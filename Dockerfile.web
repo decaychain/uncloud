@@ -1,0 +1,30 @@
+# Multi-stage build: Dioxus WASM frontend served by nginx
+FROM rust:1.88-bookworm AS builder
+
+# Install Node.js (needed for Tailwind CSS) and wasm target
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup target add wasm32-unknown-unknown
+RUN cargo install dioxus-cli --locked
+
+WORKDIR /app
+
+# Copy entire workspace (dx build needs it)
+COPY . .
+
+# Install npm deps and build the frontend
+RUN cd crates/uncloud-web && npm install
+RUN cd crates/uncloud-web && dx build --release
+
+# Serve with nginx
+FROM nginx:1.27-bookworm
+
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# dx build --release outputs to target/dx/uncloud-web/release/web/public (or similar)
+# Check both possible output paths
+COPY --from=builder /app/target/dx/uncloud-web/release/web/public /usr/share/nginx/html
+
+EXPOSE 80

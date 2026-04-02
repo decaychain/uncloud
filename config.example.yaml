@@ -1,0 +1,51 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+
+database:
+  uri: "mongodb://localhost:27017"
+  name: "uncloud"
+
+storage:
+  # Default storage created on first run
+  default_path: "/data/uncloud"
+
+auth:
+  # Session duration in hours
+  session_duration_hours: 168  # 7 days
+  # Allow public registration
+  registration_enabled: true
+
+uploads:
+  # Max chunk size in bytes
+  max_chunk_size: 10485760  # 10MB
+  # Max file size (0 = unlimited)
+  max_file_size: 0
+  # Temp upload cleanup after hours
+  temp_cleanup_hours: 24
+
+# App Platform
+apps:
+  # registration_secret: "change-me"  # required to enable app registration
+  managed:
+    []
+    # Example managed app:
+    # - name: shopping
+    #   command: cargo run -p uncloud-shopping
+    #   working_dir: /path/to/uncloud    # optional, defaults to server working directory
+    #   env:
+    #     SHOPPING_REGISTRATION_SECRET: change-me
+    #     SHOPPING_PORT: "8082"
+    #     SHOPPING_UNCLOUD_URL: http://localhost:8080
+    #   restart: on-failure              # always | on-failure | never
+    #   restart_max_attempts: 5          # 0 = unlimited
+    #   restart_backoff_secs: 2          # initial backoff, doubles each attempt (max 60s)
+
+# Full-text search (Meilisearch)
+search:
+  # Enable search indexing
+  enabled: false
+  # Meilisearch URL
+  url: "http://localhost:7700"
+  # Meilisearch API key (optional)
+  # api_key: "your-api-key"

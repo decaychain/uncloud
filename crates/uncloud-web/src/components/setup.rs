@@ -1,0 +1,170 @@
+use dioxus::prelude::*;
+
+use crate::hooks::{api, tauri, use_auth, use_search};
+use crate::state::AuthState;
+
+/// First-run onboarding screen for the desktop app.
+///
+/// Shown when running inside Tauri and no saved config is found.
+/// Collects server URL, credentials, and local sync folder path.
+/// On success, seeds the API base URL, initialises the sync engine,
+/// establishes a browser session, then navigates to `/`.
+#[component]
+pub fn Setup() -> Element {
+    let mut server_url = use_signal(String::new);
+    let mut username = use_signal(String::new);
+    let mut password = use_signal(String::new);
+    let mut root_path = use_signal(String::new);
+    let mut error = use_signal(|| None::<String>);
+    let mut loading = use_signal(|| false);
+    let nav = use_navigator();
+    let mut auth_state = use_context::<Signal<AuthState>>();
+    let mut search_enabled = use_context::<Signal<bool>>();
+    let is_android = tauri::is_android();
+
+    let on_submit = move |evt: Event<FormData>| {
+        evt.prevent_default();
+        let server = server_url();
+        let user = username();
+        let pass = password();
+        let path = root_path();
+
+        spawn(async move {
+            loading.set(true);
+            error.set(None);
+
+            // Seed the API base so subsequent web requests go to the right server.
+            api::seed_api_base(server.clone());
+
+            // On Android, skip sync engine setup — users configure sync per-folder later.
+            if !is_android {
+                if let Err(e) = tauri::login(&server, &user, &pass, &path).await {
+                    error.set(Some(format!("Connection failed: {e}")));
+                    loading.set(false);
+                    return;
+                }
+            }
+
+            // Establish a browser-level session for the file browser UI.
+            match use_auth::login(&user, &pass).await {
+                Ok(user_resp) => {
+                    auth_state.write().user = Some(user_resp);
+                    let enabled = use_search::fetch_search_enabled().await;
+                    search_enabled.set(enabled);
+                    tauri::mark_setup_complete();
+                    nav.replace("/");
+                }
+                Err(e) => {
+                    error.set(Some(format!("Login failed: {e}")));
+                }
+            }
+
+            loading.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "flex items-center justify-center min-h-screen bg-base-200",
+            div { class: "card bg-base-100 shadow-xl w-full max-w-md",
+                div { class: "card-body gap-4",
+                    div { class: "text-center",
+                        div { class: "text-5xl mb-2", "☁" }
+                        h1 { class: "text-2xl font-bold", "Welcome to Uncloud" }
+                        p { class: "text-base-content/60 text-sm",
+                            "Connect to your server to get started."
+                        }
+                    }
+
+                    form { class: "flex flex-col gap-3", onsubmit: on_submit,
+                        if let Some(err) = error() {
+                            div { class: "alert alert-error text-sm",
+                                span { "{err}" }
+                            }
+                        }
+
+                        div { class: "form-control",
+                            label { class: "label", r#for: "server-url",
+                                span { class: "label-text", "Server URL" }
+                            }
+                            input {
+                                class: "input input-bordered w-full",
+                                r#type: "url",
+                                id: "server-url",
+                                placeholder: "http://localhost:8080",
+                                value: "{server_url}",
+                                oninput: move |evt| server_url.set(evt.value()),
+                                required: true,
+                            }
+                        }
+
+                        div { class: "form-control",
+                            label { class: "label", r#for: "setup-username",
+                                span { class: "label-text", "Username" }
+                            }
+                            input {
+                                class: "input input-bordered w-full",
+                                r#type: "text",
+                                id: "setup-username",
+                                placeholder: "Enter your username",
+                                value: "{username}",
+                                oninput: move |evt| username.set(evt.value()),
+                                required: true,
+                            }
+                        }
+
+                        div { class: "form-control",
+                            label { class: "label", r#for: "setup-password",
+                                span { class: "label-text", "Password" }
+                            }
+                            input {
+                                class: "input input-bordered w-full",
+                                r#type: "password",
+                                id: "setup-password",
+                                placeholder: "Enter your password",
+                                value: "{password}",
+                                oninput: move |evt| password.set(evt.value()),
+                                required: true,
+                            }
+                        }
+
+                        if !is_android {
+                            div { class: "divider text-xs opacity-50", "Sync" }
+
+                            div { class: "form-control",
+                                label { class: "label", r#for: "root-path",
+                                    span { class: "label-text", "Local sync folder" }
+                                }
+                                input {
+                                    class: "input input-bordered w-full",
+                                    r#type: "text",
+                                    id: "root-path",
+                                    placeholder: "/home/user/Uncloud",
+                                    value: "{root_path}",
+                                    oninput: move |evt| root_path.set(evt.value()),
+                                    required: true,
+                                }
+                                label { class: "label",
+                                    span { class: "label-text-alt text-base-content/50",
+                                        "Files will be synced to and from this folder."
+                                    }
+                                }
+                            }
+                        }
+
+                        button {
+                            class: "btn btn-primary w-full mt-1",
+                            r#type: "submit",
+                            disabled: loading(),
+                            if loading() {
+                                span { class: "loading loading-spinner loading-sm" }
+                                "Connecting…"
+                            } else {
+                                "Connect"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

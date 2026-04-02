@@ -1,0 +1,41 @@
+# Rust
+/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config (keep example, ignore live config with secrets/local paths)
+config.yaml
+!config.example.yaml
+
+# Data directories
+/data/
+/test-data/
+
+# Dioxus build output
+/crates/uncloud-web/dist/
+/crates/uncloud-web/target/
+
+# Node / Tailwind
+/crates/uncloud-web/node_modules/
+/crates/uncloud-web/assets/tailwind.css
+
+# Logs
+*.log
+/tests/playwright/logs/
+/tests/playwright/test-results/
+
+# Environment
+.env
+.env.local
+
+# Claude Code
+.claude/

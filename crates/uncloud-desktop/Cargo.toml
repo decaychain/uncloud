@@ -1,0 +1,29 @@
+[package]
+name = "uncloud-desktop"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "uncloud_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+uncloud-client = { path = "../uncloud-client" }
+uncloud-sync = { path = "../uncloud-sync" }
+uncloud-common = { path = "../uncloud-common" }
+
+tauri = { version = "2", features = ["tray-icon", "native-tls-vendored"] }
+dirs = "5"
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+
+[[bin]]
+name = "uncloud-desktop"
+path = "src/main.rs"

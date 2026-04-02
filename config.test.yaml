@@ -1,0 +1,31 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+
+database:
+  uri: "mongodb://mongo:27017"
+  name: "uncloud_test"
+
+storage:
+  default_path: "/data/uncloud"
+
+auth:
+  session_duration_hours: 168
+  registration_enabled: true
+
+uploads:
+  max_chunk_size: 10485760
+  max_file_size: 0
+  temp_cleanup_hours: 24
+
+processing:
+  max_concurrency: 2
+  thumbnail_size: 320
+  max_attempts: 3
+
+search:
+  enabled: false
+
+versioning:
+  max_versions: 50
+  trash_retention_days: 30

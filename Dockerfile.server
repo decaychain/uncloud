@@ -1,0 +1,52 @@
+# Multi-stage Rust build for uncloud-server
+FROM rust:1.88-bookworm AS builder
+
+RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy workspace manifests first for layer caching
+COPY Cargo.toml Cargo.lock ./
+COPY crates/uncloud-server/Cargo.toml crates/uncloud-server/Cargo.toml
+COPY crates/uncloud-common/Cargo.toml crates/uncloud-common/Cargo.toml
+COPY crates/uncloud-web/Cargo.toml crates/uncloud-web/Cargo.toml
+COPY crates/uncloud-client/Cargo.toml crates/uncloud-client/Cargo.toml
+COPY crates/uncloud-sync/Cargo.toml crates/uncloud-sync/Cargo.toml
+COPY crates/uncloud-desktop/Cargo.toml crates/uncloud-desktop/Cargo.toml
+
+# Create stub lib/main files so cargo can resolve the workspace
+RUN mkdir -p crates/uncloud-server/src && echo "fn main() {}" > crates/uncloud-server/src/main.rs && echo "" > crates/uncloud-server/src/lib.rs
+RUN mkdir -p crates/uncloud-common/src && echo "" > crates/uncloud-common/src/lib.rs
+RUN mkdir -p crates/uncloud-web/src && echo "fn main() {}" > crates/uncloud-web/src/main.rs
+RUN mkdir -p crates/uncloud-client/src && echo "" > crates/uncloud-client/src/lib.rs
+RUN mkdir -p crates/uncloud-sync/src && echo "" > crates/uncloud-sync/src/lib.rs
+RUN mkdir -p crates/uncloud-desktop/src && echo "fn main() {}" > crates/uncloud-desktop/src/main.rs && echo "" > crates/uncloud-desktop/src/lib.rs
+
+# Pre-build dependencies (this layer is cached unless Cargo.toml/lock changes)
+RUN cargo build --release -p uncloud-server 2>/dev/null || true
+
+# Copy actual source code
+COPY crates/uncloud-server/ crates/uncloud-server/
+COPY crates/uncloud-common/ crates/uncloud-common/
+
+# Touch main.rs to invalidate the cached build of our code (not deps)
+RUN touch crates/uncloud-server/src/main.rs crates/uncloud-server/src/lib.rs crates/uncloud-common/src/lib.rs
+
+# Build the server binary
+RUN cargo build --release -p uncloud-server
+
+# Runtime image
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /app/target/release/uncloud-server /app/uncloud-server
+COPY config.test.yaml /app/config.yaml
+
+RUN mkdir -p /data/uncloud
+
+EXPOSE 8080
+
+CMD ["/app/uncloud-server"]

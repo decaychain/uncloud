@@ -1,0 +1,12 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Uncloud",
+        "url": "/",
+        "useHttpsScheme": false
+      }
+    ]
+  }
+}

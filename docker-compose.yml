@@ -1,0 +1,44 @@
+services:
+  mongodb:
+    image: mongo:7
+    container_name: uncloud-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: uncloud
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.12
+    container_name: uncloud-meilisearch
+    restart: unless-stopped
+    ports:
+      - "7700:7700"
+    volumes:
+      - meilisearch_data:/meili_data
+    environment:
+      MEILI_ENV: development
+      # Uncomment and set a master key for non-development use:
+      # MEILI_MASTER_KEY: "your-master-key"
+
+  # Development server (optional - for running the compiled binary)
+  # uncloud-server:
+  #   build: .
+  #   container_name: uncloud-server
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8080:8080"
+  #   volumes:
+  #     - ./data:/data/uncloud
+  #     - ./config.yaml:/app/config.yaml:ro
+  #   depends_on:
+  #     - mongodb
+  #     - meilisearch
+  #   environment:
+  #     RUST_LOG: info
+
+volumes:
+  mongodb_data:
+  meilisearch_data:

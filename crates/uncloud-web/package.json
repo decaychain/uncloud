@@ -1,0 +1,8 @@
+{
+  "name": "uncloud-web",
+  "private": true,
+  "devDependencies": {
+    "tailwindcss": "^3.4.0",
+    "daisyui": "^4.12.0"
+  }
+}

@@ -1,0 +1,19 @@
+[package]
+name = "uncloud-sync"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+uncloud-common = { path = "../uncloud-common" }
+uncloud-client = { path = "../uncloud-client" }
+
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+futures.workspace = true
+
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono", "migrate"] }
+walkdir = "2"
