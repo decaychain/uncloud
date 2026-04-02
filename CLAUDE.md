@@ -160,31 +160,31 @@ Every agent implementing a feature or fix **must** follow this workflow — neve
    ```bash
    git push -u origin feature/<short-description>
    ```
-4. **Open a Merge Request** using `glab` (GitLab CLI, authenticated against `gitlab.betonprojekt.info`):
+4. **Open a Pull Request** using `gh` (GitHub CLI):
    ```bash
-   glab mr create --fill --target-branch main
+   gh pr create --fill --base main
    ```
-5. **Stop — do not merge**. Leave the MR open for the user to review and merge via the GitLab UI or `glab mr merge`.
+5. **Stop — do not merge**. Leave the PR open for the user to review and merge via the GitHub UI or `gh pr merge`.
 
-> **Why**: every change is reviewable before landing in `main`, avoids cherry-pick gymnastics, and mirrors a real team workflow. The repo remote is `https://gitlab.betonprojekt.info/devzero/uncloud.git`.
+> **Why**: every change is reviewable before landing in `main`, avoids cherry-pick gymnastics, and mirrors a real team workflow. The repo remote is `https://github.com/decaychain/uncloud.git`.
 
 ### Main working directory stays on `main`
 
 The main working directory must **always** be on the `main` branch. Agents work in isolated worktrees. This keeps file edits, git status, and builds predictable.
 
-### Amending an open MR
+### Amending an open PR
 
-When a quick fix is needed on an open MR (e.g. a bug found during review):
+When a quick fix is needed on an open PR (e.g. a bug found during review):
 
 ```bash
-git checkout feature/<branch-name>   # switch to the MR branch
+git checkout feature/<branch-name>   # switch to the PR branch
 # make the fix
 git add <files> && git commit -m "Fix: ..."
-git push                              # updates the MR automatically
+git push                              # updates the PR automatically
 git checkout main                     # return to main
 ```
 
-The MR is updated in place; no new MR needed.
+The PR is updated in place; no new PR needed.
 
 ---
 
