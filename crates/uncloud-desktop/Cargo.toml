@@ -15,7 +15,7 @@ uncloud-client = { path = "../uncloud-client" }
 uncloud-sync = { path = "../uncloud-sync" }
 uncloud-common = { path = "../uncloud-common" }
 
-tauri = { version = "2", features = ["tray-icon", "native-tls-vendored"] }
+tauri = { version = "2", features = ["tray-icon", "rustls-tls"] }
 dirs = "5"
 serde.workspace = true
 serde_json.workspace = true
