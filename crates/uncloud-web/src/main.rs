@@ -23,6 +23,9 @@ fn main() {
                 match hooks::tauri::get_config().await {
                     Some(cfg) => {
                         hooks::api::seed_api_base(cfg.server_url);
+                        // Restore auth token from localStorage so the WebView
+                        // can authenticate without re-entering credentials.
+                        hooks::api::restore_from_storage();
                     }
                     None => {
                         hooks::tauri::mark_needs_setup();
