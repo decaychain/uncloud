@@ -5,6 +5,9 @@ use crate::router::Route;
 use crate::state::{AuthState, HighlightTarget, PlayerState, ThemeState, ViewMode};
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
+const FAVICON: Asset = asset!("/assets/favicon.ico");
+const FAVICON_PNG: Asset = asset!("/assets/favicon-32.png");
+const APPLE_TOUCH_ICON: Asset = asset!("/assets/apple-touch-icon.png");
 
 #[component]
 pub fn App() -> Element {
@@ -47,6 +50,9 @@ pub fn App() -> Element {
 
     rsx! {
         document::Stylesheet { href: TAILWIND }
+        document::Link { rel: "icon", href: FAVICON, sizes: "16x16 32x32 48x48" }
+        document::Link { rel: "icon", href: FAVICON_PNG, r#type: "image/png", sizes: "32x32" }
+        document::Link { rel: "apple-touch-icon", href: APPLE_TOUCH_ICON }
         Router::<Route> {}
     }
 }
