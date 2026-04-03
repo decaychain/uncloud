@@ -1,0 +1,76 @@
+name: Release Android
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Install Dioxus CLI
+        run: cargo install dioxus-cli --locked
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: sdkmanager "ndk;27.0.12077973"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install web dependencies
+        run: cd crates/uncloud-web && npm ci
+
+      - name: Decode keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/uncloud-release.jks
+
+      - name: Build web frontend
+        run: cd crates/uncloud-web && dx build --release
+
+      - name: Copy frontend to src-frontend
+        run: |
+          rm -rf crates/uncloud-desktop/src-frontend/assets/
+          cp -r target/dx/uncloud-web/release/web/public/* crates/uncloud-desktop/src-frontend/
+
+      - name: Build Android release
+        env:
+          KEYSTORE_PATH: /tmp/uncloud-release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: uncloud
+          KEY_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
+        run: |
+          cd crates/uncloud-desktop
+          cargo tauri android build
+
+      - name: Upload to Google Play (Internal Testing)
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: de.lunarstream.uncloud
+          releaseFiles: crates/uncloud-desktop/gen/android/app/build/outputs/bundle/universalRelease/app-universal-release.aab
+          track: internal
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            crates/uncloud-desktop/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
+          generate_release_notes: true
