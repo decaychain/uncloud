@@ -1,4 +1,4 @@
-package app.uncloud.desktop
+package de.lunarstream.uncloud
 
 import android.graphics.Color
 import android.os.Bundle
