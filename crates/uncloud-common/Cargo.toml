@@ -10,9 +10,9 @@ chrono.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-reqwest = { version = "0.12", features = ["json", "stream", "cookies"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "cookies", "rustls-tls"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 gloo-net = "0.6"
 web-sys = { version = "0.3", features = ["Window", "Document"] }
