@@ -1,0 +1,94 @@
+name: Release Desktop
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf rpm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Dioxus CLI and Tauri CLI
+        run: cargo install dioxus-cli tauri-cli --locked
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install web dependencies
+        run: cd crates/uncloud-web && npm ci
+
+      - name: Build web frontend
+        run: cd crates/uncloud-web && dx build --release
+
+      - name: Copy frontend to src-frontend
+        run: |
+          rm -rf crates/uncloud-desktop/src-frontend/assets/
+          cp -r target/dx/uncloud-web/release/web/public/* crates/uncloud-desktop/src-frontend/
+
+      - name: Build desktop bundles
+        run: |
+          cd crates/uncloud-desktop
+          cargo tauri build --bundles deb,rpm
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/rpm/*.rpm
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Dioxus CLI and Tauri CLI
+        run: cargo install dioxus-cli tauri-cli --locked
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install web dependencies
+        run: cd crates/uncloud-web && npm ci
+
+      - name: Build web frontend
+        run: cd crates/uncloud-web && dx build --release
+
+      - name: Copy frontend to src-frontend
+        shell: bash
+        run: |
+          rm -rf crates/uncloud-desktop/src-frontend/assets/
+          cp -r target/dx/uncloud-web/release/web/public/* crates/uncloud-desktop/src-frontend/
+
+      - name: Build desktop bundles
+        run: |
+          cd crates/uncloud-desktop
+          cargo tauri build --bundles msi
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/release/bundle/msi/*.msi

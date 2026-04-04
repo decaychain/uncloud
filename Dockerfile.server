@@ -1,7 +1,8 @@
-# Multi-stage Rust build for uncloud-server
+# Static musl build for uncloud-server → FROM scratch image
 FROM rust:1.88-bookworm AS builder
 
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+RUN rustup target add x86_64-unknown-linux-musl && \
+    apt-get update && apt-get install -y musl-tools && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -22,31 +23,28 @@ RUN mkdir -p crates/uncloud-client/src && echo "" > crates/uncloud-client/src/li
 RUN mkdir -p crates/uncloud-sync/src && echo "" > crates/uncloud-sync/src/lib.rs
 RUN mkdir -p crates/uncloud-desktop/src && echo "fn main() {}" > crates/uncloud-desktop/src/main.rs && echo "" > crates/uncloud-desktop/src/lib.rs
 
-# Pre-build dependencies (this layer is cached unless Cargo.toml/lock changes)
-RUN cargo build --release -p uncloud-server 2>/dev/null || true
+# Pre-build dependencies (cached unless Cargo.toml/lock changes)
+RUN cargo build --release --target x86_64-unknown-linux-musl -p uncloud-server 2>/dev/null || true
 
 # Copy actual source code
 COPY crates/uncloud-server/ crates/uncloud-server/
 COPY crates/uncloud-common/ crates/uncloud-common/
 
-# Touch main.rs to invalidate the cached build of our code (not deps)
+# Touch to invalidate cached build of our code (not deps)
 RUN touch crates/uncloud-server/src/main.rs crates/uncloud-server/src/lib.rs crates/uncloud-common/src/lib.rs
 
-# Build the server binary
-RUN cargo build --release -p uncloud-server
+# Build static binary
+RUN cargo build --release --target x86_64-unknown-linux-musl -p uncloud-server
 
-# Runtime image
-FROM debian:bookworm-slim
+# Verify it's statically linked
+RUN file target/x86_64-unknown-linux-musl/release/uncloud-server | grep -q "static"
 
-RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
+# Runtime: scratch + static binary + CA certs
+FROM scratch
 
-WORKDIR /app
-
-COPY --from=builder /app/target/release/uncloud-server /app/uncloud-server
-COPY config.test.yaml /app/config.yaml
-
-RUN mkdir -p /data/uncloud
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/uncloud-server /uncloud-server
 
 EXPOSE 8080
 
-CMD ["/app/uncloud-server"]
+ENTRYPOINT ["/uncloud-server"]

@@ -1,0 +1,47 @@
+name: Release Server
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version from tag
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.server
+          push: true
+          tags: |
+            ghcr.io/decaychain/uncloud-server:${{ env.VERSION }}
+            ghcr.io/decaychain/uncloud-server:latest
+
+      - name: Extract static binary from image
+        run: |
+          docker create --name extract ghcr.io/decaychain/uncloud-server:${{ env.VERSION }}
+          docker cp extract:/uncloud-server uncloud-server-linux-amd64
+          docker rm extract
+          chmod +x uncloud-server-linux-amd64
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: uncloud-server-linux-amd64

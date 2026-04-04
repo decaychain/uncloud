@@ -23,21 +23,20 @@ services:
       # Uncomment and set a master key for non-development use:
       # MEILI_MASTER_KEY: "your-master-key"
 
-  # Development server (optional - for running the compiled binary)
-  # uncloud-server:
-  #   build: .
-  #   container_name: uncloud-server
-  #   restart: unless-stopped
-  #   ports:
-  #     - "8080:8080"
-  #   volumes:
-  #     - ./data:/data/uncloud
-  #     - ./config.yaml:/app/config.yaml:ro
-  #   depends_on:
-  #     - mongodb
-  #     - meilisearch
-  #   environment:
-  #     RUST_LOG: info
+  uncloud-server:
+    image: ghcr.io/decaychain/uncloud-server:latest
+    container_name: uncloud-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data/uncloud
+      - ./config.yaml:/config.yaml:ro
+    depends_on:
+      - mongodb
+      - meilisearch
+    environment:
+      RUST_LOG: info
 
 volumes:
   mongodb_data:
