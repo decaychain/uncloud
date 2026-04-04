@@ -92,6 +92,7 @@ jobs:
           packageName: de.lunarstream.uncloud
           releaseFiles: crates/uncloud-desktop/gen/android/app/build/outputs/bundle/universalRelease/app-universal-release.aab
           track: internal
+          status: draft
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
