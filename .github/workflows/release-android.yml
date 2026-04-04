@@ -38,6 +38,21 @@ jobs:
       - name: Install web dependencies
         run: cd crates/uncloud-web && npm ci
 
+      - name: Set version from tag
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          VERSION_CODE=$(git rev-list --count HEAD)
+          echo "VERSION_NAME=$TAG" >> $GITHUB_ENV
+          echo "VERSION_CODE=$VERSION_CODE" >> $GITHUB_ENV
+          echo "Version: $TAG (code: $VERSION_CODE)"
+
+      - name: Write tauri.properties
+        run: |
+          cat > crates/uncloud-desktop/gen/android/app/tauri.properties <<EOF
+          tauri.android.versionName=${{ env.VERSION_NAME }}
+          tauri.android.versionCode=${{ env.VERSION_CODE }}
+          EOF
+
       - name: Decode keystore
         run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/uncloud-release.jks
 
