@@ -1,6 +1,17 @@
 use std::path::Path;
 use std::process::Command;
 
+/// On Windows, bare `npm`/`npx` won't resolve — use `npm.cmd`/`npx.cmd`.
+fn npm_cmd(name: &str) -> Command {
+    if cfg!(windows) {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/c", name]);
+        cmd
+    } else {
+        Command::new(name)
+    }
+}
+
 fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let crate_dir = Path::new(&manifest_dir);
@@ -15,7 +26,7 @@ fn main() {
     // Install npm dependencies the first time (or if node_modules is missing).
     let node_modules = crate_dir.join("node_modules");
     if !node_modules.exists() {
-        let status = Command::new("npm")
+        let status = npm_cmd("npm")
             .arg("install")
             .current_dir(crate_dir)
             .status()
@@ -27,7 +38,7 @@ fn main() {
     }
 
     // Generate assets/tailwind.css from input.css.
-    let status = Command::new("npx")
+    let status = npm_cmd("npx")
         .args(["--no-install", "tailwindcss", "-i", "input.css", "-o", "assets/tailwind.css"])
         .current_dir(crate_dir)
         .status()
