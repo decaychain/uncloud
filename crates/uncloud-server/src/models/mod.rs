@@ -10,6 +10,8 @@ pub mod s3_credential;
 pub mod app;
 pub mod webhook;
 pub mod shopping;
+pub mod invite;
+pub mod totp_challenge;
 
 pub use user::*;
 pub use session::*;
@@ -23,6 +25,8 @@ pub use s3_credential::*;
 pub use app::*;
 pub use webhook::*;
 pub use shopping::*;
+pub use invite::*;
+pub use totp_challenge::*;
 
 /// Serde module for `Option<chrono::DateTime<Utc>>` ↔ BSON Date (nullable).
 /// Usage: `#[serde(with = "crate::models::opt_dt")]`

@@ -49,6 +49,7 @@ lofty = "0.22"
 meilisearch-sdk = "0.28"
 pdf-extract = "0.7"
 hmac = "0.12"
+totp-rs = { version = "5", features = ["otpauth", "qr", "gen_secret"] }
 http-body-util = "0.1"
 subtle = "2"
 quick-xml = { version = "0.37", features = ["serialize"] }

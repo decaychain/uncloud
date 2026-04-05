@@ -11,7 +11,7 @@ storage:
 
 auth:
   session_duration_hours: 168
-  registration_enabled: true
+  registration: open
 
 uploads:
   max_chunk_size: 10485760

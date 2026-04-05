@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod files;
 pub mod folders;
+pub mod invites;
 pub mod music;
 pub mod playlists;
 pub mod search;
@@ -30,8 +31,12 @@ use crate::AppState;
 pub fn create_router(state: Arc<AppState>) -> Router {
     // -- Public routes (no auth) defined once, nested under /api and /api/v1 --
     let public_api = Router::new()
+        .route("/auth/server-info", get(auth::server_info))
         .route("/auth/register", post(auth::register))
         .route("/auth/login", post(auth::login))
+        .route("/auth/demo", post(auth::demo_login))
+        .route("/auth/totp/verify", post(auth::totp_verify))
+        .route("/auth/invite/{token}", get(auth::validate_invite))
         .route("/public/{token}", get(shares::get_public_share))
         .route("/public/{token}/download", get(shares::download_public))
         .route("/public/{token}/verify", post(shares::verify_share_password));
@@ -53,6 +58,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/auth/me", get(auth::me))
         .route("/auth/sessions", get(auth::list_sessions))
         .route("/auth/sessions/{id}", delete(auth::revoke_session))
+        // TOTP
+        .route("/auth/totp/setup", post(auth::totp_setup))
+        .route("/auth/totp/enable", post(auth::totp_enable))
+        .route("/auth/totp/disable", post(auth::totp_disable))
         // Files
         .route("/files", get(files::list_files))
         .route("/files/{id}", get(files::get_file))
@@ -164,7 +173,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/admin/users", get(users::list_users))
         .route("/admin/users", post(users::create_user))
         .route("/admin/users/{id}", put(users::update_user))
-        .route("/admin/users/{id}", delete(users::delete_user));
+        .route("/admin/users/{id}", delete(users::delete_user))
+        .route("/admin/users/{id}/approve", post(users::approve_user))
+        .route("/admin/users/{id}/disable", post(users::disable_user))
+        .route("/admin/users/{id}/enable", post(users::enable_user))
+        .route("/admin/users/{id}/reset-totp", post(users::reset_user_totp))
+        // Invites
+        .route("/admin/invites", get(invites::list_invites))
+        .route("/admin/invites", post(invites::create_invite))
+        .route("/admin/invites/{id}", delete(invites::delete_invite));
 
     let admin_v1_only = Router::new()
         .route("/apps/{name}", delete(apps::delete_app))

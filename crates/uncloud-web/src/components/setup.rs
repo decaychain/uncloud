@@ -47,12 +47,16 @@ pub fn Setup() -> Element {
 
             // Establish a browser-level session for the file browser UI.
             match use_auth::login(&user, &pass).await {
-                Ok(user_resp) => {
-                    auth_state.write().user = Some(user_resp);
-                    let enabled = use_search::fetch_search_enabled().await;
-                    search_enabled.set(enabled);
-                    tauri::mark_setup_complete();
-                    nav.replace("/");
+                Ok(resp) => {
+                    if resp.totp_required {
+                        error.set(Some("TOTP is not supported during setup yet".to_string()));
+                    } else if let Some(user_resp) = resp.user {
+                        auth_state.write().user = Some(user_resp);
+                        let enabled = use_search::fetch_search_enabled().await;
+                        search_enabled.set(enabled);
+                        tauri::mark_setup_complete();
+                        nav.replace("/");
+                    }
                 }
                 Err(e) => {
                     error.set(Some(format!("Login failed: {e}")));

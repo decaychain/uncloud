@@ -103,6 +103,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Spawn demo account purge background task
+    if config.auth.registration == uncloud_server::config::RegistrationMode::Demo {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let interval = std::time::Duration::from_secs(3600); // check every hour
+            loop {
+                tokio::time::sleep(interval).await;
+                match state.auth.purge_demo_accounts(&state.db).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!("Purged {} expired demo accounts", n),
+                    Err(e) => tracing::error!("Demo account purge error: {}", e),
+                }
+            }
+        });
+    }
+
     // Build router with API routes
     let api_router = routes::create_router(state.clone());
 

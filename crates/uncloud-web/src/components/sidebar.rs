@@ -27,7 +27,7 @@ pub fn Sidebar() -> Element {
         "music"
     } else if matches!(route, Route::Shopping {} | Route::ShoppingList { .. }) {
         "shopping"
-    } else if matches!(route, Route::Settings {}) {
+    } else if matches!(route, Route::Settings {} | Route::SettingsTab { .. }) {
         "settings"
     } else {
         "files"
@@ -132,16 +132,49 @@ pub fn Sidebar() -> Element {
                                 }
                             }
                         },
-                        "settings" => rsx! {
-                            li { class: "menu-title", span { "Settings" } }
-                            li {
-                                a { href: "#", "👤 Account" }
-                            }
-                            li {
-                                a { href: "#", "💾 Storage" }
-                            }
-                            li {
-                                a { href: "#", "🔐 Sessions" }
+                        "settings" => {
+                            let active_tab = if let Route::SettingsTab { ref tab } = route {
+                                tab.as_str().to_string()
+                            } else {
+                                "account".to_string()
+                            };
+                            let is_admin = auth_state().is_admin();
+                            rsx! {
+                                li { class: "menu-title", span { "Settings" } }
+                                li {
+                                    Link {
+                                        to: Route::SettingsTab { tab: "account".to_string() },
+                                        class: if active_tab == "account" { "active" } else { "" },
+                                        onclick: move |_| close_drawer(),
+                                        "👤 Account"
+                                    }
+                                }
+                                li {
+                                    Link {
+                                        to: Route::SettingsTab { tab: "preferences".to_string() },
+                                        class: if active_tab == "preferences" { "active" } else { "" },
+                                        onclick: move |_| close_drawer(),
+                                        "🎨 Preferences"
+                                    }
+                                }
+                                if is_admin {
+                                    li {
+                                        Link {
+                                            to: Route::SettingsTab { tab: "users".to_string() },
+                                            class: if active_tab == "users" { "active" } else { "" },
+                                            onclick: move |_| close_drawer(),
+                                            "👥 Users"
+                                        }
+                                    }
+                                    li {
+                                        Link {
+                                            to: Route::SettingsTab { tab: "admin".to_string() },
+                                            class: if active_tab == "admin" { "active" } else { "" },
+                                            onclick: move |_| close_drawer(),
+                                            "🛡 Admin"
+                                        }
+                                    }
+                                }
                             }
                         },
                         _ => rsx! {

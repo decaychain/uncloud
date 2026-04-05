@@ -2,6 +2,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+pub use uncloud_common::RegistrationMode;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
@@ -38,10 +40,48 @@ pub struct StorageConfig {
     pub default_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AuthConfig {
     pub session_duration_hours: u64,
-    pub registration_enabled: bool,
+    pub registration: RegistrationMode,
+    pub demo_quota_bytes: i64,
+    pub demo_ttl_hours: u64,
+}
+
+/// Raw deserialization target that accepts both old (`registration_enabled: bool`)
+/// and new (`registration: mode`) config fields.
+#[derive(Deserialize)]
+struct AuthConfigRaw {
+    session_duration_hours: u64,
+    #[serde(default)]
+    registration: Option<RegistrationMode>,
+    #[serde(default)]
+    registration_enabled: Option<bool>,
+    #[serde(default = "default_demo_quota")]
+    demo_quota_bytes: i64,
+    #[serde(default = "default_demo_ttl_hours")]
+    demo_ttl_hours: u64,
+}
+
+impl<'de> serde::Deserialize<'de> for AuthConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = AuthConfigRaw::deserialize(deserializer)?;
+        let registration = match (raw.registration, raw.registration_enabled) {
+            (Some(mode), _) => mode,
+            (None, Some(true)) => RegistrationMode::Open,
+            (None, Some(false)) => RegistrationMode::Disabled,
+            (None, None) => RegistrationMode::Open,
+        };
+        Ok(AuthConfig {
+            session_duration_hours: raw.session_duration_hours,
+            registration,
+            demo_quota_bytes: raw.demo_quota_bytes,
+            demo_ttl_hours: raw.demo_ttl_hours,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -166,6 +206,14 @@ impl Default for FeaturesConfig {
     }
 }
 
+fn default_demo_quota() -> i64 {
+    50 * 1024 * 1024 // 50MB
+}
+
+fn default_demo_ttl_hours() -> u64 {
+    24
+}
+
 fn default_backoff_secs() -> u64 {
     2
 }
@@ -245,7 +293,9 @@ impl Default for Config {
             },
             auth: AuthConfig {
                 session_duration_hours: 168,
-                registration_enabled: true,
+                registration: RegistrationMode::Open,
+                demo_quota_bytes: default_demo_quota(),
+                demo_ttl_hours: default_demo_ttl_hours(),
             },
             uploads: UploadConfig {
                 max_chunk_size: 10 * 1024 * 1024, // 10MB

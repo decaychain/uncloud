@@ -5,7 +5,7 @@ use crate::components::{
     layout::Layout,
     gallery::{Gallery, GalleryAlbum},
     music::{Music, MusicArtistView, MusicAlbumView as MusicAlbumViewComp, MusicFolderView, MusicPlaylistView},
-    settings::Settings,
+    settings::SettingsPage,
     setup::Setup,
     shopping,
     trash::Trash,
@@ -19,6 +19,9 @@ pub enum Route {
 
     #[route("/register")]
     Register {},
+
+    #[route("/invite/:token")]
+    InviteRegister { token: String },
 
     // First-run onboarding (Tauri desktop only, shown when no config saved).
     #[route("/setup")]
@@ -66,6 +69,9 @@ pub enum Route {
 
         #[route("/settings")]
         Settings {},
+
+        #[route("/settings/:tab")]
+        SettingsTab { tab: String },
     #[end_layout]
 
     #[route("/share/:token")]
@@ -76,6 +82,27 @@ pub enum Route {
 fn Home() -> Element {
     rsx! {
         FileBrowser { parent_id: None }
+    }
+}
+
+#[component]
+fn Settings() -> Element {
+    let nav = use_navigator();
+    nav.replace(Route::SettingsTab { tab: "account".to_string() });
+    rsx! {}
+}
+
+#[component]
+fn InviteRegister(token: String) -> Element {
+    rsx! {
+        Register { invite_token: Some(token) }
+    }
+}
+
+#[component]
+fn SettingsTab(tab: String) -> Element {
+    rsx! {
+        SettingsPage { tab }
     }
 }
 

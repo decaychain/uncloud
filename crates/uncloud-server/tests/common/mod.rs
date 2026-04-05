@@ -74,7 +74,9 @@ impl TestApp {
             },
             auth: AuthConfig {
                 session_duration_hours: 1,
-                registration_enabled: true,
+                registration: uncloud_server::config::RegistrationMode::Open,
+                demo_quota_bytes: 50 * 1024 * 1024,
+                demo_ttl_hours: 24,
             },
             uploads: UploadConfig {
                 max_chunk_size: 10 * 1024 * 1024,
@@ -217,7 +219,9 @@ impl BoundTestApp {
             },
             auth: uncloud_server::config::AuthConfig {
                 session_duration_hours: 1,
-                registration_enabled: true,
+                registration: uncloud_server::config::RegistrationMode::Open,
+                demo_quota_bytes: 50 * 1024 * 1024,
+                demo_ttl_hours: 24,
             },
             uploads: uncloud_server::config::UploadConfig {
                 max_chunk_size: 10 * 1024 * 1024,

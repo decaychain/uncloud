@@ -16,7 +16,8 @@ use crate::AppState;
 #[derive(Debug, Deserialize)]
 pub struct CreateUserRequest {
     pub username: String,
-    pub email: String,
+    #[serde(default)]
+    pub email: Option<String>,
     pub password: String,
     pub role: Option<UserRole>,
     pub quota_bytes: Option<i64>,
@@ -34,10 +35,13 @@ pub struct UpdateUserRequest {
 pub struct UserResponse {
     pub id: String,
     pub username: String,
-    pub email: String,
+    pub email: Option<String>,
     pub role: UserRole,
+    pub status: uncloud_common::UserStatus,
     pub quota_bytes: Option<i64>,
     pub used_bytes: i64,
+    pub totp_enabled: bool,
+    pub demo: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -49,8 +53,11 @@ impl From<&User> for UserResponse {
             username: u.username.clone(),
             email: u.email.clone(),
             role: u.role,
+            status: u.status,
             quota_bytes: u.quota_bytes,
             used_bytes: u.used_bytes,
+            totp_enabled: u.totp_enabled,
+            demo: u.demo,
             created_at: u.created_at.to_rfc3339(),
             updated_at: u.updated_at.to_rfc3339(),
         }
@@ -85,8 +92,12 @@ pub async fn create_user(
             "Password must be at least 8 characters".to_string(),
         ));
     }
-    if !req.email.contains('@') {
-        return Err(AppError::Validation("Invalid email address".to_string()));
+
+    let email = req.email.map(|e| e.trim().to_string()).filter(|e| !e.is_empty());
+    if let Some(ref email) = email {
+        if !email.contains('@') {
+            return Err(AppError::Validation("Invalid email address".to_string()));
+        }
     }
 
     let collection = state.db.collection::<User>("users");
@@ -99,17 +110,19 @@ pub async fn create_user(
     {
         return Err(AppError::Conflict("Username already taken".to_string()));
     }
-    if collection
-        .find_one(doc! { "email": &req.email })
-        .await?
-        .is_some()
-    {
-        return Err(AppError::Conflict("Email already registered".to_string()));
+    if let Some(ref email) = email {
+        if collection
+            .find_one(doc! { "email": email })
+            .await?
+            .is_some()
+        {
+            return Err(AppError::Conflict("Email already registered".to_string()));
+        }
     }
 
     let password_hash = state.auth.hash_password(&req.password)?;
 
-    let mut user = User::new(req.username, req.email, password_hash);
+    let mut user = User::new(req.username, email, password_hash);
     user.role = req.role.unwrap_or(UserRole::User);
     user.quota_bytes = req.quota_bytes;
 
@@ -136,16 +149,22 @@ pub async fn update_user(
     let mut update = doc! { "$set": { "updated_at": mongodb::bson::DateTime::now() } };
 
     if let Some(email) = &req.email {
-        if !email.contains('@') {
-            return Err(AppError::Validation("Invalid email address".to_string()));
-        }
-        // Check if email is taken by another user
-        if let Some(existing) = collection.find_one(doc! { "email": email }).await? {
-            if existing.id != user_id {
-                return Err(AppError::Conflict("Email already in use".to_string()));
+        let email = email.trim();
+        if email.is_empty() {
+            // Clear email
+            update.get_document_mut("$set").unwrap().insert("email", mongodb::bson::Bson::Null);
+        } else {
+            if !email.contains('@') {
+                return Err(AppError::Validation("Invalid email address".to_string()));
             }
+            // Check if email is taken by another user
+            if let Some(existing) = collection.find_one(doc! { "email": email }).await? {
+                if existing.id != user_id {
+                    return Err(AppError::Conflict("Email already in use".to_string()));
+                }
+            }
+            update.get_document_mut("$set").unwrap().insert("email", email);
         }
-        update.get_document_mut("$set").unwrap().insert("email", email);
     }
 
     if let Some(password) = &req.password {
@@ -236,5 +255,49 @@ pub async fn delete_user(
     // Delete user
     users_collection.delete_one(doc! { "_id": user_id }).await?;
 
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn approve_user(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    let user_id = ObjectId::parse_str(&id)
+        .map_err(|_| AppError::BadRequest("Invalid user ID".to_string()))?;
+    state.auth.approve_user(user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn disable_user(
+    State(state): State<Arc<AppState>>,
+    admin: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    let user_id = ObjectId::parse_str(&id)
+        .map_err(|_| AppError::BadRequest("Invalid user ID".to_string()))?;
+    if user_id == admin.id {
+        return Err(AppError::BadRequest("Cannot disable yourself".to_string()));
+    }
+    state.auth.disable_user(user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn enable_user(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    let user_id = ObjectId::parse_str(&id)
+        .map_err(|_| AppError::BadRequest("Invalid user ID".to_string()))?;
+    state.auth.enable_user(user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn reset_user_totp(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    let user_id = ObjectId::parse_str(&id)
+        .map_err(|_| AppError::BadRequest("Invalid user ID".to_string()))?;
+    state.auth.admin_reset_totp(user_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

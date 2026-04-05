@@ -32,11 +32,22 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
                 .build(),
         )
         .await?;
+    // Drop the old non-partial email index if it exists, then create a partial
+    // unique index that only covers documents where email is a non-null string.
+    // This allows multiple users to have no email (null) without collisions.
+    let _ = users.drop_index("email_1").await;
     users
         .create_index(
             IndexModel::builder()
                 .keys(mongodb::bson::doc! { "email": 1 })
-                .options(IndexOptions::builder().unique(true).build())
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(mongodb::bson::doc! {
+                            "email": { "$type": "string" }
+                        })
+                        .build(),
+                )
                 .build(),
         )
         .await?;
@@ -284,6 +295,52 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
             IndexModel::builder()
                 .keys(mongodb::bson::doc! { "owner_id": 1, "name": 1 })
                 .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    // Invites indexes
+    let invites = db.collection::<mongodb::bson::Document>("invites");
+    invites
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "token": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    invites
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(std::time::Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    // TOTP challenges indexes (short-lived, auto-expire)
+    let totp_challenges = db.collection::<mongodb::bson::Document>("totp_challenges");
+    totp_challenges
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "token": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    totp_challenges
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(std::time::Duration::from_secs(0))
+                        .build(),
+                )
                 .build(),
         )
         .await?;

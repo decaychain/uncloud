@@ -13,8 +13,15 @@ storage:
 auth:
   # Session duration in hours
   session_duration_hours: 168  # 7 days
-  # Allow public registration
-  registration_enabled: true
+  # Registration mode: open | approval | invite_only | disabled | demo
+  #   open         - anyone can register (default)
+  #   approval     - anyone can register, but account is pending until admin approves
+  #   invite_only  - only users with an invite link can register
+  #   disabled     - no public registration (admin can still create users)
+  #   demo         - shows a "Try Demo" button; creates ephemeral accounts
+  registration: open
+  # demo_quota_bytes: 52428800   # 50MB quota for demo accounts
+  # demo_ttl_hours: 24           # auto-purge demo accounts after N hours
 
 uploads:
   # Max chunk size in bytes
