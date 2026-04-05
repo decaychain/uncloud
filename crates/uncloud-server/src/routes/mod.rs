@@ -58,6 +58,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/auth/me", get(auth::me))
         .route("/auth/sessions", get(auth::list_sessions))
         .route("/auth/sessions/{id}", delete(auth::revoke_session))
+        // Password
+        .route("/auth/change-password", post(auth::change_password))
         // TOTP
         .route("/auth/totp/setup", post(auth::totp_setup))
         .route("/auth/totp/enable", post(auth::totp_enable))
@@ -178,6 +180,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/admin/users/{id}/disable", post(users::disable_user))
         .route("/admin/users/{id}/enable", post(users::enable_user))
         .route("/admin/users/{id}/reset-totp", post(users::reset_user_totp))
+        .route("/admin/users/{id}/reset-password", post(users::reset_user_password))
+        .route("/admin/users/{id}/role", post(users::change_user_role))
         // Invites
         .route("/admin/invites", get(invites::list_invites))
         .route("/admin/invites", post(invites::create_invite))

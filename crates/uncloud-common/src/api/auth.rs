@@ -152,3 +152,19 @@ pub struct CreateInviteRequest {
 pub struct InviteInfoResponse {
     pub valid: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminResetPasswordRequest {
+    pub new_password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeRoleRequest {
+    pub role: UserRole,
+}

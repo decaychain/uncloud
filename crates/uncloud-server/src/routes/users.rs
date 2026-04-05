@@ -301,3 +301,43 @@ pub async fn reset_user_totp(
     state.auth.admin_reset_totp(user_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
+
+pub async fn reset_user_password(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<uncloud_common::AdminResetPasswordRequest>,
+) -> Result<StatusCode> {
+    let user_id = ObjectId::parse_str(&id)
+        .map_err(|_| AppError::BadRequest("Invalid user ID".to_string()))?;
+    state
+        .auth
+        .admin_reset_password(user_id, &req.new_password)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn change_user_role(
+    State(state): State<Arc<AppState>>,
+    admin: AuthUser,
+    Path(id): Path<String>,
+    Json(req): Json<uncloud_common::ChangeRoleRequest>,
+) -> Result<StatusCode> {
+    let user_id = ObjectId::parse_str(&id)
+        .map_err(|_| AppError::BadRequest("Invalid user ID".to_string()))?;
+
+    // Convert from common type to server type
+    let role = match req.role {
+        uncloud_common::UserRole::Admin => UserRole::Admin,
+        uncloud_common::UserRole::User => UserRole::User,
+    };
+
+    // Prevent self-demotion
+    if user_id == admin.id && role != UserRole::Admin {
+        return Err(AppError::BadRequest(
+            "Cannot demote yourself".to_string(),
+        ));
+    }
+
+    state.auth.change_role(user_id, role).await?;
+    Ok(StatusCode::NO_CONTENT)
+}

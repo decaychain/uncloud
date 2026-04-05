@@ -425,6 +425,105 @@ impl AuthService {
         self.config.registration
     }
 
+    // ── Password management ────────────────────────────────────────────────────
+
+    /// Change password for the authenticated user (requires current password).
+    pub async fn change_password(
+        &self,
+        user_id: ObjectId,
+        current_password: &str,
+        new_password: &str,
+    ) -> Result<()> {
+        if new_password.len() < 8 {
+            return Err(AppError::Validation(
+                "Password must be at least 8 characters".to_string(),
+            ));
+        }
+
+        let user = self
+            .users
+            .find_one(doc! { "_id": user_id })
+            .await?
+            .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+        if !self.verify_password(current_password, &user.password_hash)? {
+            return Err(AppError::BadRequest(
+                "Current password is incorrect".to_string(),
+            ));
+        }
+
+        let new_hash = self.hash_password(new_password)?;
+        self.users
+            .update_one(
+                doc! { "_id": user_id },
+                doc! { "$set": {
+                    "password_hash": new_hash,
+                    "updated_at": mongodb::bson::DateTime::now(),
+                }},
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    /// Admin: reset a user's password without knowing the current one.
+    pub async fn admin_reset_password(
+        &self,
+        user_id: ObjectId,
+        new_password: &str,
+    ) -> Result<()> {
+        if new_password.len() < 8 {
+            return Err(AppError::Validation(
+                "Password must be at least 8 characters".to_string(),
+            ));
+        }
+
+        let new_hash = self.hash_password(new_password)?;
+        let result = self
+            .users
+            .update_one(
+                doc! { "_id": user_id },
+                doc! { "$set": {
+                    "password_hash": new_hash,
+                    "updated_at": mongodb::bson::DateTime::now(),
+                }},
+            )
+            .await?;
+
+        if result.matched_count == 0 {
+            return Err(AppError::NotFound("User not found".to_string()));
+        }
+
+        Ok(())
+    }
+
+    /// Admin: change a user's role.
+    pub async fn change_role(
+        &self,
+        user_id: ObjectId,
+        role: UserRole,
+    ) -> Result<()> {
+        let role_str = serde_json::to_value(role)
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        let result = self
+            .users
+            .update_one(
+                doc! { "_id": user_id },
+                doc! { "$set": {
+                    "role": role_str.as_str().unwrap_or("user"),
+                    "updated_at": mongodb::bson::DateTime::now(),
+                }},
+            )
+            .await?;
+
+        if result.matched_count == 0 {
+            return Err(AppError::NotFound("User not found".to_string()));
+        }
+
+        Ok(())
+    }
+
     // ── User status management (admin) ───────────────────────────────────────
 
     pub async fn approve_user(&self, user_id: ObjectId) -> Result<()> {

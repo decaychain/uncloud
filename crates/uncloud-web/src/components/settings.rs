@@ -25,6 +25,7 @@ pub fn SettingsPage(tab: String) -> Element {
                         SyncSection {}
                         ConnectionSection {}
                     }
+                    ChangePasswordSection {}
                     TotpSection {}
                     S3AccessKeysSection {}
                 },
@@ -615,6 +616,114 @@ fn AdminSection(search_enabled: bool) -> Element {
                     div {
                         class: if ok { "alert alert-success text-sm" } else { "alert alert-error text-sm" },
                         span { "{msg}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Change Password section
+// ---------------------------------------------------------------------------
+
+#[component]
+fn ChangePasswordSection() -> Element {
+    let mut current_password = use_signal(String::new);
+    let mut new_password = use_signal(String::new);
+    let mut confirm_password = use_signal(String::new);
+    let mut error = use_signal(|| None::<String>);
+    let mut success = use_signal(|| false);
+    let mut loading = use_signal(|| false);
+
+    let on_submit = move |evt: Event<FormData>| {
+        evt.prevent_default();
+
+        let current = current_password();
+        let new_pw = new_password();
+        let confirm = confirm_password();
+
+        if new_pw != confirm {
+            error.set(Some("Passwords do not match".to_string()));
+            return;
+        }
+
+        spawn(async move {
+            loading.set(true);
+            error.set(None);
+            success.set(false);
+
+            match use_auth::change_password(&current, &new_pw).await {
+                Ok(()) => {
+                    success.set(true);
+                    current_password.set(String::new());
+                    new_password.set(String::new());
+                    confirm_password.set(String::new());
+                }
+                Err(e) => error.set(Some(e)),
+            }
+
+            loading.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "card bg-base-100 shadow",
+            div { class: "card-body gap-3",
+                h2 { class: "card-title text-lg", "Change Password" }
+
+                if let Some(err) = error() {
+                    div { class: "alert alert-error text-sm", span { "{err}" } }
+                }
+                if success() {
+                    div { class: "alert alert-success text-sm", span { "Password changed successfully." } }
+                }
+
+                form { class: "flex flex-col gap-3", onsubmit: on_submit,
+                    div { class: "form-control",
+                        label { class: "label",
+                            span { class: "label-text text-sm", "Current password" }
+                        }
+                        input {
+                            class: "input input-bordered input-sm w-full max-w-xs",
+                            r#type: "password",
+                            value: "{current_password}",
+                            oninput: move |evt| current_password.set(evt.value()),
+                            required: true,
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label",
+                            span { class: "label-text text-sm", "New password" }
+                        }
+                        input {
+                            class: "input input-bordered input-sm w-full max-w-xs",
+                            r#type: "password",
+                            value: "{new_password}",
+                            oninput: move |evt| new_password.set(evt.value()),
+                            required: true,
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label",
+                            span { class: "label-text text-sm", "Confirm new password" }
+                        }
+                        input {
+                            class: "input input-bordered input-sm w-full max-w-xs",
+                            r#type: "password",
+                            value: "{confirm_password}",
+                            oninput: move |evt| confirm_password.set(evt.value()),
+                            required: true,
+                        }
+                    }
+                    button {
+                        class: "btn btn-primary btn-sm w-fit",
+                        r#type: "submit",
+                        disabled: loading(),
+                        if loading() {
+                            span { class: "loading loading-spinner loading-xs" }
+                        }
+                        "Change password"
                     }
                 }
             }
@@ -1270,6 +1379,11 @@ fn UserManagementSection() -> Element {
     let mut loading = use_signal(|| true);
     let mut error = use_signal(|| None::<String>);
     let mut action_loading = use_signal(|| None::<String>);
+    let mut reset_pw_target = use_signal(|| None::<(String, String)>);
+    let mut reset_pw_value = use_signal(String::new);
+    let mut reset_pw_error = use_signal(|| None::<String>);
+    let mut reset_pw_loading = use_signal(|| false);
+    let mut reset_pw_success = use_signal(|| false);
 
     let refresh_users = move || {
         spawn(async move {
@@ -1291,6 +1405,9 @@ fn UserManagementSection() -> Element {
         });
     });
 
+    let auth_state = use_context::<Signal<AuthState>>();
+    let current_user_id = auth_state().user.as_ref().map(|u| u.id.clone()).unwrap_or_default();
+
     rsx! {
         div { class: "card bg-base-100 shadow",
             div { class: "card-body gap-4",
@@ -1308,7 +1425,7 @@ fn UserManagementSection() -> Element {
                     p { class: "text-base-content/50 text-sm py-2", "No users found." }
                 } else {
                     div { class: "overflow-x-auto",
-                        table { class: "table table-sm",
+                        table { class: "table w-full",
                             thead {
                                 tr {
                                     th { "Username" }
@@ -1316,7 +1433,7 @@ fn UserManagementSection() -> Element {
                                     th { "Role" }
                                     th { "Status" }
                                     th { "2FA" }
-                                    th { "Actions" }
+                                    th { class: "w-10" }
                                 }
                             }
                             tbody {
@@ -1327,11 +1444,26 @@ fn UserManagementSection() -> Element {
                                         let uid_enable = uid.clone();
                                         let uid_disable = uid.clone();
                                         let uid_totp = uid.clone();
+                                        let uid_role = uid.clone();
+                                        let uid_pw = uid.clone();
+                                        let username_pw = user.username.clone();
+                                        let is_self = uid == current_user_id;
                                         let is_acting = action_loading() == Some(uid.clone());
+                                        let new_role = match user.role {
+                                            UserRole::Admin => UserRole::User,
+                                            UserRole::User => UserRole::Admin,
+                                        };
+                                        let role_label = match user.role {
+                                            UserRole::Admin => "Demote to user",
+                                            UserRole::User => "Promote to admin",
+                                        };
+                                        let has_menu_items = !is_self
+                                            || user.status == UserStatus::Pending
+                                            || user.totp_enabled;
                                         rsx! {
                                             tr {
-                                                td { class: "font-medium text-sm", "{user.username}" }
-                                                td { class: "text-xs text-base-content/70",
+                                                td { class: "font-medium", "{user.username}" }
+                                                td { class: "text-base-content/70",
                                                     {user.email.as_deref().unwrap_or("—")}
                                                 }
                                                 td {
@@ -1349,73 +1481,117 @@ fn UserManagementSection() -> Element {
                                                 }
                                                 td {
                                                     if user.totp_enabled {
-                                                        span { class: "text-success text-xs", "Enabled" }
+                                                        span { class: "text-success text-sm", "Enabled" }
                                                     } else {
-                                                        span { class: "text-base-content/40 text-xs", "Off" }
+                                                        span { class: "text-base-content/40 text-sm", "Off" }
                                                     }
                                                 }
-                                                td { class: "flex gap-1 flex-wrap",
+                                                td {
                                                     if is_acting {
                                                         span { class: "loading loading-spinner loading-xs" }
-                                                    } else {
-                                                        if user.status == UserStatus::Pending {
-                                                            button {
-                                                                class: "btn btn-success btn-xs",
-                                                                onclick: move |_| {
-                                                                    let id = uid_approve.clone();
-                                                                    action_loading.set(Some(id.clone()));
-                                                                    spawn(async move {
-                                                                        let _ = use_auth::approve_user(&id).await;
-                                                                        action_loading.set(None);
-                                                                        refresh_users();
-                                                                    });
-                                                                },
-                                                                "Approve"
+                                                    } else if has_menu_items {
+                                                        div { class: "dropdown dropdown-end",
+                                                            div {
+                                                                tabindex: "0",
+                                                                role: "button",
+                                                                class: "btn btn-ghost btn-sm btn-circle",
+                                                                "..."
                                                             }
-                                                        }
-                                                        if user.status == UserStatus::Active {
-                                                            button {
-                                                                class: "btn btn-error btn-xs btn-outline",
-                                                                onclick: move |_| {
-                                                                    let id = uid_disable.clone();
-                                                                    action_loading.set(Some(id.clone()));
-                                                                    spawn(async move {
-                                                                        let _ = use_auth::disable_user(&id).await;
-                                                                        action_loading.set(None);
-                                                                        refresh_users();
-                                                                    });
-                                                                },
-                                                                "Disable"
-                                                            }
-                                                        }
-                                                        if user.status == UserStatus::Disabled {
-                                                            button {
-                                                                class: "btn btn-success btn-xs btn-outline",
-                                                                onclick: move |_| {
-                                                                    let id = uid_enable.clone();
-                                                                    action_loading.set(Some(id.clone()));
-                                                                    spawn(async move {
-                                                                        let _ = use_auth::enable_user(&id).await;
-                                                                        action_loading.set(None);
-                                                                        refresh_users();
-                                                                    });
-                                                                },
-                                                                "Enable"
-                                                            }
-                                                        }
-                                                        if user.totp_enabled {
-                                                            button {
-                                                                class: "btn btn-warning btn-xs btn-outline",
-                                                                onclick: move |_| {
-                                                                    let id = uid_totp.clone();
-                                                                    action_loading.set(Some(id.clone()));
-                                                                    spawn(async move {
-                                                                        let _ = use_auth::reset_user_totp(&id).await;
-                                                                        action_loading.set(None);
-                                                                        refresh_users();
-                                                                    });
-                                                                },
-                                                                "Reset 2FA"
+                                                            ul {
+                                                                tabindex: "0",
+                                                                class: "dropdown-content z-10 menu menu-sm shadow bg-base-200 rounded-box w-48",
+
+                                                                if user.status == UserStatus::Pending {
+                                                                    li {
+                                                                        a {
+                                                                            onclick: move |_| {
+                                                                                let id = uid_approve.clone();
+                                                                                action_loading.set(Some(id.clone()));
+                                                                                spawn(async move {
+                                                                                    let _ = use_auth::approve_user(&id).await;
+                                                                                    action_loading.set(None);
+                                                                                    refresh_users();
+                                                                                });
+                                                                            },
+                                                                            "Approve"
+                                                                        }
+                                                                    }
+                                                                }
+                                                                if user.status == UserStatus::Active && !is_self {
+                                                                    li {
+                                                                        a {
+                                                                            onclick: move |_| {
+                                                                                let id = uid_disable.clone();
+                                                                                action_loading.set(Some(id.clone()));
+                                                                                spawn(async move {
+                                                                                    let _ = use_auth::disable_user(&id).await;
+                                                                                    action_loading.set(None);
+                                                                                    refresh_users();
+                                                                                });
+                                                                            },
+                                                                            "Disable"
+                                                                        }
+                                                                    }
+                                                                }
+                                                                if user.status == UserStatus::Disabled {
+                                                                    li {
+                                                                        a {
+                                                                            onclick: move |_| {
+                                                                                let id = uid_enable.clone();
+                                                                                action_loading.set(Some(id.clone()));
+                                                                                spawn(async move {
+                                                                                    let _ = use_auth::enable_user(&id).await;
+                                                                                    action_loading.set(None);
+                                                                                    refresh_users();
+                                                                                });
+                                                                            },
+                                                                            "Enable"
+                                                                        }
+                                                                    }
+                                                                }
+                                                                if !is_self {
+                                                                    li {
+                                                                        a {
+                                                                            onclick: move |_| {
+                                                                                let id = uid_role.clone();
+                                                                                action_loading.set(Some(id.clone()));
+                                                                                spawn(async move {
+                                                                                    let _ = use_auth::change_user_role(&id, new_role).await;
+                                                                                    action_loading.set(None);
+                                                                                    refresh_users();
+                                                                                });
+                                                                            },
+                                                                            "{role_label}"
+                                                                        }
+                                                                    }
+                                                                    li {
+                                                                        a {
+                                                                            onclick: move |_| {
+                                                                                reset_pw_target.set(Some((uid_pw.clone(), username_pw.clone())));
+                                                                                reset_pw_value.set(String::new());
+                                                                                reset_pw_error.set(None);
+                                                                                reset_pw_success.set(false);
+                                                                            },
+                                                                            "Reset password"
+                                                                        }
+                                                                    }
+                                                                }
+                                                                if user.totp_enabled {
+                                                                    li {
+                                                                        a {
+                                                                            onclick: move |_| {
+                                                                                let id = uid_totp.clone();
+                                                                                action_loading.set(Some(id.clone()));
+                                                                                spawn(async move {
+                                                                                    let _ = use_auth::reset_user_totp(&id).await;
+                                                                                    action_loading.set(None);
+                                                                                    refresh_users();
+                                                                                });
+                                                                            },
+                                                                            "Reset 2FA"
+                                                                        }
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -1430,6 +1606,73 @@ fn UserManagementSection() -> Element {
                 }
 
                 CreateUserSection { on_created: move |_| refresh_users() }
+            }
+        }
+
+        // Reset password modal
+        if let Some((ref target_id, ref target_username)) = reset_pw_target() {
+            {
+                let target_id = target_id.clone();
+                rsx! {
+                    div { class: "modal modal-open",
+                        div { class: "modal-box",
+                            h3 { class: "font-bold text-lg", "Reset password for {target_username}" }
+
+                            if let Some(err) = reset_pw_error() {
+                                div { class: "alert alert-error text-sm mt-3", span { "{err}" } }
+                            }
+                            if reset_pw_success() {
+                                div { class: "alert alert-success text-sm mt-3", span { "Password reset successfully." } }
+                            }
+
+                            if !reset_pw_success() {
+                                div { class: "form-control mt-4",
+                                    label { class: "label",
+                                        span { class: "label-text", "New password" }
+                                    }
+                                    input {
+                                        class: "input input-bordered w-full",
+                                        r#type: "password",
+                                        placeholder: "Enter new password",
+                                        value: "{reset_pw_value}",
+                                        oninput: move |evt| reset_pw_value.set(evt.value()),
+                                    }
+                                }
+                            }
+
+                            div { class: "modal-action",
+                                if !reset_pw_success() {
+                                    button {
+                                        class: "btn btn-primary",
+                                        disabled: reset_pw_loading() || reset_pw_value().len() < 8,
+                                        onclick: move |_| {
+                                            let id = target_id.clone();
+                                            let pw = reset_pw_value();
+                                            spawn(async move {
+                                                reset_pw_loading.set(true);
+                                                reset_pw_error.set(None);
+                                                match use_auth::admin_reset_password(&id, &pw).await {
+                                                    Ok(()) => reset_pw_success.set(true),
+                                                    Err(e) => reset_pw_error.set(Some(e)),
+                                                }
+                                                reset_pw_loading.set(false);
+                                            });
+                                        },
+                                        if reset_pw_loading() {
+                                            span { class: "loading loading-spinner loading-xs" }
+                                        }
+                                        "Reset password"
+                                    }
+                                }
+                                button {
+                                    class: "btn",
+                                    onclick: move |_| reset_pw_target.set(None),
+                                    if reset_pw_success() { "Close" } else { "Cancel" }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

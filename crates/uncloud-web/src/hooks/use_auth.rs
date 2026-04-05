@@ -1,6 +1,7 @@
 use uncloud_common::{
-    CreateInviteRequest, InviteInfoResponse, InviteResponse, LoginRequest, LoginResponse,
-    RegisterRequest, ServerInfoResponse, TotpDisableRequest, TotpEnableRequest, TotpSetupResponse,
+    AdminResetPasswordRequest, ChangePasswordRequest, ChangeRoleRequest, CreateInviteRequest,
+    InviteInfoResponse, InviteResponse, LoginRequest, LoginResponse, RegisterRequest,
+    ServerInfoResponse, TotpDisableRequest, TotpEnableRequest, TotpSetupResponse,
     TotpVerifyRequest, UserResponse,
 };
 
@@ -395,6 +396,65 @@ pub async fn disable_user(id: &str) -> Result<(), String> {
 
 pub async fn enable_user(id: &str) -> Result<(), String> {
     let response = api::post(&format!("/admin/users/{}/enable", id))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if response.ok() {
+        Ok(())
+    } else {
+        let text = response.text().await.unwrap_or_default();
+        Err(extract_error(&text))
+    }
+}
+
+pub async fn change_password(current_password: &str, new_password: &str) -> Result<(), String> {
+    let req = ChangePasswordRequest {
+        current_password: current_password.to_string(),
+        new_password: new_password.to_string(),
+    };
+
+    let response = api::post("/auth/change-password")
+        .json(&req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if response.ok() {
+        Ok(())
+    } else {
+        let text = response.text().await.unwrap_or_default();
+        Err(extract_error(&text))
+    }
+}
+
+pub async fn admin_reset_password(id: &str, new_password: &str) -> Result<(), String> {
+    let req = AdminResetPasswordRequest {
+        new_password: new_password.to_string(),
+    };
+
+    let response = api::post(&format!("/admin/users/{}/reset-password", id))
+        .json(&req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if response.ok() {
+        Ok(())
+    } else {
+        let text = response.text().await.unwrap_or_default();
+        Err(extract_error(&text))
+    }
+}
+
+pub async fn change_user_role(id: &str, role: uncloud_common::UserRole) -> Result<(), String> {
+    let req = ChangeRoleRequest { role };
+
+    let response = api::post(&format!("/admin/users/{}/role", id))
+        .json(&req)
+        .map_err(|e| e.to_string())?
         .send()
         .await
         .map_err(|e| e.to_string())?;

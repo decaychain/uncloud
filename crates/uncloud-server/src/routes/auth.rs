@@ -398,6 +398,20 @@ pub async fn revoke_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ── Authenticated: change password ───────────────────────────────────────────
+
+pub async fn change_password(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(req): Json<uncloud_common::ChangePasswordRequest>,
+) -> Result<StatusCode> {
+    state
+        .auth
+        .change_password(user.id, &req.current_password, &req.new_password)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ── Authenticated: TOTP management ───────────────────────────────────────────
 
 pub async fn totp_setup(
