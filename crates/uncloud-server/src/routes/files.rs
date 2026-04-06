@@ -17,8 +17,9 @@ use uuid::Uuid;
 use std::collections::{HashMap, HashSet};
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
-use crate::models::{File, FileVersion, Folder, ProcessingStatus, TaskType, UploadChunk};
+use crate::models::{File, FileVersion, Folder, ProcessingStatus, TaskType, UploadChunk, User};
 use crate::routes::apps::{deliver_webhooks, EVENT_FILE_CREATED, EVENT_FILE_UPDATED, EVENT_FILE_DELETED};
+use crate::services::sharing::{check_file_access, check_folder_access};
 use crate::AppState;
 use uncloud_common::{FileResponse, InheritableSetting};
 
@@ -166,8 +167,29 @@ pub async fn list_files(
         _ => None,
     };
 
+    // Determine effective owner_id: if parent_id is set and user doesn't own it,
+    // check share access and list using the actual owner.
+    let effective_owner_id = if let Some(pid) = parent_id {
+        let folders_coll = state.db.collection::<Folder>("folders");
+        let parent = folders_coll
+            .find_one(doc! { "_id": pid, "deleted_at": mongodb::bson::Bson::Null })
+            .await?
+            .ok_or_else(|| AppError::NotFound("Parent folder not found".to_string()))?;
+        if parent.owner_id == user.id {
+            user.id
+        } else {
+            let access = check_folder_access(&state.db, user.id, pid).await?;
+            if !access.can_read() {
+                return Err(AppError::NotFound("Parent folder not found".to_string()));
+            }
+            parent.owner_id
+        }
+    } else {
+        user.id
+    };
+
     let filter = match parent_id {
-        Some(pid) => doc! { "owner_id": user.id, "parent_id": pid, "deleted_at": mongodb::bson::Bson::Null },
+        Some(pid) => doc! { "owner_id": effective_owner_id, "parent_id": pid, "deleted_at": mongodb::bson::Bson::Null },
         None => doc! { "owner_id": user.id, "parent_id": null, "deleted_at": mongodb::bson::Bson::Null },
     };
 
@@ -193,9 +215,14 @@ pub async fn get_file(
 
     let collection = state.db.collection::<File>("files");
     let file = collection
-        .find_one(doc! { "_id": file_id, "owner_id": user.id, "deleted_at": mongodb::bson::Bson::Null })
+        .find_one(doc! { "_id": file_id, "deleted_at": mongodb::bson::Bson::Null })
         .await?
         .ok_or_else(|| AppError::NotFound("File not found".to_string()))?;
+
+    let access = check_file_access(&state.db, user.id, file.id).await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound("File not found".to_string()));
+    }
 
     Ok(Json(file_to_response(&file)))
 }
@@ -245,9 +272,14 @@ pub async fn download_file(
 
     let collection = state.db.collection::<File>("files");
     let file = collection
-        .find_one(doc! { "_id": file_id, "owner_id": user.id, "deleted_at": mongodb::bson::Bson::Null })
+        .find_one(doc! { "_id": file_id, "deleted_at": mongodb::bson::Bson::Null })
         .await?
         .ok_or_else(|| AppError::NotFound("File not found".to_string()))?;
+
+    let access = check_file_access(&state.db, user.id, file.id).await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound("File not found".to_string()));
+    }
 
     let backend = state.storage.get_backend(file.storage_id).await?;
     let total = file.size_bytes as u64;
@@ -316,9 +348,28 @@ pub async fn update_file(
 
     let collection = state.db.collection::<File>("files");
     let file = collection
-        .find_one(doc! { "_id": file_id, "owner_id": user.id, "deleted_at": mongodb::bson::Bson::Null })
+        .find_one(doc! { "_id": file_id, "deleted_at": mongodb::bson::Bson::Null })
         .await?
         .ok_or_else(|| AppError::NotFound("File not found".to_string()))?;
+
+    let access = check_file_access(&state.db, user.id, file.id).await?;
+    if !access.can_write() {
+        return Err(if access.can_read() {
+            AppError::Forbidden("Read-only access".into())
+        } else {
+            AppError::NotFound("File not found".into())
+        });
+    }
+
+    let owner_id = file.owner_id;
+    let owner_username = {
+        let users_coll = state.db.collection::<User>("users");
+        users_coll
+            .find_one(doc! { "_id": owner_id })
+            .await?
+            .map(|u| u.username)
+            .unwrap_or_else(|| user.username.clone())
+    };
 
     // Effective name/parent after this update
     let new_name: &str = req.name.as_deref().unwrap_or(&file.name);
@@ -338,7 +389,7 @@ pub async fn update_file(
 
     if name_changed || parent_changed {
         // Conflict check
-        if check_name_conflict(&state.db, user.id, new_parent_id, new_name, Some(file_id), None)
+        if check_name_conflict(&state.db, owner_id, new_parent_id, new_name, Some(file_id), None)
             .await?
         {
             return Err(AppError::Conflict(
@@ -349,8 +400,8 @@ pub async fn update_file(
         // Compute new storage path and rename the blob on disk
         let new_path = resolve_storage_path(
             &state.db,
-            user.id,
-            &user.username,
+            owner_id,
+            &owner_username,
             new_parent_id,
             new_name,
         )
@@ -377,7 +428,7 @@ pub async fn update_file(
     }
 
     collection
-        .update_one(doc! { "_id": file_id, "owner_id": user.id }, doc! { "$set": set_doc })
+        .update_one(doc! { "_id": file_id, "owner_id": owner_id }, doc! { "$set": set_doc })
         .await?;
 
     let updated = collection
@@ -385,17 +436,17 @@ pub async fn update_file(
         .await?
         .ok_or_else(|| AppError::NotFound("File not found".to_string()))?;
 
-    state.events.emit_file_updated(user.id, &updated).await;
+    state.events.emit_file_updated(owner_id, &updated).await;
     {
         let state_clone = state.clone();
         let file_id = updated.id.to_hex();
-        let owner_id = user.id.to_hex();
-        let username = user.username.clone();
+        let owner_id_str = owner_id.to_hex();
+        let username = owner_username.clone();
         let name = updated.name.clone();
         tokio::spawn(async move {
             deliver_webhooks(&state_clone, EVENT_FILE_UPDATED, serde_json::json!({
                 "file_id": file_id,
-                "owner_id": owner_id,
+                "owner_id": owner_id_str,
                 "username": username,
                 "name": name,
             })).await;
@@ -438,9 +489,20 @@ pub async fn delete_file(
 
     let collection = state.db.collection::<File>("files");
     let file = collection
-        .find_one(doc! { "_id": file_id, "owner_id": user.id, "deleted_at": mongodb::bson::Bson::Null })
+        .find_one(doc! { "_id": file_id, "deleted_at": mongodb::bson::Bson::Null })
         .await?
         .ok_or_else(|| AppError::NotFound("File not found".to_string()))?;
+
+    let access = check_file_access(&state.db, user.id, file.id).await?;
+    if !access.can_write() {
+        return Err(if access.can_read() {
+            AppError::Forbidden("Read-only access".into())
+        } else {
+            AppError::NotFound("File not found".into())
+        });
+    }
+
+    let file_owner_id = file.owner_id;
 
     // Move blob to trash on storage
     let backend = state.storage.get_backend(file.storage_id).await?;
@@ -456,7 +518,7 @@ pub async fn delete_file(
     let batch_id = uuid::Uuid::new_v4().to_string();
     collection
         .update_one(
-            doc! { "_id": file_id, "owner_id": user.id },
+            doc! { "_id": file_id, "owner_id": file_owner_id },
             doc! { "$set": {
                 "deleted_at": mongodb::bson::DateTime::from_chrono(now),
                 "trash_path": &tp,
@@ -480,18 +542,16 @@ pub async fn delete_file(
         tracing::warn!("Failed to remove file {} from search index: {}", id, e);
     }
 
-    state.events.emit_file_deleted(user.id, file_id).await;
+    state.events.emit_file_deleted(file_owner_id, file_id).await;
     {
         let state_clone = state.clone();
         let file_id_str = id.clone();
-        let owner_id = user.id.to_hex();
-        let username = user.username.clone();
+        let owner_id_str = file_owner_id.to_hex();
         let name = file.name.clone();
         tokio::spawn(async move {
             deliver_webhooks(&state_clone, EVENT_FILE_DELETED, serde_json::json!({
                 "file_id": file_id_str,
-                "owner_id": owner_id,
-                "username": username,
+                "owner_id": owner_id_str,
                 "name": name,
             })).await;
         });
@@ -703,20 +763,58 @@ pub async fn simple_upload(
     let filename = filename.ok_or_else(|| AppError::BadRequest("No file provided".to_string()))?;
     let size = file_data.len() as i64;
 
-    // Check quota
-    if !user.has_quota_space(size) {
-        return Err(AppError::Forbidden);
+    // Determine effective owner: if uploading to a shared folder, the file
+    // belongs to the folder owner, and quota is charged to them.
+    let (effective_owner_id, effective_username) = if let Some(pid) = parent_id {
+        let folders_coll = state.db.collection::<Folder>("folders");
+        let parent = folders_coll
+            .find_one(doc! { "_id": pid, "deleted_at": mongodb::bson::Bson::Null })
+            .await?
+            .ok_or_else(|| AppError::NotFound("Parent folder not found".to_string()))?;
+        if parent.owner_id == user.id {
+            (user.id, user.username.clone())
+        } else {
+            let access = check_folder_access(&state.db, user.id, pid).await?;
+            if !access.can_write() {
+                return Err(if access.can_read() {
+                    AppError::Forbidden("Read-only access".into())
+                } else {
+                    AppError::NotFound("Parent folder not found".into())
+                });
+            }
+            let owner_username = {
+                let users_coll = state.db.collection::<User>("users");
+                users_coll
+                    .find_one(doc! { "_id": parent.owner_id })
+                    .await?
+                    .map(|u| u.username)
+                    .unwrap_or_else(|| user.username.clone())
+            };
+            (parent.owner_id, owner_username)
+        }
+    } else {
+        (user.id, user.username.clone())
+    };
+
+    // Check quota against the effective owner
+    {
+        let users_coll = state.db.collection::<User>("users");
+        if let Some(owner) = users_coll.find_one(doc! { "_id": effective_owner_id }).await? {
+            if !owner.has_quota_space(size) {
+                return Err(AppError::Forbidden("Quota exceeded".into()));
+            }
+        }
     }
 
     // Get or create default storage (auto-provisions on first upload)
-    let storage = state.storage.get_or_create_default(user.id).await?;
+    let storage = state.storage.get_or_create_default(effective_owner_id).await?;
     let backend = state.storage.get_backend(storage.id).await?;
 
     // Build logical storage path: username/folder/chain/filename
     let storage_path = resolve_storage_path(
         &state.db,
-        user.id,
-        &user.username,
+        effective_owner_id,
+        &effective_username,
         parent_id,
         &filename,
     ).await?;
@@ -738,7 +836,7 @@ pub async fn simple_upload(
     let file = File::new(
         storage.id,
         storage_path,
-        user.id,
+        effective_owner_id,
         parent_id,
         filename,
         mime_type,
@@ -749,20 +847,20 @@ pub async fn simple_upload(
     let collection = state.db.collection::<File>("files");
     collection.insert_one(&file).await?;
 
-    // Update user's used bytes
-    state.auth.update_user_bytes(user.id, size).await?;
+    // Update effective owner's used bytes
+    state.auth.update_user_bytes(effective_owner_id, size).await?;
 
-    state.events.emit_file_created(user.id, &file).await;
+    state.events.emit_file_created(effective_owner_id, &file).await;
     {
         let state_clone = state.clone();
         let file_id = file.id.to_hex();
-        let owner_id = user.id.to_hex();
-        let username = user.username.clone();
+        let owner_id_str = effective_owner_id.to_hex();
+        let username = effective_username.clone();
         let name = file.name.clone();
         tokio::spawn(async move {
             deliver_webhooks(&state_clone, EVENT_FILE_CREATED, serde_json::json!({
                 "file_id": file_id,
-                "owner_id": owner_id,
+                "owner_id": owner_id_str,
                 "username": username,
                 "name": name,
             })).await;
@@ -778,21 +876,6 @@ pub async fn init_upload(
     user: AuthUser,
     Json(req): Json<InitUploadRequest>,
 ) -> Result<Json<InitUploadResponse>> {
-    // Check quota
-    if !user.has_quota_space(req.size) {
-        return Err(AppError::Forbidden);
-    }
-
-    let chunk_size = req.chunk_size.unwrap_or(state.config.uploads.max_chunk_size as i64);
-
-    // Get or create default storage (auto-provisions on first upload)
-    let storage = state.storage.get_or_create_default(user.id).await?;
-    let backend = state.storage.get_backend(storage.id).await?;
-
-    // Create temp file
-    let temp_path = backend.create_temp().await?;
-    let upload_id = Uuid::new_v4().to_string();
-
     let parent_id = match &req.parent_id {
         Some(id) if !id.is_empty() => Some(
             ObjectId::parse_str(id)
@@ -801,9 +884,53 @@ pub async fn init_upload(
         _ => None,
     };
 
+    // Determine effective owner for shared folder uploads
+    let effective_owner_id = if let Some(pid) = parent_id {
+        let folders_coll = state.db.collection::<Folder>("folders");
+        let parent = folders_coll
+            .find_one(doc! { "_id": pid, "deleted_at": mongodb::bson::Bson::Null })
+            .await?
+            .ok_or_else(|| AppError::NotFound("Parent folder not found".to_string()))?;
+        if parent.owner_id == user.id {
+            user.id
+        } else {
+            let access = check_folder_access(&state.db, user.id, pid).await?;
+            if !access.can_write() {
+                return Err(if access.can_read() {
+                    AppError::Forbidden("Read-only access".into())
+                } else {
+                    AppError::NotFound("Parent folder not found".into())
+                });
+            }
+            parent.owner_id
+        }
+    } else {
+        user.id
+    };
+
+    // Check quota against the effective owner
+    {
+        let users_coll = state.db.collection::<User>("users");
+        if let Some(owner) = users_coll.find_one(doc! { "_id": effective_owner_id }).await? {
+            if !owner.has_quota_space(req.size) {
+                return Err(AppError::Forbidden("Quota exceeded".into()));
+            }
+        }
+    }
+
+    let chunk_size = req.chunk_size.unwrap_or(state.config.uploads.max_chunk_size as i64);
+
+    // Get or create default storage for the effective owner
+    let storage = state.storage.get_or_create_default(effective_owner_id).await?;
+    let backend = state.storage.get_backend(storage.id).await?;
+
+    // Create temp file
+    let temp_path = backend.create_temp().await?;
+    let upload_id = Uuid::new_v4().to_string();
+
     let upload = UploadChunk::new(
         upload_id.clone(),
-        user.id,
+        user.id, // Store the requesting user's ID for lookup in upload_chunk/complete_upload
         req.filename,
         parent_id,
         storage.id,
@@ -885,13 +1012,37 @@ pub async fn complete_upload(
         )));
     }
 
+    // Resolve effective owner for shared folder uploads
+    let (effective_owner_id, effective_username) = if let Some(pid) = upload.parent_id {
+        let folders_coll = state.db.collection::<Folder>("folders");
+        match folders_coll
+            .find_one(doc! { "_id": pid, "deleted_at": mongodb::bson::Bson::Null })
+            .await?
+        {
+            Some(parent) if parent.owner_id != user.id => {
+                let owner_username = {
+                    let users_coll = state.db.collection::<User>("users");
+                    users_coll
+                        .find_one(doc! { "_id": parent.owner_id })
+                        .await?
+                        .map(|u| u.username)
+                        .unwrap_or_else(|| user.username.clone())
+                };
+                (parent.owner_id, owner_username)
+            }
+            _ => (user.id, user.username.clone()),
+        }
+    } else {
+        (user.id, user.username.clone())
+    };
+
     let backend = state.storage.get_backend(upload.storage_id).await?;
 
     // Build logical storage path: username/folder/chain/filename
     let storage_path = resolve_storage_path(
         &state.db,
-        user.id,
-        &user.username,
+        effective_owner_id,
+        &effective_username,
         upload.parent_id,
         &upload.filename,
     ).await?;
@@ -922,11 +1073,11 @@ pub async fn complete_upload(
         .first_or_octet_stream()
         .to_string();
 
-    // Create file record
+    // Create file record — owned by the effective owner (folder owner for shared folders)
     let file = File::new(
         upload.storage_id,
         storage_path,
-        user.id,
+        effective_owner_id,
         upload.parent_id,
         upload.filename.clone(),
         mime_type,
@@ -937,10 +1088,10 @@ pub async fn complete_upload(
     let files_collection = state.db.collection::<File>("files");
     files_collection.insert_one(&file).await?;
 
-    // Update user's used bytes
+    // Update effective owner's used bytes
     state
         .auth
-        .update_user_bytes(user.id, upload.total_size)
+        .update_user_bytes(effective_owner_id, upload.total_size)
         .await?;
 
     // Delete upload record
@@ -948,17 +1099,17 @@ pub async fn complete_upload(
         .delete_one(doc! { "upload_id": &upload_id })
         .await?;
 
-    state.events.emit_file_created(user.id, &file).await;
+    state.events.emit_file_created(effective_owner_id, &file).await;
     {
         let state_clone = state.clone();
         let file_id = file.id.to_hex();
-        let owner_id = user.id.to_hex();
-        let username = user.username.clone();
+        let owner_id_str = effective_owner_id.to_hex();
+        let username = effective_username.clone();
         let name = file.name.clone();
         tokio::spawn(async move {
             deliver_webhooks(&state_clone, EVENT_FILE_CREATED, serde_json::json!({
                 "file_id": file_id,
-                "owner_id": owner_id,
+                "owner_id": owner_id_str,
                 "username": username,
                 "name": name,
             })).await;
@@ -985,7 +1136,7 @@ pub async fn copy_file(
         .ok_or_else(|| AppError::NotFound("File not found".to_string()))?;
 
     if !user.has_quota_space(file.size_bytes) {
-        return Err(AppError::Forbidden);
+        return Err(AppError::Forbidden("Access denied".into()));
     }
 
     // Destination parent: None (same as source) | Some("") = root | Some(id) = folder
@@ -1518,9 +1669,14 @@ pub async fn get_thumbnail(
 
     let collection = state.db.collection::<File>("files");
     let file = collection
-        .find_one(doc! { "_id": file_id, "owner_id": user.id, "deleted_at": mongodb::bson::Bson::Null })
+        .find_one(doc! { "_id": file_id, "deleted_at": mongodb::bson::Bson::Null })
         .await?
         .ok_or_else(|| AppError::NotFound("File not found".to_string()))?;
+
+    let access = check_file_access(&state.db, user.id, file.id).await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound("File not found".to_string()));
+    }
 
     // Both ThumbnailProcessor (images) and AudioMetadataProcessor (audio cover art)
     // write to the same .thumbs/{id}.jpg path — check either task type.

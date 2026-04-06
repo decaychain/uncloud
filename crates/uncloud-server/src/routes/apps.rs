@@ -82,7 +82,7 @@ fn verify_secret(state: &AppState, secret: &str) -> Result<()> {
             "App registration is disabled (no registration_secret configured)".to_string(),
         )),
         Some(expected) if expected == secret => Ok(()),
-        Some(_) => Err(AppError::Forbidden),
+        Some(_) => Err(AppError::Forbidden("Access denied".into())),
     }
 }
 
@@ -315,7 +315,7 @@ pub async fn proxy_handler(
 
     // Check user is allowed
     if !app.enabled_for.is_empty() && !app.enabled_for.contains(&user.id) {
-        return Err(AppError::Forbidden);
+        return Err(AppError::Forbidden("Access denied".into()));
     }
 
     let upstream = format!("{}{}", app.base_url.trim_end_matches('/'), upstream_path);

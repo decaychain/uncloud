@@ -101,11 +101,11 @@ impl AuthService {
         // Determine whether registration is allowed and what status the user gets.
         let status = match self.config.registration {
             RegistrationMode::Disabled => {
-                return Err(AppError::Forbidden);
+                return Err(AppError::Forbidden("Access denied".into()));
             }
             RegistrationMode::InviteOnly => {
                 if invite.is_none() {
-                    return Err(AppError::Forbidden);
+                    return Err(AppError::Forbidden("Access denied".into()));
                 }
                 UserStatus::Active // invite present → immediate activation
             }
@@ -217,10 +217,10 @@ impl AuthService {
         // Check user status
         match user.status {
             UserStatus::Pending => {
-                return Err(AppError::Forbidden);
+                return Err(AppError::Forbidden("Access denied".into()));
             }
             UserStatus::Disabled => {
-                return Err(AppError::Forbidden);
+                return Err(AppError::Forbidden("Access denied".into()));
             }
             UserStatus::Active => {}
         }
@@ -261,7 +261,7 @@ impl AuthService {
         ip_address: Option<String>,
     ) -> Result<(User, Session)> {
         if self.config.registration != RegistrationMode::Demo {
-            return Err(AppError::Forbidden);
+            return Err(AppError::Forbidden("Access denied".into()));
         }
 
         let demo_id = &self.generate_token()[..8];

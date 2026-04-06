@@ -22,10 +22,10 @@ use uncloud_common::{
 
 fn require_shopping(state: &AppState, user: &crate::models::User) -> Result<()> {
     if !state.config.features.shopping {
-        return Err(AppError::Forbidden);
+        return Err(AppError::Forbidden("Access denied".into()));
     }
     if user.disabled_features.contains(&"shopping".to_string()) {
-        return Err(AppError::Forbidden);
+        return Err(AppError::Forbidden("Access denied".into()));
     }
     Ok(())
 }
