@@ -43,6 +43,10 @@ pub fn FileItem(
     on_edit_request: EventHandler<()>,
     on_version_history_request: EventHandler<()>,
     on_folder_settings_request: EventHandler<()>,
+    #[props(default)]
+    on_share_folder_request: EventHandler<()>,
+    #[props(default)]
+    shared_by: Option<String>,
 ) -> Element {
     let nav = use_navigator();
     // None = hidden; Some((x, y)) = visible at clamped viewport coordinates.
@@ -173,9 +177,17 @@ pub fn FileItem(
                         }
                     }
                     div { class: "p-3 items-center text-center gap-1 flex flex-col",
-                        div { class: "text-sm font-medium truncate w-full", title: "{name}", "{name}" }
+                        div { class: "text-sm font-medium truncate w-full", title: "{name}",
+                            if shared_by.is_some() && is_folder {
+                                span { class: "mr-1 opacity-60", "👥" }
+                            }
+                            "{name}"
+                        }
                         if !is_folder {
                             div { class: "text-xs text-base-content/50", "{size_str}" }
+                        }
+                        if let Some(ref owner) = shared_by {
+                            div { class: "text-xs text-base-content/40", "Shared by {owner}" }
                         }
                     }
                 }
@@ -187,6 +199,7 @@ pub fn FileItem(
                         name: name.clone(),
                         is_folder,
                         mime_type: mime_type.clone(),
+                        shared_by: shared_by.clone(),
                         on_close: move |_| menu_pos.set(None),
                         on_open_request: move |_| on_open_request.call(()),
                         on_edit_request: move |_| on_edit_request.call(()),
@@ -196,6 +209,7 @@ pub fn FileItem(
                         on_copy: move |_| on_copy_request.call(()),
                         on_version_history: move |_| on_version_history_request.call(()),
                         on_folder_settings: move |_| on_folder_settings_request.call(()),
+                        on_share_folder: move |_| on_share_folder_request.call(()),
                     }
                 }
             }
@@ -233,7 +247,17 @@ pub fn FileItem(
                 }
                 td { class: "w-8 text-lg py-2", "{icon}" }
                 td { class: "font-medium",
-                    span { title: "{name}", "{name}" }
+                    span { title: "{name}",
+                        if shared_by.is_some() && is_folder {
+                            span { class: "mr-1 opacity-60", "👥" }
+                        }
+                        "{name}"
+                    }
+                    if let Some(ref owner) = shared_by {
+                        span { class: "text-xs text-base-content/40 ml-2",
+                            "Shared by {owner}"
+                        }
+                    }
                 }
                 td { class: "text-base-content/50 text-sm hidden sm:table-cell", "{type_str}" }
                 td { class: "text-right text-sm text-base-content/50 hidden sm:table-cell tabular-nums",
@@ -259,6 +283,7 @@ pub fn FileItem(
                     name: name.clone(),
                     is_folder,
                     mime_type: mime_type.clone(),
+                    shared_by: shared_by.clone(),
                     on_close: move |_| menu_pos.set(None),
                     on_open_request: move |_| on_open_request.call(()),
                     on_edit_request: move |_| on_edit_request.call(()),
@@ -268,6 +293,7 @@ pub fn FileItem(
                     on_copy: move |_| on_copy_request.call(()),
                     on_version_history: move |_| on_version_history_request.call(()),
                     on_folder_settings: move |_| on_folder_settings_request.call(()),
+                    on_share_folder: move |_| on_share_folder_request.call(()),
                 }
             }
         },
@@ -284,6 +310,7 @@ fn FileContextMenu(
     name: String,
     is_folder: bool,
     mime_type: Option<String>,
+    shared_by: Option<String>,
     on_close: EventHandler<()>,
     on_open_request: EventHandler<()>,
     on_edit_request: EventHandler<()>,
@@ -293,6 +320,7 @@ fn FileContextMenu(
     on_copy: EventHandler<()>,
     on_version_history: EventHandler<()>,
     on_folder_settings: EventHandler<()>,
+    on_share_folder: EventHandler<()>,
 ) -> Element {
     let is_editable_text = !is_folder && mime_type.as_deref()
         .map(|m| m.starts_with("text/") || m == "application/json" || m == "application/xml")
@@ -352,16 +380,27 @@ fn FileContextMenu(
                     span { "Move to…" }
                 }
             }
-            li {
-                a { onclick: move |_| { on_copy.call(()); on_close.call(()); },
-                    span { "📋" }
-                    span { "Copy" }
+            // Hide Copy for shared folders (they are mounted references)
+            if !(is_folder && shared_by.is_some()) {
+                li {
+                    a { onclick: move |_| { on_copy.call(()); on_close.call(()); },
+                        span { "📋" }
+                        span { "Copy" }
+                    }
+                }
+            }
+            if is_folder {
+                li {
+                    a { onclick: move |_| { on_share_folder.call(()); on_close.call(()); },
+                        span { "👥" }
+                        span { "Share folder\u{2026}" }
+                    }
                 }
             }
             li {
                 a { onclick: move |_| on_close.call(()),
                     span { "🔗" }
-                    span { "Share" }
+                    span { "Share link" }
                 }
             }
             if !is_folder {

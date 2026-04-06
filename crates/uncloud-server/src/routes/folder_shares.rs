@@ -192,6 +192,12 @@ pub async fn create_share(
 
     shares_coll.insert_one(&share).await?;
 
+    // Notify the grantee that a folder has been shared with them
+    state
+        .events
+        .emit_folder_shared(share.grantee_id, share.folder_id, share.id)
+        .await;
+
     let response = build_response(&state, &share).await?;
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -375,6 +381,20 @@ pub async fn delete_share(
     shares_coll
         .delete_one(doc! { "_id": share_id })
         .await?;
+
+    // Notify the other party: if the owner/admin is revoking, notify the grantee;
+    // if the grantee is leaving, notify the owner.
+    if is_grantee {
+        state
+            .events
+            .emit_folder_share_revoked(share.owner_id, share.folder_id, share.id)
+            .await;
+    } else {
+        state
+            .events
+            .emit_folder_share_revoked(share.grantee_id, share.folder_id, share.id)
+            .await;
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }

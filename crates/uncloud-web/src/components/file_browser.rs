@@ -65,6 +65,10 @@ impl Selection {
         }
         out
     }
+
+    fn has_shared_folder(&self, folders: &[FolderResponse]) -> bool {
+        folders.iter().any(|f| self.folders.contains(&f.id) && f.shared_by.is_some())
+    }
 }
 
 // ── ViewerTarget ─────────────────────────────────────────────────────────────
@@ -103,6 +107,8 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
     let mut delete_target: Signal<Option<(String, bool, String)>> = use_signal(|| None);
     // Folder settings modal target: Some((folder_id, folder_name, gallery_include, music_include))
     let mut folder_settings_target: Signal<Option<(String, String, GalleryInclude, MusicInclude)>> = use_signal(|| None);
+    // Folder share dialog target: Some((folder_id, folder_name))
+    let mut share_folder_target: Signal<Option<(String, String)>> = use_signal(|| None);
     // File viewer target
     let mut viewer_target: Signal<Option<ViewerTarget>> = use_signal(|| None);
     // Version history modal target: Some((file_id, file_name))
@@ -127,7 +133,8 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                 ServerEvent::FileCreated { .. } | ServerEvent::FileUpdated { .. }
                 | ServerEvent::FileDeleted { .. } | ServerEvent::FolderCreated { .. }
                 | ServerEvent::FolderUpdated { .. } | ServerEvent::FolderDeleted { .. }
-                | ServerEvent::FileRestored { .. } => {
+                | ServerEvent::FileRestored { .. }
+                | ServerEvent::FolderShared { .. } | ServerEvent::FolderShareRevoked { .. } => {
                     let next = *refresh.peek() + 1;
                     refresh.set(next);
                 }
@@ -234,15 +241,17 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                     span { "📂" }
                     span { class: "hidden sm:inline", "Move" }
                 }
-                button {
-                    class: "btn btn-sm btn-ghost gap-1",
-                    title: "Copy selected",
-                    onclick: move |_| {
-                        let items = selection().items_with_names(&files(), &folders());
-                        move_target.set(Some((items, true)));
-                    },
-                    span { "📋" }
-                    span { class: "hidden sm:inline", "Copy" }
+                if !selection().has_shared_folder(&folders()) {
+                    button {
+                        class: "btn btn-sm btn-ghost gap-1",
+                        title: "Copy selected",
+                        onclick: move |_| {
+                            let items = selection().items_with_names(&files(), &folders());
+                            move_target.set(Some((items, true)));
+                        },
+                        span { "📋" }
+                        span { class: "hidden sm:inline", "Copy" }
+                    }
                 }
                 button {
                     class: "btn btn-sm btn-ghost gap-1 text-error",
@@ -344,8 +353,9 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
             div { class: "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 mt-6",
                 for folder in folders() {
                     {
-                        let (id_t, id_r, name_r, id_m, name_m, id_c, name_c, id_d, name_d, id_fs, name_fs) = (
+                        let (id_t, id_r, name_r, id_m, name_m, id_c, name_c, id_d, name_d, id_fs, name_fs, id_sh, name_sh) = (
                             folder.id.clone(), folder.id.clone(), folder.name.clone(),
+                            folder.id.clone(), folder.name.clone(),
                             folder.id.clone(), folder.name.clone(),
                             folder.id.clone(), folder.name.clone(),
                             folder.id.clone(), folder.name.clone(),
@@ -353,6 +363,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                         );
                         let gi = folder.gallery_include;
                         let mi = folder.music_include;
+                        let shared_by = folder.shared_by.clone();
                         rsx! {
                             FileItem {
                                 key: "{folder.id}",
@@ -364,6 +375,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                 view_mode: ViewMode::Grid,
                                 selected: selection().contains_folder(&folder.id),
                                 thumbnail_ver: 0,
+                                shared_by,
                                 on_delete_request: move |_| delete_target.set(Some((id_d.clone(), true, name_d.clone()))),
                                 on_toggle_select: move |_| selection.write().toggle_folder(id_t.clone()),
                                 on_rename_request: move |_| rename_target.set(Some((id_r.clone(), true, name_r.clone()))),
@@ -374,6 +386,9 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                 on_version_history_request: move |_| {},
                                 on_folder_settings_request: move |_| {
                                     folder_settings_target.set(Some((id_fs.clone(), name_fs.clone(), gi, mi)));
+                                },
+                                on_share_folder_request: move |_| {
+                                    share_folder_target.set(Some((id_sh.clone(), name_sh.clone())));
                                 },
                             }
                         }
@@ -468,8 +483,9 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                     tbody {
                         for folder in folders() {
                             {
-                                let (id_t, id_r, name_r, id_m, name_m, id_c, name_c, id_d, name_d, id_fs, name_fs) = (
+                                let (id_t, id_r, name_r, id_m, name_m, id_c, name_c, id_d, name_d, id_fs, name_fs, id_sh, name_sh) = (
                                     folder.id.clone(), folder.id.clone(), folder.name.clone(),
+                                    folder.id.clone(), folder.name.clone(),
                                     folder.id.clone(), folder.name.clone(),
                                     folder.id.clone(), folder.name.clone(),
                                     folder.id.clone(), folder.name.clone(),
@@ -477,6 +493,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                 );
                                 let gi = folder.gallery_include;
                                 let mi = folder.music_include;
+                                let shared_by = folder.shared_by.clone();
                                 rsx! {
                                     FileItem {
                                         key: "{folder.id}",
@@ -488,6 +505,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                         view_mode: ViewMode::List,
                                         selected: selection().contains_folder(&folder.id),
                                         thumbnail_ver: 0,
+                                        shared_by,
                                         on_delete_request: move |_| delete_target.set(Some((id_d.clone(), true, name_d.clone()))),
                                         on_toggle_select: move |_| selection.write().toggle_folder(id_t.clone()),
                                         on_rename_request: move |_| rename_target.set(Some((id_r.clone(), true, name_r.clone()))),
@@ -498,6 +516,9 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                         on_version_history_request: move |_| {},
                                         on_folder_settings_request: move |_| {
                                             folder_settings_target.set(Some((id_fs.clone(), name_fs.clone(), gi, mi)));
+                                        },
+                                        on_share_folder_request: move |_| {
+                                            share_folder_target.set(Some((id_sh.clone(), name_sh.clone())));
                                         },
                                     }
                                 }
@@ -653,6 +674,14 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                     folder_settings_target.set(None);
                     refresh.set(refresh() + 1);
                 },
+            }
+        }
+
+        if let Some((folder_id, folder_name)) = share_folder_target() {
+            crate::components::folder_share_dialog::FolderShareDialog {
+                folder_id,
+                folder_name,
+                on_close: move |_| share_folder_target.set(None),
             }
         }
 

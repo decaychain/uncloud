@@ -12,6 +12,8 @@ pub enum ServerEvent {
     UploadProgress { upload_id: String, progress: f64 },
     ProcessingCompleted { file_id: String, task_type: String, success: bool },
     FileRestored { file_id: String },
+    FolderShared { folder_id: String, share_id: String },
+    FolderShareRevoked { folder_id: String, share_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

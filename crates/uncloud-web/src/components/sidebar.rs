@@ -217,6 +217,14 @@ pub fn Sidebar() -> Element {
                             }
                             li {
                                 Link {
+                                    to: Route::SharedWithMe {},
+                                    class: if matches!(route, Route::SharedWithMe {}) { "active" } else { "" },
+                                    onclick: move |_| close_drawer(),
+                                    "👥 Shared with me"
+                                }
+                            }
+                            li {
+                                Link {
                                     to: Route::Trash {},
                                     class: if matches!(route, Route::Trash {}) { "active" } else { "" },
                                     "🗑️ Trash"

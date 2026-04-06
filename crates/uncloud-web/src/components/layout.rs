@@ -53,6 +53,7 @@ pub fn Layout() -> Element {
         Route::Passwords {} => "Uncloud - Passwords",
         Route::Settings {} | Route::SettingsTab { .. } => "Uncloud - Settings",
         Route::Trash {} => "Uncloud - Trash",
+        Route::SharedWithMe {} => "Uncloud - Shared with me",
         _ => "Uncloud - Files",
     };
 
@@ -114,6 +115,8 @@ fn Navbar() -> Element {
         "Settings"
     } else if matches!(route, Route::Trash {}) {
         "Trash"
+    } else if matches!(route, Route::SharedWithMe {}) {
+        "Shared"
     } else {
         "Files"
     };
