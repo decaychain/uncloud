@@ -65,6 +65,10 @@ impl Selection {
         }
         out
     }
+
+    fn has_shared_folder(&self, folders: &[FolderResponse]) -> bool {
+        folders.iter().any(|f| self.folders.contains(&f.id) && f.shared_by.is_some())
+    }
 }
 
 // ── ViewerTarget ─────────────────────────────────────────────────────────────
@@ -237,15 +241,17 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                     span { "📂" }
                     span { class: "hidden sm:inline", "Move" }
                 }
-                button {
-                    class: "btn btn-sm btn-ghost gap-1",
-                    title: "Copy selected",
-                    onclick: move |_| {
-                        let items = selection().items_with_names(&files(), &folders());
-                        move_target.set(Some((items, true)));
-                    },
-                    span { "📋" }
-                    span { class: "hidden sm:inline", "Copy" }
+                if !selection().has_shared_folder(&folders()) {
+                    button {
+                        class: "btn btn-sm btn-ghost gap-1",
+                        title: "Copy selected",
+                        onclick: move |_| {
+                            let items = selection().items_with_names(&files(), &folders());
+                            move_target.set(Some((items, true)));
+                        },
+                        span { "📋" }
+                        span { class: "hidden sm:inline", "Copy" }
+                    }
                 }
                 button {
                     class: "btn btn-sm btn-ghost gap-1 text-error",

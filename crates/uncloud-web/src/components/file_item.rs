@@ -199,6 +199,7 @@ pub fn FileItem(
                         name: name.clone(),
                         is_folder,
                         mime_type: mime_type.clone(),
+                        shared_by: shared_by.clone(),
                         on_close: move |_| menu_pos.set(None),
                         on_open_request: move |_| on_open_request.call(()),
                         on_edit_request: move |_| on_edit_request.call(()),
@@ -282,6 +283,7 @@ pub fn FileItem(
                     name: name.clone(),
                     is_folder,
                     mime_type: mime_type.clone(),
+                    shared_by: shared_by.clone(),
                     on_close: move |_| menu_pos.set(None),
                     on_open_request: move |_| on_open_request.call(()),
                     on_edit_request: move |_| on_edit_request.call(()),
@@ -308,6 +310,7 @@ fn FileContextMenu(
     name: String,
     is_folder: bool,
     mime_type: Option<String>,
+    shared_by: Option<String>,
     on_close: EventHandler<()>,
     on_open_request: EventHandler<()>,
     on_edit_request: EventHandler<()>,
@@ -377,10 +380,13 @@ fn FileContextMenu(
                     span { "Move to…" }
                 }
             }
-            li {
-                a { onclick: move |_| { on_copy.call(()); on_close.call(()); },
-                    span { "📋" }
-                    span { "Copy" }
+            // Hide Copy for shared folders (they are mounted references)
+            if !(is_folder && shared_by.is_some()) {
+                li {
+                    a { onclick: move |_| { on_copy.call(()); on_close.call(()); },
+                        span { "📋" }
+                        span { "Copy" }
+                    }
                 }
             }
             if is_folder {

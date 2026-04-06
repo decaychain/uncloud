@@ -343,6 +343,58 @@ pub async fn update_folder(
         });
     }
 
+    // If the user is a share grantee moving/renaming, update the share mount
+    // instead of the actual folder.
+    if folder.owner_id != user.id {
+        // Find the share record for this folder (direct share, not inherited)
+        let shares_coll = state.db.collection::<FolderShare>("folder_shares");
+        if let Some(share) = shares_coll
+            .find_one(doc! { "folder_id": folder_id, "grantee_id": user.id })
+            .await?
+        {
+            let mut update = doc! { "updated_at": mongodb::bson::DateTime::now() };
+            if let Some(ref parent_id_str) = req.parent_id {
+                if parent_id_str.is_empty() {
+                    // Move to user's root = "Shared with me" section
+                    update.insert("mount_parent_id", bson::Bson::Null);
+                } else {
+                    let pid = ObjectId::parse_str(parent_id_str)
+                        .map_err(|_| AppError::BadRequest("Invalid parent ID".to_string()))?;
+                    // Verify the grantee owns the target folder
+                    let target = collection
+                        .find_one(doc! { "_id": pid, "owner_id": user.id, "deleted_at": bson::Bson::Null })
+                        .await?
+                        .ok_or_else(|| AppError::NotFound("Parent folder not found".to_string()))?;
+                    let _ = target;
+                    update.insert("mount_parent_id", pid);
+                }
+            }
+            if let Some(ref name) = req.name {
+                if name.is_empty() || name.len() > 255 {
+                    return Err(AppError::Validation(
+                        "Folder name must be between 1 and 255 characters".to_string(),
+                    ));
+                }
+                update.insert("mount_name", name.as_str());
+            }
+            shares_coll
+                .update_one(doc! { "_id": share.id }, doc! { "$set": update })
+                .await?;
+
+            // Return the folder response (with shared_by info)
+            let shared_by = Some(get_username(&state.db, folder.owner_id).await?);
+            return Ok(Json(
+                folder_to_response_with_shared(&state.db, folder.owner_id, &folder, shared_by).await?,
+            ));
+        }
+        // If no direct share found, the user has inherited access — they can modify
+        // the actual folder contents but not move/rename the shared root itself.
+        // Only allow rename/settings changes within the shared tree (not move).
+        if req.parent_id.is_some() {
+            return Err(AppError::Forbidden("Cannot move folders in a shared tree".into()));
+        }
+    }
+
     let owner_id = folder.owner_id;
 
     // Effective name/parent after this update
@@ -728,6 +780,10 @@ pub async fn copy_folder(
     let access = check_folder_access(&state.db, user.id, source.id).await?;
     if !access.can_read() {
         return Err(AppError::NotFound("Folder not found".to_string()));
+    }
+    // Cannot copy shared folders — they are mounted references, not owned content.
+    if source.owner_id != user.id {
+        return Err(AppError::Forbidden("Cannot copy shared folders".into()));
     }
 
     let dest_parent_id = match req.parent_id.as_deref() {
