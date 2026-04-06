@@ -8,6 +8,7 @@ use crate::components::{
     passwords::PasswordsPage,
     settings::SettingsPage,
     setup::Setup,
+    shared_with_me::SharedWithMePage,
     shopping,
     trash::Trash,
 };
@@ -37,6 +38,9 @@ pub enum Route {
 
         #[route("/shares")]
         Shares {},
+
+        #[route("/shared")]
+        SharedWithMe {},
 
         #[route("/gallery")]
         Gallery {},
@@ -126,6 +130,13 @@ fn Shares() -> Element {
                 p { class: "text-base-content/70", "Shared files and folders will appear here." }
             }
         }
+    }
+}
+
+#[component]
+fn SharedWithMe() -> Element {
+    rsx! {
+        SharedWithMePage {}
     }
 }
 

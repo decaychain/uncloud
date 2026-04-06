@@ -8,6 +8,7 @@ pub mod use_player;
 pub mod use_playlists;
 pub mod use_search;
 pub mod use_shares;
+pub mod use_folder_shares;
 pub mod use_s3;
 pub mod use_apps;
 pub mod use_shopping;

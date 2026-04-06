@@ -18,6 +18,8 @@ pub enum Event {
     UploadProgress { upload_id: String, progress: f64 },
     ProcessingCompleted { file_id: String, task_type: String, success: bool },
     FileRestored { file_id: String },
+    FolderShared { folder_id: String, share_id: String },
+    FolderShareRevoked { folder_id: String, share_id: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -190,6 +192,38 @@ impl EventService {
             user_id,
             Event::FileRestored {
                 file_id: file_id.to_hex(),
+            },
+        )
+        .await;
+    }
+
+    pub async fn emit_folder_shared(
+        &self,
+        user_id: ObjectId,
+        folder_id: ObjectId,
+        share_id: ObjectId,
+    ) {
+        self.emit(
+            user_id,
+            Event::FolderShared {
+                folder_id: folder_id.to_hex(),
+                share_id: share_id.to_hex(),
+            },
+        )
+        .await;
+    }
+
+    pub async fn emit_folder_share_revoked(
+        &self,
+        user_id: ObjectId,
+        folder_id: ObjectId,
+        share_id: ObjectId,
+    ) {
+        self.emit(
+            user_id,
+            Event::FolderShareRevoked {
+                folder_id: folder_id.to_hex(),
+                share_id: share_id.to_hex(),
             },
         )
         .await;

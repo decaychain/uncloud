@@ -18,3 +18,5 @@ pub mod trash;
 pub mod version_history;
 pub mod shopping;
 pub mod passwords;
+pub mod shared_with_me;
+pub mod folder_share_dialog;
