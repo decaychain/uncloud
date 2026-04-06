@@ -42,8 +42,11 @@ web-sys = { version = "0.3", features = [
     "ScrollBehavior",
     "HtmlTextAreaElement",
     "BlobPropertyBag",
+    "Crypto",
 ] }
 js-sys = "0.3"
 futures = "0.3"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+keepass = { git = "https://github.com/decaychain/keepass-rs", features = ["save_kdbx4"] }
+uuid = { version = "1", features = ["v4", "js"] }
 console_error_panic_hook = "0.1"
