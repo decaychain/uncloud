@@ -12,8 +12,10 @@ pub mod webhook;
 pub mod shopping;
 pub mod invite;
 pub mod totp_challenge;
+pub mod folder_share;
 pub mod user_preferences;
 
+pub use folder_share::*;
 pub use user::*;
 pub use session::*;
 pub use file::*;

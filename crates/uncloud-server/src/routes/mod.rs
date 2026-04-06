@@ -16,6 +16,7 @@ pub mod s3_credentials;
 pub mod s3;
 pub mod apps;
 pub mod shopping;
+pub mod folder_shares;
 pub mod vault_recents;
 
 use axum::{
@@ -149,7 +150,13 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/shopping/categories/{id}/position", put(shopping::update_category_position))
         // Shopping shops
         .route("/shopping/shops", get(shopping::list_shops).post(shopping::create_shop))
-        .route("/shopping/shops/{id}", put(shopping::update_shop).delete(shopping::delete_shop));
+        .route("/shopping/shops/{id}", put(shopping::update_shop).delete(shopping::delete_shop))
+        // Folder shares
+        .route("/folder-shares", post(folder_shares::create_share))
+        .route("/folder-shares/by-me", get(folder_shares::list_shares_by_me))
+        .route("/folder-shares/with-me", get(folder_shares::list_shares_with_me))
+        .route("/folder-shares/folder/{id}", get(folder_shares::list_folder_shares))
+        .route("/folder-shares/{id}", put(folder_shares::update_share).delete(folder_shares::delete_share));
 
     // v1-only routes (API tokens, S3 credentials, apps)
     let v1_only = Router::new()
