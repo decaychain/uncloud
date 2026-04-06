@@ -6,6 +6,7 @@
   },
   "devDependencies": {
     "@playwright/test": "1.58.2",
-    "mongodb": "^6.12.0"
+    "mongodb": "^6.12.0",
+    "typescript": "^6.0.2"
   }
 }

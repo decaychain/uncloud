@@ -267,10 +267,11 @@ impl Config {
     }
 
     pub fn load_or_default() -> Self {
-        match Self::load("config.yaml") {
+        let path = std::env::var("CONFIG_PATH").unwrap_or_else(|_| "config.yaml".to_string());
+        match Self::load(&path) {
             Ok(config) => config,
             Err(e) => {
-                eprintln!("FATAL: Failed to load config.yaml: {e}");
+                eprintln!("FATAL: Failed to load {path}: {e}");
                 std::process::exit(1);
             }
         }
