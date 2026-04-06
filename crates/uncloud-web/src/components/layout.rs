@@ -44,7 +44,20 @@ pub fn Layout() -> Element {
         "flex-1 p-4 md:p-6"
     };
 
+    let route = use_route::<Route>();
+    let page_title = match route {
+        Route::Gallery {} | Route::GalleryAlbum { .. } => "Uncloud - Gallery",
+        Route::Music {} | Route::MusicArtist { .. } | Route::MusicAlbum { .. }
+            | Route::MusicFolder { .. } | Route::MusicPlaylist { .. } => "Uncloud - Music",
+        Route::Shopping {} | Route::ShoppingList { .. } => "Uncloud - Shopping",
+        Route::Passwords {} => "Uncloud - Passwords",
+        Route::Settings {} | Route::SettingsTab { .. } => "Uncloud - Settings",
+        Route::Trash {} => "Uncloud - Trash",
+        _ => "Uncloud - Files",
+    };
+
     rsx! {
+        document::Title { "{page_title}" }
         div { "data-theme": theme, class: "min-h-screen bg-base-100",
             div { class: "drawer lg:drawer-open",
                 input { id: "main-sidebar", r#type: "checkbox", class: "drawer-toggle" }
@@ -108,8 +121,9 @@ fn Navbar() -> Element {
     let search_enabled = use_context::<Signal<bool>>()();
 
     rsx! {
-        div { class: "navbar bg-base-200 shadow-sm sticky top-0 z-30 gap-1",
-            div { class: "navbar-start gap-1",
+        div { class: "navbar bg-base-200 shadow-sm sticky top-0 z-30 gap-2",
+            // Left: hamburger + section title (mobile only)
+            div { class: "flex-shrink-0 flex items-center gap-1",
                 label {
                     r#for: "main-sidebar",
                     class: "btn btn-ghost btn-circle lg:hidden",
@@ -120,16 +134,16 @@ fn Navbar() -> Element {
                 span { class: "text-lg font-semibold lg:hidden", "{section_title}" }
             }
 
-            // Search — wide on desktop, hidden on mobile (icon in navbar-end)
-            div { class: "navbar-center hidden sm:flex flex-1 px-2",
+            // Search — fills all available space between left and right
+            div { class: "hidden sm:flex flex-1 min-w-0 justify-center px-4",
                 if search_enabled {
-                    div { class: "w-full max-w-md mx-auto",
+                    div { class: "w-full max-w-2xl",
                         crate::components::search::SearchBar {}
                     }
                 }
             }
 
-            div { class: "navbar-end gap-0",
+            div { class: "flex-shrink-0 flex items-center gap-0",
                 // Mobile search icon (visible on sm and below)
                 if search_enabled {
                     crate::components::search::SearchIconMobile {}

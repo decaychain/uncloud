@@ -3,7 +3,6 @@ name = "uncloud"
 default_platform = "web"
 
 [web.app]
-title = "Uncloud - Personal Cloud"
 
 [web.watcher]
 reload_html = true

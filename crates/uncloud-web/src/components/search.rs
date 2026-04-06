@@ -95,7 +95,7 @@ pub fn SearchBar() -> Element {
     };
 
     rsx! {
-        div { class: "relative",
+        div { class: "relative w-full",
             onfocusout: on_focusout,
 
             // Search input

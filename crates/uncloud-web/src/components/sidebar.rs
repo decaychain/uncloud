@@ -6,6 +6,8 @@ use crate::hooks::use_apps::AppEntry;
 use crate::router::Route;
 use crate::state::AuthState;
 
+const LOGO: Asset = asset!("/assets/favicon-32.png");
+
 /// Close the drawer on mobile by unchecking the toggle checkbox.
 fn close_drawer() {
     if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
@@ -46,7 +48,7 @@ pub fn Sidebar() -> Element {
         aside { class: "min-h-full w-64 bg-base-200 flex flex-col",
             // Logo
             div { class: "flex items-center gap-2 px-4 py-4 border-b border-base-300",
-                span { class: "text-2xl", "☁" }
+                img { src: LOGO, alt: "Uncloud", class: "w-7 h-7" }
                 span { class: "text-xl font-bold", "Uncloud" }
             }
 
