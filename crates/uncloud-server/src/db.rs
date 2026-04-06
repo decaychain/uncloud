@@ -345,6 +345,31 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         )
         .await?;
 
+    // Folder shares indexes
+    let folder_shares = db.collection::<mongodb::bson::Document>("folder_shares");
+    folder_shares
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "folder_id": 1, "grantee_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    folder_shares
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "grantee_id": 1 })
+                .build(),
+        )
+        .await?;
+    folder_shares
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1 })
+                .build(),
+        )
+        .await?;
+
     tracing::info!("Database indexes created successfully");
     Ok(())
 }
