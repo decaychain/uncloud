@@ -113,6 +113,9 @@ pub struct FolderResponse {
     /// The resolved music inclusion (walking up the tree; root `Inherit` → `Exclude`).
     #[serde(default)]
     pub effective_music_include: MusicInclude,
+    /// Username of the owner when this folder is being viewed via a share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

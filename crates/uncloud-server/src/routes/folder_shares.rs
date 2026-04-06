@@ -137,7 +137,7 @@ pub async fn create_share(
     // Check the caller has permission to share this folder
     let access = sharing::check_folder_access(&state.db, user.id, folder_id).await?;
     if !access.can_admin() {
-        return Err(AppError::Forbidden);
+        return Err(AppError::Forbidden("Access denied".into()));
     }
 
     // Look up grantee by username
@@ -246,7 +246,7 @@ pub async fn list_folder_shares(
     // Caller must be owner or have Admin share permission
     let access = sharing::check_folder_access(&state.db, user.id, folder_id).await?;
     if !access.can_admin() {
-        return Err(AppError::Forbidden);
+        return Err(AppError::Forbidden("Access denied".into()));
     }
 
     let shares_coll = state.db.collection::<FolderShare>("folder_shares");
@@ -283,7 +283,7 @@ pub async fn update_share(
     let is_grantee = share.grantee_id == user.id;
 
     if !is_owner_or_admin && !is_grantee {
-        return Err(AppError::Forbidden);
+        return Err(AppError::Forbidden("Access denied".into()));
     }
 
     let mut update = doc! {};
@@ -291,7 +291,7 @@ pub async fn update_share(
     // Permission can only be changed by owner/admin
     if let Some(permission) = req.permission {
         if !is_owner_or_admin {
-            return Err(AppError::Forbidden);
+            return Err(AppError::Forbidden("Access denied".into()));
         }
         let perm_model: SharePermissionModel = permission.into();
         update.insert(
@@ -304,7 +304,7 @@ pub async fn update_share(
     // Mount settings can only be changed by the grantee
     if let Some(ref mount_parent_id) = req.mount_parent_id {
         if !is_grantee {
-            return Err(AppError::Forbidden);
+            return Err(AppError::Forbidden("Access denied".into()));
         }
         if mount_parent_id.is_empty() {
             update.insert("mount_parent_id", mongodb::bson::Bson::Null);
@@ -317,7 +317,7 @@ pub async fn update_share(
 
     if let Some(ref mount_name) = req.mount_name {
         if !is_grantee {
-            return Err(AppError::Forbidden);
+            return Err(AppError::Forbidden("Access denied".into()));
         }
         if mount_name.is_empty() {
             update.insert("mount_name", mongodb::bson::Bson::Null);
@@ -369,7 +369,7 @@ pub async fn delete_share(
     let is_grantee = share.grantee_id == user.id;
 
     if !is_owner_or_admin && !is_grantee {
-        return Err(AppError::Forbidden);
+        return Err(AppError::Forbidden("Access denied".into()));
     }
 
     shares_coll

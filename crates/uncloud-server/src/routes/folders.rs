@@ -12,9 +12,20 @@ use uncloud_common::{EffectiveStrategyResponse, GalleryInclude, InheritableSetti
 
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
-use crate::models::{File, Folder};
+use crate::models::{File, Folder, FolderShare, User};
 use crate::routes::files::{check_name_conflict, resolve_storage_path};
+use crate::services::sharing::check_folder_access;
 use crate::AppState;
+
+/// Look up a username by user ID.
+async fn get_username(db: &Database, user_id: ObjectId) -> Result<String> {
+    let users_coll = db.collection::<User>("users");
+    let user = users_coll
+        .find_one(doc! { "_id": user_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+    Ok(user.username)
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ListFoldersQuery {
@@ -49,6 +60,8 @@ pub struct FolderResponse {
     pub effective_gallery_include: GalleryInclude,
     pub music_include: MusicInclude,
     pub effective_music_include: MusicInclude,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_by: Option<String>,
 }
 
 /// Walk the parent chain to find the first non-Inherit value for a folder setting.
@@ -92,9 +105,21 @@ async fn folder_to_response(
     user_id: ObjectId,
     folder: &Folder,
 ) -> Result<FolderResponse> {
-    let (effective, _source) = resolve_setting(db, user_id, folder, |f| f.sync_strategy).await?;
-    let (effective_gallery, _) = resolve_setting(db, user_id, folder, |f| f.gallery_include).await?;
-    let (effective_music, _) = resolve_setting(db, user_id, folder, |f| f.music_include).await?;
+    folder_to_response_with_shared(db, user_id, folder, None).await
+}
+
+async fn folder_to_response_with_shared(
+    db: &Database,
+    user_id: ObjectId,
+    folder: &Folder,
+    shared_by: Option<String>,
+) -> Result<FolderResponse> {
+    // For resolve_setting, use the folder's owner_id so parent chain lookups succeed
+    // even when the caller is a share grantee (not the owner).
+    let resolve_id = folder.owner_id;
+    let (effective, _source) = resolve_setting(db, resolve_id, folder, |f| f.sync_strategy).await?;
+    let (effective_gallery, _) = resolve_setting(db, resolve_id, folder, |f| f.gallery_include).await?;
+    let (effective_music, _) = resolve_setting(db, resolve_id, folder, |f| f.music_include).await?;
     Ok(FolderResponse {
         id: folder.id.to_hex(),
         name: folder.name.clone(),
@@ -107,6 +132,7 @@ async fn folder_to_response(
         effective_gallery_include: effective_gallery,
         music_include: folder.music_include,
         effective_music_include: effective_music,
+        shared_by,
     })
 }
 
@@ -123,18 +149,68 @@ pub async fn list_folders(
         _ => None,
     };
 
+    let collection = state.db.collection::<Folder>("folders");
+
+    // Determine the effective owner_id for the query.
+    // If parent_id is set and the user doesn't own it, check share access.
+    let effective_owner_id = if let Some(pid) = parent_id {
+        let parent = collection
+            .find_one(doc! { "_id": pid, "deleted_at": bson::Bson::Null })
+            .await?
+            .ok_or_else(|| AppError::NotFound("Parent folder not found".to_string()))?;
+        if parent.owner_id == user.id {
+            user.id
+        } else {
+            let access = check_folder_access(&state.db, user.id, pid).await?;
+            if !access.can_read() {
+                return Err(AppError::NotFound("Parent folder not found".to_string()));
+            }
+            parent.owner_id
+        }
+    } else {
+        user.id
+    };
+
     let filter = match parent_id {
-        Some(pid) => doc! { "owner_id": user.id, "parent_id": pid, "deleted_at": bson::Bson::Null },
+        Some(pid) => doc! { "owner_id": effective_owner_id, "parent_id": pid, "deleted_at": bson::Bson::Null },
         None => doc! { "owner_id": user.id, "parent_id": null, "deleted_at": bson::Bson::Null },
     };
 
-    let collection = state.db.collection::<Folder>("folders");
     let mut cursor = collection.find(filter).await?;
 
     let mut folders = Vec::new();
     while cursor.advance().await? {
         let folder: Folder = cursor.deserialize_current()?;
-        folders.push(folder_to_response(&state.db, user.id, &folder).await?);
+        folders.push(folder_to_response(&state.db, effective_owner_id, &folder).await?);
+    }
+
+    // Append mounted shares: folder_shares where grantee_id == user.id
+    // and mount_parent_id matches the current listing context.
+    let shares_coll = state.db.collection::<FolderShare>("folder_shares");
+    let mount_filter = match parent_id {
+        Some(pid) => doc! { "grantee_id": user.id, "mount_parent_id": pid },
+        None => doc! { "grantee_id": user.id, "mount_parent_id": null },
+    };
+    let mut share_cursor = shares_coll.find(mount_filter).await?;
+    while share_cursor.advance().await? {
+        let share: FolderShare = share_cursor.deserialize_current()?;
+        // Load the actual shared folder
+        if let Some(shared_folder) = collection
+            .find_one(doc! { "_id": share.folder_id, "deleted_at": bson::Bson::Null })
+            .await?
+        {
+            let owner_username = get_username(&state.db, shared_folder.owner_id).await?;
+            let display_name = share.mount_name.unwrap_or_else(|| shared_folder.name.clone());
+            let mut resp = folder_to_response_with_shared(
+                &state.db,
+                shared_folder.owner_id,
+                &shared_folder,
+                Some(owner_username),
+            )
+            .await?;
+            resp.name = display_name;
+            folders.push(resp);
+        }
     }
 
     Ok(Json(folders))
@@ -159,26 +235,39 @@ pub async fn create_folder(
         _ => None,
     };
 
-    // Verify parent folder exists if specified
-    if let Some(pid) = parent_id {
+    // Determine the effective owner: if creating inside a shared folder,
+    // the new folder belongs to the folder's owner, not the grantee.
+    let effective_owner_id = if let Some(pid) = parent_id {
         let collection = state.db.collection::<Folder>("folders");
-        if collection
-            .find_one(doc! { "_id": pid, "owner_id": user.id, "deleted_at": bson::Bson::Null })
+        let parent = collection
+            .find_one(doc! { "_id": pid, "deleted_at": bson::Bson::Null })
             .await?
-            .is_none()
-        {
-            return Err(AppError::NotFound("Parent folder not found".to_string()));
+            .ok_or_else(|| AppError::NotFound("Parent folder not found".to_string()))?;
+        if parent.owner_id == user.id {
+            user.id
+        } else {
+            let access = check_folder_access(&state.db, user.id, pid).await?;
+            if !access.can_write() {
+                return Err(if access.can_read() {
+                    AppError::Forbidden("Read-only access".into())
+                } else {
+                    AppError::NotFound("Parent folder not found".into())
+                });
+            }
+            parent.owner_id
         }
-    }
+    } else {
+        user.id
+    };
 
-    let folder = Folder::new(user.id, parent_id, req.name);
+    let folder = Folder::new(effective_owner_id, parent_id, req.name);
 
     let collection = state.db.collection::<Folder>("folders");
 
     // Check for duplicate name in same parent
     let exists = collection
         .find_one(doc! {
-            "owner_id": user.id,
+            "owner_id": effective_owner_id,
             "parent_id": parent_id.map(mongodb::bson::Bson::ObjectId).unwrap_or(bson::Bson::Null),
             "name": &folder.name,
             "deleted_at": bson::Bson::Null,
@@ -194,9 +283,9 @@ pub async fn create_folder(
 
     collection.insert_one(&folder).await?;
 
-    state.events.emit_folder_created(user.id, &folder).await;
+    state.events.emit_folder_created(effective_owner_id, &folder).await;
 
-    let resp = folder_to_response(&state.db, user.id, &folder).await?;
+    let resp = folder_to_response(&state.db, effective_owner_id, &folder).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -210,11 +299,24 @@ pub async fn get_folder(
 
     let collection = state.db.collection::<Folder>("folders");
     let folder = collection
-        .find_one(doc! { "_id": folder_id, "owner_id": user.id, "deleted_at": bson::Bson::Null })
+        .find_one(doc! { "_id": folder_id, "deleted_at": bson::Bson::Null })
         .await?
         .ok_or_else(|| AppError::NotFound("Folder not found".to_string()))?;
 
-    Ok(Json(folder_to_response(&state.db, user.id, &folder).await?))
+    let access = check_folder_access(&state.db, user.id, folder_id).await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound("Folder not found".to_string()));
+    }
+
+    let shared_by = if folder.owner_id != user.id {
+        Some(get_username(&state.db, folder.owner_id).await?)
+    } else {
+        None
+    };
+
+    Ok(Json(
+        folder_to_response_with_shared(&state.db, folder.owner_id, &folder, shared_by).await?,
+    ))
 }
 
 pub async fn update_folder(
@@ -228,9 +330,20 @@ pub async fn update_folder(
 
     let collection = state.db.collection::<Folder>("folders");
     let folder = collection
-        .find_one(doc! { "_id": folder_id, "owner_id": user.id, "deleted_at": bson::Bson::Null })
+        .find_one(doc! { "_id": folder_id, "deleted_at": bson::Bson::Null })
         .await?
         .ok_or_else(|| AppError::NotFound("Folder not found".to_string()))?;
+
+    let access = check_folder_access(&state.db, user.id, folder_id).await?;
+    if !access.can_write() {
+        return Err(if access.can_read() {
+            AppError::Forbidden("Read-only access".into())
+        } else {
+            AppError::NotFound("Folder not found".into())
+        });
+    }
+
+    let owner_id = folder.owner_id;
 
     // Effective name/parent after this update
     let new_name: &str = req.name.as_deref().unwrap_or(&folder.name);
@@ -245,7 +358,7 @@ pub async fn update_folder(
                 ));
             }
             if collection
-                .find_one(doc! { "_id": pid, "owner_id": user.id, "deleted_at": bson::Bson::Null })
+                .find_one(doc! { "_id": pid, "owner_id": owner_id, "deleted_at": bson::Bson::Null })
                 .await?
                 .is_none()
             {
@@ -268,7 +381,7 @@ pub async fn update_folder(
     if name_changed || parent_changed {
         if check_name_conflict(
             &state.db,
-            user.id,
+            owner_id,
             new_parent_id,
             new_name,
             None,
@@ -319,14 +432,16 @@ pub async fn update_folder(
         );
     }
 
+    let owner_username = get_username(&state.db, owner_id).await?;
+
     collection
-        .update_one(doc! { "_id": folder_id, "owner_id": user.id }, doc! { "$set": set_doc })
+        .update_one(doc! { "_id": folder_id, "owner_id": owner_id }, doc! { "$set": set_doc })
         .await?;
 
     // After the DB update, recursively update storage_path for all contained files
     // so the on-disk layout stays in sync with the logical folder structure.
     if name_changed || parent_changed {
-        update_folder_file_paths(&state, user.id, folder_id, &user.username).await?;
+        update_folder_file_paths(&state, owner_id, folder_id, &owner_username).await?;
     }
 
     let updated = collection
@@ -334,9 +449,9 @@ pub async fn update_folder(
         .await?
         .ok_or_else(|| AppError::NotFound("Folder not found".to_string()))?;
 
-    state.events.emit_folder_updated(user.id, &updated).await;
+    state.events.emit_folder_updated(owner_id, &updated).await;
 
-    Ok(Json(folder_to_response(&state.db, user.id, &updated).await?))
+    Ok(Json(folder_to_response(&state.db, owner_id, &updated).await?))
 }
 
 /// GET /api/folders/{id}/effective-strategy
@@ -534,16 +649,55 @@ pub async fn get_folder_breadcrumb(
         .map_err(|_| AppError::BadRequest("Invalid folder ID".to_string()))?;
 
     let collection = state.db.collection::<Folder>("folders");
+    let shares_coll = state.db.collection::<FolderShare>("folder_shares");
     let mut chain: Vec<FolderResponse> = Vec::new();
     let mut current_id = Some(folder_id);
 
     while let Some(id) = current_id {
         let folder = collection
-            .find_one(doc! { "_id": id, "owner_id": user.id, "deleted_at": bson::Bson::Null })
+            .find_one(doc! { "_id": id, "deleted_at": bson::Bson::Null })
             .await?
             .ok_or_else(|| AppError::NotFound("Folder not found".to_string()))?;
-        current_id = folder.parent_id;
-        chain.push(folder_to_response(&state.db, user.id, &folder).await?);
+
+        if folder.owner_id == user.id {
+            // User owns this folder — continue up normally
+            current_id = folder.parent_id;
+            chain.push(folder_to_response(&state.db, user.id, &folder).await?);
+        } else {
+            // Not the owner — check if user has share access on this folder
+            // or an ancestor. Walk up until we find a share or run out.
+            let access = check_folder_access(&state.db, user.id, id).await?;
+            if !access.can_read() {
+                return Err(AppError::NotFound("Folder not found".to_string()));
+            }
+            // Include this folder (the shared root or a descendant of it)
+            let owner_username = get_username(&state.db, folder.owner_id).await?;
+
+            // Check if this specific folder has a direct share — if so, it's the
+            // share root and we should stop the breadcrumb here.
+            let has_direct_share = shares_coll
+                .find_one(doc! { "folder_id": id, "grantee_id": user.id })
+                .await?
+                .is_some();
+
+            let resp = folder_to_response_with_shared(
+                &state.db,
+                folder.owner_id,
+                &folder,
+                Some(owner_username),
+            )
+            .await?;
+
+            if has_direct_share {
+                // This is the share root; stop the breadcrumb here
+                chain.push(resp);
+                break;
+            } else {
+                // Folder is a child of the shared root; keep walking up
+                current_id = folder.parent_id;
+                chain.push(resp);
+            }
+        }
     }
 
     chain.reverse();
@@ -679,33 +833,40 @@ pub async fn delete_folder(
         .map_err(|_| AppError::BadRequest("Invalid folder ID".to_string()))?;
 
     let folders_collection = state.db.collection::<Folder>("folders");
-    let files_collection = state.db.collection::<File>("files");
 
     // Verify folder exists
-    if folders_collection
-        .find_one(doc! { "_id": folder_id, "owner_id": user.id, "deleted_at": bson::Bson::Null })
+    let folder = folders_collection
+        .find_one(doc! { "_id": folder_id, "deleted_at": bson::Bson::Null })
         .await?
-        .is_none()
-    {
-        return Err(AppError::NotFound("Folder not found".to_string()));
+        .ok_or_else(|| AppError::NotFound("Folder not found".to_string()))?;
+
+    let access = check_folder_access(&state.db, user.id, folder_id).await?;
+    if !access.can_write() {
+        return Err(if access.can_read() {
+            AppError::Forbidden("Read-only access".into())
+        } else {
+            AppError::NotFound("Folder not found".into())
+        });
     }
+
+    let owner_id = folder.owner_id;
 
     let now = Utc::now();
     let now_bson = bson::DateTime::from_chrono(now);
     let batch_id = uuid::Uuid::new_v4().to_string();
 
     // Recursively soft-delete contents
-    soft_delete_folder_contents(&state, user.id, folder_id, now_bson, &batch_id).await?;
+    soft_delete_folder_contents(&state, owner_id, folder_id, now_bson, &batch_id).await?;
 
     // Soft-delete the folder itself
     folders_collection
         .update_one(
-            doc! { "_id": folder_id, "owner_id": user.id },
+            doc! { "_id": folder_id, "owner_id": owner_id },
             doc! { "$set": { "deleted_at": now_bson, "batch_delete_id": &batch_id } },
         )
         .await?;
 
-    state.events.emit_folder_deleted(user.id, folder_id).await;
+    state.events.emit_folder_deleted(owner_id, folder_id).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
