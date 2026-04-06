@@ -106,20 +106,57 @@ fn find_group_entries(group: &Group, group_uuid: uuid::Uuid) -> Vec<EntryView> {
     Vec::new()
 }
 
-// ── Kdbx file detection and loading ────────────────────────────────────────
+// ── Vault recents API ─────────────────────────────────────────────────────
+
+async fn fetch_recent_vaults() -> Result<Vec<uncloud_common::RecentVaultEntry>, String> {
+    let resp = api::get("/vault-recents")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    resp.json::<Vec<uncloud_common::RecentVaultEntry>>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn add_recent_vault_api(file_id: &str, file_name: &str, folder_path: Option<&str>) -> Result<(), String> {
+    let req = uncloud_common::AddRecentVaultRequest {
+        file_id: file_id.to_string(),
+        file_name: file_name.to_string(),
+        folder_path: folder_path.map(|s| s.to_string()),
+    };
+    let resp = api::post("/vault-recents")
+        .json(&req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    Ok(())
+}
+
+async fn remove_recent_vault_api(file_id: &str) -> Result<(), String> {
+    let resp = api::delete(&format!("/vault-recents/{}", file_id))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    Ok(())
+}
+
+// ── Kdbx file loading ─────────────────────────────────────────────────────
 
 #[derive(Clone)]
 struct KdbxFile {
     id: String,
     name: String,
-}
-
-async fn find_kdbx_in_root() -> Result<Vec<KdbxFile>, String> {
-    let files = use_files::list_files(None).await?;
-    Ok(files.into_iter()
-        .filter(|f| f.name.ends_with(".kdbx"))
-        .map(|f| KdbxFile { id: f.id, name: f.name })
-        .collect())
+    folder_path: Option<String>,
 }
 
 async fn download_file_bytes(file_id: &str) -> Result<Vec<u8>, String> {
@@ -241,44 +278,35 @@ fn generate_password(length: usize, uppercase: bool, lowercase: bool, digits: bo
 pub fn PasswordsPage() -> Element {
     let mut vault: Signal<Option<VaultState>> = use_signal(|| None);
     let mut master_password: Signal<String> = use_signal(String::new);
-    let mut kdbx_files: Signal<Option<Vec<KdbxFile>>> = use_signal(|| None);
-    let mut scanning: Signal<bool> = use_signal(|| true);
-
-    // New vault dialog state
-    let mut show_new_vault: Signal<bool> = use_signal(|| false);
-    let mut new_vault_name: Signal<String> = use_signal(|| "passwords.kdbx".to_string());
-    let mut new_vault_password: Signal<String> = use_signal(String::new);
-    let mut new_vault_confirm: Signal<String> = use_signal(String::new);
-    let mut new_vault_error: Signal<Option<String>> = use_signal(|| None);
-    let mut new_vault_folder: Signal<Option<String>> = use_signal(|| None);
+    let mut recent_vaults: Signal<Vec<uncloud_common::RecentVaultEntry>> = use_signal(Vec::new);
+    let mut loading: Signal<bool> = use_signal(|| true);
 
     // Open from folder browser
     let mut show_file_picker: Signal<bool> = use_signal(|| false);
+    // New vault dialog
+    let mut show_new_vault: Signal<bool> = use_signal(|| false);
 
     // Check if we were navigated here with a specific vault file to open
     let mut vault_open_target = use_context::<Signal<crate::state::VaultOpenTarget>>();
 
-    // Scan for .kdbx files on mount (root only — quick check),
-    // then merge in any vault open target from the file browser.
+    // Fetch LRU list on mount; if navigated here via file browser, show that file too
     use_effect(move || {
         spawn(async move {
-            scanning.set(true);
-            let mut files = match find_kdbx_in_root().await {
-                Ok(f) => f,
-                Err(_) => Vec::new(),
-            };
+            loading.set(true);
+            let recents = fetch_recent_vaults().await.unwrap_or_default();
+            recent_vaults.set(recents);
+            loading.set(false);
 
-            // If navigated here via "Open" on a .kdbx file, add it to the list
+            // If navigated here via "Open" on a .kdbx file, add it to recents
             let target = vault_open_target();
             if let (Some(fid), Some(fname)) = (target.file_id, target.file_name) {
-                if !files.iter().any(|f| f.id == fid) {
-                    files.push(KdbxFile { id: fid, name: fname });
+                let _ = add_recent_vault_api(&fid, &fname, None).await;
+                // Refresh the list
+                if let Ok(recents) = fetch_recent_vaults().await {
+                    recent_vaults.set(recents);
                 }
                 vault_open_target.set(crate::state::VaultOpenTarget::default());
             }
-
-            kdbx_files.set(Some(files));
-            scanning.set(false);
         });
     });
 
@@ -297,27 +325,47 @@ pub fn PasswordsPage() -> Element {
         div { class: "max-w-lg mx-auto mt-8",
             div { class: "card bg-base-100 shadow-xl",
                 div { class: "card-body",
-                    h2 { class: "card-title text-2xl mb-2", "🔑 Password Vault" }
+                    h2 { class: "card-title text-2xl mb-2", "Password Vault" }
 
-                    if scanning() {
+                    if loading() {
                         div { class: "flex items-center justify-center py-8",
                             span { class: "loading loading-spinner loading-lg" }
                         }
-                    } else if let Some(files) = kdbx_files() {
-                        if !files.is_empty() {
+                    } else {
+                        if !recent_vaults().is_empty() {
                             p { class: "text-base-content/70 mb-4",
-                                "Select a vault to unlock:"
+                                "Recent vaults:"
                             }
-                            for file in files.iter() {
+                            for entry in recent_vaults().iter() {
                                 {
-                                    let file_id = file.id.clone();
-                                    let file_name = file.name.clone();
+                                    let file_id = entry.file_id.clone();
+                                    let file_name = entry.file_name.clone();
+                                    let folder_path = entry.folder_path.clone();
+                                    let file_id_rm = file_id.clone();
                                     rsx! {
-                                        VaultUnlockCard {
-                                            file_id,
-                                            file_name,
-                                            vault,
-                                            master_password,
+                                        div { class: "relative",
+                                            VaultUnlockCard {
+                                                file_id,
+                                                file_name: file_name.clone(),
+                                                folder_path,
+                                                vault,
+                                                master_password,
+                                                recent_vaults,
+                                            }
+                                            button {
+                                                class: "btn btn-ghost btn-xs absolute top-2 right-2 text-base-content/40 hover:text-error",
+                                                title: "Remove from recent list",
+                                                onclick: move |_| {
+                                                    let fid = file_id_rm.clone();
+                                                    spawn(async move {
+                                                        let _ = remove_recent_vault_api(&fid).await;
+                                                        if let Ok(recents) = fetch_recent_vaults().await {
+                                                            recent_vaults.set(recents);
+                                                        }
+                                                    });
+                                                },
+                                                "✕"
+                                            }
                                         }
                                     }
                                 }
@@ -325,7 +373,7 @@ pub fn PasswordsPage() -> Element {
                             div { class: "divider", "OR" }
                         } else {
                             p { class: "text-base-content/70 mb-4",
-                                "No password vaults found in root. Open an existing vault or create a new one."
+                                "No recent vaults. Open a .kdbx file from the file browser or create a new vault."
                             }
                         }
 
@@ -337,14 +385,7 @@ pub fn PasswordsPage() -> Element {
                             }
                             button {
                                 class: "btn btn-primary w-full",
-                                onclick: move |_| {
-                                    new_vault_name.set("passwords.kdbx".to_string());
-                                    new_vault_password.set(String::new());
-                                    new_vault_confirm.set(String::new());
-                                    new_vault_error.set(None);
-                                    new_vault_folder.set(None);
-                                    show_new_vault.set(true);
-                                },
+                                onclick: move |_| show_new_vault.set(true),
                                 "Create New Vault"
                             }
                         }
@@ -357,12 +398,15 @@ pub fn PasswordsPage() -> Element {
                 VaultFilePicker {
                     on_select: move |file: KdbxFile| {
                         show_file_picker.set(false);
-                        // Add to the list so the unlock card appears
-                        let mut files = kdbx_files().unwrap_or_default();
-                        if !files.iter().any(|f| f.id == file.id) {
-                            files.push(file);
-                            kdbx_files.set(Some(files));
-                        }
+                        let fid = file.id.clone();
+                        let fname = file.name.clone();
+                        let fpath = file.folder_path.clone();
+                        spawn(async move {
+                            let _ = add_recent_vault_api(&fid, &fname, fpath.as_deref()).await;
+                            if let Ok(recents) = fetch_recent_vaults().await {
+                                recent_vaults.set(recents);
+                            }
+                        });
                     },
                     on_close: move |_| show_file_picker.set(false),
                 }
@@ -483,6 +527,8 @@ fn VaultFilePicker(
                                 {
                                     let fid = file.id.clone();
                                     let fname = file.name.clone();
+                                    let fpath = breadcrumb().iter().map(|f| f.name.clone()).collect::<Vec<_>>().join("/");
+                                    let folder_path = if fpath.is_empty() { None } else { Some(fpath) };
                                     rsx! {
                                         li {
                                             a {
@@ -490,6 +536,7 @@ fn VaultFilePicker(
                                                     on_select.call(KdbxFile {
                                                         id: fid.clone(),
                                                         name: fname.clone(),
+                                                        folder_path: folder_path.clone(),
                                                     });
                                                 },
                                                 span { "🔒" }
@@ -768,8 +815,10 @@ fn NewVaultModal(
 fn VaultUnlockCard(
     file_id: String,
     file_name: String,
+    folder_path: Option<String>,
     vault: Signal<Option<VaultState>>,
     master_password: Signal<String>,
+    recent_vaults: Signal<Vec<uncloud_common::RecentVaultEntry>>,
 ) -> Element {
     let mut password = use_signal(String::new);
     let mut error: Signal<Option<String>> = use_signal(|| None);
@@ -784,6 +833,7 @@ fn VaultUnlockCard(
         mut unlocking: Signal<bool>,
         mut master_password: Signal<String>,
         mut vault: Signal<Option<VaultState>>,
+        mut recent_vaults: Signal<Vec<uncloud_common::RecentVaultEntry>>,
     ) {
         let pw = password();
         if pw.is_empty() {
@@ -799,6 +849,16 @@ fn VaultUnlockCard(
                     let key = DatabaseKey::new().with_password(&pw);
                     match Database::parse(&bytes, key) {
                         Ok(db) => {
+                            // Record in LRU (fire and forget)
+                            let fid = file_id.clone();
+                            let fname = file_name.clone();
+                            spawn(async move {
+                                let _ = add_recent_vault_api(&fid, &fname, None).await;
+                                if let Ok(recents) = fetch_recent_vaults().await {
+                                    recent_vaults.set(recents);
+                                }
+                            });
+
                             master_password.set(pw);
                             vault.set(Some(VaultState {
                                 db,
@@ -808,7 +868,7 @@ fn VaultUnlockCard(
                             }));
                         }
                         Err(e) => {
-                            error.set(Some(format!("Failed to open vault ({} bytes downloaded): {:?}", bytes.len(), e)));
+                            error.set(Some(format!("Failed to open vault: {:?}", e)));
                             unlocking.set(false);
                         }
                     }
@@ -823,13 +883,20 @@ fn VaultUnlockCard(
 
     let (fid_k, fname_k) = (file_id.clone(), file_name.clone());
     let (fid_b, fname_b) = (file_id.clone(), file_name.clone());
+    let file_name_display = file_name.clone();
+    let folder_display = folder_path.clone();
 
     rsx! {
         div { class: "card bg-base-200 mb-3",
             div { class: "card-body p-4",
                 div { class: "flex items-center gap-2 mb-2",
                     span { class: "text-xl", "🔒" }
-                    span { class: "font-medium", "{file_name}" }
+                    div { class: "flex flex-col",
+                        span { class: "font-medium", "{file_name_display}" }
+                        if let Some(ref path) = folder_display {
+                            span { class: "text-xs text-base-content/50", "{path}" }
+                        }
+                    }
                 }
                 if let Some(err) = error() {
                     div { class: "alert alert-error alert-sm text-sm mb-2", "{err}" }
@@ -844,7 +911,7 @@ fn VaultUnlockCard(
                         oninput: move |e| password.set(e.value()),
                         onkeypress: move |e| {
                             if e.key() == Key::Enter {
-                                do_unlock(fid_k.clone(), fname_k.clone(), password, error, unlocking, master_password, vault);
+                                do_unlock(fid_k.clone(), fname_k.clone(), password, error, unlocking, master_password, vault, recent_vaults);
                             }
                         },
                     }
@@ -852,7 +919,7 @@ fn VaultUnlockCard(
                         class: "btn btn-primary btn-sm",
                         disabled: unlocking() || password().is_empty(),
                         onclick: move |_| {
-                            do_unlock(fid_b.clone(), fname_b.clone(), password, error, unlocking, master_password, vault);
+                            do_unlock(fid_b.clone(), fname_b.clone(), password, error, unlocking, master_password, vault, recent_vaults);
                         },
                         if unlocking() {
                             span { class: "loading loading-spinner loading-xs" }

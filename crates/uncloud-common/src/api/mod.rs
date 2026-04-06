@@ -8,6 +8,7 @@ pub mod events;
 pub mod search;
 pub mod versions;
 pub mod shopping;
+pub mod vault_recents;
 
 pub use auth::*;
 pub use files::*;
@@ -19,3 +20,4 @@ pub use events::*;
 pub use search::*;
 pub use versions::*;
 pub use shopping::*;
+pub use vault_recents::*;
