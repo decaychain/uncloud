@@ -6,21 +6,32 @@ use std::sync::Arc;
 use axum_test::{TestServer, TestServerConfig};
 use serde_json::Value;
 use tempfile::TempDir;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::mongo::Mongo;
+use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
 use uncloud_client::Client;
 
 use uncloud_server::{
     AppState,
-    config::{AuthConfig, Config, DatabaseConfig, ProcessingConfig, ServerConfig, StorageConfig, UploadConfig},
+    config::{
+        AppsConfig, AuthConfig, Config, DatabaseConfig, FeaturesConfig, ProcessingConfig,
+        SearchConfig, ServerConfig, StorageConfig, UploadConfig, VersioningConfig,
+    },
     db,
     processing::ProcessingService,
     routes,
-    services::{AuthService, EventService, StorageService},
+    services::{AuthService, EventService, SearchService, StorageService},
 };
 
 // Shared MongoDB container — started once per test binary, port stored here.
 static MONGO_PORT: OnceLock<u16> = OnceLock::new();
+
+// Limits concurrent databases to avoid exhausting file descriptors in the container.
+static DB_SEMAPHORE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+
+fn db_semaphore() -> Arc<tokio::sync::Semaphore> {
+    DB_SEMAPHORE
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
+        .clone()
+}
 
 fn mongo_port() -> u16 {
     *MONGO_PORT.get_or_init(|| {
@@ -29,7 +40,17 @@ fn mongo_port() -> u16 {
         std::thread::spawn(|| {
             let rt = tokio::runtime::Runtime::new().expect("runtime for container start");
             rt.block_on(async {
-                let container = Mongo::default()
+                use testcontainers::core::WaitFor;
+                let container = GenericImage::new("mongo", "8")
+                    .with_exposed_port(27017.into())
+                    .with_wait_for(WaitFor::message_on_stdout("Waiting for connections"))
+                    .with_cmd(vec![
+                        "mongod",
+                        "--wiredTigerCacheSizeGB",
+                        "0.25",
+                        "--bind_ip_all",
+                    ])
+                    .with_ulimit("nofile", 65536, Some(65536))
                     .start()
                     .await
                     .expect("MongoDB container failed to start");
@@ -52,15 +73,30 @@ pub struct TestApp {
     pub db: mongodb::Database,
     /// Kept alive so the temp directory is not deleted before the test ends.
     _storage: TempDir,
+    /// Held until cleanup — limits concurrent databases in the container.
+    _db_permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl TestApp {
-    pub async fn new() -> Self {
+    /// Create a TestApp with a custom registration mode.
+    pub async fn with_registration(mode: uncloud_server::config::RegistrationMode) -> Self {
+        Self::with_config(|config| {
+            config.auth.registration = mode;
+        })
+        .await
+    }
+
+    /// Create a TestApp with custom config modifications.
+    async fn with_config(customize: impl FnOnce(&mut Config)) -> Self {
+        let permit = db_semaphore()
+            .acquire_owned()
+            .await
+            .expect("db semaphore permit");
         let port = mongo_port();
         let db_name = format!("uncloud_test_{}", uuid::Uuid::new_v4().simple());
         let storage_dir = TempDir::new().expect("temp dir");
 
-        let config = Config {
+        let mut config = Config {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 0,
@@ -84,7 +120,13 @@ impl TestApp {
                 temp_cleanup_hours: 24,
             },
             processing: ProcessingConfig::default(),
+            search: SearchConfig::default(),
+            versioning: VersioningConfig::default(),
+            apps: AppsConfig::default(),
+            features: FeaturesConfig::default(),
         };
+
+        customize(&mut config);
 
         let database = db::connect(&config.database)
             .await
@@ -98,7 +140,9 @@ impl TestApp {
             .await
             .expect("storage service");
         let events = EventService::new();
-        // No processors registered — avoids background tasks in tests.
+        let search = SearchService::new(&config.search)
+            .await
+            .expect("search service");
         let processing = ProcessingService::new(1, 3);
 
         let db_handle = database.clone();
@@ -110,6 +154,8 @@ impl TestApp {
             storage,
             events,
             processing,
+            search,
+            http_client: reqwest::Client::new(),
         });
 
         let router = routes::create_router(state);
@@ -126,7 +172,18 @@ impl TestApp {
             server,
             db: db_handle,
             _storage: storage_dir,
+            _db_permit: permit,
         }
+    }
+
+    pub async fn new() -> Self {
+        Self::with_config(|_| {}).await
+    }
+
+    /// Drop the test database to free MongoDB memory.
+    /// Call this at the end of each test.
+    pub async fn cleanup(&self) {
+        self.db.drop().await.ok();
     }
 
     /// Register a new user and return the parsed response body.
@@ -185,6 +242,47 @@ impl TestApp {
             .await
             .json()
     }
+
+    /// Create an admin user directly in the DB, then log in via the API.
+    /// Works regardless of registration mode.
+    pub async fn create_admin_and_login(&self, username: &str, password: &str) -> Value {
+        use uncloud_server::services::AuthService;
+
+        // Hash password using the same argon2 logic as the server
+        let auth_config = uncloud_server::config::AuthConfig {
+            session_duration_hours: 1,
+            registration: uncloud_server::config::RegistrationMode::Open,
+            demo_quota_bytes: 0,
+            demo_ttl_hours: 24,
+        };
+        let temp_auth = AuthService::new(&self.db, auth_config);
+        let hash = temp_auth.hash_password(password).expect("hash password");
+
+        // Insert admin user directly
+        let collection = self.db.collection::<mongodb::bson::Document>("users");
+        let now = mongodb::bson::DateTime::now();
+        collection
+            .insert_one(mongodb::bson::doc! {
+                "username": username,
+                "email": mongodb::bson::Bson::Null,
+                "password_hash": hash,
+                "role": "admin",
+                "status": "active",
+                "quota_bytes": mongodb::bson::Bson::Null,
+                "used_bytes": 0_i64,
+                "totp_enabled": false,
+                "totp_secret": mongodb::bson::Bson::Null,
+                "recovery_codes": [],
+                "demo": false,
+                "disabled_features": [],
+                "created_at": now,
+                "updated_at": now,
+            })
+            .await
+            .expect("insert admin user");
+
+        self.login(username, password).await
+    }
 }
 
 // ── BoundTestApp ──────────────────────────────────────────────────────────────
@@ -205,53 +303,62 @@ impl BoundTestApp {
         let db_name = format!("uncloud_test_{}", uuid::Uuid::new_v4().simple());
         let storage_dir = TempDir::new().expect("temp dir");
 
-        let config = uncloud_server::config::Config {
-            server: uncloud_server::config::ServerConfig {
+        let config = Config {
+            server: ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 0,
             },
-            database: uncloud_server::config::DatabaseConfig {
+            database: DatabaseConfig {
                 uri: format!("mongodb://127.0.0.1:{}", port),
                 name: db_name,
             },
-            storage: uncloud_server::config::StorageConfig {
+            storage: StorageConfig {
                 default_path: storage_dir.path().to_path_buf(),
             },
-            auth: uncloud_server::config::AuthConfig {
+            auth: AuthConfig {
                 session_duration_hours: 1,
                 registration: uncloud_server::config::RegistrationMode::Open,
                 demo_quota_bytes: 50 * 1024 * 1024,
                 demo_ttl_hours: 24,
             },
-            uploads: uncloud_server::config::UploadConfig {
+            uploads: UploadConfig {
                 max_chunk_size: 10 * 1024 * 1024,
                 max_file_size: 0,
                 temp_cleanup_hours: 24,
             },
-            processing: uncloud_server::config::ProcessingConfig::default(),
+            processing: ProcessingConfig::default(),
+            search: SearchConfig::default(),
+            versioning: VersioningConfig::default(),
+            apps: AppsConfig::default(),
+            features: FeaturesConfig::default(),
         };
 
-        let database = uncloud_server::db::connect(&config.database)
+        let database = db::connect(&config.database)
             .await
             .expect("connect to test MongoDB");
-        uncloud_server::db::setup_indexes(&database)
+        db::setup_indexes(&database)
             .await
             .expect("setup indexes");
 
-        let auth = uncloud_server::services::AuthService::new(&database, config.auth.clone());
-        let storage = uncloud_server::services::StorageService::new(&database, &config.storage)
+        let auth = AuthService::new(&database, config.auth.clone());
+        let storage = StorageService::new(&database, &config.storage)
             .await
             .expect("storage service");
-        let events = uncloud_server::services::EventService::new();
-        let processing = uncloud_server::processing::ProcessingService::new(1, 3);
+        let events = EventService::new();
+        let search = SearchService::new(&config.search)
+            .await
+            .expect("search service");
+        let processing = ProcessingService::new(1, 3);
 
-        let state = Arc::new(uncloud_server::AppState {
+        let state = Arc::new(AppState {
             config,
             db: database,
             auth,
             storage,
             events,
             processing,
+            search,
+            http_client: reqwest::Client::new(),
         });
 
         let router = uncloud_server::routes::create_router(state);

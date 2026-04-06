@@ -222,12 +222,17 @@ async fn session_list_includes_current() {
 #[tokio::test]
 async fn revoke_session_invalidates_access() {
     let app = TestApp::new().await;
-    app.register_and_login("alice").await;
+    // Use register only (not register_and_login) to ensure a single session.
+    // register_and_login creates two sessions (register auto-login + explicit login),
+    // and revoking sessions[0] might not match the cookie jar's active session.
+    app.register("alice", "alice@example.com", "password123!").await;
 
-    // Get the session ID
+    // Get the session ID — should be exactly one
     let sessions_res = app.server.get("/api/auth/sessions").await;
     let sessions: serde_json::Value = sessions_res.json();
-    let session_id = sessions[0]["id"].as_str().expect("session id");
+    let sessions_arr = sessions.as_array().expect("sessions array");
+    assert_eq!(sessions_arr.len(), 1, "expected exactly one session");
+    let session_id = sessions_arr[0]["id"].as_str().expect("session id");
 
     // Revoke it
     app.server

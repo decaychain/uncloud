@@ -183,6 +183,7 @@ async fn do_not_sync_folder_skips_download() {
                 parent_id: None,
                 sync_strategy: Some(SyncStrategy::DoNotSync),
                 gallery_include: None,
+                music_include: None,
             },
         )
         .await
@@ -227,6 +228,7 @@ async fn server_to_client_folder_blocks_local_upload() {
                 parent_id: None,
                 sync_strategy: Some(SyncStrategy::ServerToClient),
                 gallery_include: None,
+                music_include: None,
             },
         )
         .await
