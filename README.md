@@ -10,6 +10,7 @@ Self-hosted personal cloud storage. Manage your files, photos, and music from an
 - **Photo gallery** — timeline view and album organization
 - **Music library** — artist/album browsing, playlists, in-browser playback
 - **Full-text search** — powered by Meilisearch
+- **Password manager** — KeePass-compatible (.kdbx) vault with client-side encryption, entry/group management, and password generator
 - **Sharing** — public links with optional password, expiry, and download limits
 - **Desktop sync** — two-way file sync with per-folder strategy
 - **Multi-platform** — web, desktop (Linux/Windows), and Android
