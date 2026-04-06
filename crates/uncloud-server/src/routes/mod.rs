@@ -16,6 +16,7 @@ pub mod s3_credentials;
 pub mod s3;
 pub mod apps;
 pub mod shopping;
+pub mod vault_recents;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -139,6 +140,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/shopping/lists/{id}/remove-purchased", post(shopping::remove_purchased))
         .route("/shopping/lists/{id}/share", post(shopping::share_list))
         .route("/shopping/lists/{id}/share/{user_id}", delete(shopping::unshare_list))
+        // Vault recents
+        .route("/vault-recents", get(vault_recents::list_recent_vaults).post(vault_recents::add_recent_vault))
+        .route("/vault-recents/{file_id}", delete(vault_recents::remove_recent_vault))
         // Shopping categories
         .route("/shopping/categories", get(shopping::list_categories).post(shopping::create_category))
         .route("/shopping/categories/{id}", delete(shopping::delete_category))

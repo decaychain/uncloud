@@ -7,6 +7,7 @@ pub enum Section {
     Gallery,
     Music,
     Shopping,
+    Passwords,
     Settings,
 }
 
@@ -64,6 +65,14 @@ pub struct PlayerState {
 #[derive(Clone, Default, PartialEq)]
 pub struct HighlightTarget {
     pub file_id: Option<String>,
+}
+
+/// Set before navigating to /passwords to auto-show an unlock card for a specific vault file.
+/// The passwords page reads and clears this on mount.
+#[derive(Clone, Default, PartialEq)]
+pub struct VaultOpenTarget {
+    pub file_id: Option<String>,
+    pub file_name: Option<String>,
 }
 
 impl PlayerState {

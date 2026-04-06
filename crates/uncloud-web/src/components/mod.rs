@@ -17,3 +17,4 @@ pub mod setup;
 pub mod trash;
 pub mod version_history;
 pub mod shopping;
+pub mod passwords;

@@ -5,6 +5,7 @@ use crate::components::{
     layout::Layout,
     gallery::{Gallery, GalleryAlbum},
     music::{Music, MusicArtistView, MusicAlbumView as MusicAlbumViewComp, MusicFolderView, MusicPlaylistView},
+    passwords::PasswordsPage,
     settings::SettingsPage,
     setup::Setup,
     shopping,
@@ -60,6 +61,9 @@ pub enum Route {
 
         #[route("/trash")]
         Trash {},
+
+        #[route("/passwords")]
+        Passwords {},
 
         #[route("/shopping")]
         Shopping {},
@@ -173,6 +177,13 @@ fn MusicPlaylist(id: String) -> Element {
         div { class: "p-4",
             MusicPlaylistView { key: "{id}", playlist_id: id }
         }
+    }
+}
+
+#[component]
+fn Passwords() -> Element {
+    rsx! {
+        PasswordsPage {}
     }
 }
 
