@@ -721,9 +721,14 @@ pub async fn copy_folder(
 
     let folders_coll = state.db.collection::<Folder>("folders");
     let source = folders_coll
-        .find_one(doc! { "_id": source_id, "owner_id": user.id, "deleted_at": bson::Bson::Null })
+        .find_one(doc! { "_id": source_id, "deleted_at": bson::Bson::Null })
         .await?
         .ok_or_else(|| AppError::NotFound("Folder not found".to_string()))?;
+
+    let access = check_folder_access(&state.db, user.id, source.id).await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound("Folder not found".to_string()));
+    }
 
     let dest_parent_id = match req.parent_id.as_deref() {
         Some("") => None,

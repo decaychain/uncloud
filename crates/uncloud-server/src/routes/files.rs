@@ -598,9 +598,18 @@ pub async fn update_file_content(
 
     let collection = state.db.collection::<File>("files");
     let file = collection
-        .find_one(doc! { "_id": file_id, "owner_id": user.id, "deleted_at": mongodb::bson::Bson::Null })
+        .find_one(doc! { "_id": file_id, "deleted_at": mongodb::bson::Bson::Null })
         .await?
         .ok_or_else(|| AppError::NotFound("File not found".to_string()))?;
+
+    let access = check_file_access(&state.db, user.id, file.id).await?;
+    if !access.can_write() {
+        return Err(if access.can_read() {
+            AppError::Forbidden("Read-only access".into())
+        } else {
+            AppError::NotFound("File not found".to_string())
+        });
+    }
 
     // Read new content from multipart
     let mut new_data = Vec::new();
@@ -1131,9 +1140,14 @@ pub async fn copy_file(
 
     let collection = state.db.collection::<File>("files");
     let file = collection
-        .find_one(doc! { "_id": file_id, "owner_id": user.id, "deleted_at": mongodb::bson::Bson::Null })
+        .find_one(doc! { "_id": file_id, "deleted_at": mongodb::bson::Bson::Null })
         .await?
         .ok_or_else(|| AppError::NotFound("File not found".to_string()))?;
+
+    let access = check_file_access(&state.db, user.id, file.id).await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound("File not found".to_string()));
+    }
 
     if !user.has_quota_space(file.size_bytes) {
         return Err(AppError::Forbidden("Access denied".into()));
