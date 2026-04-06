@@ -73,6 +73,7 @@ impl Selection {
 enum ViewerTarget {
     Image { files: Vec<FileResponse>, index: usize },
     Text(FileResponse),
+    TextEdit(FileResponse),
 }
 
 // ── FileBrowser ───────────────────────────────────────────────────────────────
@@ -84,6 +85,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
     let mut loading = use_signal(|| true);
     let mut error = use_signal(|| None::<String>);
     let mut show_new_folder = use_signal(|| false);
+    let mut show_new_file = use_signal(|| false);
     let mut refresh = use_signal(|| 0u32);
     let mut view_mode = use_context::<Signal<ViewMode>>();
 
@@ -322,6 +324,12 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                 span { "📁" }
                 span { class: "hidden sm:inline", "New Folder" }
             }
+            button {
+                class: "btn btn-sm btn-ghost gap-1 shrink-0",
+                onclick: move |_| show_new_file.set(true),
+                span { "📝" }
+                span { class: "hidden sm:inline", "New File" }
+            }
         }
 
         UploadZone {
@@ -360,6 +368,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                 on_move_request: move |_| move_target.set(Some((vec![(id_m.clone(), true, name_m.clone())], false))),
                                 on_copy_request: move |_| move_target.set(Some((vec![(id_c.clone(), true, name_c.clone())], true))),
                                 on_open_request: move |_| {},
+                                on_edit_request: move |_| {},
                                 on_version_history_request: move |_| {},
                                 on_folder_settings_request: move |_| {
                                     folder_settings_target.set(Some((id_fs.clone(), name_fs.clone(), gi, mi)));
@@ -378,6 +387,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                             file.id.clone(), file.name.clone(),
                         );
                         let file_for_open = file.clone();
+                        let file_for_edit = file.clone();
                         rsx! {
                             FileItem {
                                 key: "{file.id}",
@@ -417,6 +427,12 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                         } else if mime.starts_with("text/") || mime == "application/json" || mime == "application/xml" {
                                             viewer_target.set(Some(ViewerTarget::Text(f)));
                                         }
+                                    }
+                                },
+                                on_edit_request: {
+                                    let f = file_for_edit.clone();
+                                    move |_| {
+                                        viewer_target.set(Some(ViewerTarget::TextEdit(f.clone())));
                                     }
                                 },
                                 on_version_history_request: move |_| version_history_target.set(Some((id_v.clone(), name_v.clone()))),
@@ -468,6 +484,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                         on_move_request: move |_| move_target.set(Some((vec![(id_m.clone(), true, name_m.clone())], false))),
                                         on_copy_request: move |_| move_target.set(Some((vec![(id_c.clone(), true, name_c.clone())], true))),
                                         on_open_request: move |_| {},
+                                        on_edit_request: move |_| {},
                                         on_version_history_request: move |_| {},
                                         on_folder_settings_request: move |_| {
                                             folder_settings_target.set(Some((id_fs.clone(), name_fs.clone(), gi, mi)));
@@ -486,6 +503,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                     file.id.clone(), file.name.clone(),
                                 );
                                 let file_for_open = file.clone();
+                                let file_for_edit = file.clone();
                                 rsx! {
                                     FileItem {
                                         key: "{file.id}",
@@ -527,6 +545,12 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                                 }
                                             }
                                         },
+                                        on_edit_request: {
+                                            let f = file_for_edit.clone();
+                                            move |_| {
+                                                viewer_target.set(Some(ViewerTarget::TextEdit(f.clone())));
+                                            }
+                                        },
                                         on_version_history_request: move |_| version_history_target.set(Some((id_v.clone(), name_v.clone()))),
                                         on_folder_settings_request: move |_| {},
                                     }
@@ -545,6 +569,18 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                 on_created: move |_| {
                     show_new_folder.set(false);
                     refresh.set(refresh() + 1);
+                },
+            }
+        }
+
+        if show_new_file() {
+            NewFileModal {
+                parent_id: parent_id.clone(),
+                on_cancel: move |_| show_new_file.set(false),
+                on_created: move |file: FileResponse| {
+                    show_new_file.set(false);
+                    refresh.set(refresh() + 1);
+                    viewer_target.set(Some(ViewerTarget::TextEdit(file)));
                 },
             }
         }
@@ -675,6 +711,14 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                 ViewerTarget::Text(file) => rsx! {
                     crate::components::file_viewer::TextViewer {
                         file,
+                        start_editing: false,
+                        on_close: move |_| viewer_target.set(None),
+                    }
+                },
+                ViewerTarget::TextEdit(file) => rsx! {
+                    crate::components::file_viewer::TextViewer {
+                        file,
+                        start_editing: true,
                         on_close: move |_| viewer_target.set(None),
                     }
                 },
@@ -820,6 +864,114 @@ fn NewFolderModal(
                         input {
                             class: "input input-bordered w-full",
                             placeholder: "Folder name",
+                            autofocus: true,
+                            value: "{name}",
+                            oninput: move |e| name.set(e.value()),
+                        }
+                    }
+
+                    if let Some(err) = error() {
+                        div { class: "alert alert-error mt-3 py-2 text-sm", "{err}" }
+                    }
+
+                    div { class: "modal-action",
+                        button {
+                            class: "btn btn-ghost",
+                            r#type: "button",
+                            onclick: move |_| on_cancel.call(()),
+                            "Cancel"
+                        }
+                        button {
+                            class: "btn btn-primary",
+                            r#type: "submit",
+                            disabled: creating(),
+                            if creating() {
+                                span { class: "loading loading-spinner loading-sm" }
+                            }
+                            "Create"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── New File Modal ───────────────────────────────────────────────────────────
+
+#[component]
+fn NewFileModal(
+    parent_id: Option<String>,
+    on_cancel: EventHandler<()>,
+    on_created: EventHandler<FileResponse>,
+) -> Element {
+    let mut name = use_signal(|| "untitled.md".to_string());
+    let mut creating = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+
+    let on_submit = move |e: Event<FormData>| {
+        e.prevent_default();
+        let n = name().trim().to_string();
+        if n.is_empty() {
+            return;
+        }
+        let parent = parent_id.clone();
+        creating.set(true);
+        error.set(None);
+        spawn(async move {
+            let result = async {
+                // Create a Blob with empty content
+                let blob_parts = js_sys::Array::new();
+                blob_parts.push(&wasm_bindgen::JsValue::from_str(""));
+                let opts = web_sys::BlobPropertyBag::new();
+                opts.set_type("text/markdown");
+                let blob = web_sys::Blob::new_with_str_sequence_and_options(&blob_parts, &opts)
+                    .map_err(|_| "Failed to create Blob".to_string())?;
+
+                let form = web_sys::FormData::new()
+                    .map_err(|_| "Failed to create FormData".to_string())?;
+                form.append_with_blob_and_filename("file", &blob, &n)
+                    .map_err(|_| "Failed to append file".to_string())?;
+                if let Some(pid) = &parent {
+                    form.append_with_str("parent_id", pid)
+                        .map_err(|_| "Failed to append parent_id".to_string())?;
+                }
+
+                let resp = crate::hooks::api::post("/uploads/simple")
+                    .body(wasm_bindgen::JsValue::from(form))
+                    .map_err(|e| format!("{:?}", e))?
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                if resp.ok() {
+                    resp.json::<FileResponse>().await.map_err(|e| e.to_string())
+                } else {
+                    Err(format!("Failed to create file (HTTP {})", resp.status()))
+                }
+            }
+            .await;
+
+            match result {
+                Ok(file) => on_created.call(file),
+                Err(e) => {
+                    error.set(Some(e));
+                    creating.set(false);
+                }
+            }
+        });
+    };
+
+    rsx! {
+        div { class: "modal modal-open",
+            div { class: "modal-box max-w-sm",
+                h3 { class: "font-bold text-lg mb-4", "New File" }
+
+                form { onsubmit: on_submit,
+                    div { class: "form-control",
+                        input {
+                            class: "input input-bordered w-full",
+                            placeholder: "File name",
                             autofocus: true,
                             value: "{name}",
                             oninput: move |e| name.set(e.value()),

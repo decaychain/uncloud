@@ -40,6 +40,7 @@ pub fn FileItem(
     on_move_request: EventHandler<()>,
     on_copy_request: EventHandler<()>,
     on_open_request: EventHandler<()>,
+    on_edit_request: EventHandler<()>,
     on_version_history_request: EventHandler<()>,
     on_folder_settings_request: EventHandler<()>,
 ) -> Element {
@@ -185,8 +186,10 @@ pub fn FileItem(
                         id: id.clone(),
                         name: name.clone(),
                         is_folder,
+                        mime_type: mime_type.clone(),
                         on_close: move |_| menu_pos.set(None),
                         on_open_request: move |_| on_open_request.call(()),
+                        on_edit_request: move |_| on_edit_request.call(()),
                         on_delete_request,
                         on_rename: move |_| on_rename_request.call(()),
                         on_move: move |_| on_move_request.call(()),
@@ -255,8 +258,10 @@ pub fn FileItem(
                     id: id.clone(),
                     name: name.clone(),
                     is_folder,
+                    mime_type: mime_type.clone(),
                     on_close: move |_| menu_pos.set(None),
                     on_open_request: move |_| on_open_request.call(()),
+                    on_edit_request: move |_| on_edit_request.call(()),
                     on_delete_request,
                     on_rename: move |_| on_rename_request.call(()),
                     on_move: move |_| on_move_request.call(()),
@@ -278,8 +283,10 @@ fn FileContextMenu(
     id: String,
     name: String,
     is_folder: bool,
+    mime_type: Option<String>,
     on_close: EventHandler<()>,
     on_open_request: EventHandler<()>,
+    on_edit_request: EventHandler<()>,
     on_delete_request: EventHandler<()>,
     on_rename: EventHandler<()>,
     on_move: EventHandler<()>,
@@ -287,6 +294,9 @@ fn FileContextMenu(
     on_version_history: EventHandler<()>,
     on_folder_settings: EventHandler<()>,
 ) -> Element {
+    let is_editable_text = !is_folder && mime_type.as_deref()
+        .map(|m| m.starts_with("text/") || m == "application/json" || m == "application/xml")
+        .unwrap_or(false);
     let on_download = {
         let id = id.clone();
         move |_| {
@@ -313,6 +323,14 @@ fn FileContextMenu(
                     a { onclick: move |_| { on_open_request.call(()); on_close.call(()); },
                         span { "\u{1F441}" }
                         span { "Open" }
+                    }
+                }
+                if is_editable_text {
+                    li {
+                        a { onclick: move |_| { on_edit_request.call(()); on_close.call(()); },
+                            span { "✏️" }
+                            span { "Edit" }
+                        }
                     }
                 }
                 li {
