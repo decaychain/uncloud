@@ -27,6 +27,8 @@ pub fn Sidebar() -> Element {
         "music"
     } else if matches!(route, Route::Shopping {} | Route::ShoppingList { .. }) {
         "shopping"
+    } else if matches!(route, Route::Passwords {}) {
+        "passwords"
     } else if matches!(route, Route::Settings {} | Route::SettingsTab { .. }) {
         "settings"
     } else {
@@ -86,6 +88,14 @@ pub fn Sidebar() -> Element {
                 }
                 li {
                     Link {
+                        to: Route::Passwords {},
+                        class: if section == "passwords" { "active" } else { "" },
+                        onclick: move |_| close_drawer(),
+                        "🔑 Passwords"
+                    }
+                }
+                li {
+                    Link {
                         to: Route::Settings {},
                         class: if section == "settings" { "active" } else { "" },
                         onclick: move |_| close_drawer(),
@@ -129,6 +139,16 @@ pub fn Sidebar() -> Element {
                                     to: Route::Shopping {},
                                     class: if matches!(route, Route::Shopping {}) { "active" } else { "" },
                                     "🛒 All Lists"
+                                }
+                            }
+                        },
+                        "passwords" => rsx! {
+                            li { class: "menu-title", span { "Passwords" } }
+                            li {
+                                Link {
+                                    to: Route::Passwords {},
+                                    class: "active",
+                                    "🔑 Vault"
                                 }
                             }
                         },

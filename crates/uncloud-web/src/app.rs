@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use crate::hooks::{use_auth, use_search};
 use crate::router::Route;
-use crate::state::{AuthState, HighlightTarget, PlayerState, ThemeState, ViewMode};
+use crate::state::{AuthState, HighlightTarget, PlayerState, ThemeState, VaultOpenTarget, ViewMode};
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
 const FAVICON: Asset = asset!("/assets/favicon.ico");
@@ -47,6 +47,7 @@ pub fn App() -> Element {
     use_context_provider(|| Signal::new(initial_expand_depth));
     use_context_provider(|| Signal::new(PlayerState::default()));
     use_context_provider(|| Signal::new(HighlightTarget::default()));
+    use_context_provider(|| Signal::new(VaultOpenTarget::default()));
 
     rsx! {
         document::Stylesheet { href: TAILWIND }

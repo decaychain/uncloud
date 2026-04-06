@@ -7,7 +7,7 @@ use crate::components::upload::{UploadZone, FILE_INPUT_ID};
 use web_sys::wasm_bindgen::JsCast;
 use crate::hooks::{use_files, use_player};
 use crate::router::Route;
-use crate::state::{HighlightTarget, PlayerState, ViewMode};
+use crate::state::{HighlightTarget, PlayerState, VaultOpenTarget, ViewMode};
 
 // ── Selection state ───────────────────────────────────────────────────────────
 
@@ -109,6 +109,8 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
     let mut version_history_target: Signal<Option<(String, String)>> = use_signal(|| None);
 
     let player = use_context::<Signal<PlayerState>>();
+    let mut vault_open_target = use_context::<Signal<VaultOpenTarget>>();
+    let nav = use_navigator();
 
     // Thumbnail version counters — incremented when ProcessingCompleted arrives for a file.
     let mut thumb_vers: Signal<HashMap<String, u32>> = use_signal(HashMap::new);
@@ -408,6 +410,14 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                     let f = file_for_open.clone();
                                     move |_| {
                                         let f = f.clone();
+                                        if f.name.ends_with(".kdbx") {
+                                            vault_open_target.set(VaultOpenTarget {
+                                                file_id: Some(f.id.clone()),
+                                                file_name: Some(f.name.clone()),
+                                            });
+                                            let _ = nav.push(Route::Passwords {});
+                                            return;
+                                        }
                                         let mime = f.mime_type.as_str();
                                         if mime.starts_with("audio/") {
                                             let audio: AudioMeta = f.metadata.get("audio")
@@ -524,6 +534,14 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                             let f = file_for_open.clone();
                                             move |_| {
                                                 let f = f.clone();
+                                                if f.name.ends_with(".kdbx") {
+                                                    vault_open_target.set(VaultOpenTarget {
+                                                        file_id: Some(f.id.clone()),
+                                                        file_name: Some(f.name.clone()),
+                                                    });
+                                                    let _ = nav.push(Route::Passwords {});
+                                                    return;
+                                                }
                                                 let mime = f.mime_type.as_str();
                                                 if mime.starts_with("audio/") {
                                                     let audio: AudioMeta = f.metadata.get("audio")
