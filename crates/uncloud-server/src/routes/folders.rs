@@ -62,6 +62,8 @@ pub struct FolderResponse {
     pub effective_music_include: MusicInclude,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_by: Option<String>,
+    #[serde(default)]
+    pub shared_with_count: u32,
 }
 
 /// Walk the parent chain to find the first non-Inherit value for a folder setting.
@@ -120,6 +122,18 @@ async fn folder_to_response_with_shared(
     let (effective, _source) = resolve_setting(db, resolve_id, folder, |f| f.sync_strategy).await?;
     let (effective_gallery, _) = resolve_setting(db, resolve_id, folder, |f| f.gallery_include).await?;
     let (effective_music, _) = resolve_setting(db, resolve_id, folder, |f| f.music_include).await?;
+
+    // For the owner, count how many users this folder is shared with.
+    let shared_with_count = if folder.owner_id == user_id {
+        let shares_coll = db.collection::<FolderShare>("folder_shares");
+        shares_coll
+            .count_documents(doc! { "folder_id": folder.id })
+            .await
+            .unwrap_or(0) as u32
+    } else {
+        0
+    };
+
     Ok(FolderResponse {
         id: folder.id.to_hex(),
         name: folder.name.clone(),
@@ -133,6 +147,7 @@ async fn folder_to_response_with_shared(
         music_include: folder.music_include,
         effective_music_include: effective_music,
         shared_by,
+        shared_with_count,
     })
 }
 

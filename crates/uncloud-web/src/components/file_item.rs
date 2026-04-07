@@ -47,6 +47,8 @@ pub fn FileItem(
     on_share_folder_request: EventHandler<()>,
     #[props(default)]
     shared_by: Option<String>,
+    #[props(default)]
+    shared_with_count: u32,
 ) -> Element {
     let nav = use_navigator();
     // None = hidden; Some((x, y)) = visible at clamped viewport coordinates.
@@ -178,7 +180,7 @@ pub fn FileItem(
                     }
                     div { class: "p-3 items-center text-center gap-1 flex flex-col",
                         div { class: "text-sm font-medium truncate w-full", title: "{name}",
-                            if shared_by.is_some() && is_folder {
+                            if is_folder && (shared_by.is_some() || shared_with_count > 0) {
                                 span { class: "mr-1 opacity-60", "👥" }
                             }
                             "{name}"
@@ -188,6 +190,10 @@ pub fn FileItem(
                         }
                         if let Some(ref owner) = shared_by {
                             div { class: "text-xs text-base-content/40", "Shared by {owner}" }
+                        } else if is_folder && shared_with_count > 0 {
+                            div { class: "text-xs text-base-content/40",
+                                "Shared with {shared_with_count}"
+                            }
                         }
                     }
                 }
@@ -248,7 +254,7 @@ pub fn FileItem(
                 td { class: "w-8 text-lg py-2", "{icon}" }
                 td { class: "font-medium",
                     span { title: "{name}",
-                        if shared_by.is_some() && is_folder {
+                        if is_folder && (shared_by.is_some() || shared_with_count > 0) {
                             span { class: "mr-1 opacity-60", "👥" }
                         }
                         "{name}"
@@ -256,6 +262,10 @@ pub fn FileItem(
                     if let Some(ref owner) = shared_by {
                         span { class: "text-xs text-base-content/40 ml-2",
                             "Shared by {owner}"
+                        }
+                    } else if is_folder && shared_with_count > 0 {
+                        span { class: "text-xs text-base-content/40 ml-2",
+                            "Shared with {shared_with_count}"
                         }
                     }
                 }
@@ -386,14 +396,6 @@ fn FileContextMenu(
                     a { onclick: move |_| { on_copy.call(()); on_close.call(()); },
                         span { "📋" }
                         span { "Copy" }
-                    }
-                }
-            }
-            if is_folder {
-                li {
-                    a { onclick: move |_| { on_share_folder.call(()); on_close.call(()); },
-                        span { "👥" }
-                        span { "Share folder\u{2026}" }
                     }
                 }
             }

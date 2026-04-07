@@ -364,6 +364,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                         let gi = folder.gallery_include;
                         let mi = folder.music_include;
                         let shared_by = folder.shared_by.clone();
+                        let swc = folder.shared_with_count;
                         rsx! {
                             FileItem {
                                 key: "{folder.id}",
@@ -376,6 +377,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                 selected: selection().contains_folder(&folder.id),
                                 thumbnail_ver: 0,
                                 shared_by,
+                                shared_with_count: swc,
                                 on_delete_request: move |_| delete_target.set(Some((id_d.clone(), true, name_d.clone()))),
                                 on_toggle_select: move |_| selection.write().toggle_folder(id_t.clone()),
                                 on_rename_request: move |_| rename_target.set(Some((id_r.clone(), true, name_r.clone()))),
@@ -494,6 +496,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                 let gi = folder.gallery_include;
                                 let mi = folder.music_include;
                                 let shared_by = folder.shared_by.clone();
+                                let swc = folder.shared_with_count;
                                 rsx! {
                                     FileItem {
                                         key: "{folder.id}",
@@ -506,6 +509,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                         selected: selection().contains_folder(&folder.id),
                                         thumbnail_ver: 0,
                                         shared_by,
+                                        shared_with_count: swc,
                                         on_delete_request: move |_| delete_target.set(Some((id_d.clone(), true, name_d.clone()))),
                                         on_toggle_select: move |_| selection.write().toggle_folder(id_t.clone()),
                                         on_rename_request: move |_| rename_target.set(Some((id_r.clone(), true, name_r.clone()))),
@@ -674,14 +678,6 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                     folder_settings_target.set(None);
                     refresh.set(refresh() + 1);
                 },
-            }
-        }
-
-        if let Some((folder_id, folder_name)) = share_folder_target() {
-            crate::components::folder_share_dialog::FolderShareDialog {
-                folder_id,
-                folder_name,
-                on_close: move |_| share_folder_target.set(None),
             }
         }
 
@@ -1386,7 +1382,7 @@ fn FolderSettingsModal(
     on_close: EventHandler<()>,
     on_saved: EventHandler<()>,
 ) -> Element {
-    let mut tab: Signal<&'static str> = use_signal(|| "sync");
+    let mut tab: Signal<&'static str> = use_signal(|| "sharing");
     let mut sync_selected: Signal<SyncStrategy> = use_signal(|| SyncStrategy::Inherit);
     let mut gallery_selected: Signal<GalleryInclude> = use_signal(|| gallery_include);
     let mut music_selected: Signal<MusicInclude> = use_signal(|| music_include);
@@ -1396,6 +1392,7 @@ fn FolderSettingsModal(
     let mut error: Signal<Option<String>> = use_signal(|| None);
 
     let folder_id_for_save = folder_id.clone();
+    let folder_id_for_sharing = folder_id.clone();
 
     use_effect(move || {
         let id = folder_id.clone();
@@ -1414,12 +1411,21 @@ fn FolderSettingsModal(
                 h3 { class: "font-bold text-lg mb-4", "Folder settings \u{2014} {folder_name}" }
 
                 div { role: "tablist", class: "tabs tabs-bordered mb-4",
+                    a { role: "tab", class: if tab() == "sharing" { "tab tab-active" } else { "tab" },
+                        onclick: move |_| tab.set("sharing"), "Sharing" }
                     a { role: "tab", class: if tab() == "sync" { "tab tab-active" } else { "tab" },
                         onclick: move |_| tab.set("sync"), "Sync" }
                     a { role: "tab", class: if tab() == "gallery" { "tab tab-active" } else { "tab" },
                         onclick: move |_| tab.set("gallery"), "Gallery" }
                     a { role: "tab", class: if tab() == "music" { "tab tab-active" } else { "tab" },
                         onclick: move |_| tab.set("music"), "Music" }
+                }
+
+                // ── Sharing tab ─────────────────────────────────────────
+                if tab() == "sharing" {
+                    crate::components::folder_share_dialog::FolderSharePanel {
+                        folder_id: folder_id_for_sharing.clone(),
+                    }
                 }
 
                 // ── Sync tab ────────────────────────────────────────────
@@ -1522,42 +1528,51 @@ fn FolderSettingsModal(
                 }
 
                 div { class: "modal-action",
-                    button {
-                        class: "btn btn-ghost",
-                        r#type: "button",
-                        disabled: saving(),
-                        onclick: move |_| on_close.call(()),
-                        "Cancel"
-                    }
-                    button {
-                        class: "btn btn-primary",
-                        r#type: "button",
-                        disabled: saving() || (tab() == "sync" && loading()),
-                        onclick: move |_| {
-                            let fid = folder_id_for_save.clone();
-                            let current_tab = tab();
-                            let sync_val = sync_selected();
-                            let gallery_val = gallery_selected();
-                            let music_val = music_selected();
-                            spawn(async move {
-                                saving.set(true);
-                                error.set(None);
-                                let result = match current_tab {
-                                    "gallery" => use_files::update_folder_gallery_include(&fid, gallery_val).await,
-                                    "music"   => use_files::update_folder_music_include(&fid, music_val).await,
-                                    _         => use_files::update_folder_strategy(&fid, sync_val).await,
-                                };
-                                match result {
-                                    Ok(_) => on_saved.call(()),
-                                    Err(e) => {
+                    if tab() == "sharing" {
+                        button {
+                            class: "btn btn-ghost",
+                            r#type: "button",
+                            onclick: move |_| on_close.call(()),
+                            "Close"
+                        }
+                    } else {
+                        button {
+                            class: "btn btn-ghost",
+                            r#type: "button",
+                            disabled: saving(),
+                            onclick: move |_| on_close.call(()),
+                            "Cancel"
+                        }
+                        button {
+                            class: "btn btn-primary",
+                            r#type: "button",
+                            disabled: saving() || (tab() == "sync" && loading()),
+                            onclick: move |_| {
+                                let fid = folder_id_for_save.clone();
+                                let current_tab = tab();
+                                let sync_val = sync_selected();
+                                let gallery_val = gallery_selected();
+                                let music_val = music_selected();
+                                spawn(async move {
+                                    saving.set(true);
+                                    error.set(None);
+                                    let result = match current_tab {
+                                        "gallery" => use_files::update_folder_gallery_include(&fid, gallery_val).await,
+                                        "music"   => use_files::update_folder_music_include(&fid, music_val).await,
+                                        _         => use_files::update_folder_strategy(&fid, sync_val).await,
+                                    };
+                                    match result {
+                                        Ok(_) => on_saved.call(()),
+                                        Err(e) => {
                                         error.set(Some(e));
                                         saving.set(false);
                                     }
                                 }
                             });
                         },
-                        if saving() { span { class: "loading loading-spinner loading-sm" } }
-                        "Save"
+                            if saving() { span { class: "loading loading-spinner loading-sm" } }
+                            "Save"
+                        }
                     }
                 }
             }

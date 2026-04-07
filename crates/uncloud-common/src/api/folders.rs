@@ -116,6 +116,9 @@ pub struct FolderResponse {
     /// Username of the owner when this folder is being viewed via a share.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_by: Option<String>,
+    /// Number of users this folder is shared with (only set for the owner).
+    #[serde(default)]
+    pub shared_with_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
