@@ -392,6 +392,23 @@ pub async fn update_folder(
                 }
                 update.insert("mount_name", name.as_str());
             }
+            // Route music/gallery inclusion settings to the share record
+            if let Some(music) = req.music_include {
+                update.insert(
+                    "music_include",
+                    serde_json::to_string(&music)
+                        .map(|s| s.trim_matches('"').to_string())
+                        .unwrap_or_default(),
+                );
+            }
+            if let Some(gallery) = req.gallery_include {
+                update.insert(
+                    "gallery_include",
+                    serde_json::to_string(&gallery)
+                        .map(|s| s.trim_matches('"').to_string())
+                        .unwrap_or_default(),
+                );
+            }
             shares_coll
                 .update_one(doc! { "_id": share.id }, doc! { "$set": update })
                 .await?;

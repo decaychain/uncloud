@@ -161,6 +161,8 @@ pub fn FolderSharePanel(
                                                         permission: Some(new_perm),
                                                         mount_parent_id: None,
                                                         mount_name: None,
+                                                        music_include: None,
+                                                        gallery_include: None,
                                                     };
                                                     let _ = use_folder_shares::update_folder_share(&sid, &req).await;
                                                     let next = *refresh.peek() + 1;

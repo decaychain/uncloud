@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::folders::{GalleryInclude, MusicInclude};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SharePermission {
@@ -25,6 +27,12 @@ pub struct UpdateFolderShareRequest {
     /// Empty string = clear override, use real folder name
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount_name: Option<String>,
+    /// Grantee's music inclusion preference for this shared folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub music_include: Option<MusicInclude>,
+    /// Grantee's gallery inclusion preference for this shared folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gallery_include: Option<GalleryInclude>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,5 +49,9 @@ pub struct FolderShareResponse {
     pub mount_parent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount_name: Option<String>,
+    #[serde(default)]
+    pub music_include: MusicInclude,
+    #[serde(default)]
+    pub gallery_include: GalleryInclude,
     pub created_at: String,
 }

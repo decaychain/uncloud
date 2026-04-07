@@ -17,7 +17,7 @@ use uuid::Uuid;
 use std::collections::{HashMap, HashSet};
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
-use crate::models::{File, FileVersion, Folder, ProcessingStatus, TaskType, UploadChunk, User};
+use crate::models::{File, FileVersion, Folder, FolderShare, ProcessingStatus, TaskType, UploadChunk, User};
 use crate::routes::apps::{deliver_webhooks, EVENT_FILE_CREATED, EVENT_FILE_UPDATED, EVENT_FILE_DELETED};
 use crate::services::sharing::{check_file_access, check_folder_access};
 use crate::AppState;
@@ -1321,6 +1321,61 @@ pub struct GalleryResponse {
     pub next_cursor: Option<String>,
 }
 
+/// Helper: collect folder IDs from shared folders where the grantee has set
+/// `gallery_include` to `Include`. Includes the shared folder and all its
+/// non-deleted subfolders recursively.
+async fn shared_gallery_folder_ids(
+    state: &AppState,
+    user_id: ObjectId,
+) -> Result<Vec<mongodb::bson::Bson>> {
+    use futures::TryStreamExt;
+
+    let shares_coll = state.db.collection::<FolderShare>("folder_shares");
+    let shares: Vec<FolderShare> = shares_coll
+        .find(doc! { "grantee_id": user_id, "gallery_include": "include" })
+        .await?
+        .try_collect()
+        .await?;
+
+    if shares.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let folders_coll = state.db.collection::<Folder>("folders");
+    let mut result = Vec::new();
+
+    for share in &shares {
+        result.push(mongodb::bson::Bson::ObjectId(share.folder_id));
+
+        let mut cursor = folders_coll
+            .find(doc! { "owner_id": share.owner_id, "deleted_at": mongodb::bson::Bson::Null })
+            .await?;
+        let mut owner_folders: Vec<Folder> = Vec::new();
+        while cursor.advance().await? {
+            owner_folders.push(cursor.deserialize_current()?);
+        }
+
+        let mut children_map: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
+        for f in &owner_folders {
+            if let Some(pid) = f.parent_id {
+                children_map.entry(pid).or_default().push(f.id);
+            }
+        }
+
+        let mut stack = vec![share.folder_id];
+        while let Some(fid) = stack.pop() {
+            if let Some(children) = children_map.get(&fid) {
+                for &child_id in children {
+                    result.push(mongodb::bson::Bson::ObjectId(child_id));
+                    stack.push(child_id);
+                }
+            }
+        }
+    }
+
+    Ok(result)
+}
+
 pub async fn list_gallery(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -1329,13 +1384,13 @@ pub async fn list_gallery(
     let limit = query.limit.unwrap_or(60).min(200) as i64;
 
     if let Some(ref folder_id_str) = query.folder_id {
-        // Album mode — scope to one folder
+        // Album mode — scope to one folder (no owner_id filter needed;
+        // folder_id is validated by being in the included set or via access check)
         let folder_id = ObjectId::parse_str(folder_id_str)
             .map_err(|_| AppError::BadRequest("Invalid folder ID".to_string()))?;
 
         let files_coll = state.db.collection::<File>("files");
         let mut filter = doc! {
-            "owner_id": user.id,
             "parent_id": folder_id,
             "mime_type": { "$regex": "^image/" },
             "deleted_at": mongodb::bson::Bson::Null,
@@ -1367,7 +1422,7 @@ pub async fn list_gallery(
 
         Ok(Json(GalleryResponse { files, next_cursor }))
     } else {
-        // Timeline mode — all included folders
+        // Timeline mode — all included folders (owned + shared)
         let folders_coll = state.db.collection::<Folder>("folders");
         let mut folder_cursor = folders_coll.find(doc! { "owner_id": user.id, "deleted_at": mongodb::bson::Bson::Null }).await?;
         let mut all_folders = Vec::new();
@@ -1377,11 +1432,7 @@ pub async fn list_gallery(
 
         let included = resolve_included_folder_ids_by(&all_folders, |f| f.gallery_include.as_include_flag());
 
-        if included.is_empty() {
-            return Ok(Json(GalleryResponse { files: Vec::new(), next_cursor: None }));
-        }
-
-        let parent_ids: Vec<mongodb::bson::Bson> = included
+        let mut parent_ids: Vec<mongodb::bson::Bson> = included
             .into_iter()
             .map(|opt| match opt {
                 Some(id) => mongodb::bson::Bson::ObjectId(id),
@@ -1389,9 +1440,16 @@ pub async fn list_gallery(
             })
             .collect();
 
+        // Also include shared folders marked for gallery inclusion
+        let shared = shared_gallery_folder_ids(&state, user.id).await?;
+        parent_ids.extend(shared);
+
+        if parent_ids.is_empty() {
+            return Ok(Json(GalleryResponse { files: Vec::new(), next_cursor: None }));
+        }
+
         let files_coll = state.db.collection::<File>("files");
         let mut filter = doc! {
-            "owner_id": user.id,
             "parent_id": { "$in": &parent_ids },
             "mime_type": { "$regex": "^image/" },
             "deleted_at": mongodb::bson::Bson::Null,
@@ -1439,9 +1497,12 @@ pub async fn list_gallery_albums(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<Json<Vec<AlbumResponse>>> {
+    use futures::TryStreamExt;
+
     let folders_coll = state.db.collection::<Folder>("folders");
     let files_coll = state.db.collection::<File>("files");
 
+    // --- Owned folders ---
     let mut folder_cursor = folders_coll.find(doc! { "owner_id": user.id, "deleted_at": mongodb::bson::Bson::Null }).await?;
     let mut all_folders: Vec<Folder> = Vec::new();
     while folder_cursor.advance().await? {
@@ -1450,6 +1511,9 @@ pub async fn list_gallery_albums(
 
     let included = resolve_included_folder_ids_by(&all_folders, |f| f.gallery_include.as_include_flag());
     let by_id: HashMap<ObjectId, &Folder> = all_folders.iter().map(|f| (f.id, f)).collect();
+
+    // Collect all included IDs (owned + shared) for parent_folder_id resolution
+    let mut all_included_ids: HashSet<ObjectId> = included.iter().filter_map(|x| *x).collect();
 
     let mut albums = Vec::new();
     for opt_id in &included {
@@ -1460,7 +1524,6 @@ pub async fn list_gallery_albums(
 
         let image_count = files_coll
             .count_documents(doc! {
-                "owner_id": user.id,
                 "parent_id": folder_id,
                 "mime_type": { "$regex": "^image/" },
                 "deleted_at": mongodb::bson::Bson::Null,
@@ -1469,7 +1532,6 @@ pub async fn list_gallery_albums(
 
         let cover = files_coll
             .find_one(doc! {
-                "owner_id": user.id,
                 "parent_id": folder_id,
                 "mime_type": { "$regex": "^image/" },
                 "deleted_at": mongodb::bson::Bson::Null,
@@ -1484,7 +1546,7 @@ pub async fn list_gallery_albums(
 
         let parent_folder_id = folder
             .parent_id
-            .filter(|pid| included.contains(&Some(*pid)))
+            .filter(|pid| all_included_ids.contains(pid))
             .map(|pid| pid.to_hex());
 
         albums.push(AlbumResponse {
@@ -1495,6 +1557,91 @@ pub async fn list_gallery_albums(
             image_count: image_count as i64,
             cover_image_id: cover.map(|f| f.id.to_hex()),
         });
+    }
+
+    // --- Shared folders marked for gallery inclusion ---
+    let shares_coll = state.db.collection::<FolderShare>("folder_shares");
+    let shares: Vec<FolderShare> = shares_coll
+        .find(doc! { "grantee_id": user.id, "gallery_include": "include" })
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut shared_folder_ids: HashSet<ObjectId> = HashSet::new();
+    let mut owner_folders_cache: HashMap<ObjectId, Vec<Folder>> = HashMap::new();
+
+    for share in &shares {
+        if !owner_folders_cache.contains_key(&share.owner_id) {
+            let mut cursor = folders_coll
+                .find(doc! { "owner_id": share.owner_id, "deleted_at": mongodb::bson::Bson::Null })
+                .await?;
+            let mut owner_folders = Vec::new();
+            while cursor.advance().await? {
+                owner_folders.push(cursor.deserialize_current()?);
+            }
+            owner_folders_cache.insert(share.owner_id, owner_folders);
+        }
+
+        let owner_folders = owner_folders_cache.get(&share.owner_id).unwrap();
+        let mut children_map: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
+        for f in owner_folders {
+            if let Some(pid) = f.parent_id {
+                children_map.entry(pid).or_default().push(f.id);
+            }
+        }
+
+        shared_folder_ids.insert(share.folder_id);
+        let mut stack = vec![share.folder_id];
+        while let Some(fid) = stack.pop() {
+            if let Some(children) = children_map.get(&fid) {
+                for &child_id in children {
+                    shared_folder_ids.insert(child_id);
+                    stack.push(child_id);
+                }
+            }
+        }
+    }
+
+    all_included_ids.extend(&shared_folder_ids);
+
+    for (_, owner_folders) in &owner_folders_cache {
+        let shared_by_id: HashMap<ObjectId, &Folder> = owner_folders.iter().map(|f| (f.id, f)).collect();
+        for folder in owner_folders {
+            if !shared_folder_ids.contains(&folder.id) {
+                continue;
+            }
+
+            let image_count = files_coll
+                .count_documents(doc! {
+                    "parent_id": folder.id,
+                    "mime_type": { "$regex": "^image/" },
+                    "deleted_at": mongodb::bson::Bson::Null,
+                })
+                .await?;
+
+            let cover = files_coll
+                .find_one(doc! {
+                    "parent_id": folder.id,
+                    "mime_type": { "$regex": "^image/" },
+                    "deleted_at": mongodb::bson::Bson::Null,
+                })
+                .sort(doc! { "created_at": -1 })
+                .await?;
+
+            let parent_folder_id = folder
+                .parent_id
+                .filter(|pid| all_included_ids.contains(pid))
+                .map(|pid| pid.to_hex());
+
+            albums.push(AlbumResponse {
+                folder_id: folder.id.to_hex(),
+                parent_folder_id,
+                name: folder.name.clone(),
+                path: build_folder_path(folder.id, &shared_by_id),
+                image_count: image_count as i64,
+                cover_image_id: cover.map(|f| f.id.to_hex()),
+            });
+        }
     }
 
     albums.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
