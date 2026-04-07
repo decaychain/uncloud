@@ -7,6 +7,7 @@ use crate::router::Route;
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ShareTab {
     Links,
+    SharedByMe,
     SharedWithMe,
 }
 
@@ -26,6 +27,12 @@ pub fn SharesPage() -> Element {
                 }
                 button {
                     role: "tab",
+                    class: if active_tab() == ShareTab::SharedByMe { "tab tab-active" } else { "tab" },
+                    onclick: move |_| active_tab.set(ShareTab::SharedByMe),
+                    "Shared by me"
+                }
+                button {
+                    role: "tab",
                     class: if active_tab() == ShareTab::SharedWithMe { "tab tab-active" } else { "tab" },
                     onclick: move |_| active_tab.set(ShareTab::SharedWithMe),
                     "Shared with me"
@@ -34,6 +41,7 @@ pub fn SharesPage() -> Element {
 
             match active_tab() {
                 ShareTab::Links => rsx! { ShareLinksPanel {} },
+                ShareTab::SharedByMe => rsx! { SharedByMePanel {} },
                 ShareTab::SharedWithMe => rsx! { SharedWithMePanel {} },
             }
         }
@@ -223,6 +231,156 @@ fn ShareLinksPanel() -> Element {
                             }
                         }
                         div { class: "modal-backdrop", onclick: move |_| delete_target.set(None) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SharedByMePanel() -> Element {
+    let mut shares: Signal<Vec<FolderShareResponse>> = use_signal(Vec::new);
+    let mut loading = use_signal(|| true);
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+    let mut refresh = use_signal(|| 0u32);
+    let nav = use_navigator();
+
+    let mut revoke_target: Signal<Option<(String, String, String)>> = use_signal(|| None);
+
+    let sse_event = use_context::<Signal<Option<ServerEvent>>>();
+    use_effect(move || {
+        if let Some(event) = sse_event() {
+            match event {
+                ServerEvent::FolderShared { .. } | ServerEvent::FolderShareRevoked { .. } => {
+                    let next = *refresh.peek() + 1;
+                    refresh.set(next);
+                }
+                _ => {}
+            }
+        }
+    });
+
+    use_effect(move || {
+        let _ = refresh();
+        spawn(async move {
+            error.set(None);
+            match use_folder_shares::list_shares_by_me().await {
+                Ok(s) => shares.set(s),
+                Err(e) => error.set(Some(e)),
+            }
+            loading.set(false);
+        });
+    });
+
+    if loading() {
+        return rsx! {
+            div { class: "flex items-center justify-center py-20",
+                span { class: "loading loading-spinner loading-lg" }
+            }
+        };
+    }
+
+    if let Some(err) = error() {
+        return rsx! {
+            div { class: "flex flex-col items-center justify-center py-20 gap-3",
+                div { class: "text-5xl", "⚠" }
+                h3 { class: "text-lg font-semibold", "Error loading shares" }
+                p { class: "text-base-content/60", "{err}" }
+            }
+        };
+    }
+
+    let share_list = shares();
+
+    rsx! {
+        if share_list.is_empty() {
+            div { class: "flex flex-col items-center justify-center py-20 gap-3",
+                div { class: "text-5xl", "👥" }
+                h3 { class: "text-lg font-semibold", "No shared folders" }
+                p { class: "text-base-content/60", "You haven't shared any folders with other users yet." }
+            }
+        } else {
+            div { class: "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4",
+                for share in share_list {
+                    {
+                        let folder_id = share.folder_id.clone();
+                        let share_id_revoke = share.id.clone();
+                        let folder_name = share.folder_name.clone();
+                        let grantee = share.grantee_username.clone();
+                        let folder_name_revoke = folder_name.clone();
+                        let grantee_revoke = grantee.clone();
+                        rsx! {
+                            div {
+                                class: "card bg-base-100 shadow-sm border border-base-300 hover:shadow-md transition-all cursor-pointer group",
+                                onclick: move |_| {
+                                    let _ = nav.push(Route::Folder { id: folder_id.clone() });
+                                },
+                                div { class: "card-body p-4 gap-2",
+                                    div { class: "flex items-start justify-between",
+                                        div { class: "flex items-center gap-2 min-w-0 flex-1",
+                                            span { class: "text-2xl flex-shrink-0", "📁" }
+                                            div { class: "min-w-0",
+                                                div { class: "font-medium truncate", "{folder_name}" }
+                                                div { class: "text-xs text-base-content/50",
+                                                    "Shared with {grantee}"
+                                                }
+                                            }
+                                        }
+                                        button {
+                                            class: "btn btn-ghost btn-xs btn-circle opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0",
+                                            title: "Revoke share",
+                                            onclick: move |e| {
+                                                e.stop_propagation();
+                                                revoke_target.set(Some((share_id_revoke.clone(), folder_name_revoke.clone(), grantee_revoke.clone())));
+                                            },
+                                            "✕"
+                                        }
+                                    }
+                                    div {
+                                        PermissionBadge { permission: share.permission }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Revoke confirmation modal
+        if let Some((ref share_id, ref name, ref grantee)) = revoke_target() {
+            {
+                let sid = share_id.clone();
+                rsx! {
+                    div { class: "modal modal-open",
+                        div { class: "modal-box max-w-sm",
+                            h3 { class: "font-bold text-lg mb-2", "Revoke share?" }
+                            p { class: "text-base-content/70",
+                                "\"{name}\" will no longer be shared with {grantee}."
+                            }
+                            div { class: "modal-action",
+                                button {
+                                    class: "btn btn-ghost",
+                                    onclick: move |_| revoke_target.set(None),
+                                    "Cancel"
+                                }
+                                button {
+                                    class: "btn btn-error",
+                                    onclick: move |_| {
+                                        let id = sid.clone();
+                                        spawn(async move {
+                                            let _ = use_folder_shares::delete_folder_share(&id).await;
+                                            revoke_target.set(None);
+                                            let next = *refresh.peek() + 1;
+                                            refresh.set(next);
+                                        });
+                                    },
+                                    "Revoke"
+                                }
+                            }
+                        }
+                        div { class: "modal-backdrop", onclick: move |_| revoke_target.set(None) }
                     }
                 }
             }
