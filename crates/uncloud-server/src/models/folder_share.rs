@@ -2,6 +2,7 @@ use bson::serde_helpers::chrono_datetime_as_bson_datetime;
 use chrono::{DateTime, Utc};
 use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
+use uncloud_common::{GalleryInclude, MusicInclude};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -43,6 +44,10 @@ pub struct FolderShare {
     pub mount_parent_id: Option<ObjectId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount_name: Option<String>,
+    #[serde(default)]
+    pub music_include: MusicInclude,
+    #[serde(default)]
+    pub gallery_include: GalleryInclude,
     #[serde(with = "chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]

@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
-use crate::models::{File, Folder};
+use crate::models::{File, Folder, FolderShare};
 use crate::routes::files::{build_folder_path, file_to_response, resolve_included_folder_ids_by};
 use crate::AppState;
 use uncloud_common::{
@@ -39,34 +39,18 @@ pub async fn list_music_tracks(
             .map_err(|_| AppError::BadRequest("Invalid folder_id".to_string()))?;
         vec![mongodb::bson::Bson::ObjectId(oid)]
     } else {
-        // All music-included folders
-        let folders_coll = state.db.collection::<Folder>("folders");
-        let mut folder_cursor = folders_coll.find(doc! { "owner_id": user.id, "deleted_at": bson::Bson::Null }).await?;
-        let mut all_folders: Vec<Folder> = Vec::new();
-        while folder_cursor.advance().await? {
-            all_folders.push(folder_cursor.deserialize_current()?);
-        }
-
-        let included = resolve_included_folder_ids_by(&all_folders, |f| f.music_include.as_include_flag());
-
-        if included.is_empty() {
+        // All music-included folders (owned + shared)
+        let ids = music_included_parent_ids(&state, user.id).await?;
+        if ids.is_empty() {
             return Ok(Json(MusicTracksResponse {
                 tracks: Vec::new(),
                 next_cursor: None,
             }));
         }
-
-        included
-            .into_iter()
-            .map(|opt| match opt {
-                Some(id) => mongodb::bson::Bson::ObjectId(id),
-                None => mongodb::bson::Bson::Null,
-            })
-            .collect()
+        ids
     };
 
     let mut filter = doc! {
-        "owner_id": user.id,
         "parent_id": { "$in": &parent_ids },
         "mime_type": { "$regex": "^audio/" },
         "deleted_at": bson::Bson::Null,
@@ -135,9 +119,12 @@ pub async fn list_music_folders(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<Json<Vec<MusicFolderResponse>>> {
+    use futures::TryStreamExt;
+
     let folders_coll = state.db.collection::<Folder>("folders");
     let files_coll = state.db.collection::<File>("files");
 
+    // --- Owned folders ---
     let mut folder_cursor = folders_coll.find(doc! { "owner_id": user.id, "deleted_at": bson::Bson::Null }).await?;
     let mut all_folders: Vec<Folder> = Vec::new();
     while folder_cursor.advance().await? {
@@ -163,7 +150,6 @@ pub async fn list_music_folders(
 
         let track_count = files_coll
             .count_documents(doc! {
-                "owner_id": user.id,
                 "parent_id": folder_id,
                 "mime_type": { "$regex": "^audio/" },
                 "deleted_at": bson::Bson::Null,
@@ -172,7 +158,6 @@ pub async fn list_music_folders(
 
         let cover = files_coll
             .find_one(doc! {
-                "owner_id": user.id,
                 "parent_id": folder_id,
                 "mime_type": { "$regex": "^audio/" },
                 "deleted_at": bson::Bson::Null,
@@ -195,13 +180,160 @@ pub async fn list_music_folders(
         });
     }
 
+    // --- Shared folders marked for music inclusion ---
+    let shares_coll = state.db.collection::<FolderShare>("folder_shares");
+    let shares: Vec<FolderShare> = shares_coll
+        .find(doc! { "grantee_id": user.id, "music_include": "include" })
+        .await?
+        .try_collect()
+        .await?;
+
+    // Collect all shared folder IDs (root + descendants) and build a lookup map
+    let mut shared_folder_ids: HashSet<ObjectId> = HashSet::new();
+    // Map of owner_id → all their folders (loaded once per owner)
+    let mut owner_folders_cache: HashMap<ObjectId, Vec<Folder>> = HashMap::new();
+
+    for share in &shares {
+        if !owner_folders_cache.contains_key(&share.owner_id) {
+            let mut cursor = folders_coll
+                .find(doc! { "owner_id": share.owner_id, "deleted_at": bson::Bson::Null })
+                .await?;
+            let mut owner_folders = Vec::new();
+            while cursor.advance().await? {
+                owner_folders.push(cursor.deserialize_current()?);
+            }
+            owner_folders_cache.insert(share.owner_id, owner_folders);
+        }
+
+        let owner_folders = owner_folders_cache.get(&share.owner_id).unwrap();
+
+        // BFS from the shared folder root to find all descendant folder IDs
+        let mut children_map: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
+        for f in owner_folders {
+            if let Some(pid) = f.parent_id {
+                children_map.entry(pid).or_default().push(f.id);
+            }
+        }
+
+        shared_folder_ids.insert(share.folder_id);
+        let mut stack = vec![share.folder_id];
+        while let Some(fid) = stack.pop() {
+            if let Some(children) = children_map.get(&fid) {
+                for &child_id in children {
+                    shared_folder_ids.insert(child_id);
+                    stack.push(child_id);
+                }
+            }
+        }
+    }
+
+    // Build folder responses for shared folders
+    for (_, owner_folders) in &owner_folders_cache {
+        let shared_by_id: HashMap<ObjectId, &Folder> = owner_folders.iter().map(|f| (f.id, f)).collect();
+        for folder in owner_folders {
+            if !shared_folder_ids.contains(&folder.id) {
+                continue;
+            }
+
+            let track_count = files_coll
+                .count_documents(doc! {
+                    "parent_id": folder.id,
+                    "mime_type": { "$regex": "^audio/" },
+                    "deleted_at": bson::Bson::Null,
+                })
+                .await?;
+
+            let cover = files_coll
+                .find_one(doc! {
+                    "parent_id": folder.id,
+                    "mime_type": { "$regex": "^audio/" },
+                    "deleted_at": bson::Bson::Null,
+                })
+                .sort(doc! { "created_at": -1 })
+                .await?;
+
+            let parent_folder_id = folder
+                .parent_id
+                .filter(|pid| shared_folder_ids.contains(pid))
+                .map(|pid| pid.to_hex());
+
+            result.push(MusicFolderResponse {
+                folder_id: folder.id.to_hex(),
+                parent_folder_id,
+                name: folder.name.clone(),
+                path: build_folder_path(folder.id, &shared_by_id),
+                track_count: track_count as i64,
+                cover_file_id: cover.map(|f| f.id.to_hex()),
+            });
+        }
+    }
+
     result.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
 
     Ok(Json(result))
 }
 
-/// Helper: fetch all music-included folder IDs for the user, returning BSON values
-/// suitable for `$in` queries. Returns an empty vec if no folders are included.
+/// Helper: collect folder IDs from shared folders where the grantee has set
+/// `music_include` to `Include`. For each such share, includes the shared folder
+/// and all its (non-deleted) subfolders recursively.
+async fn shared_music_folder_ids(
+    state: &AppState,
+    user_id: ObjectId,
+) -> Result<Vec<mongodb::bson::Bson>> {
+    use futures::TryStreamExt;
+
+    let shares_coll = state.db.collection::<FolderShare>("folder_shares");
+    let shares: Vec<FolderShare> = shares_coll
+        .find(doc! { "grantee_id": user_id, "music_include": "include" })
+        .await?
+        .try_collect()
+        .await?;
+
+    if shares.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let folders_coll = state.db.collection::<Folder>("folders");
+    let mut result = Vec::new();
+
+    for share in &shares {
+        // Include the shared folder itself
+        result.push(mongodb::bson::Bson::ObjectId(share.folder_id));
+
+        // Load ALL non-deleted folders owned by the share owner, then find
+        // descendants of the shared folder.
+        let mut cursor = folders_coll
+            .find(doc! { "owner_id": share.owner_id, "deleted_at": bson::Bson::Null })
+            .await?;
+        let mut owner_folders: Vec<Folder> = Vec::new();
+        while cursor.advance().await? {
+            owner_folders.push(cursor.deserialize_current()?);
+        }
+
+        // Build parent→children map and BFS from the shared folder
+        let mut children_map: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
+        for f in &owner_folders {
+            if let Some(pid) = f.parent_id {
+                children_map.entry(pid).or_default().push(f.id);
+            }
+        }
+
+        let mut stack = vec![share.folder_id];
+        while let Some(fid) = stack.pop() {
+            if let Some(children) = children_map.get(&fid) {
+                for &child_id in children {
+                    result.push(mongodb::bson::Bson::ObjectId(child_id));
+                    stack.push(child_id);
+                }
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Helper: fetch all music-included folder IDs for the user (owned + shared),
+/// returning BSON values suitable for `$in` queries.
 async fn music_included_parent_ids(
     state: &AppState,
     user_id: ObjectId,
@@ -215,24 +347,31 @@ async fn music_included_parent_ids(
 
     let included = resolve_included_folder_ids_by(&all_folders, |f| f.music_include.as_include_flag());
 
-    Ok(included
+    let mut result: Vec<mongodb::bson::Bson> = included
         .into_iter()
         .map(|opt| match opt {
             Some(id) => mongodb::bson::Bson::ObjectId(id),
             None => mongodb::bson::Bson::Null,
         })
-        .collect())
+        .collect();
+
+    // Also include shared folders marked for music inclusion
+    let shared = shared_music_folder_ids(state, user_id).await?;
+    result.extend(shared);
+
+    Ok(result)
 }
 
-/// Helper: fetch all audio files in the given parent IDs for the user.
+/// Helper: fetch all audio files in the given parent IDs.
+/// The parent_ids set is already access-validated (owned + shared folders),
+/// so no owner_id filter is needed.
 async fn fetch_audio_files(
     state: &AppState,
-    user_id: ObjectId,
+    _user_id: ObjectId,
     parent_ids: &[mongodb::bson::Bson],
 ) -> Result<Vec<File>> {
     let files_coll = state.db.collection::<File>("files");
     let filter = doc! {
-        "owner_id": user_id,
         "parent_id": { "$in": parent_ids },
         "mime_type": { "$regex": "^audio/" },
         "deleted_at": bson::Bson::Null,
@@ -317,7 +456,6 @@ pub async fn list_artist_albums(
 
     let files_coll = state.db.collection::<File>("files");
     let filter = doc! {
-        "owner_id": user.id,
         "parent_id": { "$in": &parent_ids },
         "mime_type": { "$regex": "^audio/" },
         "deleted_at": bson::Bson::Null,
@@ -336,7 +474,6 @@ pub async fn list_artist_albums(
     // Note: { field: null } matches both null values and missing fields in MongoDB
     if artist_name == "Unknown Artist" {
         let unknown_filter = doc! {
-            "owner_id": user.id,
             "parent_id": { "$in": &parent_ids },
             "mime_type": { "$regex": "^audio/" },
             "deleted_at": bson::Bson::Null,
@@ -429,7 +566,6 @@ pub async fn list_album_tracks(
     let files_coll = state.db.collection::<File>("files");
 
     let mut filters = vec![
-        doc! { "owner_id": user.id },
         doc! { "parent_id": { "$in": &parent_ids } },
         doc! { "mime_type": { "$regex": "^audio/" } },
         doc! { "deleted_at": bson::Bson::Null },

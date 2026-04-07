@@ -50,6 +50,8 @@ async fn build_response(
         permission: share.permission.into(),
         mount_parent_id: share.mount_parent_id.map(|id| id.to_hex()),
         mount_name: share.mount_name.clone(),
+        music_include: share.music_include,
+        gallery_include: share.gallery_include,
         created_at: share.created_at.to_rfc3339(),
     })
 }
@@ -118,6 +120,8 @@ async fn build_responses(
             permission: share.permission.into(),
             mount_parent_id: share.mount_parent_id.map(|id| id.to_hex()),
             mount_name: share.mount_name.clone(),
+            music_include: share.music_include,
+            gallery_include: share.gallery_include,
             created_at: share.created_at.to_rfc3339(),
         });
     }
@@ -186,6 +190,8 @@ pub async fn create_share(
         permission: req.permission.into(),
         mount_parent_id: None,
         mount_name: None,
+        music_include: Default::default(),
+        gallery_include: Default::default(),
         created_at: now,
         updated_at: now,
     };
@@ -330,6 +336,30 @@ pub async fn update_share(
         } else {
             update.insert("mount_name", mount_name.as_str());
         }
+    }
+
+    // Music/gallery inclusion can only be changed by the grantee
+    if let Some(music) = req.music_include {
+        if !is_grantee {
+            return Err(AppError::Forbidden("Access denied".into()));
+        }
+        update.insert(
+            "music_include",
+            serde_json::to_string(&music)
+                .map(|s| s.trim_matches('"').to_string())
+                .unwrap_or_default(),
+        );
+    }
+    if let Some(gallery) = req.gallery_include {
+        if !is_grantee {
+            return Err(AppError::Forbidden("Access denied".into()));
+        }
+        update.insert(
+            "gallery_include",
+            serde_json::to_string(&gallery)
+                .map(|s| s.trim_matches('"').to_string())
+                .unwrap_or_default(),
+        );
     }
 
     if update.is_empty() {
