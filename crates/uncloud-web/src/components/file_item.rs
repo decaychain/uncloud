@@ -46,6 +46,8 @@ pub fn FileItem(
     #[props(default)]
     on_share_folder_request: EventHandler<()>,
     #[props(default)]
+    on_share_link_request: EventHandler<()>,
+    #[props(default)]
     shared_by: Option<String>,
     #[props(default)]
     shared_with_count: u32,
@@ -216,6 +218,7 @@ pub fn FileItem(
                         on_version_history: move |_| on_version_history_request.call(()),
                         on_folder_settings: move |_| on_folder_settings_request.call(()),
                         on_share_folder: move |_| on_share_folder_request.call(()),
+                        on_share_link: move |_| on_share_link_request.call(()),
                     }
                 }
             }
@@ -304,6 +307,7 @@ pub fn FileItem(
                     on_version_history: move |_| on_version_history_request.call(()),
                     on_folder_settings: move |_| on_folder_settings_request.call(()),
                     on_share_folder: move |_| on_share_folder_request.call(()),
+                    on_share_link: move |_| on_share_link_request.call(()),
                 }
             }
         },
@@ -331,6 +335,7 @@ fn FileContextMenu(
     on_version_history: EventHandler<()>,
     on_folder_settings: EventHandler<()>,
     on_share_folder: EventHandler<()>,
+    on_share_link: EventHandler<()>,
 ) -> Element {
     let is_editable_text = !is_folder && mime_type.as_deref()
         .map(|m| m.starts_with("text/") || m == "application/json" || m == "application/xml")
@@ -400,7 +405,7 @@ fn FileContextMenu(
                 }
             }
             li {
-                a { onclick: move |_| on_close.call(()),
+                a { onclick: move |_| { on_share_link.call(()); on_close.call(()); },
                     span { "🔗" }
                     span { "Share link" }
                 }

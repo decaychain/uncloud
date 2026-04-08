@@ -109,6 +109,8 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
     let mut folder_settings_target: Signal<Option<(String, String, GalleryInclude, MusicInclude)>> = use_signal(|| None);
     // Folder share dialog target: Some((folder_id, folder_name))
     let mut share_folder_target: Signal<Option<(String, String)>> = use_signal(|| None);
+    // Share link dialog target: Some((resource_id, resource_type, resource_name))
+    let mut share_link_target: Signal<Option<(String, String, String)>> = use_signal(|| None);
     // File viewer target
     let mut viewer_target: Signal<Option<ViewerTarget>> = use_signal(|| None);
     // Version history modal target: Some((file_id, file_name))
@@ -353,8 +355,9 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
             div { class: "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 mt-6",
                 for folder in folders() {
                     {
-                        let (id_t, id_r, name_r, id_m, name_m, id_c, name_c, id_d, name_d, id_fs, name_fs, id_sh, name_sh) = (
+                        let (id_t, id_r, name_r, id_m, name_m, id_c, name_c, id_d, name_d, id_fs, name_fs, id_sh, name_sh, id_sl, name_sl) = (
                             folder.id.clone(), folder.id.clone(), folder.name.clone(),
+                            folder.id.clone(), folder.name.clone(),
                             folder.id.clone(), folder.name.clone(),
                             folder.id.clone(), folder.name.clone(),
                             folder.id.clone(), folder.name.clone(),
@@ -392,14 +395,18 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                 on_share_folder_request: move |_| {
                                     share_folder_target.set(Some((id_sh.clone(), name_sh.clone())));
                                 },
+                                on_share_link_request: move |_| {
+                                    share_link_target.set(Some((id_sl.clone(), "folder".to_string(), name_sl.clone())));
+                                },
                             }
                         }
                     }
                 }
                 for file in files() {
                     {
-                        let (id_t, id_r, name_r, id_m, name_m, id_c, name_c, id_d, name_d, id_v, name_v) = (
+                        let (id_t, id_r, name_r, id_m, name_m, id_c, name_c, id_d, name_d, id_v, name_v, id_sl, name_sl) = (
                             file.id.clone(), file.id.clone(), file.name.clone(),
+                            file.id.clone(), file.name.clone(),
                             file.id.clone(), file.name.clone(),
                             file.id.clone(), file.name.clone(),
                             file.id.clone(), file.name.clone(),
@@ -464,6 +471,9 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                 },
                                 on_version_history_request: move |_| version_history_target.set(Some((id_v.clone(), name_v.clone()))),
                                 on_folder_settings_request: move |_| {},
+                                on_share_link_request: move |_| {
+                                    share_link_target.set(Some((id_sl.clone(), "file".to_string(), name_sl.clone())));
+                                },
                             }
                         }
                     }
@@ -485,8 +495,9 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                     tbody {
                         for folder in folders() {
                             {
-                                let (id_t, id_r, name_r, id_m, name_m, id_c, name_c, id_d, name_d, id_fs, name_fs, id_sh, name_sh) = (
+                                let (id_t, id_r, name_r, id_m, name_m, id_c, name_c, id_d, name_d, id_fs, name_fs, id_sh, name_sh, id_sl, name_sl) = (
                                     folder.id.clone(), folder.id.clone(), folder.name.clone(),
+                                    folder.id.clone(), folder.name.clone(),
                                     folder.id.clone(), folder.name.clone(),
                                     folder.id.clone(), folder.name.clone(),
                                     folder.id.clone(), folder.name.clone(),
@@ -524,14 +535,18 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                         on_share_folder_request: move |_| {
                                             share_folder_target.set(Some((id_sh.clone(), name_sh.clone())));
                                         },
+                                        on_share_link_request: move |_| {
+                                            share_link_target.set(Some((id_sl.clone(), "folder".to_string(), name_sl.clone())));
+                                        },
                                     }
                                 }
                             }
                         }
                         for file in files() {
                             {
-                                let (id_t, id_r, name_r, id_m, name_m, id_c, name_c, id_d, name_d, id_v, name_v) = (
+                                let (id_t, id_r, name_r, id_m, name_m, id_c, name_c, id_d, name_d, id_v, name_v, id_sl, name_sl) = (
                                     file.id.clone(), file.id.clone(), file.name.clone(),
+                                    file.id.clone(), file.name.clone(),
                                     file.id.clone(), file.name.clone(),
                                     file.id.clone(), file.name.clone(),
                                     file.id.clone(), file.name.clone(),
@@ -596,6 +611,9 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                         },
                                         on_version_history_request: move |_| version_history_target.set(Some((id_v.clone(), name_v.clone()))),
                                         on_folder_settings_request: move |_| {},
+                                        on_share_link_request: move |_| {
+                                            share_link_target.set(Some((id_sl.clone(), "file".to_string(), name_sl.clone())));
+                                        },
                                     }
                                 }
                             }
@@ -690,6 +708,15 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                     version_history_target.set(None);
                     refresh.set(refresh() + 1);
                 },
+            }
+        }
+
+        if let Some((res_id, res_type, res_name)) = share_link_target() {
+            crate::components::share_dialog::ShareDialog {
+                resource_id: res_id,
+                resource_type: res_type,
+                resource_name: res_name,
+                on_close: move |_| share_link_target.set(None),
             }
         }
 
