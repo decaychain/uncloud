@@ -22,6 +22,8 @@ pub struct ShareResponse {
     pub token: String,
     pub resource_type: ShareResourceType,
     pub resource_id: String,
+    #[serde(default)]
+    pub resource_name: String,
     pub has_password: bool,
     pub expires_at: Option<String>,
     pub download_count: i64,

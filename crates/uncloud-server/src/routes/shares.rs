@@ -37,6 +37,7 @@ pub struct ShareResponse {
     pub token: String,
     pub resource_type: ShareResourceType,
     pub resource_id: String,
+    pub resource_name: String,
     pub has_password: bool,
     pub expires_at: Option<String>,
     pub download_count: i64,
@@ -44,18 +45,47 @@ pub struct ShareResponse {
     pub created_at: String,
 }
 
-impl From<&Share> for ShareResponse {
-    fn from(s: &Share) -> Self {
+impl ShareResponse {
+    fn from_share(s: &Share, resource_name: String) -> Self {
         Self {
             id: s.id.to_hex(),
             token: s.token.clone(),
             resource_type: s.resource_type,
             resource_id: s.resource_id.to_hex(),
+            resource_name,
             has_password: s.password_hash.is_some(),
             expires_at: s.expires_at.map(|dt| dt.to_rfc3339()),
             download_count: s.download_count,
             max_downloads: s.max_downloads,
             created_at: s.created_at.to_rfc3339(),
+        }
+    }
+}
+
+/// Look up the name of a shared resource.
+async fn resolve_resource_name(
+    db: &mongodb::Database,
+    resource_type: ShareResourceType,
+    resource_id: ObjectId,
+) -> String {
+    match resource_type {
+        ShareResourceType::File => {
+            db.collection::<File>("files")
+                .find_one(doc! { "_id": resource_id })
+                .await
+                .ok()
+                .flatten()
+                .map(|f| f.name)
+                .unwrap_or_else(|| "(deleted)".to_string())
+        }
+        ShareResourceType::Folder => {
+            db.collection::<Folder>("folders")
+                .find_one(doc! { "_id": resource_id })
+                .await
+                .ok()
+                .flatten()
+                .map(|f| f.name)
+                .unwrap_or_else(|| "(deleted)".to_string())
         }
     }
 }
@@ -126,7 +156,8 @@ pub async fn create_share(
     let collection = state.db.collection::<Share>("shares");
     collection.insert_one(&share).await?;
 
-    Ok((StatusCode::CREATED, Json(ShareResponse::from(&share))))
+    let name = resolve_resource_name(&state.db, req.resource_type, resource_id).await;
+    Ok((StatusCode::CREATED, Json(ShareResponse::from_share(&share, name))))
 }
 
 pub async fn list_shares(
@@ -136,10 +167,16 @@ pub async fn list_shares(
     let collection = state.db.collection::<Share>("shares");
     let mut cursor = collection.find(doc! { "owner_id": user.id }).await?;
 
-    let mut shares = Vec::new();
+    let mut raw_shares = Vec::new();
     while cursor.advance().await? {
         let share: Share = cursor.deserialize_current()?;
-        shares.push(ShareResponse::from(&share));
+        raw_shares.push(share);
+    }
+
+    let mut shares = Vec::with_capacity(raw_shares.len());
+    for s in &raw_shares {
+        let name = resolve_resource_name(&state.db, s.resource_type, s.resource_id).await;
+        shares.push(ShareResponse::from_share(s, name));
     }
 
     Ok(Json(shares))

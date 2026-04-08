@@ -111,28 +111,25 @@ fn ShareLinksPanel() -> Element {
                             ShareResourceType::File => "📄",
                             ShareResourceType::Folder => "📁",
                         };
-                        let type_label = match share.resource_type {
-                            ShareResourceType::File => "File",
-                            ShareResourceType::Folder => "Folder",
-                        };
+                        let resource_name = share.resource_name.clone();
 
                         rsx! {
                             div { class: "card bg-base-100 shadow-sm border border-base-300",
                                 div { class: "card-body p-4",
                                     div { class: "flex items-start justify-between gap-3",
                                         div { class: "flex-1 min-w-0",
-                                            // Type + token row
+                                            // Name + type row
                                             div { class: "flex items-center gap-2 mb-2",
                                                 span { class: "text-xl", "{type_icon}" }
-                                                span { class: "badge badge-outline badge-sm", "{type_label}" }
+                                                span { class: "font-medium truncate", "{resource_name}" }
                                                 if share.has_password {
-                                                    span { class: "badge badge-outline badge-sm", "🔒 Password" }
+                                                    span { class: "badge badge-outline badge-sm", "🔒" }
                                                 }
                                             }
 
                                             // Link
                                             div { class: "flex items-center gap-2 mb-2",
-                                                code { class: "text-sm text-base-content/70 truncate block flex-1 min-w-0",
+                                                code { class: "text-sm text-base-content/50 truncate block flex-1 min-w-0",
                                                     "/share/{share_token}"
                                                 }
                                                 button {
