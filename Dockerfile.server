@@ -1,4 +1,41 @@
-# Static musl build for uncloud-server → FROM scratch image
+# Stage 1: Build the Dioxus web frontend
+FROM node:20-bookworm AS frontend
+
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+
+# Install Rust (needed for dx CLI and wasm target)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN rustup target add wasm32-unknown-unknown
+RUN cargo install dioxus-cli --locked
+
+WORKDIR /app
+
+# Copy workspace manifests for dependency resolution
+COPY Cargo.toml Cargo.lock ./
+COPY crates/uncloud-web/Cargo.toml crates/uncloud-web/Cargo.toml
+COPY crates/uncloud-common/Cargo.toml crates/uncloud-common/Cargo.toml
+COPY crates/uncloud-server/Cargo.toml crates/uncloud-server/Cargo.toml
+COPY crates/uncloud-client/Cargo.toml crates/uncloud-client/Cargo.toml
+COPY crates/uncloud-sync/Cargo.toml crates/uncloud-sync/Cargo.toml
+COPY crates/uncloud-desktop/Cargo.toml crates/uncloud-desktop/Cargo.toml
+
+# Create stub files so cargo can resolve the workspace
+RUN mkdir -p crates/uncloud-web/src && echo "fn main() {}" > crates/uncloud-web/src/main.rs
+RUN mkdir -p crates/uncloud-common/src && echo "" > crates/uncloud-common/src/lib.rs
+RUN mkdir -p crates/uncloud-server/src && echo "fn main() {}" > crates/uncloud-server/src/main.rs && echo "" > crates/uncloud-server/src/lib.rs
+RUN mkdir -p crates/uncloud-client/src && echo "" > crates/uncloud-client/src/lib.rs
+RUN mkdir -p crates/uncloud-sync/src && echo "" > crates/uncloud-sync/src/lib.rs
+RUN mkdir -p crates/uncloud-desktop/src && echo "fn main() {}" > crates/uncloud-desktop/src/main.rs && echo "" > crates/uncloud-desktop/src/lib.rs
+
+# Copy web frontend source + common types
+COPY crates/uncloud-web/ crates/uncloud-web/
+COPY crates/uncloud-common/ crates/uncloud-common/
+
+# Build the web frontend (output: target/dx/uncloud-web/release/web/public/)
+RUN cd crates/uncloud-web && dx build --release
+
+# Stage 2: Build the server with embedded frontend
 FROM rust:1.88-bookworm AS builder
 
 RUN rustup target add x86_64-unknown-linux-musl && \
@@ -24,16 +61,22 @@ RUN mkdir -p crates/uncloud-sync/src && echo "" > crates/uncloud-sync/src/lib.rs
 RUN mkdir -p crates/uncloud-desktop/src && echo "fn main() {}" > crates/uncloud-desktop/src/main.rs && echo "" > crates/uncloud-desktop/src/lib.rs
 
 # Pre-build dependencies (cached unless Cargo.toml/lock changes)
+# Create a dummy frontend output so rust-embed compiles during dep caching
+RUN mkdir -p target/dx/uncloud-web/release/web/public && \
+    echo "<html></html>" > target/dx/uncloud-web/release/web/public/index.html
 RUN cargo build --release --target x86_64-unknown-linux-musl -p uncloud-server 2>/dev/null || true
 
 # Copy actual source code
 COPY crates/uncloud-server/ crates/uncloud-server/
 COPY crates/uncloud-common/ crates/uncloud-common/
 
+# Copy built frontend from stage 1
+COPY --from=frontend /app/target/dx/uncloud-web/release/web/public/ target/dx/uncloud-web/release/web/public/
+
 # Touch to invalidate cached build of our code (not deps)
 RUN touch crates/uncloud-server/src/main.rs crates/uncloud-server/src/lib.rs crates/uncloud-common/src/lib.rs
 
-# Build static binary
+# Build static binary with embedded frontend
 RUN cargo build --release --target x86_64-unknown-linux-musl -p uncloud-server
 
 # Verify it's statically linked

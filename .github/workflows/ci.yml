@@ -14,6 +14,22 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install Dioxus CLI
+        run: cargo install dioxus-cli --locked
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install web dependencies
+        run: cd crates/uncloud-web && npm ci
+
+      - name: Build web frontend
+        run: cd crates/uncloud-web && dx build --release
 
       - name: Check server
         run: cargo check -p uncloud-server

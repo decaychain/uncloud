@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use axum::http::{HeaderValue, Method};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+use axum::routing::get;
 use tower_http::cors::CorsLayer;
-use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -122,12 +122,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build router with API routes
     let api_router = routes::create_router(state.clone());
 
-    // Serve static files from the frontend build directory
-    let static_dir = std::env::var("STATIC_DIR")
-        .unwrap_or_else(|_| "target/dx/uncloud-web/release/web/public".to_string());
-    let index_path = format!("{}/index.html", static_dir);
-    let serve_dir = ServeDir::new(&static_dir)
-        .not_found_service(ServeFile::new(&index_path));
+    // Embedded frontend (assets baked into binary in release builds)
+    let frontend = axum::Router::new()
+        .route("/{*path}", get(uncloud_server::frontend::static_handler))
+        .fallback(get(uncloud_server::frontend::index_handler));
 
     let cors = CorsLayer::new()
         .allow_origin([
@@ -140,7 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .allow_credentials(true);
 
     let app = api_router
-        .fallback_service(serve_dir)
+        .fallback_service(frontend)
         .layer(cors)
         .layer(TraceLayer::new_for_http());
 
