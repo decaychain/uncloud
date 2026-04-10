@@ -20,20 +20,15 @@ pub fn Setup() -> Element {
     let nav = use_navigator();
     let mut auth_state = use_context::<Signal<AuthState>>();
     let mut search_enabled = use_context::<Signal<bool>>();
-    let is_android = tauri::is_android();
-
-    // Pre-fill the sync folder with a platform-appropriate default on desktop.
-    let is_android_val = is_android;
+    // Pre-fill the sync folder with a platform-appropriate default.
     use_effect(move || {
-        if !is_android_val {
-            spawn(async move {
-                if let Some(default) = tauri::default_sync_folder().await {
-                    if root_path.peek().is_empty() {
-                        root_path.set(default);
-                    }
+        spawn(async move {
+            if let Some(default) = tauri::default_sync_folder().await {
+                if root_path.peek().is_empty() {
+                    root_path.set(default);
                 }
-            });
-        }
+            }
+        });
     });
 
     let on_submit = move |evt: Event<FormData>| {
@@ -47,7 +42,7 @@ pub fn Setup() -> Element {
             loading.set(true);
             error.set(None);
 
-            if !is_android && path.is_empty() {
+            if path.is_empty() {
                 error.set(Some("Please select a sync folder".to_string()));
                 loading.set(false);
                 return;
@@ -56,13 +51,10 @@ pub fn Setup() -> Element {
             // Seed the API base so subsequent web requests go to the right server.
             api::seed_api_base(server.clone());
 
-            // On Android, skip sync engine setup — users configure sync per-folder later.
-            if !is_android {
-                if let Err(e) = tauri::login(&server, &user, &pass, &path).await {
-                    error.set(Some(format!("Connection failed: {e}")));
-                    loading.set(false);
-                    return;
-                }
+            if let Err(e) = tauri::login(&server, &user, &pass, &path).await {
+                error.set(Some(format!("Connection failed: {e}")));
+                loading.set(false);
+                return;
             }
 
             // Establish a browser-level session for the file browser UI.
@@ -151,39 +143,37 @@ pub fn Setup() -> Element {
                             }
                         }
 
-                        if !is_android {
-                            div { class: "divider text-xs opacity-50", "Sync" }
+                        div { class: "divider text-xs opacity-50", "Sync" }
 
-                            div { class: "form-control",
-                                label { class: "label", r#for: "root-path",
-                                    span { class: "label-text", "Local sync folder" }
+                        div { class: "form-control",
+                            label { class: "label", r#for: "root-path",
+                                span { class: "label-text", "Local sync folder" }
+                            }
+                            div { class: "join w-full",
+                                input {
+                                    class: "input input-bordered join-item flex-1",
+                                    r#type: "text",
+                                    id: "root-path",
+                                    readonly: true,
+                                    value: "{root_path}",
+                                    placeholder: "Select a folder\u{2026}",
                                 }
-                                div { class: "join w-full",
-                                    input {
-                                        class: "input input-bordered join-item flex-1",
-                                        r#type: "text",
-                                        id: "root-path",
-                                        readonly: true,
-                                        value: "{root_path}",
-                                        placeholder: "Select a folder\u{2026}",
-                                    }
-                                    button {
-                                        class: "btn btn-neutral join-item",
-                                        r#type: "button",
-                                        onclick: move |_| {
-                                            spawn(async move {
-                                                if let Some(path) = tauri::pick_folder().await {
-                                                    root_path.set(path);
-                                                }
-                                            });
-                                        },
-                                        "Browse\u{2026}"
-                                    }
+                                button {
+                                    class: "btn btn-neutral join-item",
+                                    r#type: "button",
+                                    onclick: move |_| {
+                                        spawn(async move {
+                                            if let Some(path) = tauri::pick_folder().await {
+                                                root_path.set(path);
+                                            }
+                                        });
+                                    },
+                                    "Browse\u{2026}"
                                 }
-                                label { class: "label",
-                                    span { class: "label-text-alt text-base-content/50",
-                                        "Files will be synced to and from this folder."
-                                    }
+                            }
+                            label { class: "label",
+                                span { class: "label-text-alt text-base-content/50",
+                                    "Files will be synced to and from this folder."
                                 }
                             }
                         }

@@ -11,7 +11,10 @@ use tauri::{
 };
 use tauri::{AppHandle, Manager, State};
 use tauri::async_runtime;
+#[cfg(desktop)]
 use tauri_plugin_dialog::DialogExt;
+#[cfg(mobile)]
+use tauri_plugin_android_fs::AndroidFsExt;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info};
 use uncloud_client::Client;
@@ -231,6 +234,7 @@ async fn set_folder_strategy(
         .map_err(|e| e.to_string())
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -240,9 +244,39 @@ async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
     rx.await.map_err(|e| e.to_string())
 }
 
+#[cfg(mobile)]
+#[tauri::command]
+async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
+    let api = app.android_fs_async();
+    let selected = api
+        .file_picker()
+        .pick_dir(None, false)
+        .await
+        .map_err(|e| e.to_string())?;
+    match selected {
+        Some(dir_uri) => {
+            // Persist access so it survives app/device restarts.
+            api.file_picker()
+                .persist_uri_permission(&dir_uri)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(Some(dir_uri.uri))
+        }
+        None => Ok(None),
+    }
+}
+
+#[cfg(desktop)]
 #[tauri::command]
 fn default_sync_folder() -> Option<String> {
     dirs::home_dir().map(|h| h.join("Uncloud").to_string_lossy().to_string())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn default_sync_folder() -> Option<String> {
+    // On Android, suggest the shared Documents/Uncloud path.
+    Some("/storage/emulated/0/Documents/Uncloud".to_string())
 }
 
 // ── Polling scheduler ─────────────────────────────────────────────────────────
@@ -318,8 +352,13 @@ pub fn run() {
     #[cfg(desktop)]
     let status_arc = state.status.clone();
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
+    let mut builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    { builder = builder.plugin(tauri_plugin_dialog::init()); }
+    #[cfg(mobile)]
+    { builder = builder.plugin(tauri_plugin_android_fs::init()); }
+
+    builder
         .manage(state)
         .setup(move |app| {
             // Auto-login from persisted config if one exists.
