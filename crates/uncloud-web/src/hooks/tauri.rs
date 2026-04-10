@@ -160,3 +160,15 @@ pub async fn default_sync_folder() -> Option<String> {
     let result = invoke_raw("default_sync_folder", &args).await.ok()?;
     result.as_string()
 }
+
+/// Set the sync strategy and optional local path for a folder via the desktop sync engine.
+pub async fn set_folder_strategy(folder_id: &str, strategy: &str, local_path: Option<&str>) -> Result<(), String> {
+    let args = Object::new();
+    let _ = Reflect::set(&args, &JsValue::from_str("folderId"), &JsValue::from_str(folder_id));
+    let _ = Reflect::set(&args, &JsValue::from_str("strategy"), &JsValue::from_str(strategy));
+    match local_path {
+        Some(p) => { let _ = Reflect::set(&args, &JsValue::from_str("localPath"), &JsValue::from_str(p)); }
+        None => { let _ = Reflect::set(&args, &JsValue::from_str("localPath"), &JsValue::NULL); }
+    }
+    invoke_raw("set_folder_strategy", &args).await.map(|_| ())
+}

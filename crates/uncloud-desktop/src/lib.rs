@@ -275,8 +275,8 @@ fn default_sync_folder() -> Option<String> {
 #[cfg(mobile)]
 #[tauri::command]
 fn default_sync_folder() -> Option<String> {
-    // On Android, suggest the shared Documents/Uncloud path.
-    Some("/storage/emulated/0/Documents/Uncloud".to_string())
+    // On Android, sync is per-folder — no global default.
+    None
 }
 
 // ── Polling scheduler ─────────────────────────────────────────────────────────
