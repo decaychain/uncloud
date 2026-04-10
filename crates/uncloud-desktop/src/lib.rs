@@ -153,7 +153,19 @@ async fn login(
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let engine = SyncEngine::new(&db_path, client.clone(), PathBuf::from(&root_path))
+
+    // On Android (empty root_path), use the app data dir as a placeholder root.
+    // Per-folder sync paths override this; the root itself won't sync because
+    // the server default strategy is DoNotSync.
+    let effective_root = if root_path.is_empty() {
+        app.path().app_data_dir()
+            .map_err(|e| format!("Cannot determine app data dir: {e}"))?
+            .join("sync-root")
+    } else {
+        PathBuf::from(&root_path)
+    };
+
+    let engine = SyncEngine::new(&db_path, client.clone(), effective_root)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -377,7 +389,15 @@ pub fn run() {
                                 Some(p) => { let _ = p.parent().map(std::fs::create_dir_all); p }
                                 None => { error!("Auto-login: cannot determine data directory"); return; }
                             };
-                            let engine_result = SyncEngine::new(&db, client.clone(), PathBuf::from(&cfg.root_path)).await.map_err(|e| e.to_string());
+                            let effective_root = if cfg.root_path.is_empty() {
+                                match app_handle.path().app_data_dir() {
+                                    Ok(p) => p.join("sync-root"),
+                                    Err(_) => { error!("Auto-login: cannot determine app data dir"); return; }
+                                }
+                            } else {
+                                PathBuf::from(&cfg.root_path)
+                            };
+                            let engine_result = SyncEngine::new(&db, client.clone(), effective_root).await.map_err(|e| e.to_string());
                             match engine_result {
                                 Ok(engine) => {
                                     *client_arc.write().await = Some(client);

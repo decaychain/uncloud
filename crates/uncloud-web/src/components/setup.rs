@@ -49,19 +49,19 @@ pub fn Setup() -> Element {
             // Seed the API base so subsequent web requests go to the right server.
             api::seed_api_base(server.clone());
 
-            // On desktop, set up the sync engine with the chosen root folder.
-            // On Android, sync is configured per-folder later, so skip this.
-            if !is_android {
-                if path.is_empty() {
-                    error.set(Some("Please select a sync folder".to_string()));
-                    loading.set(false);
-                    return;
-                }
-                if let Err(e) = tauri::login(&server, &user, &pass, &path).await {
-                    error.set(Some(format!("Connection failed: {e}")));
-                    loading.set(false);
-                    return;
-                }
+            // On desktop, validate that a sync folder was chosen.
+            if !is_android && path.is_empty() {
+                error.set(Some("Please select a sync folder".to_string()));
+                loading.set(false);
+                return;
+            }
+
+            // Initialise the sync engine. On Android, root_path is empty —
+            // the backend uses a placeholder; per-folder paths override it.
+            if let Err(e) = tauri::login(&server, &user, &pass, &path).await {
+                error.set(Some(format!("Connection failed: {e}")));
+                loading.set(false);
+                return;
             }
 
             // Establish a browser-level session for the file browser UI.

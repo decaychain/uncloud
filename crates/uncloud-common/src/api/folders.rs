@@ -63,7 +63,7 @@ pub trait InheritableSetting: Copy + PartialEq + Default {
 
 impl InheritableSetting for SyncStrategy {
     fn is_inherit(&self) -> bool { *self == Self::Inherit }
-    fn root_default() -> Self { Self::TwoWay }
+    fn root_default() -> Self { Self::DoNotSync }
 }
 
 impl InheritableSetting for GalleryInclude {
