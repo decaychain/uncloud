@@ -11,6 +11,7 @@ use tauri::{
 };
 use tauri::{AppHandle, Manager, State};
 use tauri::async_runtime;
+use tauri_plugin_dialog::DialogExt;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info};
 use uncloud_client::Client;
@@ -230,6 +231,20 @@ async fn set_folder_strategy(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folder(move |folder_path| {
+        let _ = tx.send(folder_path.map(|p| p.to_string()));
+    });
+    rx.await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn default_sync_folder() -> Option<String> {
+    dirs::home_dir().map(|h| h.join("Uncloud").to_string_lossy().to_string())
+}
+
 // ── Polling scheduler ─────────────────────────────────────────────────────────
 
 fn start_poll_loop(
@@ -304,6 +319,7 @@ pub fn run() {
     let status_arc = state.status.clone();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .setup(move |app| {
             // Auto-login from persisted config if one exists.
@@ -412,6 +428,8 @@ pub fn run() {
             disconnect,
             sync_now,
             set_folder_strategy,
+            pick_folder,
+            default_sync_folder,
         ])
         .build(tauri::generate_context!())
         .expect("error building Tauri application")

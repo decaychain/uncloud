@@ -22,6 +22,20 @@ pub fn Setup() -> Element {
     let mut search_enabled = use_context::<Signal<bool>>();
     let is_android = tauri::is_android();
 
+    // Pre-fill the sync folder with a platform-appropriate default on desktop.
+    let is_android_val = is_android;
+    use_effect(move || {
+        if !is_android_val {
+            spawn(async move {
+                if let Some(default) = tauri::default_sync_folder().await {
+                    if root_path.peek().is_empty() {
+                        root_path.set(default);
+                    }
+                }
+            });
+        }
+    });
+
     let on_submit = move |evt: Event<FormData>| {
         evt.prevent_default();
         let server = server_url();
@@ -32,6 +46,12 @@ pub fn Setup() -> Element {
         spawn(async move {
             loading.set(true);
             error.set(None);
+
+            if !is_android && path.is_empty() {
+                error.set(Some("Please select a sync folder".to_string()));
+                loading.set(false);
+                return;
+            }
 
             // Seed the API base so subsequent web requests go to the right server.
             api::seed_api_base(server.clone());
@@ -138,14 +158,27 @@ pub fn Setup() -> Element {
                                 label { class: "label", r#for: "root-path",
                                     span { class: "label-text", "Local sync folder" }
                                 }
-                                input {
-                                    class: "input input-bordered w-full",
-                                    r#type: "text",
-                                    id: "root-path",
-                                    placeholder: "/home/user/Uncloud",
-                                    value: "{root_path}",
-                                    oninput: move |evt| root_path.set(evt.value()),
-                                    required: true,
+                                div { class: "join w-full",
+                                    input {
+                                        class: "input input-bordered join-item flex-1",
+                                        r#type: "text",
+                                        id: "root-path",
+                                        readonly: true,
+                                        value: "{root_path}",
+                                        placeholder: "Select a folder\u{2026}",
+                                    }
+                                    button {
+                                        class: "btn btn-neutral join-item",
+                                        r#type: "button",
+                                        onclick: move |_| {
+                                            spawn(async move {
+                                                if let Some(path) = tauri::pick_folder().await {
+                                                    root_path.set(path);
+                                                }
+                                            });
+                                        },
+                                        "Browse\u{2026}"
+                                    }
                                 }
                                 label { class: "label",
                                     span { class: "label-text-alt text-base-content/50",

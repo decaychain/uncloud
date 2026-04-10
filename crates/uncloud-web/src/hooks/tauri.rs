@@ -143,3 +143,20 @@ pub async fn sync_now() -> Result<(), String> {
     let args = Object::new();
     invoke_raw("sync_now", &args).await.map(|_| ())
 }
+
+/// Opens a native folder picker dialog. Returns the selected path or None if cancelled.
+pub async fn pick_folder() -> Option<String> {
+    let args = Object::new();
+    let result = invoke_raw("pick_folder", &args).await.ok()?;
+    if result.is_null() || result.is_undefined() {
+        return None;
+    }
+    result.as_string()
+}
+
+/// Returns the platform-appropriate default sync folder (e.g. ~/Uncloud).
+pub async fn default_sync_folder() -> Option<String> {
+    let args = Object::new();
+    let result = invoke_raw("default_sync_folder", &args).await.ok()?;
+    result.as_string()
+}
