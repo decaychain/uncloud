@@ -161,24 +161,48 @@ pub async fn default_sync_folder() -> Option<String> {
     result.as_string()
 }
 
-/// Fetch the locally-stored sync config for a folder from the desktop journal.
-/// Returns `(strategy_string, local_path)` where `local_path` may be a native
-/// filesystem path (desktop) or a SAF content URI (Android).
-pub async fn get_folder_sync_config(folder_id: &str) -> Option<(String, Option<String>)> {
+/// Per-folder effective sync config, resolved across all layers:
+/// per-device override, server effective strategy, inherited local base path.
+#[derive(Debug, Clone)]
+pub struct FolderEffectiveConfig {
+    pub client_strategy: Option<String>,
+    pub effective_strategy: String,
+    pub base_path: Option<String>,
+    pub base_source: String,
+    pub base_source_folder_id: Option<String>,
+}
+
+/// Fetch the resolved per-folder sync config from the desktop journal + server.
+pub async fn get_folder_effective_config(folder_id: &str) -> Option<FolderEffectiveConfig> {
     let args = Object::new();
     let _ = Reflect::set(&args, &JsValue::from_str("folderId"), &JsValue::from_str(folder_id));
-    let result = invoke_raw("get_folder_sync_config", &args).await.ok()?;
+    let result = invoke_raw("get_folder_effective_config", &args).await.ok()?;
     if result.is_null() || result.is_undefined() {
         return None;
     }
-    // Tauri serializes the Rust tuple as a JS array: [strategy, local_path].
-    let arr = js_sys::Array::from(&result);
-    if arr.length() == 0 {
-        return None;
-    }
-    let strategy = arr.get(0).as_string()?;
-    let local_path = arr.get(1).as_string();
-    Some((strategy, local_path))
+    let client_strategy = Reflect::get(&result, &JsValue::from_str("client_strategy"))
+        .ok()
+        .and_then(|v| v.as_string());
+    let effective_strategy = Reflect::get(&result, &JsValue::from_str("effective_strategy"))
+        .ok()?
+        .as_string()?;
+    let base_path = Reflect::get(&result, &JsValue::from_str("base_path"))
+        .ok()
+        .and_then(|v| v.as_string());
+    let base_source = Reflect::get(&result, &JsValue::from_str("base_source"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .unwrap_or_else(|| "none".to_string());
+    let base_source_folder_id = Reflect::get(&result, &JsValue::from_str("base_source_folder_id"))
+        .ok()
+        .and_then(|v| v.as_string());
+    Some(FolderEffectiveConfig {
+        client_strategy,
+        effective_strategy,
+        base_path,
+        base_source,
+        base_source_folder_id,
+    })
 }
 
 /// Convert a stored local path (native filesystem path or Android SAF
@@ -230,14 +254,26 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
-/// Set the sync strategy and optional local path for a folder via the desktop sync engine.
-pub async fn set_folder_strategy(folder_id: &str, strategy: &str, local_path: Option<&str>) -> Result<(), String> {
+/// Write (or clear) the per-device strategy override for a folder.
+/// Pass `None` to clear the override (use server default).
+pub async fn set_folder_local_strategy(folder_id: &str, strategy: Option<&str>) -> Result<(), String> {
     let args = Object::new();
     let _ = Reflect::set(&args, &JsValue::from_str("folderId"), &JsValue::from_str(folder_id));
-    let _ = Reflect::set(&args, &JsValue::from_str("strategy"), &JsValue::from_str(strategy));
+    match strategy {
+        Some(s) => { let _ = Reflect::set(&args, &JsValue::from_str("strategy"), &JsValue::from_str(s)); }
+        None => { let _ = Reflect::set(&args, &JsValue::from_str("strategy"), &JsValue::NULL); }
+    }
+    invoke_raw("set_folder_local_strategy", &args).await.map(|_| ())
+}
+
+/// Write (or clear) the per-device local path override for a folder.
+/// Pass `None` to clear the override (inherit from ancestor or client root).
+pub async fn set_folder_local_path(folder_id: &str, local_path: Option<&str>) -> Result<(), String> {
+    let args = Object::new();
+    let _ = Reflect::set(&args, &JsValue::from_str("folderId"), &JsValue::from_str(folder_id));
     match local_path {
         Some(p) => { let _ = Reflect::set(&args, &JsValue::from_str("localPath"), &JsValue::from_str(p)); }
         None => { let _ = Reflect::set(&args, &JsValue::from_str("localPath"), &JsValue::NULL); }
     }
-    invoke_raw("set_folder_strategy", &args).await.map(|_| ())
+    invoke_raw("set_folder_local_path", &args).await.map(|_| ())
 }

@@ -18,7 +18,10 @@ use tauri_plugin_android_fs::AndroidFsExt;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info};
 use uncloud_client::Client;
-use uncloud_sync::{SyncEngine, SyncReport};
+use uncloud_sync::{BaseSource, SyncEngine, SyncReport};
+
+#[cfg(mobile)]
+mod android_fs;
 
 // ── App state ─────────────────────────────────────────────────────────────────
 
@@ -53,22 +56,38 @@ pub struct SyncConfigDto {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SyncErrorDto {
+    pub path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SyncReportDto {
     pub uploaded: Vec<String>,
     pub downloaded: Vec<String>,
     pub deleted_local: Vec<String>,
     pub conflict_count: usize,
     pub error_count: usize,
+    pub errors: Vec<SyncErrorDto>,
 }
 
 impl From<SyncReport> for SyncReportDto {
     fn from(r: SyncReport) -> Self {
+        let errors = r
+            .errors
+            .iter()
+            .map(|e| SyncErrorDto {
+                path: e.path.clone(),
+                reason: e.reason.clone(),
+            })
+            .collect();
         SyncReportDto {
             conflict_count: r.conflicts.len(),
             error_count: r.errors.len(),
             uploaded: r.uploaded,
             downloaded: r.downloaded,
             deleted_local: r.deleted_local,
+            errors,
         }
     }
 }
@@ -127,6 +146,26 @@ fn clear_config(app: &AppHandle) {
     }
 }
 
+/// Build a [`SyncEngine`] with the platform-appropriate [`LocalFs`] backend:
+/// [`uncloud_sync::NativeFs`] on desktop, `AndroidSafFs` on mobile.
+async fn build_engine(
+    app: &AppHandle,
+    db_path: &std::path::Path,
+    client: Arc<Client>,
+    effective_root: Option<String>,
+) -> Result<SyncEngine, Box<dyn std::error::Error>> {
+    #[cfg(mobile)]
+    {
+        let fs = Arc::new(android_fs::AndroidSafFs::new(app.clone()));
+        SyncEngine::with_fs(db_path, client, fs, effective_root).await
+    }
+    #[cfg(desktop)]
+    {
+        let _ = app;
+        SyncEngine::new(db_path, client, effective_root).await
+    }
+}
+
 // ── Tauri commands ────────────────────────────────────────────────────────────
 
 /// Ensure the sync engine is initialized. If not, try to load persisted config
@@ -150,16 +189,14 @@ async fn ensure_engine(
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let effective_root = if cfg.root_path.is_empty() {
-        app.path()
-            .app_data_dir()
-            .map_err(|e| format!("Cannot determine app data dir: {e}"))?
-            .join("sync-root")
+    let effective_root: Option<String> = if cfg.root_path.is_empty() {
+        None
     } else {
-        PathBuf::from(&cfg.root_path)
+        let p = PathBuf::from(&cfg.root_path);
+        let _ = std::fs::create_dir_all(&p);
+        Some(cfg.root_path.clone())
     };
-    let _ = std::fs::create_dir_all(&effective_root);
-    let engine = SyncEngine::new(&db_path, client.clone(), effective_root)
+    let engine = build_engine(app, &db_path, client.clone(), effective_root)
         .await
         .map_err(|e| {
             let msg = format!("Sync engine init failed: {e}");
@@ -181,25 +218,55 @@ async fn get_status(state: State<'_, DesktopState>) -> Result<SyncStatus, String
     Ok(state.status.lock().await.clone())
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct FolderEffectiveConfigDto {
+    /// Per-device client strategy override, snake_case (e.g. "two_way"), or None.
+    pub client_strategy: Option<String>,
+    /// Server-resolved effective strategy (shared across clients), snake_case.
+    pub effective_strategy: String,
+    /// Resolved local base path for this folder's contents, or None.
+    pub base_path: Option<String>,
+    /// Where `base_path` came from: "self" / "ancestor" / "client_root" / "none".
+    pub base_source: String,
+    /// Ancestor folder id when `base_source == "ancestor"`; otherwise None.
+    pub base_source_folder_id: Option<String>,
+}
+
+fn strategy_to_snake(s: uncloud_common::SyncStrategy) -> String {
+    serde_json::to_string(&s)
+        .unwrap_or_else(|_| "\"inherit\"".to_string())
+        .trim_matches('"')
+        .to_owned()
+}
+
+fn strategy_from_snake(s: &str) -> Result<uncloud_common::SyncStrategy, String> {
+    serde_json::from_str(&format!("\"{}\"", s)).map_err(|e| format!("Invalid strategy: {}", e))
+}
+
 #[tauri::command]
-async fn get_folder_sync_config(
+async fn get_folder_effective_config(
     app: AppHandle,
     state: State<'_, DesktopState>,
     folder_id: String,
-) -> Result<Option<(String, Option<String>)>, String> {
+) -> Result<FolderEffectiveConfigDto, String> {
     let engine = ensure_engine(&app, &state).await?;
-    let Some((strategy, local_path)) = engine
-        .get_folder_sync_config(&folder_id)
+    let cfg = engine
+        .get_folder_effective_config(&folder_id)
         .await
-        .map_err(|e| e.to_string())?
-    else {
-        return Ok(None);
+        .map_err(|e| e.to_string())?;
+
+    let base_source_folder_id = match &cfg.base_source {
+        BaseSource::Ancestor(id) => Some(id.clone()),
+        _ => None,
     };
-    let strategy_str = serde_json::to_string(&strategy)
-        .map_err(|e| e.to_string())?
-        .trim_matches('"')
-        .to_owned();
-    Ok(Some((strategy_str, local_path)))
+
+    Ok(FolderEffectiveConfigDto {
+        client_strategy: cfg.client_strategy.map(strategy_to_snake),
+        effective_strategy: strategy_to_snake(cfg.effective_strategy),
+        base_path: cfg.base_path,
+        base_source: cfg.base_source.as_str().to_string(),
+        base_source_folder_id,
+    })
 }
 
 #[tauri::command]
@@ -222,18 +289,21 @@ async fn login(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    // On Android (empty root_path), use the app data dir as a placeholder root.
-    // Per-folder sync paths override this; the root itself won't sync because
-    // the server default strategy is DoNotSync.
-    let effective_root = if root_path.is_empty() {
-        app.path().app_data_dir()
-            .map_err(|e| format!("Cannot determine app data dir: {e}"))?
-            .join("sync-root")
+    // Desktop requires a root path (enforced at the setup UI). Mobile passes
+    // an empty string — there is no global sync root on Android, only
+    // per-folder picks.
+    #[cfg(desktop)]
+    if root_path.is_empty() {
+        return Err("A sync folder is required on desktop".to_string());
+    }
+
+    let effective_root: Option<String> = if root_path.is_empty() {
+        None
     } else {
-        PathBuf::from(&root_path)
+        Some(root_path.clone())
     };
 
-    let engine = SyncEngine::new(&db_path, client.clone(), effective_root)
+    let engine = build_engine(&app, &db_path, client.clone(), effective_root)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -278,6 +348,17 @@ async fn sync_now(app: AppHandle, state: State<'_, DesktopState>) -> Result<Sync
     let result = engine.incremental_sync().await.map_err(|e| e.to_string());
     match result {
         Ok(report) => {
+            eprintln!(
+                "[uncloud-desktop] sync report: uploaded={} downloaded={} deleted_local={} conflicts={} errors={}",
+                report.uploaded.len(),
+                report.downloaded.len(),
+                report.deleted_local.len(),
+                report.conflicts.len(),
+                report.errors.len(),
+            );
+            for err in &report.errors {
+                eprintln!("[uncloud-desktop] sync error: {} — {}", err.path, err.reason);
+            }
             *state.status.lock().await = SyncStatus::Idle {
                 last_sync: Utc::now().to_rfc3339(),
             };
@@ -293,24 +374,33 @@ async fn sync_now(app: AppHandle, state: State<'_, DesktopState>) -> Result<Sync
 }
 
 #[tauri::command]
-async fn set_folder_strategy(
+async fn set_folder_local_strategy(
     app: AppHandle,
     state: State<'_, DesktopState>,
     folder_id: String,
-    strategy: String,
-    local_path: Option<String>,
+    strategy: Option<String>,
 ) -> Result<(), String> {
-    let strategy: uncloud_common::SyncStrategy =
-        serde_json::from_str(&format!("\"{}\"", strategy))
-            .map_err(|e| format!("Invalid strategy: {}", e))?;
-
+    let strategy = match strategy {
+        Some(s) => Some(strategy_from_snake(&s)?),
+        None => None,
+    };
     let engine = ensure_engine(&app, &state).await?;
     engine
-        .set_folder_strategy(
-            &folder_id,
-            strategy,
-            local_path.as_deref().map(std::path::Path::new),
-        )
+        .set_folder_local_strategy(&folder_id, strategy)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_folder_local_path(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    folder_id: String,
+    local_path: Option<String>,
+) -> Result<(), String> {
+    let engine = ensure_engine(&app, &state).await?;
+    engine
+        .set_folder_local_path(&folder_id, local_path.as_deref())
         .await
         .map_err(|e| e.to_string())
 }
@@ -458,15 +548,12 @@ pub fn run() {
                                 Some(p) => { let _ = p.parent().map(std::fs::create_dir_all); p }
                                 None => { error!("Auto-login: cannot determine data directory"); return; }
                             };
-                            let effective_root = if cfg.root_path.is_empty() {
-                                match app_handle.path().app_data_dir() {
-                                    Ok(p) => p.join("sync-root"),
-                                    Err(_) => { error!("Auto-login: cannot determine app data dir"); return; }
-                                }
+                            let effective_root: Option<String> = if cfg.root_path.is_empty() {
+                                None
                             } else {
-                                PathBuf::from(&cfg.root_path)
+                                Some(cfg.root_path.clone())
                             };
-                            let engine_result = SyncEngine::new(&db, client.clone(), effective_root).await.map_err(|e| e.to_string());
+                            let engine_result = build_engine(&app_handle, &db, client.clone(), effective_root).await.map_err(|e| e.to_string());
                             match engine_result {
                                 Ok(engine) => {
                                     *client_arc.write().await = Some(client);
@@ -562,8 +649,9 @@ pub fn run() {
             login,
             disconnect,
             sync_now,
-            set_folder_strategy,
-            get_folder_sync_config,
+            set_folder_local_strategy,
+            set_folder_local_path,
+            get_folder_effective_config,
             pick_folder,
             default_sync_folder,
         ])

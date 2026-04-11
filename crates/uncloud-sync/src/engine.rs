@@ -1,7 +1,6 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 
 use chrono::{NaiveDate, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -9,6 +8,7 @@ use tracing::{info, warn};
 use uncloud_client::Client;
 use uncloud_common::SyncStrategy;
 
+use crate::fs::{LocalFs, NativeFs};
 use crate::journal::Journal;
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -35,19 +35,46 @@ pub struct SyncReport {
     pub errors: Vec<SyncError>,
 }
 
+// ── Internal resolved per-folder info ─────────────────────────────────────────
+
+/// Internal scratch struct produced by [`SyncEngine::resolve_folders`]. Each
+/// server folder is paired with the strategy that applies to it on *this*
+/// client and the local directory where its contents should live.
+#[derive(Debug, Clone)]
+struct ResolvedFolder {
+    strategy: SyncStrategy,
+    base_path: Option<String>,
+}
+
 // ── Engine ────────────────────────────────────────────────────────────────────
 
 pub struct SyncEngine {
     journal: Journal,
     client: Arc<Client>,
-    root_local_path: PathBuf,
+    fs: Arc<dyn LocalFs>,
+    /// Client-wide root path. `None` on mobile where there is no global sync
+    /// root — each picked folder carries its own `local_path` instead.
+    root_local_path: Option<String>,
 }
 
 impl SyncEngine {
+    /// Shorthand for desktop callers: opens the journal and wires a
+    /// [`NativeFs`] backend. Android callers use [`SyncEngine::with_fs`].
     pub async fn new(
         db_path: &Path,
         client: Arc<Client>,
-        root_local_path: PathBuf,
+        root_local_path: Option<String>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::with_fs(db_path, client, Arc::new(NativeFs::new()), root_local_path).await
+    }
+
+    /// Construct a [`SyncEngine`] with an explicit [`LocalFs`] backend. The
+    /// Android Tauri build uses this to wire a SAF-backed implementation.
+    pub async fn with_fs(
+        db_path: &Path,
+        client: Arc<Client>,
+        fs: Arc<dyn LocalFs>,
+        root_local_path: Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let opts = SqliteConnectOptions::new()
             .filename(db_path)
@@ -62,6 +89,7 @@ impl SyncEngine {
         Ok(Self {
             journal: Journal::new(pool),
             client,
+            fs,
             root_local_path,
         })
     }
@@ -80,8 +108,13 @@ impl SyncEngine {
         // 1. Fetch server tree
         let tree = self.client.sync_tree(None).await?;
 
-        // 2. Build local map: relative_path → mtime
-        let local_map = walk_local(&self.root_local_path);
+        // 2. Resolve (strategy, base_path) for every server folder. This layers
+        //    client journal overrides on top of the server's effective strategy
+        //    and walks up the parent chain to compute the local directory each
+        //    folder's contents live in. Folders with no resolvable base_path
+        //    (Android with no root and no ancestor override) are kept in the
+        //    map with `base_path = None` so subtree lookups still succeed.
+        let folder_info = self.resolve_folders(&tree.folders).await?;
 
         // 3. Load journal
         let journal_rows = self.journal.all().await?;
@@ -94,62 +127,80 @@ impl SyncEngine {
 
         // 4. Process server folders first (create local dirs)
         for folder in &tree.folders {
-            let eff = folder.effective_strategy;
-            if eff == SyncStrategy::DoNotSync {
+            let Some(info) = folder_info.get(&folder.id) else {
+                continue;
+            };
+            if info.strategy == SyncStrategy::DoNotSync {
+                continue;
+            }
+            let Some(base) = info.base_path.as_ref() else {
+                continue;
+            };
+
+            if let Err(e) = self.fs.create_dir_all(base).await {
+                report.errors.push(SyncError {
+                    path: folder.name.clone(),
+                    reason: e.to_string(),
+                });
                 continue;
             }
 
-            let local_dir = self.root_local_path.join(&folder.name);
-            let key = (folder.id.clone(), "folder".to_string());
-
-            if !local_dir.exists() {
-                if let Err(e) = tokio::fs::create_dir_all(&local_dir).await {
-                    report.errors.push(SyncError {
-                        path: folder.name.clone(),
-                        reason: e.to_string(),
-                    });
-                    continue;
-                }
-            }
-
-            let local_path_str = local_dir.to_string_lossy().into_owned();
-            let _ = self.journal.upsert(
-                &folder.id,
-                "folder",
-                &folder.name,
-                &local_path_str,
-                None,
-                None,
-                &folder.updated_at,
-                None,
-                "synced",
-            ).await;
-
-            let _ = key;
+            let _ = self
+                .journal
+                .upsert(
+                    &folder.id,
+                    "folder",
+                    &folder.name,
+                    base,
+                    None,
+                    None,
+                    &folder.updated_at,
+                    None,
+                    "synced",
+                )
+                .await;
         }
 
         // 5. Process server files
         for file in &tree.files {
             let key = (file.id.clone(), "file".to_string());
             let server_rel_path = &file.name;
-            let local_path = self.root_local_path.join(server_rel_path);
-            let local_path_str = local_path.to_string_lossy().into_owned();
 
-            // Determine effective strategy for this file (use parent folder's)
-            let strategy = self.file_strategy(&file.parent_id, &tree.folders);
+            // Determine effective strategy and local base for this file's parent.
+            let (strategy, parent_base) = match &file.parent_id {
+                None => (SyncStrategy::TwoWay, self.root_local_path.clone()),
+                Some(pid) => match folder_info.get(pid) {
+                    Some(info) => (info.strategy, info.base_path.clone()),
+                    None => continue,
+                },
+            };
             if strategy == SyncStrategy::DoNotSync {
                 continue;
             }
+            let Some(parent_base) = parent_base else {
+                // No resolvable local base — skip (Android subtree with no override).
+                continue;
+            };
 
-            let journal_entry = journal_map.get(&key);
+            let local_path_str = self.fs.join(&parent_base, server_rel_path);
+            let local_path = &local_path_str;
+
+            // If the journal thinks this file is synced but it no longer exists
+            // at the resolved local path, treat it as new. This catches root-path
+            // changes (stale journal rows pointing at an old root) and accidental
+            // local deletes.
+            let local_exists = self.fs.is_file(local_path).await.unwrap_or(false);
+            let journal_entry = journal_map
+                .get(&key)
+                .filter(|_| local_exists);
 
             match journal_entry {
                 None => {
                     // New on server → download if strategy allows
                     if strategy != SyncStrategy::ClientToServer {
-                        match self.client.download_file(&file.id, &local_path).await {
+                        match self.download_to(&file.id, local_path).await {
                             Ok(()) => {
-                                let mtime = file_mtime(&local_path);
+                                let mtime = self.fs.mtime(local_path).await.ok().flatten();
                                 let _ = self.journal.upsert(
                                     &file.id, "file",
                                     server_rel_path, &local_path_str,
@@ -160,29 +211,34 @@ impl SyncEngine {
                             }
                             Err(e) => report.errors.push(SyncError {
                                 path: server_rel_path.clone(),
-                                reason: e.to_string(),
+                                reason: e,
                             }),
                         }
                     }
                 }
                 Some(j) => {
                     let server_newer = file.updated_at > j.server_updated_at;
-                    let local_mtime = file_mtime(&local_path);
+                    let local_mtime = self.fs.mtime(local_path).await.ok().flatten();
                     let local_newer = local_mtime
                         .zip(j.local_mtime)
                         .map(|(lm, jm)| lm > jm)
                         .unwrap_or(false);
 
                     if server_newer && local_newer {
-                        // CONFLICT: keep both
-                        let conflict_name = conflict_name(server_rel_path, today);
-                        let conflict_path = self.root_local_path.join(&conflict_name);
-                        if let Err(e) = tokio::fs::copy(&local_path, &conflict_path).await {
-                            warn!("Could not create conflict copy: {}", e);
+                        // CONFLICT: copy current local aside, then pull server version.
+                        let conflict_rel = conflict_name(server_rel_path, today);
+                        let conflict_path = self.fs.join(&parent_base, &conflict_rel);
+                        match self.fs.read(local_path).await {
+                            Ok(cur) => {
+                                if let Err(e) = self.fs.write(&conflict_path, &cur).await {
+                                    warn!("Could not create conflict copy: {}", e);
+                                }
+                            }
+                            Err(e) => warn!("Could not read local for conflict copy: {}", e),
                         }
-                        match self.client.download_file(&file.id, &local_path).await {
+                        match self.download_to(&file.id, local_path).await {
                             Ok(()) => {
-                                let new_mtime = file_mtime(&local_path);
+                                let new_mtime = self.fs.mtime(local_path).await.ok().flatten();
                                 let _ = self.journal.upsert(
                                     &file.id, "file",
                                     server_rel_path, &local_path_str,
@@ -192,20 +248,20 @@ impl SyncEngine {
                                 report.conflicts.push(SyncConflict {
                                     server_path: server_rel_path.clone(),
                                     local_path: local_path_str.clone(),
-                                    conflict_copy: conflict_path.to_string_lossy().into_owned(),
+                                    conflict_copy: conflict_path,
                                 });
                             }
                             Err(e) => report.errors.push(SyncError {
                                 path: server_rel_path.clone(),
-                                reason: e.to_string(),
+                                reason: e,
                             }),
                         }
                     } else if server_newer {
                         // Server changed only → download
                         if strategy != SyncStrategy::ClientToServer {
-                            match self.client.download_file(&file.id, &local_path).await {
+                            match self.download_to(&file.id, local_path).await {
                                 Ok(()) => {
-                                    let new_mtime = file_mtime(&local_path);
+                                    let new_mtime = self.fs.mtime(local_path).await.ok().flatten();
                                     let _ = self.journal.upsert(
                                         &file.id, "file",
                                         server_rel_path, &local_path_str,
@@ -216,14 +272,14 @@ impl SyncEngine {
                                 }
                                 Err(e) => report.errors.push(SyncError {
                                     path: server_rel_path.clone(),
-                                    reason: e.to_string(),
+                                    reason: e,
                                 }),
                             }
                         }
                     } else if local_newer {
                         // Local changed only → update existing server file if strategy allows.
-                        // We use update_file_content (not upload_file) so the server ID stays
-                        // the same and the old blob is archived as a version.
+                        // We use update_file_content_bytes (not upload_bytes) so the server ID
+                        // stays the same and the old blob is archived as a version.
                         let can_upload = matches!(
                             strategy,
                             SyncStrategy::TwoWay
@@ -231,9 +287,9 @@ impl SyncEngine {
                                 | SyncStrategy::UploadOnly
                         );
                         if can_upload {
-                            match self.client.update_file_content(&file.id, &local_path).await {
+                            match self.upload_update(&file.id, server_rel_path, local_path).await {
                                 Ok(updated) => {
-                                    let new_mtime = file_mtime(&local_path);
+                                    let new_mtime = self.fs.mtime(local_path).await.ok().flatten();
                                     let _ = self.journal.upsert(
                                         &updated.id, "file",
                                         server_rel_path, &local_path_str,
@@ -244,7 +300,7 @@ impl SyncEngine {
                                 }
                                 Err(e) => report.errors.push(SyncError {
                                     path: server_rel_path.clone(),
-                                    reason: e.to_string(),
+                                    reason: e,
                                 }),
                             }
                         }
@@ -264,63 +320,131 @@ impl SyncEngine {
             }
             if !server_file_ids.contains(j.server_id.as_str()) {
                 // Server deleted this file
-                let local = Path::new(&j.local_path);
                 let strategy = SyncStrategy::TwoWay; // default; ideally look up parent folder
                 if matches!(strategy, SyncStrategy::TwoWay | SyncStrategy::ServerToClient) {
-                    if local.exists() {
-                        if let Err(e) = tokio::fs::remove_file(local).await {
-                            report.errors.push(SyncError {
-                                path: j.server_path.clone(),
-                                reason: e.to_string(),
-                            });
-                        } else {
-                            report.deleted_local.push(j.server_path.clone());
-                        }
+                    match self.fs.remove_file(&j.local_path).await {
+                        Ok(()) => report.deleted_local.push(j.server_path.clone()),
+                        Err(e) => report.errors.push(SyncError {
+                            path: j.server_path.clone(),
+                            reason: e.to_string(),
+                        }),
                     }
                 }
                 let _ = self.journal.delete(&j.server_id, "file").await;
             }
         }
 
-        // 7. Handle new local files not in journal
-        for (rel_path, mtime) in &local_map {
-            let full_path = self.root_local_path.join(rel_path);
-            if !full_path.is_file() {
-                continue;
-            }
-            // Check if any journal entry matches this local_path
-            let already_tracked = journal_map.values().any(|j| {
-                j.item_type == "file" && j.local_path == full_path.to_string_lossy().as_ref()
-            });
-            if !already_tracked {
-                // New local file → upload if strategy allows
-                let strategy = SyncStrategy::TwoWay;
+        // 7. Handle new local files not in journal.
+        //
+        // We walk `root_local_path` (if set) and then determine which server
+        // folder each discovered file logically belongs to, by longest-prefix
+        // matching the file's absolute path against the resolved `base_path`
+        // of each synced folder. Files sitting directly at the client root map
+        // to `parent_id = None`. Files inside a subdirectory that does not
+        // correspond to any known server folder are skipped — they cannot yet
+        // be uploaded because we do not create server folders from the client.
+        if let Some(root) = self.root_local_path.as_ref() {
+            // Build a descending-length index of (base_path, folder_id, strategy).
+            let mut bases: Vec<(String, String, SyncStrategy)> = folder_info
+                .iter()
+                .filter_map(|(id, info)| {
+                    info.base_path
+                        .as_ref()
+                        .map(|p| (p.clone(), id.clone(), info.strategy))
+                })
+                .collect();
+            bases.sort_by_key(|(p, _, _)| std::cmp::Reverse(p.len()));
+
+            let local_entries = self.fs.walk(root).await?;
+
+            for entry in local_entries {
+                let full_path = self.fs.join(root, &entry.rel_path);
+                if !self.fs.is_file(&full_path).await.unwrap_or(false) {
+                    continue;
+                }
+                let already_tracked = journal_map
+                    .values()
+                    .any(|j| j.item_type == "file" && j.local_path == full_path);
+                if already_tracked {
+                    continue;
+                }
+
+                // Longest-prefix match against folder bases. Parent is the
+                // folder whose base path directly contains this file (no
+                // further subdir). If nothing matches, fall back to the
+                // client root (parent_id = None).
+                let mut matched_parent: Option<(String, SyncStrategy)> = None;
+                for (base, fid, strat) in &bases {
+                    if let Some(rest) = full_path.strip_prefix(base.as_str()) {
+                        let rest = rest.strip_prefix('/').unwrap_or(rest);
+                        if !rest.is_empty() && !rest.contains('/') && !rest.contains('\\') {
+                            matched_parent = Some((fid.clone(), *strat));
+                            break;
+                        }
+                    }
+                }
+
+                let (parent_id, strategy) = match matched_parent {
+                    Some((fid, s)) => (Some(fid), s),
+                    None => {
+                        // No folder base matched. The file must sit directly at
+                        // the client root to be uploadable here.
+                        if entry.rel_path.contains('/') || entry.rel_path.contains('\\') {
+                            continue;
+                        }
+                        (None, SyncStrategy::TwoWay)
+                    }
+                };
+
                 let can_upload = matches!(
                     strategy,
                     SyncStrategy::TwoWay
                         | SyncStrategy::ClientToServer
                         | SyncStrategy::UploadOnly
                 );
-                if can_upload {
-                    match self.client.upload_file(&full_path, None).await {
+                if !can_upload {
+                    continue;
+                }
+
+                let file_name = entry
+                    .rel_path
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(&entry.rel_path)
+                    .to_owned();
+
+                match self.fs.read(&full_path).await {
+                    Ok(bytes) => match self
+                        .client
+                        .upload_bytes(&file_name, bytes, parent_id.as_deref())
+                        .await
+                    {
                         Ok(new_file) => {
-                            let _ = self.journal.upsert(
-                                &new_file.id, "file",
-                                rel_path,
-                                &full_path.to_string_lossy(),
-                                Some(new_file.size_bytes),
-                                None,
-                                &new_file.updated_at,
-                                Some(*mtime),
-                                "synced",
-                            ).await;
-                            report.uploaded.push(rel_path.clone());
+                            let _ = self
+                                .journal
+                                .upsert(
+                                    &new_file.id,
+                                    "file",
+                                    &file_name,
+                                    &full_path,
+                                    Some(new_file.size_bytes),
+                                    None,
+                                    &new_file.updated_at,
+                                    Some(entry.mtime),
+                                    "synced",
+                                )
+                                .await;
+                            report.uploaded.push(file_name);
                         }
                         Err(e) => report.errors.push(SyncError {
-                            path: rel_path.clone(),
+                            path: entry.rel_path.clone(),
                             reason: e.to_string(),
                         }),
-                    }
+                    },
+                    Err(e) => report.errors.push(SyncError {
+                        path: entry.rel_path.clone(),
+                        reason: e.to_string(),
+                    }),
                 }
             }
         }
@@ -338,101 +462,293 @@ impl SyncEngine {
         Ok(report)
     }
 
-    /// Resolve effective strategy for a file using its parent folder's info.
-    fn file_strategy(
+    /// Download file `id` from the server and write it to `path` via the
+    /// configured [`LocalFs`] backend.
+    async fn download_to(&self, id: &str, path: &str) -> Result<(), String> {
+        let bytes = self
+            .client
+            .download_file_bytes(id)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.fs
+            .write(path, &bytes)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Read `path` via the configured [`LocalFs`] and upload the bytes as a
+    /// new version of the server-side file `id`.
+    async fn upload_update(
         &self,
-        parent_id: &Option<String>,
+        id: &str,
+        server_rel_path: &str,
+        path: &str,
+    ) -> Result<uncloud_common::FileResponse, String> {
+        let bytes = self.fs.read(path).await.map_err(|e| e.to_string())?;
+        let file_name = server_rel_path
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(server_rel_path);
+        self.client
+            .update_file_content_bytes(id, file_name, bytes)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Resolve `(strategy, base_path)` for every folder in the server tree.
+    ///
+    /// **Strategy** layers client journal overrides on top of the server's
+    /// effective strategy: if the folder itself or any ancestor has an
+    /// explicit client-side strategy override, that wins; otherwise the
+    /// server's precomputed `effective_strategy` is used.
+    ///
+    /// **Base path** walks the parent chain from the folder itself upwards.
+    /// The nearest ancestor with a client-side `local_path` override anchors
+    /// the subtree, and the walked subpath is joined onto it. If no ancestor
+    /// has an override, `root_local_path` (if set) is used as the anchor. A
+    /// folder with no resolvable anchor (Android fresh install, no root, no
+    /// overrides anywhere in the chain) ends up with `base_path = None` and
+    /// is skipped during sync.
+    async fn resolve_folders(
+        &self,
         folders: &[uncloud_common::FolderResponse],
-    ) -> SyncStrategy {
-        let Some(pid) = parent_id else {
-            return SyncStrategy::TwoWay;
-        };
-        folders
-            .iter()
-            .find(|f| &f.id == pid)
-            .map(|f| f.effective_strategy)
-            .unwrap_or(SyncStrategy::TwoWay)
+    ) -> Result<HashMap<String, ResolvedFolder>, Box<dyn std::error::Error>> {
+        // Pull all journal overrides in one pass.
+        let mut overrides: HashMap<String, (Option<SyncStrategy>, Option<String>)> =
+            HashMap::new();
+        for f in folders {
+            if let Some((s_opt, p_opt)) = self.journal.get_folder_sync_config(&f.id).await? {
+                let strat = match s_opt {
+                    Some(s) => serde_json::from_str::<SyncStrategy>(&format!("\"{}\"", s)).ok(),
+                    None => None,
+                };
+                overrides.insert(f.id.clone(), (strat, p_opt));
+            }
+        }
+
+        let by_id: HashMap<&str, &uncloud_common::FolderResponse> =
+            folders.iter().map(|f| (f.id.as_str(), f)).collect();
+
+        let mut result: HashMap<String, ResolvedFolder> = HashMap::new();
+
+        for folder in folders {
+            // Strategy: nearest client override on the chain, else server effective.
+            let strategy = {
+                let mut current: Option<&uncloud_common::FolderResponse> = Some(folder);
+                let mut found: Option<SyncStrategy> = None;
+                while let Some(f) = current {
+                    if let Some((Some(s), _)) = overrides.get(&f.id) {
+                        found = Some(*s);
+                        break;
+                    }
+                    current = f
+                        .parent_id
+                        .as_deref()
+                        .and_then(|pid| by_id.get(pid).copied());
+                }
+                found.unwrap_or(folder.effective_strategy)
+            };
+
+            // Base path: nearest ancestor (including self) with a local_path
+            // override, joined with the relative subpath walked over from
+            // there; else client root + full relative path; else None.
+            let base_path = {
+                let mut stack: Vec<&str> = Vec::new();
+                let mut current: Option<&uncloud_common::FolderResponse> = Some(folder);
+                let mut resolved: Option<String> = None;
+                loop {
+                    let Some(f) = current else { break };
+                    if let Some((_, Some(p))) = overrides.get(&f.id) {
+                        let mut base = p.clone();
+                        for name in stack.iter().rev() {
+                            base = self.fs.join(&base, name);
+                        }
+                        resolved = Some(base);
+                        break;
+                    }
+                    stack.push(&f.name);
+                    current = f
+                        .parent_id
+                        .as_deref()
+                        .and_then(|pid| by_id.get(pid).copied());
+                }
+                resolved.or_else(|| {
+                    let root = self.root_local_path.as_ref()?;
+                    let mut base = root.clone();
+                    for name in stack.iter().rev() {
+                        base = self.fs.join(&base, name);
+                    }
+                    Some(base)
+                })
+            };
+
+            result.insert(
+                folder.id.clone(),
+                ResolvedFolder {
+                    strategy,
+                    base_path,
+                },
+            );
+        }
+
+        Ok(result)
     }
 
-    /// Return the stored strategy + local path for a folder, if any.
-    pub async fn get_folder_sync_config(
+    /// Client-side override of the sync strategy for a folder. `None` means
+    /// "no override — use the server's effective strategy".
+    pub async fn get_folder_local_strategy(
         &self,
         folder_id: &str,
-    ) -> Result<Option<(SyncStrategy, Option<String>)>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<SyncStrategy>, Box<dyn std::error::Error>> {
         let row = self.journal.get_folder_sync_config(folder_id).await?;
-        let Some((strategy_str, local_path)) = row else { return Ok(None) };
-        let strategy: SyncStrategy =
-            serde_json::from_str(&format!("\"{}\"", strategy_str))?;
-        Ok(Some((strategy, local_path)))
+        let Some((strategy_opt, _)) = row else { return Ok(None) };
+        match strategy_opt {
+            Some(s) => Ok(Some(serde_json::from_str::<SyncStrategy>(&format!(
+                "\"{}\"",
+                s
+            ))?)),
+            None => Ok(None),
+        }
     }
 
-    /// Override the sync strategy for a folder on this client.
-    pub async fn set_folder_strategy(
+    /// Client-side override of the local base path for a folder. `None` means
+    /// "no override — inherit from ancestor or client root".
+    pub async fn get_folder_local_path(
         &self,
         folder_id: &str,
-        strategy: SyncStrategy,
-        local_path: Option<&Path>,
+    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        let row = self.journal.get_folder_sync_config(folder_id).await?;
+        Ok(row.and_then(|(_, p)| p))
+    }
+
+    /// Write (or clear) the client-side strategy override for a folder without
+    /// touching the stored local path.
+    pub async fn set_folder_local_strategy(
+        &self,
+        folder_id: &str,
+        strategy: Option<SyncStrategy>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let strategy_str = serde_json::to_string(&strategy)?
-            .trim_matches('"')
-            .to_owned();
+        let strategy_opt: Option<String> = match strategy {
+            None => None,
+            Some(s) => Some(serde_json::to_string(&s)?.trim_matches('"').to_owned()),
+        };
         self.journal
-            .set_folder_strategy(
-                folder_id,
-                &strategy_str,
-                local_path.map(|p| p.to_string_lossy()).as_deref(),
-            )
+            .set_folder_local_strategy(folder_id, strategy_opt.as_deref())
             .await?;
         Ok(())
     }
+
+    /// Write (or clear) the client-side local path override for a folder
+    /// without touching the stored strategy.
+    pub async fn set_folder_local_path(
+        &self,
+        folder_id: &str,
+        local_path: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.journal
+            .set_folder_local_path(folder_id, local_path)
+            .await?;
+        Ok(())
+    }
+
+    /// Resolve the full effective config for a folder:
+    /// - `client_strategy`: per-device override, if any
+    /// - `effective_strategy`: server's resolved strategy (all clients)
+    /// - `base_path` + `base_source`: where this folder's contents live locally
+    ///
+    /// Base path resolution walks the breadcrumb from the folder itself up
+    /// through its ancestors, stopping at the nearest journal `local_path`.
+    /// If no ancestor has an override, falls back to the client root (if set).
+    pub async fn get_folder_effective_config(
+        &self,
+        folder_id: &str,
+    ) -> Result<FolderEffectiveConfig, Box<dyn std::error::Error>> {
+        let client_strategy = self.get_folder_local_strategy(folder_id).await?;
+
+        let eff = self.client.get_effective_strategy(folder_id).await?;
+        let effective_strategy = eff.strategy;
+
+        // Walk breadcrumb from leaf → root, stopping at the first journal
+        // override. Breadcrumb is ordered root → leaf, so the leaf is last.
+        // Names passed AFTER the override (descendants we walked over) get
+        // joined onto the anchor so the final path points at the folder's
+        // own local directory, not the ancestor's.
+        let breadcrumb = self.client.get_folder_breadcrumb(folder_id).await?;
+        let mut base_path: Option<String> = None;
+        let mut base_source: BaseSource = BaseSource::None;
+
+        let mut descendant_names: Vec<&str> = Vec::new();
+        for (i, f) in breadcrumb.iter().enumerate().rev() {
+            if let Some(p) = self.get_folder_local_path(&f.id).await? {
+                let mut base = p;
+                for name in descendant_names.iter().rev() {
+                    base = self.fs.join(&base, name);
+                }
+                base_path = Some(base);
+                base_source = if i == breadcrumb.len() - 1 {
+                    BaseSource::SelfOverride
+                } else {
+                    BaseSource::Ancestor(f.id.clone())
+                };
+                break;
+            }
+            descendant_names.push(&f.name);
+        }
+
+        if base_path.is_none() {
+            if let Some(root) = self.root_local_path.as_ref() {
+                let mut base = root.clone();
+                for name in descendant_names.iter().rev() {
+                    base = self.fs.join(&base, name);
+                }
+                base_path = Some(base);
+                base_source = BaseSource::ClientRoot;
+            }
+        }
+
+        Ok(FolderEffectiveConfig {
+            client_strategy,
+            effective_strategy,
+            base_path,
+            base_source,
+        })
+    }
+}
+
+/// Where a resolved `base_path` originated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BaseSource {
+    /// Override set directly on the folder itself.
+    SelfOverride,
+    /// Inherited from an ancestor folder (holds the ancestor's id).
+    Ancestor(String),
+    /// Falling back to the client-wide root path.
+    ClientRoot,
+    /// No path available — folder has no ancestor override and client has no root.
+    None,
+}
+
+impl BaseSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BaseSource::SelfOverride => "self",
+            BaseSource::Ancestor(_) => "ancestor",
+            BaseSource::ClientRoot => "client_root",
+            BaseSource::None => "none",
+        }
+    }
+}
+
+/// Result of resolving all layers of per-folder sync config.
+#[derive(Debug, Clone)]
+pub struct FolderEffectiveConfig {
+    pub client_strategy: Option<SyncStrategy>,
+    pub effective_strategy: SyncStrategy,
+    pub base_path: Option<String>,
+    pub base_source: BaseSource,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Walk the local root and return a map of relative_path → mtime (Unix seconds).
-/// Filenames that must never be synced regardless of location.
-const EXCLUDED_NAMES: &[&str] = &[".uncloud-sync.db"];
-
-fn walk_local(root: &Path) -> HashMap<String, i64> {
-    let mut map = HashMap::new();
-    for entry in walkdir::WalkDir::new(root)
-        .min_depth(1)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let file_name = entry.file_name().to_string_lossy();
-        if EXCLUDED_NAMES.iter().any(|&n| file_name == n) {
-            continue;
-        }
-        let rel = entry
-            .path()
-            .strip_prefix(root)
-            .unwrap_or(entry.path())
-            .to_string_lossy()
-            .into_owned();
-        let mtime = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        map.insert(rel, mtime);
-    }
-    map
-}
-
-/// Return the mtime of a local file as Unix seconds, or `None` if unavailable.
-fn file_mtime(path: &Path) -> Option<i64> {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-}
 
 /// Generate the conflict-renamed copy filename.
 ///

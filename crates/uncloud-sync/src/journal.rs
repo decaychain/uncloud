@@ -183,21 +183,14 @@ impl Journal {
         Ok(())
     }
 
-    pub async fn get_folder_strategy(&self, folder_id: &str) -> sqlx::Result<Option<String>> {
-        let row: Option<(String,)> =
-            sqlx::query_as("SELECT strategy FROM folder_sync_config WHERE folder_id = ?")
-                .bind(folder_id)
-                .fetch_optional(&self.pool)
-                .await?;
-        Ok(row.map(|r| r.0))
-    }
-
-    /// Returns both the stored strategy and optional local path for a folder.
+    /// Returns the stored strategy and local path for a folder, if a row exists.
+    /// Both fields are independently nullable: `None` in either position means
+    /// "no client override" for that field.
     pub async fn get_folder_sync_config(
         &self,
         folder_id: &str,
-    ) -> sqlx::Result<Option<(String, Option<String>)>> {
-        let row: Option<(String, Option<String>)> = sqlx::query_as(
+    ) -> sqlx::Result<Option<(Option<String>, Option<String>)>> {
+        let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
             "SELECT strategy, local_path FROM folder_sync_config WHERE folder_id = ?",
         )
         .bind(folder_id)
@@ -206,25 +199,49 @@ impl Journal {
         Ok(row)
     }
 
-    pub async fn set_folder_strategy(
+    /// Set (or clear) the client-side strategy override for a folder without
+    /// touching the stored local path.
+    pub async fn set_folder_local_strategy(
         &self,
         folder_id: &str,
-        strategy: &str,
+        strategy: Option<&str>,
+    ) -> sqlx::Result<()> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            INSERT INTO folder_sync_config (folder_id, strategy, local_path, updated_at)
+            VALUES (?, ?, NULL, ?)
+            ON CONFLICT(folder_id) DO UPDATE SET
+                strategy   = excluded.strategy,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(folder_id)
+        .bind(strategy)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Set (or clear) the client-side local path override for a folder without
+    /// touching the stored strategy.
+    pub async fn set_folder_local_path(
+        &self,
+        folder_id: &str,
         local_path: Option<&str>,
     ) -> sqlx::Result<()> {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             r#"
             INSERT INTO folder_sync_config (folder_id, strategy, local_path, updated_at)
-            VALUES (?, ?, ?, ?)
+            VALUES (?, NULL, ?, ?)
             ON CONFLICT(folder_id) DO UPDATE SET
-                strategy   = excluded.strategy,
                 local_path = excluded.local_path,
                 updated_at = excluded.updated_at
             "#,
         )
         .bind(folder_id)
-        .bind(strategy)
         .bind(local_path)
         .bind(&now)
         .execute(&self.pool)

@@ -1414,44 +1414,50 @@ fn FolderSettingsModal(
     on_saved: EventHandler<()>,
 ) -> Element {
     let mut tab: Signal<&'static str> = use_signal(|| "sharing");
-    let mut sync_selected: Signal<SyncStrategy> = use_signal(|| sync_strategy);
+    // Server-side default (applies to all clients).
+    let mut server_selected: Signal<SyncStrategy> = use_signal(|| sync_strategy);
+    // Per-device override. Inherit means "use server default".
+    let mut device_selected: Signal<SyncStrategy> = use_signal(|| SyncStrategy::Inherit);
     // Raw local path (native path on desktop, SAF content:// URI on Android).
     let mut local_path: Signal<Option<String>> = use_signal(|| None);
+    // Where the resolved local path came from: "self" | "inherited" | "root" | "none".
+    let mut local_source: Signal<String> = use_signal(|| "none".to_string());
     let mut gallery_selected: Signal<GalleryInclude> = use_signal(|| gallery_include);
     let mut music_selected: Signal<MusicInclude> = use_signal(|| music_include);
     let is_tauri = crate::hooks::tauri::is_tauri();
     let mut effective_info: Signal<Option<EffectiveStrategyResponse>> = use_signal(|| None);
     let mut loading = use_signal(|| true);
-    let mut saving = use_signal(|| false);
+    let mut saving_server = use_signal(|| false);
+    let mut saving_local = use_signal(|| false);
+    let mut saving_gm = use_signal(|| false);
     let mut error: Signal<Option<String>> = use_signal(|| None);
 
-    let folder_id_for_save = folder_id.clone();
     let folder_id_for_sharing = folder_id.clone();
+    let folder_id_for_effect = folder_id.clone();
+    let folder_id_server = folder_id.clone();
+    let folder_id_local = folder_id.clone();
+    let folder_id_for_save = folder_id.clone();
 
     use_effect(move || {
-        let id = folder_id.clone();
+        let id = folder_id_for_effect.clone();
         spawn(async move {
             match use_files::get_effective_strategy(&id).await {
                 Ok(resp) => effective_info.set(Some(resp)),
                 Err(_) => {}
             }
-            // In Tauri, also load the per-folder sync config (strategy + local
-            // path) from the local journal so reopening the modal shows what
-            // the user previously selected.
             if is_tauri {
-                if let Some((strategy_str, stored_path)) =
-                    crate::hooks::tauri::get_folder_sync_config(&id).await
-                {
-                    let s = match strategy_str.as_str() {
-                        "two_way" => SyncStrategy::TwoWay,
-                        "client_to_server" => SyncStrategy::ClientToServer,
-                        "server_to_client" => SyncStrategy::ServerToClient,
-                        "upload_only" => SyncStrategy::UploadOnly,
-                        "do_not_sync" => SyncStrategy::DoNotSync,
+                if let Some(cfg) = crate::hooks::tauri::get_folder_effective_config(&id).await {
+                    let s = match cfg.client_strategy.as_deref() {
+                        Some("two_way") => SyncStrategy::TwoWay,
+                        Some("client_to_server") => SyncStrategy::ClientToServer,
+                        Some("server_to_client") => SyncStrategy::ServerToClient,
+                        Some("upload_only") => SyncStrategy::UploadOnly,
+                        Some("do_not_sync") => SyncStrategy::DoNotSync,
                         _ => SyncStrategy::Inherit,
                     };
-                    sync_selected.set(s);
-                    local_path.set(stored_path);
+                    device_selected.set(s);
+                    local_path.set(cfg.base_path);
+                    local_source.set(cfg.base_source);
                 }
             }
             loading.set(false);
@@ -1488,12 +1494,141 @@ fn FolderSettingsModal(
                             span { class: "loading loading-spinner loading-md" }
                         }
                     } else {
-                        div { class: "form-control mb-2",
-                            label { class: "label",
-                                span { class: "label-text font-medium", "Sync strategy" }
+                        // ── This device section (Tauri only) ──
+                        if is_tauri {
+                            div { class: "card card-compact bg-base-200 border border-base-300 mb-4",
+                                div { class: "card-body",
+                                h4 { class: "font-semibold text-sm mb-1", "This device" }
+                                p { class: "text-xs text-base-content/60 mb-2",
+                                    "Per-device override. Applies only on this device."
+                                }
+
+                                label { class: "label py-1",
+                                    span { class: "label-text text-sm", "Device strategy" }
+                                }
+                                select {
+                                    class: "select select-bordered select-sm w-full mb-2",
+                                    onchange: move |e| {
+                                        let s = match e.value().as_str() {
+                                            "two_way"          => SyncStrategy::TwoWay,
+                                            "client_to_server" => SyncStrategy::ClientToServer,
+                                            "server_to_client" => SyncStrategy::ServerToClient,
+                                            "upload_only"      => SyncStrategy::UploadOnly,
+                                            "do_not_sync"      => SyncStrategy::DoNotSync,
+                                            _                  => SyncStrategy::Inherit,
+                                        };
+                                        device_selected.set(s);
+                                    },
+                                    option { value: "inherit",          selected: device_selected() == SyncStrategy::Inherit,         "Use server default" }
+                                    option { value: "two_way",          selected: device_selected() == SyncStrategy::TwoWay,          "Two-way" }
+                                    option { value: "client_to_server", selected: device_selected() == SyncStrategy::ClientToServer,  "Client to server" }
+                                    option { value: "server_to_client", selected: device_selected() == SyncStrategy::ServerToClient,  "Server to client (read-only)" }
+                                    option { value: "upload_only",      selected: device_selected() == SyncStrategy::UploadOnly,      "Upload only" }
+                                    option { value: "do_not_sync",      selected: device_selected() == SyncStrategy::DoNotSync,       "Do not sync" }
+                                }
+
+                                label { class: "label py-1",
+                                    span { class: "label-text text-sm", "Local folder" }
+                                }
+                                p { class: "text-xs text-base-content/60 mb-1",
+                                    {match local_source().as_str() {
+                                        "self"        => "Override set on this folder.",
+                                        "ancestor"    => "Inherited from an ancestor folder.",
+                                        "client_root" => "Using the client root default.",
+                                        _             => "No local folder resolved \u{2014} this folder will not sync on this device.",
+                                    }}
+                                }
+                                div { class: "join w-full mb-2",
+                                    input {
+                                        class: "input input-bordered input-sm join-item flex-1",
+                                        r#type: "text",
+                                        readonly: true,
+                                        value: local_path()
+                                            .map(|p| crate::hooks::tauri::display_local_path(&p))
+                                            .unwrap_or_default(),
+                                        placeholder: "No folder selected\u{2026}",
+                                    }
+                                    button {
+                                        class: "btn btn-neutral btn-sm join-item",
+                                        r#type: "button",
+                                        onclick: move |_| {
+                                            spawn(async move {
+                                                if let Some(path) = crate::hooks::tauri::pick_folder().await {
+                                                    local_path.set(Some(path));
+                                                    local_source.set("self".to_string());
+                                                }
+                                            });
+                                        },
+                                        "Browse\u{2026}"
+                                    }
+                                }
+                                div { class: "flex gap-2",
+                                    button {
+                                        class: "btn btn-primary btn-sm",
+                                        r#type: "button",
+                                        disabled: saving_local(),
+                                        onclick: move |_| {
+                                            let fid = folder_id_local.clone();
+                                            let val = device_selected();
+                                            let path = local_path();
+                                            let is_explicit = local_source() == "self";
+                                            spawn(async move {
+                                                saving_local.set(true);
+                                                error.set(None);
+                                                let strategy_opt: Option<&str> = match val {
+                                                    SyncStrategy::Inherit          => None,
+                                                    SyncStrategy::TwoWay           => Some("two_way"),
+                                                    SyncStrategy::ClientToServer   => Some("client_to_server"),
+                                                    SyncStrategy::ServerToClient   => Some("server_to_client"),
+                                                    SyncStrategy::UploadOnly       => Some("upload_only"),
+                                                    SyncStrategy::DoNotSync        => Some("do_not_sync"),
+                                                };
+                                                let to_save = if is_explicit { path.as_deref() } else { None };
+                                                let strat_res = crate::hooks::tauri::set_folder_local_strategy(&fid, strategy_opt).await;
+                                                let path_res = crate::hooks::tauri::set_folder_local_path(&fid, to_save).await;
+                                                match strat_res.and(path_res) {
+                                                    Ok(_) => on_saved.call(()),
+                                                    Err(e) => error.set(Some(e)),
+                                                }
+                                                saving_local.set(false);
+                                            });
+                                        },
+                                        if saving_local() { span { class: "loading loading-spinner loading-xs mr-1" } }
+                                        "Save device settings"
+                                    }
+                                    if local_source() == "self" {
+                                        button {
+                                            class: "btn btn-ghost btn-sm",
+                                            r#type: "button",
+                                            disabled: saving_local(),
+                                            onclick: move |_| {
+                                                local_path.set(None);
+                                                local_source.set("none".to_string());
+                                            },
+                                            "Clear override"
+                                        }
+                                    }
+                                }
+                                }
+                            }
+                        }
+
+                        // ── Server default section ──
+                        div { class: "card card-compact bg-base-200 border border-base-300",
+                            div { class: "card-body",
+                            h4 { class: "font-semibold text-sm mb-1", "Server default" }
+                            p { class: "text-xs text-base-content/60 mb-2",
+                                "Applies to all clients syncing this folder."
+                            }
+                            if let Some(info) = effective_info() {
+                                p { class: "text-xs text-base-content/60 mb-2",
+                                    "Effective on server: "
+                                    span { class: "font-medium", "{strategy_label(info.strategy)}" }
+                                    if info.source_folder_id.is_some() { " (inherited from parent)" }
+                                }
                             }
                             select {
-                                class: "select select-bordered w-full",
+                                class: "select select-bordered select-sm w-full mb-2",
                                 onchange: move |e| {
                                     let s = match e.value().as_str() {
                                         "two_way"          => SyncStrategy::TwoWay,
@@ -1503,62 +1638,40 @@ fn FolderSettingsModal(
                                         "do_not_sync"      => SyncStrategy::DoNotSync,
                                         _                  => SyncStrategy::Inherit,
                                     };
-                                    sync_selected.set(s);
+                                    server_selected.set(s);
                                 },
-                                option { value: "inherit",          selected: sync_selected() == SyncStrategy::Inherit,          "Inherit (use parent's setting)" }
-                                option { value: "two_way",          selected: sync_selected() == SyncStrategy::TwoWay,           "Two-way" }
-                                option { value: "client_to_server", selected: sync_selected() == SyncStrategy::ClientToServer,   "Client to server" }
-                                option { value: "server_to_client", selected: sync_selected() == SyncStrategy::ServerToClient,   "Server to client (read-only)" }
-                                option { value: "upload_only",      selected: sync_selected() == SyncStrategy::UploadOnly,       "Upload only (phone gallery mode)" }
-                                option { value: "do_not_sync",      selected: sync_selected() == SyncStrategy::DoNotSync,        "Do not sync" }
+                                option { value: "inherit",          selected: server_selected() == SyncStrategy::Inherit,         "Inherit (use parent's setting)" }
+                                option { value: "two_way",          selected: server_selected() == SyncStrategy::TwoWay,          "Two-way" }
+                                option { value: "client_to_server", selected: server_selected() == SyncStrategy::ClientToServer,  "Client to server" }
+                                option { value: "server_to_client", selected: server_selected() == SyncStrategy::ServerToClient,  "Server to client (read-only)" }
+                                option { value: "upload_only",      selected: server_selected() == SyncStrategy::UploadOnly,      "Upload only (phone gallery mode)" }
+                                option { value: "do_not_sync",      selected: server_selected() == SyncStrategy::DoNotSync,       "Do not sync" }
                             }
-                        }
-
-                        if let Some(info) = effective_info() {
-                            p { class: "text-sm text-base-content/60 mb-2",
-                                "Effective: "
-                                span { class: "font-medium", "{strategy_label(info.strategy)}" }
-                                if info.source_folder_id.is_some() {
-                                    " (inherited from parent)"
-                                }
-                            }
-                        }
-
-                        // Show local folder picker when running in Tauri and a
-                        // sync strategy that actually syncs is selected.
-                        if is_tauri && !matches!(sync_selected(), SyncStrategy::Inherit | SyncStrategy::DoNotSync) {
-                            div { class: "form-control mt-3",
-                                label { class: "label",
-                                    span { class: "label-text font-medium", "Local folder" }
-                                }
-                                div { class: "join w-full",
-                                    input {
-                                        class: "input input-bordered input-sm join-item flex-1",
-                                        r#type: "text",
-                                        readonly: true,
-                                        value: local_path()
-                                            .map(|p| crate::hooks::tauri::display_local_path(&p))
-                                            .unwrap_or_default(),
-                                        placeholder: "Select a folder\u{2026}",
-                                    }
-                                    button {
-                                        class: "btn btn-neutral btn-sm join-item",
-                                        r#type: "button",
-                                        onclick: move |_| {
-                                            spawn(async move {
-                                                if let Some(path) = crate::hooks::tauri::pick_folder().await {
-                                                    local_path.set(Some(path));
+                            button {
+                                class: "btn btn-primary btn-sm",
+                                r#type: "button",
+                                disabled: saving_server(),
+                                onclick: move |_| {
+                                    let fid = folder_id_server.clone();
+                                    let val = server_selected();
+                                    spawn(async move {
+                                        saving_server.set(true);
+                                        error.set(None);
+                                        match use_files::update_folder_strategy(&fid, val).await {
+                                            Ok(_) => {
+                                                if let Ok(resp) = use_files::get_effective_strategy(&fid).await {
+                                                    effective_info.set(Some(resp));
                                                 }
-                                            });
-                                        },
-                                        "Browse\u{2026}"
-                                    }
-                                }
-                                label { class: "label",
-                                    span { class: "label-text-alt text-base-content/50",
-                                        "This folder's contents will sync to the selected local path."
-                                    }
-                                }
+                                                on_saved.call(());
+                                            }
+                                            Err(e) => error.set(Some(e)),
+                                        }
+                                        saving_server.set(false);
+                                    });
+                                },
+                                if saving_server() { span { class: "loading loading-spinner loading-xs mr-1" } }
+                                "Save server default"
+                            }
                             }
                         }
                     }
@@ -1619,7 +1732,7 @@ fn FolderSettingsModal(
                 }
 
                 div { class: "modal-action",
-                    if tab() == "sharing" {
+                    if tab() == "sharing" || tab() == "sync" {
                         button {
                             class: "btn btn-ghost",
                             r#type: "button",
@@ -1630,60 +1743,35 @@ fn FolderSettingsModal(
                         button {
                             class: "btn btn-ghost",
                             r#type: "button",
-                            disabled: saving(),
+                            disabled: saving_gm(),
                             onclick: move |_| on_close.call(()),
                             "Cancel"
                         }
                         button {
                             class: "btn btn-primary",
                             r#type: "button",
-                            disabled: saving() || (tab() == "sync" && loading()),
+                            disabled: saving_gm(),
                             onclick: move |_| {
                                 let fid = folder_id_for_save.clone();
                                 let current_tab = tab();
-                                let sync_val = sync_selected();
-                                let local_path_val = local_path();
                                 let gallery_val = gallery_selected();
                                 let music_val = music_selected();
-                                let is_tauri_save = is_tauri;
                                 spawn(async move {
-                                    saving.set(true);
+                                    saving_gm.set(true);
                                     error.set(None);
-                                    let result = match current_tab {
-                                        "gallery" => use_files::update_folder_gallery_include(&fid, gallery_val).await,
-                                        "music"   => use_files::update_folder_music_include(&fid, music_val).await,
-                                        _ => {
-                                            // Save strategy to the server.
-                                            let r = use_files::update_folder_strategy(&fid, sync_val).await;
-                                            // Also update the local sync engine when running in Tauri.
-                                            if r.is_ok() && is_tauri_save {
-                                                let strategy_str = match sync_val {
-                                                    SyncStrategy::Inherit => "Inherit",
-                                                    SyncStrategy::TwoWay => "TwoWay",
-                                                    SyncStrategy::ClientToServer => "ClientToServer",
-                                                    SyncStrategy::ServerToClient => "ServerToClient",
-                                                    SyncStrategy::UploadOnly => "UploadOnly",
-                                                    SyncStrategy::DoNotSync => "DoNotSync",
-                                                };
-                                                let _ = crate::hooks::tauri::set_folder_strategy(
-                                                    &fid,
-                                                    strategy_str,
-                                                    local_path_val.as_deref(),
-                                                ).await;
-                                            }
-                                            r
-                                        }
+                                    let result: Result<(), String> = match current_tab {
+                                        "gallery" => use_files::update_folder_gallery_include(&fid, gallery_val).await.map(|_| ()),
+                                        "music"   => use_files::update_folder_music_include(&fid, music_val).await.map(|_| ()),
+                                        _         => Ok(()),
                                     };
                                     match result {
                                         Ok(_) => on_saved.call(()),
-                                        Err(e) => {
-                                        error.set(Some(e));
-                                        saving.set(false);
+                                        Err(e) => error.set(Some(e)),
                                     }
-                                }
-                            });
-                        },
-                            if saving() { span { class: "loading loading-spinner loading-sm" } }
+                                    saving_gm.set(false);
+                                });
+                            },
+                            if saving_gm() { span { class: "loading loading-spinner loading-sm" } }
                             "Save"
                         }
                     }

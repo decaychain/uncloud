@@ -162,6 +162,61 @@ impl Client {
         self.parse(resp).await
     }
 
+    /// Download a file by ID and return its bytes. Used by `uncloud-sync` so
+    /// the engine can write through a `LocalFs` backend instead of `std::fs`.
+    pub async fn download_file_bytes(&self, id: &str) -> Result<Vec<u8>> {
+        let resp = self
+            .http
+            .get(self.url(&format!("/api/files/{}/download", id)))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(ClientError::api(resp).await);
+        }
+        let bytes = resp.bytes().await?;
+        Ok(bytes.to_vec())
+    }
+
+    /// Upload raw bytes as a new file. Parallel to [`upload_file`] but sourced
+    /// from memory rather than disk.
+    pub async fn upload_bytes(
+        &self,
+        file_name: &str,
+        bytes: Vec<u8>,
+        parent_id: Option<&str>,
+    ) -> Result<FileResponse> {
+        let part = reqwest::multipart::Part::bytes(bytes).file_name(file_name.to_owned());
+        let mut form = reqwest::multipart::Form::new().part("file", part);
+        if let Some(pid) = parent_id {
+            form = form.text("parent_id", pid.to_owned());
+        }
+        let resp = self
+            .http
+            .post(self.url("/api/uploads/simple"))
+            .multipart(form)
+            .send()
+            .await?;
+        self.parse(resp).await
+    }
+
+    /// Replace existing file content with raw bytes.
+    pub async fn update_file_content_bytes(
+        &self,
+        file_id: &str,
+        file_name: &str,
+        bytes: Vec<u8>,
+    ) -> Result<FileResponse> {
+        let part = reqwest::multipart::Part::bytes(bytes).file_name(file_name.to_owned());
+        let form = reqwest::multipart::Form::new().part("file", part);
+        let resp = self
+            .http
+            .post(self.url(&format!("/api/files/{}/content", file_id)))
+            .multipart(form)
+            .send()
+            .await?;
+        self.parse(resp).await
+    }
+
     pub async fn delete_file(&self, id: &str) -> Result<()> {
         let resp = self
             .http
@@ -227,6 +282,19 @@ impl Client {
                 "/api/folders/{}/effective-strategy",
                 folder_id
             )))
+            .send()
+            .await?;
+        self.parse(resp).await
+    }
+
+    /// Fetch the breadcrumb (root → leaf) for a folder.
+    pub async fn get_folder_breadcrumb(
+        &self,
+        folder_id: &str,
+    ) -> Result<Vec<FolderResponse>> {
+        let resp = self
+            .http
+            .get(self.url(&format!("/api/folders/{}/breadcrumb", folder_id)))
             .send()
             .await?;
         self.parse(resp).await
