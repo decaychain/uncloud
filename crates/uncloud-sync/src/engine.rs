@@ -354,6 +354,18 @@ impl SyncEngine {
             .unwrap_or(SyncStrategy::TwoWay)
     }
 
+    /// Return the stored strategy + local path for a folder, if any.
+    pub async fn get_folder_sync_config(
+        &self,
+        folder_id: &str,
+    ) -> Result<Option<(SyncStrategy, Option<String>)>, Box<dyn std::error::Error>> {
+        let row = self.journal.get_folder_sync_config(folder_id).await?;
+        let Some((strategy_str, local_path)) = row else { return Ok(None) };
+        let strategy: SyncStrategy =
+            serde_json::from_str(&format!("\"{}\"", strategy_str))?;
+        Ok(Some((strategy, local_path)))
+    }
+
     /// Override the sync strategy for a folder on this client.
     pub async fn set_folder_strategy(
         &self,

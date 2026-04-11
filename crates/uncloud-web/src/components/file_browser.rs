@@ -106,7 +106,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
     // Single-item delete confirmation: Some((id, is_folder, name))
     let mut delete_target: Signal<Option<(String, bool, String)>> = use_signal(|| None);
     // Folder settings modal target: Some((folder_id, folder_name, gallery_include, music_include))
-    let mut folder_settings_target: Signal<Option<(String, String, GalleryInclude, MusicInclude)>> = use_signal(|| None);
+    let mut folder_settings_target: Signal<Option<(String, String, SyncStrategy, GalleryInclude, MusicInclude)>> = use_signal(|| None);
     // Folder share dialog target: Some((folder_id, folder_name))
     let mut share_folder_target: Signal<Option<(String, String)>> = use_signal(|| None);
     // Share link dialog target: Some((resource_id, resource_type, resource_name))
@@ -364,6 +364,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                             folder.id.clone(), folder.name.clone(),
                             folder.id.clone(), folder.name.clone(),
                         );
+                        let ss = folder.sync_strategy;
                         let gi = folder.gallery_include;
                         let mi = folder.music_include;
                         let shared_by = folder.shared_by.clone();
@@ -390,7 +391,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                 on_edit_request: move |_| {},
                                 on_version_history_request: move |_| {},
                                 on_folder_settings_request: move |_| {
-                                    folder_settings_target.set(Some((id_fs.clone(), name_fs.clone(), gi, mi)));
+                                    folder_settings_target.set(Some((id_fs.clone(), name_fs.clone(), ss, gi, mi)));
                                 },
                                 on_share_folder_request: move |_| {
                                     share_folder_target.set(Some((id_sh.clone(), name_sh.clone())));
@@ -504,6 +505,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                     folder.id.clone(), folder.name.clone(),
                                     folder.id.clone(), folder.name.clone(),
                                 );
+                                let ss = folder.sync_strategy;
                                 let gi = folder.gallery_include;
                                 let mi = folder.music_include;
                                 let shared_by = folder.shared_by.clone();
@@ -530,7 +532,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                         on_edit_request: move |_| {},
                                         on_version_history_request: move |_| {},
                                         on_folder_settings_request: move |_| {
-                                            folder_settings_target.set(Some((id_fs.clone(), name_fs.clone(), gi, mi)));
+                                            folder_settings_target.set(Some((id_fs.clone(), name_fs.clone(), ss, gi, mi)));
                                         },
                                         on_share_folder_request: move |_| {
                                             share_folder_target.set(Some((id_sh.clone(), name_sh.clone())));
@@ -685,10 +687,11 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
             }
         }
 
-        if let Some((folder_id, folder_name, gallery_include, music_include)) = folder_settings_target() {
+        if let Some((folder_id, folder_name, sync_strategy, gallery_include, music_include)) = folder_settings_target() {
             FolderSettingsModal {
                 folder_id,
                 folder_name,
+                sync_strategy,
                 gallery_include,
                 music_include,
                 on_close: move |_| folder_settings_target.set(None),
@@ -1404,13 +1407,15 @@ fn strategy_label(s: SyncStrategy) -> &'static str {
 fn FolderSettingsModal(
     folder_id: String,
     folder_name: String,
+    sync_strategy: SyncStrategy,
     gallery_include: GalleryInclude,
     music_include: MusicInclude,
     on_close: EventHandler<()>,
     on_saved: EventHandler<()>,
 ) -> Element {
     let mut tab: Signal<&'static str> = use_signal(|| "sharing");
-    let mut sync_selected: Signal<SyncStrategy> = use_signal(|| SyncStrategy::Inherit);
+    let mut sync_selected: Signal<SyncStrategy> = use_signal(|| sync_strategy);
+    // Raw local path (native path on desktop, SAF content:// URI on Android).
     let mut local_path: Signal<Option<String>> = use_signal(|| None);
     let mut gallery_selected: Signal<GalleryInclude> = use_signal(|| gallery_include);
     let mut music_selected: Signal<MusicInclude> = use_signal(|| music_include);
@@ -1429,6 +1434,25 @@ fn FolderSettingsModal(
             match use_files::get_effective_strategy(&id).await {
                 Ok(resp) => effective_info.set(Some(resp)),
                 Err(_) => {}
+            }
+            // In Tauri, also load the per-folder sync config (strategy + local
+            // path) from the local journal so reopening the modal shows what
+            // the user previously selected.
+            if is_tauri {
+                if let Some((strategy_str, stored_path)) =
+                    crate::hooks::tauri::get_folder_sync_config(&id).await
+                {
+                    let s = match strategy_str.as_str() {
+                        "two_way" => SyncStrategy::TwoWay,
+                        "client_to_server" => SyncStrategy::ClientToServer,
+                        "server_to_client" => SyncStrategy::ServerToClient,
+                        "upload_only" => SyncStrategy::UploadOnly,
+                        "do_not_sync" => SyncStrategy::DoNotSync,
+                        _ => SyncStrategy::Inherit,
+                    };
+                    sync_selected.set(s);
+                    local_path.set(stored_path);
+                }
             }
             loading.set(false);
         });
@@ -1512,7 +1536,9 @@ fn FolderSettingsModal(
                                         class: "input input-bordered input-sm join-item flex-1",
                                         r#type: "text",
                                         readonly: true,
-                                        value: local_path().unwrap_or_default(),
+                                        value: local_path()
+                                            .map(|p| crate::hooks::tauri::display_local_path(&p))
+                                            .unwrap_or_default(),
                                         placeholder: "Select a folder\u{2026}",
                                     }
                                     button {
