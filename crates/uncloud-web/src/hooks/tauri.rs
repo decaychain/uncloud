@@ -143,3 +143,101 @@ pub async fn sync_now() -> Result<(), String> {
     let args = Object::new();
     invoke_raw("sync_now", &args).await.map(|_| ())
 }
+
+/// Opens a native folder picker dialog. Returns the selected path or None if cancelled.
+pub async fn pick_folder() -> Option<String> {
+    let args = Object::new();
+    let result = invoke_raw("pick_folder", &args).await.ok()?;
+    if result.is_null() || result.is_undefined() {
+        return None;
+    }
+    result.as_string()
+}
+
+/// Returns the platform-appropriate default sync folder (e.g. ~/Uncloud).
+pub async fn default_sync_folder() -> Option<String> {
+    let args = Object::new();
+    let result = invoke_raw("default_sync_folder", &args).await.ok()?;
+    result.as_string()
+}
+
+/// Fetch the locally-stored sync config for a folder from the desktop journal.
+/// Returns `(strategy_string, local_path)` where `local_path` may be a native
+/// filesystem path (desktop) or a SAF content URI (Android).
+pub async fn get_folder_sync_config(folder_id: &str) -> Option<(String, Option<String>)> {
+    let args = Object::new();
+    let _ = Reflect::set(&args, &JsValue::from_str("folderId"), &JsValue::from_str(folder_id));
+    let result = invoke_raw("get_folder_sync_config", &args).await.ok()?;
+    if result.is_null() || result.is_undefined() {
+        return None;
+    }
+    // Tauri serializes the Rust tuple as a JS array: [strategy, local_path].
+    let arr = js_sys::Array::from(&result);
+    if arr.length() == 0 {
+        return None;
+    }
+    let strategy = arr.get(0).as_string()?;
+    let local_path = arr.get(1).as_string();
+    Some((strategy, local_path))
+}
+
+/// Convert a stored local path (native filesystem path or Android SAF
+/// `content://` URI) to a human-readable label for display.
+pub fn display_local_path(raw: &str) -> String {
+    // Native path (desktop) — show as-is.
+    if !raw.starts_with("content://") {
+        return raw.to_string();
+    }
+    // Android SAF tree URI:
+    //   content://com.android.externalstorage.documents/tree/primary%3ADownload%2FFoo
+    // Extract the last path segment after "/tree/" and URL-decode it.
+    let Some(idx) = raw.find("/tree/") else { return raw.to_string() };
+    let encoded = &raw[idx + 6..];
+    // Strip anything after the next '/' — some URIs append a document part.
+    let encoded = encoded.split('/').next().unwrap_or(encoded);
+    let decoded = percent_decode(encoded);
+    // "primary:Download/Foo" → "Internal storage/Download/Foo"
+    if let Some((volume, rel)) = decoded.split_once(':') {
+        let prefix = if volume == "primary" { "Internal storage" } else { volume };
+        if rel.is_empty() {
+            prefix.to_string()
+        } else {
+            format!("{prefix}/{rel}")
+        }
+    } else {
+        decoded
+    }
+}
+
+/// Minimal percent-decoder for ASCII. Handles `%XX` sequences, leaves
+/// everything else untouched.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+            if let Ok(b) = u8::from_str_radix(hex, 16) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+/// Set the sync strategy and optional local path for a folder via the desktop sync engine.
+pub async fn set_folder_strategy(folder_id: &str, strategy: &str, local_path: Option<&str>) -> Result<(), String> {
+    let args = Object::new();
+    let _ = Reflect::set(&args, &JsValue::from_str("folderId"), &JsValue::from_str(folder_id));
+    let _ = Reflect::set(&args, &JsValue::from_str("strategy"), &JsValue::from_str(strategy));
+    match local_path {
+        Some(p) => { let _ = Reflect::set(&args, &JsValue::from_str("localPath"), &JsValue::from_str(p)); }
+        None => { let _ = Reflect::set(&args, &JsValue::from_str("localPath"), &JsValue::NULL); }
+    }
+    invoke_raw("set_folder_strategy", &args).await.map(|_| ())
+}

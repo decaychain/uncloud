@@ -22,6 +22,19 @@ pub fn Setup() -> Element {
     let mut search_enabled = use_context::<Signal<bool>>();
     let is_android = tauri::is_android();
 
+    // Pre-fill the sync folder with a platform-appropriate default (desktop only).
+    use_effect(move || {
+        if !is_android {
+            spawn(async move {
+                if let Some(default) = tauri::default_sync_folder().await {
+                    if root_path.peek().is_empty() {
+                        root_path.set(default);
+                    }
+                }
+            });
+        }
+    });
+
     let on_submit = move |evt: Event<FormData>| {
         evt.prevent_default();
         let server = server_url();
@@ -36,13 +49,19 @@ pub fn Setup() -> Element {
             // Seed the API base so subsequent web requests go to the right server.
             api::seed_api_base(server.clone());
 
-            // On Android, skip sync engine setup — users configure sync per-folder later.
-            if !is_android {
-                if let Err(e) = tauri::login(&server, &user, &pass, &path).await {
-                    error.set(Some(format!("Connection failed: {e}")));
-                    loading.set(false);
-                    return;
-                }
+            // On desktop, validate that a sync folder was chosen.
+            if !is_android && path.is_empty() {
+                error.set(Some("Please select a sync folder".to_string()));
+                loading.set(false);
+                return;
+            }
+
+            // Initialise the sync engine. On Android, root_path is empty —
+            // the backend uses a placeholder; per-folder paths override it.
+            if let Err(e) = tauri::login(&server, &user, &pass, &path).await {
+                error.set(Some(format!("Connection failed: {e}")));
+                loading.set(false);
+                return;
             }
 
             // Establish a browser-level session for the file browser UI.
@@ -72,7 +91,7 @@ pub fn Setup() -> Element {
             div { class: "card bg-base-100 shadow-xl w-full max-w-md",
                 div { class: "card-body gap-4",
                     div { class: "text-center",
-                        div { class: "text-5xl mb-2", "☁" }
+                        div { class: "text-5xl mb-2", "\u{2601}" }
                         h1 { class: "text-2xl font-bold", "Welcome to Uncloud" }
                         p { class: "text-base-content/60 text-sm",
                             "Connect to your server to get started."
@@ -138,14 +157,27 @@ pub fn Setup() -> Element {
                                 label { class: "label", r#for: "root-path",
                                     span { class: "label-text", "Local sync folder" }
                                 }
-                                input {
-                                    class: "input input-bordered w-full",
-                                    r#type: "text",
-                                    id: "root-path",
-                                    placeholder: "/home/user/Uncloud",
-                                    value: "{root_path}",
-                                    oninput: move |evt| root_path.set(evt.value()),
-                                    required: true,
+                                div { class: "join w-full",
+                                    input {
+                                        class: "input input-bordered join-item flex-1",
+                                        r#type: "text",
+                                        id: "root-path",
+                                        readonly: true,
+                                        value: "{root_path}",
+                                        placeholder: "Select a folder\u{2026}",
+                                    }
+                                    button {
+                                        class: "btn btn-neutral join-item",
+                                        r#type: "button",
+                                        onclick: move |_| {
+                                            spawn(async move {
+                                                if let Some(path) = tauri::pick_folder().await {
+                                                    root_path.set(path);
+                                                }
+                                            });
+                                        },
+                                        "Browse\u{2026}"
+                                    }
                                 }
                                 label { class: "label",
                                     span { class: "label-text-alt text-base-content/50",
@@ -161,7 +193,7 @@ pub fn Setup() -> Element {
                             disabled: loading(),
                             if loading() {
                                 span { class: "loading loading-spinner loading-sm" }
-                                "Connecting…"
+                                "Connecting\u{2026}"
                             } else {
                                 "Connect"
                             }

@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/schema/capability.json",
   "identifier": "default",
   "description": "Default capabilities for the Uncloud desktop app",
-  "windows": ["main"],
+  "windows": ["main", "browser"],
   "permissions": [
     "core:default",
     "core:path:default",
@@ -10,6 +10,7 @@
     "core:window:allow-set-focus",
     "core:window:allow-show",
     "core:window:allow-close",
-    "core:tray:default"
+    "core:tray:default",
+    "dialog:default"
   ]
 }

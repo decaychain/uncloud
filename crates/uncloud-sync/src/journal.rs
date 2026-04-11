@@ -192,6 +192,20 @@ impl Journal {
         Ok(row.map(|r| r.0))
     }
 
+    /// Returns both the stored strategy and optional local path for a folder.
+    pub async fn get_folder_sync_config(
+        &self,
+        folder_id: &str,
+    ) -> sqlx::Result<Option<(String, Option<String>)>> {
+        let row: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT strategy, local_path FROM folder_sync_config WHERE folder_id = ?",
+        )
+        .bind(folder_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
     pub async fn set_folder_strategy(
         &self,
         folder_id: &str,

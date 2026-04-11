@@ -11,6 +11,10 @@ use tauri::{
 };
 use tauri::{AppHandle, Manager, State};
 use tauri::async_runtime;
+#[cfg(desktop)]
+use tauri_plugin_dialog::DialogExt;
+#[cfg(mobile)]
+use tauri_plugin_android_fs::AndroidFsExt;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info};
 use uncloud_client::Client;
@@ -125,9 +129,77 @@ fn clear_config(app: &AppHandle) {
 
 // ── Tauri commands ────────────────────────────────────────────────────────────
 
+/// Ensure the sync engine is initialized. If not, try to load persisted config
+/// and spin it up synchronously. This self-heals from a failed auto-login at
+/// startup so commands like `sync_now` can still work once the server is up.
+async fn ensure_engine(
+    app: &AppHandle,
+    state: &State<'_, DesktopState>,
+) -> Result<Arc<SyncEngine>, String> {
+    if let Some(eng) = state.engine.read().await.as_ref().map(Arc::clone) {
+        return Ok(eng);
+    }
+    let cfg = load_config_from(app).ok_or("Not configured (no saved config)")?;
+    let client = Arc::new(Client::new(&cfg.server_url));
+    client.login(&cfg.username, &cfg.password).await.map_err(|e| {
+        let msg = format!("Login failed during lazy init: {e}");
+        eprintln!("[uncloud-desktop] {msg}");
+        msg
+    })?;
+    let db_path = sync_db_path(app).ok_or("Cannot determine data directory")?;
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let effective_root = if cfg.root_path.is_empty() {
+        app.path()
+            .app_data_dir()
+            .map_err(|e| format!("Cannot determine app data dir: {e}"))?
+            .join("sync-root")
+    } else {
+        PathBuf::from(&cfg.root_path)
+    };
+    let _ = std::fs::create_dir_all(&effective_root);
+    let engine = SyncEngine::new(&db_path, client.clone(), effective_root)
+        .await
+        .map_err(|e| {
+            let msg = format!("Sync engine init failed: {e}");
+            eprintln!("[uncloud-desktop] {msg}");
+            msg
+        })?;
+    let engine = Arc::new(engine);
+    *state.client.write().await = Some(client);
+    *state.engine.write().await = Some(engine.clone());
+    *state.status.lock().await = SyncStatus::Idle {
+        last_sync: "Never".to_string(),
+    };
+    eprintln!("[uncloud-desktop] Engine initialized lazily");
+    Ok(engine)
+}
+
 #[tauri::command]
 async fn get_status(state: State<'_, DesktopState>) -> Result<SyncStatus, String> {
     Ok(state.status.lock().await.clone())
+}
+
+#[tauri::command]
+async fn get_folder_sync_config(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    folder_id: String,
+) -> Result<Option<(String, Option<String>)>, String> {
+    let engine = ensure_engine(&app, &state).await?;
+    let Some((strategy, local_path)) = engine
+        .get_folder_sync_config(&folder_id)
+        .await
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    let strategy_str = serde_json::to_string(&strategy)
+        .map_err(|e| e.to_string())?
+        .trim_matches('"')
+        .to_owned();
+    Ok(Some((strategy_str, local_path)))
 }
 
 #[tauri::command]
@@ -149,7 +221,19 @@ async fn login(
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let engine = SyncEngine::new(&db_path, client.clone(), PathBuf::from(&root_path))
+
+    // On Android (empty root_path), use the app data dir as a placeholder root.
+    // Per-folder sync paths override this; the root itself won't sync because
+    // the server default strategy is DoNotSync.
+    let effective_root = if root_path.is_empty() {
+        app.path().app_data_dir()
+            .map_err(|e| format!("Cannot determine app data dir: {e}"))?
+            .join("sync-root")
+    } else {
+        PathBuf::from(&root_path)
+    };
+
+    let engine = SyncEngine::new(&db_path, client.clone(), effective_root)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -183,8 +267,8 @@ async fn disconnect(app: AppHandle, state: State<'_, DesktopState>) -> Result<()
 }
 
 #[tauri::command]
-async fn sync_now(state: State<'_, DesktopState>) -> Result<SyncReportDto, String> {
-    let engine = state.engine.read().await.as_ref().map(Arc::clone).ok_or("Not configured")?;
+async fn sync_now(app: AppHandle, state: State<'_, DesktopState>) -> Result<SyncReportDto, String> {
+    let engine = ensure_engine(&app, &state).await?;
 
     *state.status.lock().await = SyncStatus::Syncing {
         started_at: Utc::now().to_rfc3339(),
@@ -210,6 +294,7 @@ async fn sync_now(state: State<'_, DesktopState>) -> Result<SyncReportDto, Strin
 
 #[tauri::command]
 async fn set_folder_strategy(
+    app: AppHandle,
     state: State<'_, DesktopState>,
     folder_id: String,
     strategy: String,
@@ -219,7 +304,7 @@ async fn set_folder_strategy(
         serde_json::from_str(&format!("\"{}\"", strategy))
             .map_err(|e| format!("Invalid strategy: {}", e))?;
 
-    let engine = state.engine.read().await.as_ref().map(Arc::clone).ok_or("Not configured")?;
+    let engine = ensure_engine(&app, &state).await?;
     engine
         .set_folder_strategy(
             &folder_id,
@@ -228,6 +313,51 @@ async fn set_folder_strategy(
         )
         .await
         .map_err(|e| e.to_string())
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folder(move |folder_path| {
+        let _ = tx.send(folder_path.map(|p| p.to_string()));
+    });
+    rx.await.map_err(|e| e.to_string())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
+    let api = app.android_fs_async();
+    let selected = api
+        .file_picker()
+        .pick_dir(None, false)
+        .await
+        .map_err(|e| e.to_string())?;
+    match selected {
+        Some(dir_uri) => {
+            // Persist access so it survives app/device restarts.
+            api.file_picker()
+                .persist_uri_permission(&dir_uri)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(Some(dir_uri.uri))
+        }
+        None => Ok(None),
+    }
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn default_sync_folder() -> Option<String> {
+    dirs::home_dir().map(|h| h.join("Uncloud").to_string_lossy().to_string())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn default_sync_folder() -> Option<String> {
+    // On Android, sync is per-folder — no global default.
+    None
 }
 
 // ── Polling scheduler ─────────────────────────────────────────────────────────
@@ -303,7 +433,13 @@ pub fn run() {
     #[cfg(desktop)]
     let status_arc = state.status.clone();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    { builder = builder.plugin(tauri_plugin_dialog::init()); }
+    #[cfg(mobile)]
+    { builder = builder.plugin(tauri_plugin_android_fs::init()); }
+
+    builder
         .manage(state)
         .setup(move |app| {
             // Auto-login from persisted config if one exists.
@@ -322,7 +458,15 @@ pub fn run() {
                                 Some(p) => { let _ = p.parent().map(std::fs::create_dir_all); p }
                                 None => { error!("Auto-login: cannot determine data directory"); return; }
                             };
-                            let engine_result = SyncEngine::new(&db, client.clone(), PathBuf::from(&cfg.root_path)).await.map_err(|e| e.to_string());
+                            let effective_root = if cfg.root_path.is_empty() {
+                                match app_handle.path().app_data_dir() {
+                                    Ok(p) => p.join("sync-root"),
+                                    Err(_) => { error!("Auto-login: cannot determine app data dir"); return; }
+                                }
+                            } else {
+                                PathBuf::from(&cfg.root_path)
+                            };
+                            let engine_result = SyncEngine::new(&db, client.clone(), effective_root).await.map_err(|e| e.to_string());
                             match engine_result {
                                 Ok(engine) => {
                                     *client_arc.write().await = Some(client);
@@ -330,12 +474,19 @@ pub fn run() {
                                     *status_arc.lock().await = SyncStatus::Idle {
                                         last_sync: "Never".to_string(),
                                     };
+                                    eprintln!("[uncloud-desktop] Auto-login successful");
                                     info!("Auto-login successful");
                                 }
-                                Err(e) => error!("Auto-login: engine init failed: {}", e),
+                                Err(e) => {
+                                    eprintln!("[uncloud-desktop] Auto-login engine init failed: {e}");
+                                    error!("Auto-login: engine init failed: {}", e);
+                                }
                             }
                         }
-                        Err(e) => error!("Auto-login: login failed: {}", e),
+                        Err(e) => {
+                            eprintln!("[uncloud-desktop] Auto-login login failed: {e}");
+                            error!("Auto-login: login failed: {}", e);
+                        },
                     }
                 });
             }
@@ -412,6 +563,9 @@ pub fn run() {
             disconnect,
             sync_now,
             set_folder_strategy,
+            get_folder_sync_config,
+            pick_folder,
+            default_sync_folder,
         ])
         .build(tauri::generate_context!())
         .expect("error building Tauri application")

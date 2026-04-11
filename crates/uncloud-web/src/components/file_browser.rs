@@ -106,7 +106,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
     // Single-item delete confirmation: Some((id, is_folder, name))
     let mut delete_target: Signal<Option<(String, bool, String)>> = use_signal(|| None);
     // Folder settings modal target: Some((folder_id, folder_name, gallery_include, music_include))
-    let mut folder_settings_target: Signal<Option<(String, String, GalleryInclude, MusicInclude)>> = use_signal(|| None);
+    let mut folder_settings_target: Signal<Option<(String, String, SyncStrategy, GalleryInclude, MusicInclude)>> = use_signal(|| None);
     // Folder share dialog target: Some((folder_id, folder_name))
     let mut share_folder_target: Signal<Option<(String, String)>> = use_signal(|| None);
     // Share link dialog target: Some((resource_id, resource_type, resource_name))
@@ -364,6 +364,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                             folder.id.clone(), folder.name.clone(),
                             folder.id.clone(), folder.name.clone(),
                         );
+                        let ss = folder.sync_strategy;
                         let gi = folder.gallery_include;
                         let mi = folder.music_include;
                         let shared_by = folder.shared_by.clone();
@@ -390,7 +391,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                 on_edit_request: move |_| {},
                                 on_version_history_request: move |_| {},
                                 on_folder_settings_request: move |_| {
-                                    folder_settings_target.set(Some((id_fs.clone(), name_fs.clone(), gi, mi)));
+                                    folder_settings_target.set(Some((id_fs.clone(), name_fs.clone(), ss, gi, mi)));
                                 },
                                 on_share_folder_request: move |_| {
                                     share_folder_target.set(Some((id_sh.clone(), name_sh.clone())));
@@ -504,6 +505,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                     folder.id.clone(), folder.name.clone(),
                                     folder.id.clone(), folder.name.clone(),
                                 );
+                                let ss = folder.sync_strategy;
                                 let gi = folder.gallery_include;
                                 let mi = folder.music_include;
                                 let shared_by = folder.shared_by.clone();
@@ -530,7 +532,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                         on_edit_request: move |_| {},
                                         on_version_history_request: move |_| {},
                                         on_folder_settings_request: move |_| {
-                                            folder_settings_target.set(Some((id_fs.clone(), name_fs.clone(), gi, mi)));
+                                            folder_settings_target.set(Some((id_fs.clone(), name_fs.clone(), ss, gi, mi)));
                                         },
                                         on_share_folder_request: move |_| {
                                             share_folder_target.set(Some((id_sh.clone(), name_sh.clone())));
@@ -685,10 +687,11 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
             }
         }
 
-        if let Some((folder_id, folder_name, gallery_include, music_include)) = folder_settings_target() {
+        if let Some((folder_id, folder_name, sync_strategy, gallery_include, music_include)) = folder_settings_target() {
             FolderSettingsModal {
                 folder_id,
                 folder_name,
+                sync_strategy,
                 gallery_include,
                 music_include,
                 on_close: move |_| folder_settings_target.set(None),
@@ -1404,15 +1407,19 @@ fn strategy_label(s: SyncStrategy) -> &'static str {
 fn FolderSettingsModal(
     folder_id: String,
     folder_name: String,
+    sync_strategy: SyncStrategy,
     gallery_include: GalleryInclude,
     music_include: MusicInclude,
     on_close: EventHandler<()>,
     on_saved: EventHandler<()>,
 ) -> Element {
     let mut tab: Signal<&'static str> = use_signal(|| "sharing");
-    let mut sync_selected: Signal<SyncStrategy> = use_signal(|| SyncStrategy::Inherit);
+    let mut sync_selected: Signal<SyncStrategy> = use_signal(|| sync_strategy);
+    // Raw local path (native path on desktop, SAF content:// URI on Android).
+    let mut local_path: Signal<Option<String>> = use_signal(|| None);
     let mut gallery_selected: Signal<GalleryInclude> = use_signal(|| gallery_include);
     let mut music_selected: Signal<MusicInclude> = use_signal(|| music_include);
+    let is_tauri = crate::hooks::tauri::is_tauri();
     let mut effective_info: Signal<Option<EffectiveStrategyResponse>> = use_signal(|| None);
     let mut loading = use_signal(|| true);
     let mut saving = use_signal(|| false);
@@ -1427,6 +1434,25 @@ fn FolderSettingsModal(
             match use_files::get_effective_strategy(&id).await {
                 Ok(resp) => effective_info.set(Some(resp)),
                 Err(_) => {}
+            }
+            // In Tauri, also load the per-folder sync config (strategy + local
+            // path) from the local journal so reopening the modal shows what
+            // the user previously selected.
+            if is_tauri {
+                if let Some((strategy_str, stored_path)) =
+                    crate::hooks::tauri::get_folder_sync_config(&id).await
+                {
+                    let s = match strategy_str.as_str() {
+                        "two_way" => SyncStrategy::TwoWay,
+                        "client_to_server" => SyncStrategy::ClientToServer,
+                        "server_to_client" => SyncStrategy::ServerToClient,
+                        "upload_only" => SyncStrategy::UploadOnly,
+                        "do_not_sync" => SyncStrategy::DoNotSync,
+                        _ => SyncStrategy::Inherit,
+                    };
+                    sync_selected.set(s);
+                    local_path.set(stored_path);
+                }
             }
             loading.set(false);
         });
@@ -1494,6 +1520,44 @@ fn FolderSettingsModal(
                                 span { class: "font-medium", "{strategy_label(info.strategy)}" }
                                 if info.source_folder_id.is_some() {
                                     " (inherited from parent)"
+                                }
+                            }
+                        }
+
+                        // Show local folder picker when running in Tauri and a
+                        // sync strategy that actually syncs is selected.
+                        if is_tauri && !matches!(sync_selected(), SyncStrategy::Inherit | SyncStrategy::DoNotSync) {
+                            div { class: "form-control mt-3",
+                                label { class: "label",
+                                    span { class: "label-text font-medium", "Local folder" }
+                                }
+                                div { class: "join w-full",
+                                    input {
+                                        class: "input input-bordered input-sm join-item flex-1",
+                                        r#type: "text",
+                                        readonly: true,
+                                        value: local_path()
+                                            .map(|p| crate::hooks::tauri::display_local_path(&p))
+                                            .unwrap_or_default(),
+                                        placeholder: "Select a folder\u{2026}",
+                                    }
+                                    button {
+                                        class: "btn btn-neutral btn-sm join-item",
+                                        r#type: "button",
+                                        onclick: move |_| {
+                                            spawn(async move {
+                                                if let Some(path) = crate::hooks::tauri::pick_folder().await {
+                                                    local_path.set(Some(path));
+                                                }
+                                            });
+                                        },
+                                        "Browse\u{2026}"
+                                    }
+                                }
+                                label { class: "label",
+                                    span { class: "label-text-alt text-base-content/50",
+                                        "This folder's contents will sync to the selected local path."
+                                    }
                                 }
                             }
                         }
@@ -1578,15 +1642,37 @@ fn FolderSettingsModal(
                                 let fid = folder_id_for_save.clone();
                                 let current_tab = tab();
                                 let sync_val = sync_selected();
+                                let local_path_val = local_path();
                                 let gallery_val = gallery_selected();
                                 let music_val = music_selected();
+                                let is_tauri_save = is_tauri;
                                 spawn(async move {
                                     saving.set(true);
                                     error.set(None);
                                     let result = match current_tab {
                                         "gallery" => use_files::update_folder_gallery_include(&fid, gallery_val).await,
                                         "music"   => use_files::update_folder_music_include(&fid, music_val).await,
-                                        _         => use_files::update_folder_strategy(&fid, sync_val).await,
+                                        _ => {
+                                            // Save strategy to the server.
+                                            let r = use_files::update_folder_strategy(&fid, sync_val).await;
+                                            // Also update the local sync engine when running in Tauri.
+                                            if r.is_ok() && is_tauri_save {
+                                                let strategy_str = match sync_val {
+                                                    SyncStrategy::Inherit => "Inherit",
+                                                    SyncStrategy::TwoWay => "TwoWay",
+                                                    SyncStrategy::ClientToServer => "ClientToServer",
+                                                    SyncStrategy::ServerToClient => "ServerToClient",
+                                                    SyncStrategy::UploadOnly => "UploadOnly",
+                                                    SyncStrategy::DoNotSync => "DoNotSync",
+                                                };
+                                                let _ = crate::hooks::tauri::set_folder_strategy(
+                                                    &fid,
+                                                    strategy_str,
+                                                    local_path_val.as_deref(),
+                                                ).await;
+                                            }
+                                            r
+                                        }
                                     };
                                     match result {
                                         Ok(_) => on_saved.call(()),
