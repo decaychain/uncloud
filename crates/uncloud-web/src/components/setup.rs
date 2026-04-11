@@ -57,7 +57,7 @@ pub fn Setup() -> Element {
             }
 
             // Initialise the sync engine. On Android, root_path is empty —
-            // the backend uses a placeholder; per-folder paths override it.
+            // there is no global sync root; per-folder SAF picks stand alone.
             if let Err(e) = tauri::login(&server, &user, &pass, &path).await {
                 error.set(Some(format!("Connection failed: {e}")));
                 loading.set(false);

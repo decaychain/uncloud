@@ -241,16 +241,16 @@ async fn server_to_client_folder_blocks_local_upload() {
         .await
         .unwrap();
 
-    // First sync — file should be downloaded.
+    // First sync — file should be downloaded into the folder's subdir.
     let (engine, sync_dir) = app.new_sync_engine(Arc::clone(&client)).await;
     let report = engine.incremental_sync().await.unwrap();
     assert_eq!(report.downloaded, vec!["doc.txt"]);
 
-    // Modify local copy.
+    // Modify local copy — now lives inside `readonly/` because the engine
+    // mirrors the server folder structure on disk.
     tokio::time::sleep(Duration::from_secs(1)).await;
-    tokio::fs::write(sync_dir.path().join("doc.txt"), b"local change")
-        .await
-        .unwrap();
+    let local_file = sync_dir.path().join("readonly").join("doc.txt");
+    tokio::fs::write(&local_file, b"local change").await.unwrap();
 
     // Second sync — local change must NOT be uploaded.
     let report2 = engine.incremental_sync().await.unwrap();

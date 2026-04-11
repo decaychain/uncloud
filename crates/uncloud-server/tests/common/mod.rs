@@ -422,7 +422,7 @@ impl BoundTestApp {
         let engine = uncloud_sync::SyncEngine::new(
             &db_path,
             client,
-            sync_dir.path().to_path_buf(),
+            Some(sync_dir.path().to_string_lossy().into_owned()),
         )
         .await
         .expect("SyncEngine::new");
