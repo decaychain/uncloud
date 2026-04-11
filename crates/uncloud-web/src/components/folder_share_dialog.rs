@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 use uncloud_common::{
     CreateFolderShareRequest, FolderShareResponse, SharePermission, UpdateFolderShareRequest,
 };
+use crate::components::icons::IconX;
 use crate::hooks::use_folder_shares;
 use crate::components::shared_with_me::PermissionBadge;
 
@@ -184,7 +185,7 @@ pub fn FolderSharePanel(
                                                     refresh.set(next);
                                                 });
                                             },
-                                            "✕"
+                                            IconX {}
                                         }
                                     }
                                 }

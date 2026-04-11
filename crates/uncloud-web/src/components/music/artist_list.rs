@@ -1,12 +1,14 @@
 use dioxus::prelude::*;
 use uncloud_common::ArtistResponse;
 
+use crate::components::icons::IconMusic;
+
 #[component]
 pub fn ArtistList(artists: Vec<ArtistResponse>, on_select: EventHandler<String>) -> Element {
     if artists.is_empty() {
         return rsx! {
             div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                div { class: "text-5xl", "🎵" }
+                IconMusic { class: "w-12 h-12 text-base-content/30".to_string() }
                 h3 { class: "text-lg font-semibold", "No artists found" }
                 p { class: "text-base-content/60 text-center max-w-md",
                     "Right-click a folder in Files and select \"Music settings\" to include it in your library."

@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 use uncloud_common::TrashItemResponse;
+use crate::components::icons::{file_type_icon, IconTrash};
 use crate::hooks::use_files;
 use crate::router::Route;
 use crate::state::HighlightTarget;
@@ -62,7 +63,7 @@ pub fn Trash() -> Element {
             } else if is_empty {
                 div { class: "card bg-base-100 shadow",
                     div { class: "card-body items-center text-center py-12",
-                        p { class: "text-5xl mb-4", "🗑" }
+                        IconTrash { class: "w-12 h-12 mb-4 text-base-content/30".to_string() }
                         p { class: "text-base-content/70", "Trash is empty" }
                     }
                 }
@@ -103,10 +104,12 @@ pub fn Trash() -> Element {
                                     rsx! {
                                         tr {
                                             td {
-                                                span { class: "mr-2",
-                                                    { if is_folder { "📁" } else { file_emoji(&mime) } }
+                                                div { class: "flex items-center gap-2",
+                                                    span { class: "text-base-content/60",
+                                                        {file_type_icon(if mime.is_empty() { None } else { Some(mime.as_str()) }, is_folder, "w-5 h-5")}
+                                                    }
+                                                    span { "{name}" }
                                                 }
-                                                "{name}"
                                             }
                                             td {
                                                 if is_folder { "Folder" } else { "{mime}" }
@@ -306,20 +309,6 @@ pub fn Trash() -> Element {
                 }
             }
         }
-    }
-}
-
-fn file_emoji(mime: &str) -> &'static str {
-    if mime.starts_with("image/") {
-        "🖼"
-    } else if mime.starts_with("audio/") {
-        "🎵"
-    } else if mime.starts_with("video/") {
-        "🎬"
-    } else if mime == "application/pdf" {
-        "📄"
-    } else {
-        "📎"
     }
 }
 

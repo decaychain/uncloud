@@ -3,6 +3,7 @@ use std::rc::Rc;
 use dioxus::prelude::*;
 use uncloud_common::FileResponse;
 use wasm_bindgen::JsCast;
+use crate::components::icons::{IconChevronRight, IconX};
 use crate::hooks::api;
 
 #[component]
@@ -69,26 +70,26 @@ pub fn Lightbox(
 
             // Close button
             button {
-                class: "absolute top-4 right-4 btn btn-ghost btn-circle text-white text-xl z-50",
+                class: "absolute top-4 right-4 btn btn-ghost btn-circle text-white z-50",
                 onclick: move |e| { e.stop_propagation(); on_close.call(()); },
-                "✕"
+                IconX { class: "w-6 h-6".to_string() }
             }
 
             // Prev
             if can_prev {
                 button {
-                    class: "absolute left-4 btn btn-ghost btn-circle text-white text-2xl z-50",
+                    class: "absolute left-4 btn btn-ghost btn-circle text-white z-50",
                     onclick: move |e| { e.stop_propagation(); index.set(index() - 1); },
-                    "‹"
+                    IconChevronRight { class: "w-6 h-6 rotate-180".to_string() }
                 }
             }
 
             // Next
             if can_next {
                 button {
-                    class: "absolute right-4 btn btn-ghost btn-circle text-white text-2xl z-50",
+                    class: "absolute right-4 btn btn-ghost btn-circle text-white z-50",
                     onclick: move |e| { e.stop_propagation(); index.set(index() + 1); },
-                    "›"
+                    IconChevronRight { class: "w-6 h-6".to_string() }
                 }
             }
 

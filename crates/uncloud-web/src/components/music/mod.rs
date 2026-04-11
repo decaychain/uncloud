@@ -8,6 +8,8 @@ pub mod playlist_view;
 
 use dioxus::prelude::*;
 use uncloud_common::{ArtistResponse, MusicAlbumResponse, ServerEvent};
+
+use crate::components::icons::IconAlertTriangle;
 use crate::hooks::use_music;
 
 pub use album_view::AlbumView as MusicAlbumView;
@@ -73,7 +75,7 @@ fn MetadataView() -> Element {
     if let Some(err) = error() {
         return rsx! {
             div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                div { class: "text-5xl", "⚠️" }
+                IconAlertTriangle { class: "w-12 h-12 text-warning".to_string() }
                 h3 { class: "text-lg font-semibold", "Error loading artists" }
                 p { class: "text-base-content/60", "{err}" }
             }

@@ -3,6 +3,7 @@ use uncloud_common::{ServerEvent, TrackResponse};
 use crate::hooks::{use_music, use_player};
 use crate::state::PlayerState;
 use super::track_list::TrackList;
+use crate::components::icons::{IconAlertTriangle, IconPlay};
 
 #[component]
 pub fn FolderView(folder_id: String) -> Element {
@@ -50,7 +51,7 @@ pub fn FolderView(folder_id: String) -> Element {
     if let Some(err) = error() {
         return rsx! {
             div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                div { class: "text-5xl", "⚠️" }
+                IconAlertTriangle { class: "w-12 h-12 text-warning".to_string() }
                 h3 { class: "text-lg font-semibold", "Error loading tracks" }
                 p { class: "text-base-content/60", "{err}" }
             }
@@ -69,9 +70,7 @@ pub fn FolderView(folder_id: String) -> Element {
                     onclick: move |_| {
                         use_player::play_queue(player, tracks_for_play_all.clone(), 0);
                     },
-                    svg { class: "w-4 h-4", fill: "currentColor", view_box: "0 0 24 24",
-                        path { d: "M8 5v14l11-7z" }
-                    }
+                    IconPlay { class: "w-4 h-4".to_string() }
                     "Play All"
                 }
             }

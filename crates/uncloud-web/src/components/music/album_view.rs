@@ -3,6 +3,7 @@ use uncloud_common::TrackResponse;
 use crate::hooks::{api, use_music, use_player};
 use crate::state::PlayerState;
 use super::track_list::TrackList;
+use crate::components::icons::{IconAlertTriangle, IconMusic, IconPlay};
 
 #[component]
 pub fn AlbumView(artist: String, album: String, on_back: EventHandler<()>) -> Element {
@@ -38,7 +39,7 @@ pub fn AlbumView(artist: String, album: String, on_back: EventHandler<()>) -> El
     if let Some(err) = error() {
         return rsx! {
             div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                div { class: "text-5xl", "⚠️" }
+                IconAlertTriangle { class: "w-12 h-12 text-warning".to_string() }
                 h3 { class: "text-lg font-semibold", "Error loading album" }
                 p { class: "text-base-content/60", "{err}" }
             }
@@ -75,8 +76,8 @@ pub fn AlbumView(artist: String, album: String, on_back: EventHandler<()>) -> El
                         src: "{src}",
                     }
                 } else {
-                    div { class: "w-32 h-32 flex items-center justify-center text-5xl bg-base-200 rounded-xl shadow",
-                        "🎵"
+                    div { class: "w-32 h-32 flex items-center justify-center bg-base-200 rounded-xl shadow",
+                        IconMusic { class: "w-12 h-12 text-base-content/40".to_string() }
                     }
                 }
                 div { class: "flex flex-col justify-center",
@@ -94,9 +95,7 @@ pub fn AlbumView(artist: String, album: String, on_back: EventHandler<()>) -> El
                         onclick: move |_| {
                             use_player::play_queue(player, tracks_for_play_all.clone(), 0);
                         },
-                        svg { class: "w-4 h-4", fill: "currentColor", view_box: "0 0 24 24",
-                            path { d: "M8 5v14l11-7z" }
-                        }
+                        IconPlay { class: "w-4 h-4".to_string() }
                         "Play All"
                     }
                 }

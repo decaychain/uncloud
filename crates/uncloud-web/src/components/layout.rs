@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use uncloud_common::ServerEvent;
 use crate::hooks::use_events::use_events;
+use crate::components::icons::IconMenu;
 use crate::hooks::tauri;
 use crate::state::{AuthState, PlayerState, ThemeState};
 use crate::router::Route;
@@ -130,9 +131,7 @@ fn Navbar() -> Element {
                 label {
                     r#for: "main-sidebar",
                     class: "btn btn-ghost btn-circle lg:hidden",
-                    svg { class: "w-5 h-5", width: "20", height: "20", fill: "none", stroke: "currentColor", view_box: "0 0 24 24",
-                        path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M4 6h16M4 12h16M4 18h16" }
-                    }
+                    IconMenu { class: "w-5 h-5".to_string() }
                 }
                 span { class: "text-lg font-semibold lg:hidden", "{section_title}" }
             }
@@ -146,7 +145,7 @@ fn Navbar() -> Element {
                 }
             }
 
-            div { class: "flex-shrink-0 flex items-center gap-0",
+            div { class: "flex-shrink-0 flex items-center gap-0 ml-auto",
                 // Mobile search icon (visible on sm and below)
                 if search_enabled {
                     crate::components::search::SearchIconMobile {}

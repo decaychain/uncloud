@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use crate::components::icons::{IconMusic, IconPause, IconPlay, IconSkipBack, IconSkipForward, IconVolume2};
 use crate::hooks::{api, use_files::download_url};
 use crate::state::PlayerState;
 
@@ -186,8 +187,8 @@ pub fn Player() -> Element {
                             src: "{src}",
                         }
                     } else {
-                        div { class: "w-10 h-10 rounded bg-base-300 flex items-center justify-center text-lg",
-                            "🎵"
+                        div { class: "w-10 h-10 rounded bg-base-300 flex items-center justify-center",
+                            IconMusic { class: "w-5 h-5 text-base-content/50".to_string() }
                         }
                     }
                 }
@@ -210,9 +211,7 @@ pub fn Player() -> Element {
                                 state.current_index -= 1;
                             }
                         },
-                        svg { class: "w-5 h-5", fill: "currentColor", view_box: "0 0 24 24",
-                            path { d: "M6 6h2v12H6zm3.5 6l8.5 6V6z" }
-                        }
+                        IconSkipBack { class: "w-5 h-5".to_string() }
                     }
                     // Play/Pause
                     button {
@@ -221,13 +220,9 @@ pub fn Player() -> Element {
                             player.write().playing = !is_playing;
                         },
                         if is_playing {
-                            svg { class: "w-6 h-6", fill: "currentColor", view_box: "0 0 24 24",
-                                path { d: "M6 19h4V5H6v14zm8-14v14h4V5h-4z" }
-                            }
+                            IconPause { class: "w-6 h-6".to_string() }
                         } else {
-                            svg { class: "w-6 h-6", fill: "currentColor", view_box: "0 0 24 24",
-                                path { d: "M8 5v14l11-7z" }
-                            }
+                            IconPlay { class: "w-6 h-6".to_string() }
                         }
                     }
                     // Next
@@ -240,9 +235,7 @@ pub fn Player() -> Element {
                                 player.write().current_index += 1;
                             }
                         },
-                        svg { class: "w-5 h-5", fill: "currentColor", view_box: "0 0 24 24",
-                            path { d: "M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z" }
-                        }
+                        IconSkipForward { class: "w-5 h-5".to_string() }
                     }
                 }
 
@@ -270,9 +263,7 @@ pub fn Player() -> Element {
 
                 // Volume
                 div { class: "hidden md:flex items-center gap-1 w-28",
-                    svg { class: "w-4 h-4 text-base-content/60 flex-shrink-0", fill: "currentColor", view_box: "0 0 24 24",
-                        path { d: "M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" }
-                    }
+                    IconVolume2 { class: "w-4 h-4 text-base-content/60".to_string() }
                     input {
                         r#type: "range",
                         class: "range range-xs flex-1",

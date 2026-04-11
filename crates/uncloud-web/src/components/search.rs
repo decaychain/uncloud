@@ -2,25 +2,10 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use uncloud_common::SearchHit;
 
+use crate::components::icons::{file_type_icon, IconSearch, IconX};
 use crate::hooks::use_search::search_files;
 use crate::router::Route;
 use crate::state::HighlightTarget;
-
-fn icon_for_mime(mime: &str) -> &'static str {
-    if mime.starts_with("image/") {
-        "\u{1f5bc}\u{fe0f}" // framed picture
-    } else if mime.starts_with("audio/") {
-        "\u{1f3b5}" // musical note
-    } else if mime.starts_with("video/") {
-        "\u{1f3ac}" // clapper board
-    } else if mime == "application/pdf" {
-        "\u{1f4c4}" // page facing up
-    } else if mime.starts_with("text/") {
-        "\u{1f4dd}" // memo
-    } else {
-        "\u{1f4c1}" // file folder
-    }
-}
 
 fn format_size(bytes: i64) -> String {
     if bytes < 1024 {
@@ -101,18 +86,7 @@ pub fn SearchBar() -> Element {
             // Search input
             div { class: "form-control",
                 div { class: "input input-sm input-bordered flex items-center gap-2 w-full",
-                    svg {
-                        class: "w-4 h-4 opacity-70",
-                        fill: "none",
-                        stroke: "currentColor",
-                        view_box: "0 0 24 24",
-                        path {
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                            stroke_width: "2",
-                            d: "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z",
-                        }
-                    }
+                    IconSearch { class: "w-4 h-4 opacity-70".to_string() }
                     input {
                         r#type: "text",
                         placeholder: "Search files...",
@@ -145,7 +119,6 @@ pub fn SearchBar() -> Element {
                             let hit_name = hit.name.clone();
                             let hit_mime = hit.mime_type.clone();
                             let hit_size = hit.size_bytes;
-                            let icon = icon_for_mime(&hit_mime);
                             let size_str = format_size(hit_size);
                             let nav = nav.clone();
                             let hit_id_hl = hit_id.clone();
@@ -167,7 +140,9 @@ pub fn SearchBar() -> Element {
                                         nav.push(target);
                                     },
                                     // Icon
-                                    span { class: "text-lg flex-shrink-0", "{icon}" }
+                                    span { class: "flex-shrink-0 text-base-content/60",
+                                        {file_type_icon(Some(&hit_mime), false, "w-5 h-5")}
+                                    }
                                     // Name + size
                                     div { class: "flex-1 min-w-0",
                                         div { class: "text-sm font-medium truncate", "{hit_name}" }
@@ -194,11 +169,7 @@ pub fn SearchIconMobile() -> Element {
             class: "btn btn-ghost btn-circle sm:hidden",
             title: "Search",
             onclick: move |_| open.set(true),
-            svg { class: "w-5 h-5", fill: "none", stroke: "currentColor", view_box: "0 0 24 24",
-                path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2",
-                    d: "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z",
-                }
-            }
+            IconSearch { class: "w-5 h-5".to_string() }
         }
 
         // Full-screen overlay
@@ -208,7 +179,7 @@ pub fn SearchIconMobile() -> Element {
                     button {
                         class: "btn btn-ghost btn-circle btn-sm",
                         onclick: move |_| open.set(false),
-                        "✕"
+                        IconX {}
                     }
                     div { class: "flex-1",
                         SearchBar {}

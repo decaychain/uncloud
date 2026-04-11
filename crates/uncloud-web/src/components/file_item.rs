@@ -1,4 +1,8 @@
 use dioxus::prelude::*;
+use crate::components::icons::{
+    file_type_icon, IconClipboard, IconDownload, IconEye, IconFolderOpen, IconHistory, IconLink,
+    IconMoreVertical, IconPencil, IconSettings, IconTrash, IconUsers,
+};
 use crate::hooks::api;
 use crate::router::Route;
 use crate::state::ViewMode;
@@ -60,20 +64,6 @@ pub fn FileItem(
     // If ver_when_failed == Some(thumbnail_ver), we show the fallback icon.
     // When thumbnail_ver increments (SSE event), the mismatch triggers a retry.
     let mut ver_when_failed: Signal<Option<u32>> = use_signal(|| None);
-
-    let icon = if is_folder {
-        "📁"
-    } else {
-        match mime_type.as_deref() {
-            Some(t) if t.starts_with("image/") => "🖼️",
-            Some(t) if t.starts_with("video/") => "🎬",
-            Some(t) if t.starts_with("audio/") => "🎵",
-            Some(t) if t.starts_with("text/") => "📝",
-            Some("application/pdf") => "📕",
-            Some(t) if t.contains("zip") || t.contains("tar") || t.contains("rar") => "📦",
-            _ => "📄",
-        }
-    };
 
     let size_str = size
         .map(|s| uncloud_common::validation::format_bytes(s))
@@ -148,14 +138,14 @@ pub fn FileItem(
 
                 // ⋮ button — always visible on mobile, hover-reveal on lg+
                 button {
-                    class: "absolute top-1 right-1 z-10 btn btn-ghost btn-xs opacity-100 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity",
+                    class: "absolute top-1 right-1 z-10 btn btn-ghost btn-xs btn-circle opacity-100 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity",
                     title: "More options",
                     onclick: move |e| {
                         e.stop_propagation();
                         let c = e.client_coordinates();
                         menu_pos.set(Some(clamp_menu_pos(c.x, c.y)));
                     },
-                    "⋮"
+                    IconMoreVertical { class: "w-4 h-4".to_string() }
                 }
 
                 div { class: "card-body p-0 gap-0",
@@ -174,8 +164,8 @@ pub fn FileItem(
                             }
                         } else {
                             rsx! {
-                                div { class: "flex items-center justify-center h-32 text-4xl bg-base-200 rounded-t-xl",
-                                    "{icon}"
+                                div { class: "flex items-center justify-center h-32 bg-base-200 rounded-t-xl text-base-content/40",
+                                    {file_type_icon(mime_type.as_deref(), is_folder, "w-12 h-12")}
                                 }
                             }
                         }
@@ -183,7 +173,7 @@ pub fn FileItem(
                     div { class: "p-3 items-center text-center gap-1 flex flex-col",
                         div { class: "text-sm font-medium truncate w-full", title: "{name}",
                             if is_folder && (shared_by.is_some() || shared_with_count > 0) {
-                                span { class: "mr-1 opacity-60", "👥" }
+                                IconUsers { class: "inline-block w-3.5 h-3.5 mr-1 opacity-60 -mt-0.5".to_string() }
                             }
                             "{name}"
                         }
@@ -254,11 +244,13 @@ pub fn FileItem(
                         }
                     }
                 }
-                td { class: "w-8 text-lg py-2", "{icon}" }
+                td { class: "w-8 py-2 text-base-content/60",
+                    {file_type_icon(mime_type.as_deref(), is_folder, "w-5 h-5")}
+                }
                 td { class: "font-medium",
                     span { title: "{name}",
                         if is_folder && (shared_by.is_some() || shared_with_count > 0) {
-                            span { class: "mr-1 opacity-60", "👥" }
+                            IconUsers { class: "inline-block w-3.5 h-3.5 mr-1 opacity-60 -mt-0.5".to_string() }
                         }
                         "{name}"
                     }
@@ -278,13 +270,13 @@ pub fn FileItem(
                 }
                 td { class: "w-8 text-right",
                     button {
-                        class: "btn btn-ghost btn-xs",
+                        class: "btn btn-ghost btn-xs btn-circle",
                         onclick: move |e| {
                             e.stop_propagation();
                             let c = e.client_coordinates();
                             menu_pos.set(Some(clamp_menu_pos(c.x, c.y)));
                         },
-                        "⋮"
+                        IconMoreVertical { class: "w-4 h-4".to_string() }
                     }
                 }
             }
@@ -364,56 +356,56 @@ fn FileContextMenu(
             if !is_folder {
                 li {
                     a { onclick: move |_| { on_open_request.call(()); on_close.call(()); },
-                        span { "\u{1F441}" }
+                        IconEye {}
                         span { "Open" }
                     }
                 }
                 if is_editable_text {
                     li {
                         a { onclick: move |_| { on_edit_request.call(()); on_close.call(()); },
-                            span { "✏️" }
+                            IconPencil {}
                             span { "Edit" }
                         }
                     }
                 }
                 li {
                     a { onclick: on_download,
-                        span { "⬇️" }
+                        IconDownload {}
                         span { "Download" }
                     }
                 }
             }
             li {
                 a { onclick: move |_| { on_rename.call(()); on_close.call(()); },
-                    span { "✏️" }
+                    IconPencil {}
                     span { "Rename" }
                 }
             }
             li {
                 a { onclick: move |_| { on_move.call(()); on_close.call(()); },
-                    span { "📂" }
-                    span { "Move to…" }
+                    IconFolderOpen {}
+                    span { "Move to\u{2026}" }
                 }
             }
             // Hide Copy for shared folders (they are mounted references)
             if !(is_folder && shared_by.is_some()) {
                 li {
                     a { onclick: move |_| { on_copy.call(()); on_close.call(()); },
-                        span { "📋" }
+                        IconClipboard {}
                         span { "Copy" }
                     }
                 }
             }
             li {
                 a { onclick: move |_| { on_share_link.call(()); on_close.call(()); },
-                    span { "🔗" }
+                    IconLink {}
                     span { "Share link" }
                 }
             }
             if !is_folder {
                 li {
                     a { onclick: move |_| { on_version_history.call(()); on_close.call(()); },
-                        span { "🕓" }
+                        IconHistory {}
                         span { "Version history" }
                     }
                 }
@@ -421,7 +413,7 @@ fn FileContextMenu(
             if is_folder {
                 li {
                     a { onclick: move |_| { on_folder_settings.call(()); on_close.call(()); },
-                        span { "\u{2699}\u{FE0F}" }
+                        IconSettings {}
                         span { "Folder settings\u{2026}" }
                     }
                 }
@@ -431,7 +423,7 @@ fn FileContextMenu(
                 a {
                     class: "text-error",
                     onclick: move |_| { on_delete_request.call(()); on_close.call(()); },
-                    span { "🗑️" }
+                    IconTrash {}
                     span { "Delete" }
                 }
             }

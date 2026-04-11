@@ -1,5 +1,8 @@
 use dioxus::prelude::*;
 use uncloud_common::{FolderShareResponse, ServerEvent, ShareResourceType, ShareResponse};
+use crate::components::icons::{
+    IconAlertTriangle, IconCheck, IconClipboard, IconFile, IconFolder, IconLink, IconLock, IconUsers, IconX,
+};
 use crate::hooks::{use_folder_shares, use_shares};
 use crate::components::shared_with_me::PermissionBadge;
 use crate::router::Route;
@@ -80,7 +83,7 @@ fn ShareLinksPanel() -> Element {
     if let Some(err) = error() {
         return rsx! {
             div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                div { class: "text-5xl", "⚠" }
+                IconAlertTriangle { class: "w-12 h-12 text-warning".to_string() }
                 h3 { class: "text-lg font-semibold", "Error loading share links" }
                 p { class: "text-base-content/60", "{err}" }
             }
@@ -92,7 +95,7 @@ fn ShareLinksPanel() -> Element {
     rsx! {
         if share_list.is_empty() {
             div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                div { class: "text-5xl", "🔗" }
+                IconLink { class: "w-12 h-12 text-base-content/30".to_string() }
                 h3 { class: "text-lg font-semibold", "No share links" }
                 p { class: "text-base-content/60", "Share links you create will appear here." }
             }
@@ -107,10 +110,7 @@ fn ShareLinksPanel() -> Element {
                         let share_id_copy = share.id.clone();
                         let is_copied = copied_id() == Some(share_id.clone());
 
-                        let type_icon = match share.resource_type {
-                            ShareResourceType::File => "📄",
-                            ShareResourceType::Folder => "📁",
-                        };
+                        let is_folder_share = matches!(share.resource_type, ShareResourceType::Folder);
                         let resource_name = share.resource_name.clone();
 
                         rsx! {
@@ -120,10 +120,18 @@ fn ShareLinksPanel() -> Element {
                                         div { class: "flex-1 min-w-0",
                                             // Name + type row
                                             div { class: "flex items-center gap-2 mb-2",
-                                                span { class: "text-xl", "{type_icon}" }
+                                                span { class: "text-base-content/60",
+                                                    if is_folder_share {
+                                                        IconFolder { class: "w-5 h-5".to_string() }
+                                                    } else {
+                                                        IconFile { class: "w-5 h-5".to_string() }
+                                                    }
+                                                }
                                                 span { class: "font-medium truncate", "{resource_name}" }
                                                 if share.has_password {
-                                                    span { class: "badge badge-outline badge-sm", "🔒" }
+                                                    span { class: "badge badge-outline badge-sm gap-1",
+                                                        IconLock { class: "w-3 h-3".to_string() }
+                                                    }
                                                 }
                                             }
 
@@ -154,7 +162,11 @@ fn ShareLinksPanel() -> Element {
                                                             }
                                                         });
                                                     },
-                                                    if is_copied { "✓" } else { "📋" }
+                                                    if is_copied {
+                                                        IconCheck {}
+                                                    } else {
+                                                        IconClipboard {}
+                                                    }
                                                 }
                                             }
 
@@ -182,7 +194,7 @@ fn ShareLinksPanel() -> Element {
                                             onclick: move |_| {
                                                 delete_target.set(Some((share_id_del.clone(), share_token.clone())));
                                             },
-                                            "✕"
+                                            IconX {}
                                         }
                                     }
                                 }
@@ -281,7 +293,7 @@ fn SharedByMePanel() -> Element {
     if let Some(err) = error() {
         return rsx! {
             div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                div { class: "text-5xl", "⚠" }
+                IconAlertTriangle { class: "w-12 h-12 text-warning".to_string() }
                 h3 { class: "text-lg font-semibold", "Error loading shares" }
                 p { class: "text-base-content/60", "{err}" }
             }
@@ -293,7 +305,7 @@ fn SharedByMePanel() -> Element {
     rsx! {
         if share_list.is_empty() {
             div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                div { class: "text-5xl", "👥" }
+                IconUsers { class: "w-12 h-12 text-base-content/30".to_string() }
                 h3 { class: "text-lg font-semibold", "No shared folders" }
                 p { class: "text-base-content/60", "You haven't shared any folders with other users yet." }
             }
@@ -316,7 +328,7 @@ fn SharedByMePanel() -> Element {
                                 div { class: "card-body p-4 gap-2",
                                     div { class: "flex items-start justify-between",
                                         div { class: "flex items-center gap-2 min-w-0 flex-1",
-                                            span { class: "text-2xl flex-shrink-0", "📁" }
+                                            IconFolder { class: "w-6 h-6 flex-shrink-0 text-base-content/60".to_string() }
                                             div { class: "min-w-0",
                                                 div { class: "font-medium truncate", "{folder_name}" }
                                                 div { class: "text-xs text-base-content/50",
@@ -331,7 +343,7 @@ fn SharedByMePanel() -> Element {
                                                 e.stop_propagation();
                                                 revoke_target.set(Some((share_id_revoke.clone(), folder_name_revoke.clone(), grantee_revoke.clone())));
                                             },
-                                            "✕"
+                                            IconX {}
                                         }
                                     }
                                     div {
@@ -431,7 +443,7 @@ pub fn SharedWithMePanel() -> Element {
     if let Some(err) = error() {
         return rsx! {
             div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                div { class: "text-5xl", "⚠" }
+                IconAlertTriangle { class: "w-12 h-12 text-warning".to_string() }
                 h3 { class: "text-lg font-semibold", "Error loading shared folders" }
                 p { class: "text-base-content/60", "{err}" }
             }
@@ -443,7 +455,7 @@ pub fn SharedWithMePanel() -> Element {
     rsx! {
         if share_list.is_empty() {
             div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                div { class: "text-5xl", "👥" }
+                IconUsers { class: "w-12 h-12 text-base-content/30".to_string() }
                 h3 { class: "text-lg font-semibold", "No shared folders" }
                 p { class: "text-base-content/60", "No folders have been shared with you yet." }
             }
@@ -465,7 +477,7 @@ pub fn SharedWithMePanel() -> Element {
                                 div { class: "card-body p-4 gap-2",
                                     div { class: "flex items-start justify-between",
                                         div { class: "flex items-center gap-2 min-w-0 flex-1",
-                                            span { class: "text-2xl flex-shrink-0", "📁" }
+                                            IconFolder { class: "w-6 h-6 flex-shrink-0 text-base-content/60".to_string() }
                                             div { class: "min-w-0",
                                                 div { class: "font-medium truncate", "{folder_name}" }
                                                 div { class: "text-xs text-base-content/50",
@@ -480,7 +492,7 @@ pub fn SharedWithMePanel() -> Element {
                                                 e.stop_propagation();
                                                 leave_target.set(Some((share_id_leave.clone(), folder_name_leave.clone())));
                                             },
-                                            "✕"
+                                            IconX {}
                                         }
                                     }
                                     div {

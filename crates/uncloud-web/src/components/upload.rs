@@ -2,6 +2,8 @@ use dioxus::prelude::*;
 use web_sys::wasm_bindgen::JsCast;
 use web_sys::HtmlInputElement;
 
+use crate::components::icons::{IconAlertTriangle, IconFolderOpen};
+
 pub(crate) const FILE_INPUT_ID: &str = "uc-file-upload";
 
 #[component]
@@ -123,7 +125,7 @@ pub fn UploadZone(
 
                 if uploading() {
                     div { class: "flex flex-col items-center gap-3",
-                        div { class: "text-3xl", "⏳" }
+                        span { class: "loading loading-spinner loading-lg" }
                         p { class: "text-sm font-medium", "Uploading..." }
                         progress {
                             class: "progress progress-primary w-full max-w-xs",
@@ -133,13 +135,13 @@ pub fn UploadZone(
                     }
                 } else if let Some(err) = error() {
                     div { class: "flex flex-col items-center gap-2",
-                        div { class: "text-3xl", "⚠️" }
+                        IconAlertTriangle { class: "w-8 h-8 text-warning".to_string() }
                         p { class: "text-sm text-error", "{err}" }
                         p { class: "text-xs opacity-60", "Click to try again" }
                     }
                 } else {
                     div { class: "flex flex-col items-center gap-2",
-                        div { class: "text-5xl mb-2", "📂" }
+                        IconFolderOpen { class: "w-12 h-12 mb-2 text-base-content/40".to_string() }
                         p { class: "text-base-content/60 text-sm", "No files yet" }
                         p { class: "text-sm mt-1",
                             strong { "Click to upload" }

@@ -1,6 +1,10 @@
 use dioxus::prelude::*;
 use wasm_bindgen::JsCast;
 use uncloud_common::{AlbumResponse, MusicFolderResponse, PlaylistSummary};
+use crate::components::icons::{
+    IconFolder, IconImage, IconKey, IconLink, IconListMusic, IconMusic, IconPalette, IconPencil,
+    IconSettings, IconShield, IconShoppingCart, IconTrash, IconUser, IconUsers,
+};
 use crate::hooks::{use_apps, use_files, use_music, use_playlists};
 use crate::hooks::use_apps::AppEntry;
 use crate::router::Route;
@@ -59,7 +63,8 @@ pub fn Sidebar() -> Element {
                         to: Route::Home {},
                         class: if section == "files" { "active" } else { "" },
                         onclick: move |_| close_drawer(),
-                        "📁 Files"
+                        IconFolder {}
+                        span { "Files" }
                     }
                 }
                 li {
@@ -67,7 +72,8 @@ pub fn Sidebar() -> Element {
                         to: Route::Gallery {},
                         class: if section == "gallery" { "active" } else { "" },
                         onclick: move |_| close_drawer(),
-                        "🖼 Gallery"
+                        IconImage {}
+                        span { "Gallery" }
                     }
                 }
                 li {
@@ -75,7 +81,8 @@ pub fn Sidebar() -> Element {
                         to: Route::Music {},
                         class: if section == "music" { "active" } else { "" },
                         onclick: move |_| close_drawer(),
-                        "🎵 Music"
+                        IconMusic {}
+                        span { "Music" }
                     }
                 }
                 if shopping_enabled {
@@ -84,7 +91,8 @@ pub fn Sidebar() -> Element {
                             to: Route::Shopping {},
                             class: if section == "shopping" { "active" } else { "" },
                             onclick: move |_| close_drawer(),
-                            "🛒 Shopping"
+                            IconShoppingCart {}
+                            span { "Shopping" }
                         }
                     }
                 }
@@ -93,7 +101,8 @@ pub fn Sidebar() -> Element {
                         to: Route::Passwords {},
                         class: if section == "passwords" { "active" } else { "" },
                         onclick: move |_| close_drawer(),
-                        "🔑 Passwords"
+                        IconKey {}
+                        span { "Passwords" }
                     }
                 }
                 li {
@@ -101,7 +110,8 @@ pub fn Sidebar() -> Element {
                         to: Route::Settings {},
                         class: if section == "settings" { "active" } else { "" },
                         onclick: move |_| close_drawer(),
-                        "⚙ Settings"
+                        IconSettings {}
+                        span { "Settings" }
                     }
                 }
             }
@@ -117,7 +127,8 @@ pub fn Sidebar() -> Element {
                                 Link {
                                     to: Route::Gallery {},
                                     class: if matches!(route, Route::Gallery {}) { "active" } else { "" },
-                                    "🖼 Timeline"
+                                    IconImage {}
+                                    span { "Timeline" }
                                 }
                             }
                             GallerySidebarAlbums {}
@@ -128,7 +139,8 @@ pub fn Sidebar() -> Element {
                                 Link {
                                     to: Route::Music {},
                                     class: if matches!(route, Route::Music {}) { "active" } else { "" },
-                                    "🎵 Library"
+                                    IconMusic {}
+                                    span { "Library" }
                                 }
                             }
                             MusicSidebarPlaylists {}
@@ -140,7 +152,8 @@ pub fn Sidebar() -> Element {
                                 Link {
                                     to: Route::Shopping {},
                                     class: if matches!(route, Route::Shopping {}) { "active" } else { "" },
-                                    "🛒 All Lists"
+                                    IconShoppingCart {}
+                                    span { "All Lists" }
                                 }
                             }
                         },
@@ -150,7 +163,8 @@ pub fn Sidebar() -> Element {
                                 Link {
                                     to: Route::Passwords {},
                                     class: "active",
-                                    "🔑 Vault"
+                                    IconKey {}
+                                    span { "Vault" }
                                 }
                             }
                         },
@@ -168,7 +182,8 @@ pub fn Sidebar() -> Element {
                                         to: Route::SettingsTab { tab: "account".to_string() },
                                         class: if active_tab == "account" { "active" } else { "" },
                                         onclick: move |_| close_drawer(),
-                                        "👤 Account"
+                                        IconUser {}
+                                        span { "Account" }
                                     }
                                 }
                                 li {
@@ -176,7 +191,8 @@ pub fn Sidebar() -> Element {
                                         to: Route::SettingsTab { tab: "preferences".to_string() },
                                         class: if active_tab == "preferences" { "active" } else { "" },
                                         onclick: move |_| close_drawer(),
-                                        "🎨 Preferences"
+                                        IconPalette {}
+                                        span { "Preferences" }
                                     }
                                 }
                                 if is_admin {
@@ -185,7 +201,8 @@ pub fn Sidebar() -> Element {
                                             to: Route::SettingsTab { tab: "users".to_string() },
                                             class: if active_tab == "users" { "active" } else { "" },
                                             onclick: move |_| close_drawer(),
-                                            "👥 Users"
+                                            IconUsers {}
+                                            span { "Users" }
                                         }
                                     }
                                     li {
@@ -193,7 +210,8 @@ pub fn Sidebar() -> Element {
                                             to: Route::SettingsTab { tab: "admin".to_string() },
                                             class: if active_tab == "admin" { "active" } else { "" },
                                             onclick: move |_| close_drawer(),
-                                            "🛡 Admin"
+                                            IconShield {}
+                                            span { "Admin" }
                                         }
                                     }
                                 }
@@ -205,7 +223,8 @@ pub fn Sidebar() -> Element {
                                 Link {
                                     to: Route::Home {},
                                     class: if matches!(route, Route::Home {} | Route::Folder { .. }) { "active" } else { "" },
-                                    "📁 All Files"
+                                    IconFolder {}
+                                    span { "All Files" }
                                 }
                             }
                             li {
@@ -213,14 +232,16 @@ pub fn Sidebar() -> Element {
                                     to: Route::Shares {},
                                     class: if matches!(route, Route::Shares {}) { "active" } else { "" },
                                     onclick: move |_| close_drawer(),
-                                    "🔗 Shares"
+                                    IconLink {}
+                                    span { "Shares" }
                                 }
                             }
                             li {
                                 Link {
                                     to: Route::Trash {},
                                     class: if matches!(route, Route::Trash {}) { "active" } else { "" },
-                                    "🗑️ Trash"
+                                    IconTrash {}
+                                    span { "Trash" }
                                 }
                             }
                             SidebarApps {}
@@ -392,7 +413,8 @@ fn GallerySidebarAlbums() -> Element {
                             if depth > 0 {
                                 span { class: "opacity-30 mr-1 text-xs", "└" }
                             }
-                            "📁 {album.name}"
+                            IconFolder {}
+                            span { "{album.name}" }
                         }
                     }
                 }
@@ -579,11 +601,12 @@ fn MusicSidebarFolders() -> Element {
                                 Link {
                                     to: Route::MusicFolder { id: folder.folder_id.clone() },
                                     class: if is_active {
-                                        "flex-1 text-sm font-medium break-words min-w-0"
+                                        "flex-1 text-sm font-medium break-words min-w-0 flex items-center gap-2"
                                     } else {
-                                        "flex-1 text-sm break-words min-w-0"
+                                        "flex-1 text-sm break-words min-w-0 flex items-center gap-2"
                                     },
-                                    "📁 {folder.name}"
+                                    IconFolder {}
+                                    span { class: "truncate", "{folder.name}" }
                                 }
                             }
                         }
@@ -639,7 +662,8 @@ fn MusicSidebarPlaylists() -> Element {
                         Link {
                             to: Route::MusicPlaylist { id: pl.id.clone() },
                             class: if is_active { "active" } else { "" },
-                            span { class: "flex-1 truncate", "🎶 {pl_name}" }
+                            IconListMusic {}
+                            span { class: "flex-1 truncate", "{pl_name}" }
                             // Rename + delete buttons — inside the <a> so they sit on the same line;
                             // stop_propagation prevents the link from firing on button click.
                             div { class: "flex gap-0 opacity-0 group-hover:opacity-100 transition-opacity ml-auto shrink-0",
@@ -652,11 +676,7 @@ fn MusicSidebarPlaylists() -> Element {
                                         rename_error.set(None);
                                         rename_target.set(Some((pl_id_rename.clone(), pl_name_rename.clone())));
                                     },
-                                    svg { class: "w-3 h-3", fill: "none", stroke: "currentColor", view_box: "0 0 24 24",
-                                        path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2",
-                                            d: "M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
-                                        }
-                                    }
+                                    IconPencil { class: "w-3 h-3".to_string() }
                                 }
                                 button {
                                     class: "btn btn-ghost btn-xs btn-circle text-error",
@@ -665,11 +685,7 @@ fn MusicSidebarPlaylists() -> Element {
                                         evt.stop_propagation();
                                         delete_target.set(Some((pl_id_delete.clone(), pl_name_delete.clone())));
                                     },
-                                    svg { class: "w-3 h-3", fill: "none", stroke: "currentColor", view_box: "0 0 24 24",
-                                        path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2",
-                                            d: "M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                                        }
-                                    }
+                                    IconTrash { class: "w-3 h-3".to_string() }
                                 }
                             }
                         }

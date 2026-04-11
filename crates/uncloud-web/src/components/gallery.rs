@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use dioxus::prelude::*;
 use uncloud_common::{AlbumResponse, FileResponse, ServerEvent};
+use crate::components::icons::{IconAlertTriangle, IconImage};
 use crate::components::lightbox::Lightbox;
 use crate::hooks::{api, use_files};
 use crate::router::Route;
@@ -135,7 +136,7 @@ fn TimelineView() -> Element {
     if let Some(err) = error() {
         return rsx! {
             div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                div { class: "text-5xl", "⚠️" }
+                IconAlertTriangle { class: "w-12 h-12 text-warning".to_string() }
                 h3 { class: "text-lg font-semibold", "Error loading gallery" }
                 p { class: "text-base-content/60", "{err}" }
             }
@@ -146,7 +147,7 @@ fn TimelineView() -> Element {
     if imgs.is_empty() {
         return rsx! {
             div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                div { class: "text-5xl", "🖼️" }
+                IconImage { class: "w-12 h-12 text-base-content/30".to_string() }
                 h3 { class: "text-lg font-semibold", "No images in your Gallery yet" }
                 p { class: "text-base-content/60 text-center max-w-md",
                     "Right-click a folder in Files and select \"Gallery settings\" to include it."
@@ -242,7 +243,7 @@ fn AlbumsGrid(on_select: EventHandler<AlbumResponse>) -> Element {
     if let Some(err) = error() {
         return rsx! {
             div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                div { class: "text-5xl", "⚠️" }
+                IconAlertTriangle { class: "w-12 h-12 text-warning".to_string() }
                 h3 { class: "text-lg font-semibold", "Error loading albums" }
                 p { class: "text-base-content/60", "{err}" }
             }
@@ -253,7 +254,7 @@ fn AlbumsGrid(on_select: EventHandler<AlbumResponse>) -> Element {
     if album_list.is_empty() {
         return rsx! {
             div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                div { class: "text-5xl", "🖼️" }
+                IconImage { class: "w-12 h-12 text-base-content/30".to_string() }
                 h3 { class: "text-lg font-semibold", "No albums yet" }
                 p { class: "text-base-content/60 text-center max-w-md",
                     "Right-click a folder in Files and select \"Gallery settings\" to include it."
@@ -281,8 +282,8 @@ fn AlbumsGrid(on_select: EventHandler<AlbumResponse>) -> Element {
                                         src: "{src}",
                                     }
                                 } else {
-                                    div { class: "flex items-center justify-center h-32 text-4xl bg-base-200 rounded-t-xl",
-                                        "🖼️"
+                                    div { class: "flex items-center justify-center h-32 bg-base-200 rounded-t-xl",
+                                        IconImage { class: "w-10 h-10 text-base-content/30".to_string() }
                                     }
                                 }
                                 div { class: "p-3 text-center",
@@ -366,7 +367,7 @@ fn AlbumView(album: AlbumResponse, on_back: EventHandler<()>) -> Element {
     if let Some(err) = error() {
         return rsx! {
             div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                div { class: "text-5xl", "⚠️" }
+                IconAlertTriangle { class: "w-12 h-12 text-warning".to_string() }
                 h3 { class: "text-lg font-semibold", "Error loading album" }
                 p { class: "text-base-content/60", "{err}" }
             }
@@ -389,7 +390,7 @@ fn AlbumView(album: AlbumResponse, on_back: EventHandler<()>) -> Element {
 
             if imgs.is_empty() {
                 div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                    div { class: "text-5xl", "🖼️" }
+                    IconImage { class: "w-12 h-12 text-base-content/30".to_string() }
                     h3 { class: "text-lg font-semibold", "No images in this album" }
                 }
             } else {

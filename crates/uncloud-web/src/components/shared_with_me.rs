@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 use uncloud_common::{FolderShareResponse, ServerEvent, SharePermission};
+use crate::components::icons::{IconAlertTriangle, IconFolder, IconUsers, IconX};
 use crate::hooks::use_folder_shares;
 use crate::router::Route;
 
@@ -51,7 +52,7 @@ pub fn SharedWithMePage() -> Element {
     if let Some(err) = error() {
         return rsx! {
             div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                div { class: "text-5xl", "⚠" }
+                IconAlertTriangle { class: "w-12 h-12 text-warning".to_string() }
                 h3 { class: "text-lg font-semibold", "Error loading shared folders" }
                 p { class: "text-base-content/60", "{err}" }
             }
@@ -66,7 +67,7 @@ pub fn SharedWithMePage() -> Element {
 
             if share_list.is_empty() {
                 div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                    div { class: "text-5xl", "👥" }
+                    IconUsers { class: "w-12 h-12 text-base-content/30".to_string() }
                     h3 { class: "text-lg font-semibold", "No shared folders" }
                     p { class: "text-base-content/60", "No folders have been shared with you yet." }
                 }
@@ -88,7 +89,7 @@ pub fn SharedWithMePage() -> Element {
                                     div { class: "card-body p-4 gap-2",
                                         div { class: "flex items-start justify-between",
                                             div { class: "flex items-center gap-2 min-w-0 flex-1",
-                                                span { class: "text-2xl flex-shrink-0", "📁" }
+                                                IconFolder { class: "w-6 h-6 flex-shrink-0 text-base-content/60".to_string() }
                                                 div { class: "min-w-0",
                                                     div { class: "font-medium truncate", "{folder_name}" }
                                                     div { class: "text-xs text-base-content/50",
@@ -104,7 +105,7 @@ pub fn SharedWithMePage() -> Element {
                                                     e.stop_propagation();
                                                     leave_target.set(Some((share_id_leave.clone(), folder_name_leave.clone())));
                                                 },
-                                                "✕"
+                                                IconX {}
                                             }
                                         }
                                         div {

@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 use uncloud_common::FileResponse;
 use wasm_bindgen::JsCast;
 use crate::hooks::api::{self, api_url};
+use crate::components::icons::IconX;
 
 fn is_markdown(file: &FileResponse) -> bool {
     file.mime_type == "text/markdown"
@@ -200,7 +201,11 @@ pub fn TextViewer(file: FileResponse, #[props(default = false)] start_editing: b
                                     on_close.call(());
                                 }
                             },
-                            if editing() { "Back" } else { "✕" }
+                            if editing() {
+                                "Back"
+                            } else {
+                                IconX {}
+                            }
                         }
                     }
                 }

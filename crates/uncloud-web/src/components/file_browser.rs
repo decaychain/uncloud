@@ -3,6 +3,10 @@ use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use uncloud_common::{AudioMeta, EffectiveStrategyResponse, FileResponse, FolderResponse, GalleryInclude, MusicInclude, ServerEvent, SyncStrategy, TrackResponse};
 use crate::components::file_item::FileItem;
+use crate::components::icons::{
+    IconAlertTriangle, IconChevronRight, IconClipboard, IconFileText, IconFolder, IconFolderOpen,
+    IconFolderPlus, IconGrid, IconList, IconTrash, IconUpload, IconX,
+};
 use crate::components::upload::{UploadZone, FILE_INPUT_ID};
 use web_sys::wasm_bindgen::JsCast;
 use crate::hooks::{use_files, use_player};
@@ -216,7 +220,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
     if let Some(err) = error() {
         return rsx! {
             div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                div { class: "text-5xl", "⚠️" }
+                IconAlertTriangle { class: "w-12 h-12 text-warning".to_string() }
                 h3 { class: "text-lg font-semibold", "Error loading files" }
                 p { class: "text-base-content/60", "{err}" }
             }
@@ -240,7 +244,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                         let items = selection().items_with_names(&files(), &folders());
                         move_target.set(Some((items, false)));
                     },
-                    span { "📂" }
+                    IconFolderOpen {}
                     span { class: "hidden sm:inline", "Move" }
                 }
                 if !selection().has_shared_folder(&folders()) {
@@ -251,7 +255,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                             let items = selection().items_with_names(&files(), &folders());
                             move_target.set(Some((items, true)));
                         },
-                        span { "📋" }
+                        IconClipboard {}
                         span { class: "hidden sm:inline", "Copy" }
                     }
                 }
@@ -259,14 +263,14 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                     class: "btn btn-sm btn-ghost gap-1 text-error",
                     title: "Delete selected",
                     onclick: move |_| bulk_delete_confirm.set(true),
-                    span { "🗑️" }
+                    IconTrash {}
                     span { class: "hidden sm:inline", "Delete" }
                 }
                 button {
                     class: "btn btn-sm btn-ghost btn-circle",
                     title: "Deselect all",
                     onclick: move |_| selection.write().clear(),
-                    "✕"
+                    IconX {}
                 }
             }
         }
@@ -290,13 +294,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                         view_mode.set(ViewMode::Grid);
                         let _ = LocalStorage::set("uncloud_view_mode", "grid");
                     },
-                    svg {
-                        xmlns: "http://www.w3.org/2000/svg",
-                        width: "16", height: "16",
-                        fill: "currentColor",
-                        view_box: "0 0 16 16",
-                        path { d: "M1 2.5A1.5 1.5 0 0 1 2.5 1h3A1.5 1.5 0 0 1 7 2.5v3A1.5 1.5 0 0 1 5.5 7h-3A1.5 1.5 0 0 1 1 5.5zm8 0A1.5 1.5 0 0 1 10.5 1h3A1.5 1.5 0 0 1 15 2.5v3A1.5 1.5 0 0 1 13.5 7h-3A1.5 1.5 0 0 1 9 5.5zm-8 8A1.5 1.5 0 0 1 2.5 9h3A1.5 1.5 0 0 1 7 10.5v3A1.5 1.5 0 0 1 5.5 15h-3A1.5 1.5 0 0 1 1 13.5zm8 0A1.5 1.5 0 0 1 10.5 9h3A1.5 1.5 0 0 1 15 10.5v3A1.5 1.5 0 0 1 13.5 15h-3A1.5 1.5 0 0 1 9 13.5z" }
-                    }
+                    IconGrid {}
                 }
                 button {
                     class: if view_mode() == ViewMode::List { "join-item btn btn-sm btn-primary" } else { "join-item btn btn-sm btn-ghost" },
@@ -305,16 +303,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                         view_mode.set(ViewMode::List);
                         let _ = LocalStorage::set("uncloud_view_mode", "list");
                     },
-                    svg {
-                        xmlns: "http://www.w3.org/2000/svg",
-                        width: "16", height: "16",
-                        fill: "currentColor",
-                        view_box: "0 0 16 16",
-                        path {
-                            fill_rule: "evenodd",
-                            d: "M2.5 12a.5.5 0 0 1 .5-.5h10a.5.5 0 0 1 0 1H3a.5.5 0 0 1-.5-.5m0-4a.5.5 0 0 1 .5-.5h10a.5.5 0 0 1 0 1H3a.5.5 0 0 1-.5-.5m0-4a.5.5 0 0 1 .5-.5h10a.5.5 0 0 1 0 1H3a.5.5 0 0 1-.5-.5"
-                        }
-                    }
+                    IconList {}
                 }
             }
             button {
@@ -328,19 +317,19 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                         input.click();
                     }
                 },
-                span { "📤" }
+                IconUpload {}
                 span { class: "hidden sm:inline", "Upload" }
             }
             button {
                 class: "btn btn-sm btn-ghost gap-1 shrink-0",
                 onclick: move |_| show_new_folder.set(true),
-                span { "📁" }
+                IconFolderPlus {}
                 span { class: "hidden sm:inline", "New Folder" }
             }
             button {
                 class: "btn btn-sm btn-ghost gap-1 shrink-0",
                 onclick: move |_| show_new_file.set(true),
-                span { "📝" }
+                IconFileText {}
                 span { class: "hidden sm:inline", "New File" }
             }
         }
@@ -1285,9 +1274,9 @@ fn MoveDialog(
                                                 let id = folder.id.clone();
                                                 move |_| picker_parent.set(Some(id.clone()))
                                             },
-                                            span { "📁" }
+                                            IconFolder {}
                                             span { "{folder.name}" }
-                                            span { class: "ml-auto text-base-content/40", "›" }
+                                            IconChevronRight { class: "w-4 h-4 ml-auto opacity-40".to_string() }
                                         }
                                     }
                                 }

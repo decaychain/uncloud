@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 use keepass::db::{Database, Entry, Group};
 use keepass::DatabaseKey;
 use uncloud_common::{FileResponse, FolderResponse};
+use crate::components::icons::{IconChevronRight, IconFolder, IconLock, IconLockOpen, IconX};
 use crate::hooks::{api, use_files};
 
 // ── Vault state ────────────────────────────────────────────────────────────
@@ -364,7 +365,7 @@ pub fn PasswordsPage() -> Element {
                                                         }
                                                     });
                                                 },
-                                                "✕"
+                                                IconX { class: "w-3 h-3".to_string() }
                                             }
                                         }
                                     }
@@ -514,9 +515,9 @@ fn VaultFilePicker(
                                         li {
                                             a {
                                                 onclick: move |_| current_parent.set(Some(id.clone())),
-                                                span { "📁" }
+                                                IconFolder { class: "w-4 h-4".to_string() }
                                                 span { "{folder.name}" }
-                                                span { class: "ml-auto text-base-content/40", "›" }
+                                                IconChevronRight { class: "w-4 h-4 ml-auto opacity-40".to_string() }
                                             }
                                         }
                                     }
@@ -539,7 +540,7 @@ fn VaultFilePicker(
                                                         folder_path: folder_path.clone(),
                                                     });
                                                 },
-                                                span { "🔒" }
+                                                IconLock { class: "w-4 h-4".to_string() }
                                                 span { class: "font-medium", "{file.name}" }
                                             }
                                         }
@@ -634,7 +635,10 @@ fn NewVaultModal(
                 div { class: "form-control mb-3",
                     label { class: "label", span { class: "label-text", "Location" } }
                     div { class: "flex items-center gap-2",
-                        span { class: "text-sm flex-1 truncate", "📁 {folder_label}" }
+                        span { class: "text-sm flex-1 truncate flex items-center gap-1",
+                            IconFolder { class: "w-4 h-4 inline-block".to_string() }
+                            "{folder_label}"
+                        }
                         button {
                             class: "btn btn-outline btn-sm",
                             onclick: move |_| {
@@ -693,9 +697,9 @@ fn NewVaultModal(
                                                 li {
                                                     a {
                                                         onclick: move |_| picker_parent.set(Some(id.clone())),
-                                                        span { "📁" }
+                                                        IconFolder { class: "w-4 h-4".to_string() }
                                                         span { "{folder.name}" }
-                                                        span { class: "ml-auto text-base-content/40", "›" }
+                                                        IconChevronRight { class: "w-4 h-4 ml-auto opacity-40".to_string() }
                                                     }
                                                 }
                                             }
@@ -890,7 +894,7 @@ fn VaultUnlockCard(
         div { class: "card bg-base-200 mb-3",
             div { class: "card-body p-4",
                 div { class: "flex items-center gap-2 mb-2",
-                    span { class: "text-xl", "🔒" }
+                    IconLock { class: "w-5 h-5".to_string() }
                     div { class: "flex flex-col",
                         span { class: "font-medium", "{file_name_display}" }
                         if let Some(ref path) = folder_display {
@@ -1013,7 +1017,7 @@ fn VaultBrowser(
             // Toolbar
             div { class: "flex items-center gap-2 mb-4 flex-wrap",
                 h2 { class: "text-xl font-bold flex-1 flex items-center gap-2",
-                    "🔓"
+                    IconLockOpen { class: "w-5 h-5".to_string() }
                     span { class: "truncate", "{file_name}" }
                     if vs.dirty {
                         span { class: "badge badge-warning badge-sm", "unsaved" }
@@ -1925,7 +1929,7 @@ fn EntryEditor(
                                             fields.remove(idx);
                                             custom_fields.set(fields);
                                         },
-                                        "✕"
+                                        IconX { class: "w-3 h-3".to_string() }
                                     }
                                 }
                                 input {

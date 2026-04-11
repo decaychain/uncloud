@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 use uncloud_common::{PlaylistSummary, TrackResponse};
+use crate::components::icons::{IconListMusic, IconMusic, IconPause, IconPlay};
 use crate::hooks::use_playlists;
 use crate::state::PlayerState;
 
@@ -31,7 +32,7 @@ pub fn TrackList(
     if tracks.is_empty() {
         return rsx! {
             div { class: "flex flex-col items-center justify-center py-12 gap-3",
-                div { class: "text-4xl", "🎵" }
+                IconMusic { class: "w-10 h-10 text-base-content/30".to_string() }
                 p { class: "text-base-content/60", "No tracks found" }
             }
         };
@@ -99,13 +100,9 @@ pub fn TrackList(
                                                     }
                                                 },
                                                 if is_current && is_playing {
-                                                    svg { class: "w-4 h-4", fill: "currentColor", view_box: "0 0 24 24",
-                                                        path { d: "M6 19h4V5H6v14zm8-14v14h4V5h-4z" }
-                                                    }
+                                                    IconPause { class: "w-4 h-4".to_string() }
                                                 } else {
-                                                    svg { class: "w-4 h-4", fill: "currentColor", view_box: "0 0 24 24",
-                                                        path { d: "M8 5v14l11-7z" }
-                                                    }
+                                                    IconPlay { class: "w-4 h-4".to_string() }
                                                 }
                                             }
                                         }
@@ -197,7 +194,8 @@ pub fn TrackList(
                                                         add_loading.set(false);
                                                     });
                                                 },
-                                                "🎶 {pl.name}"
+                                                IconListMusic { class: "w-4 h-4 opacity-60".to_string() }
+                                                span { "{pl.name}" }
                                                 span { class: "text-base-content/50 text-xs ml-auto",
                                                     "{pl.track_count} tracks"
                                                 }

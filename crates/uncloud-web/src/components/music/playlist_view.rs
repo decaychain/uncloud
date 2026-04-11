@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 use uncloud_common::TrackResponse;
+use crate::components::icons::{IconAlertTriangle, IconMusic, IconPause, IconPlay};
 use crate::hooks::{use_playlists, use_player};
 use crate::state::PlayerState;
 
@@ -48,7 +49,7 @@ pub fn PlaylistView(playlist_id: String) -> Element {
     if let Some(err) = error() {
         return rsx! {
             div { class: "flex flex-col items-center justify-center py-20 gap-3",
-                div { class: "text-5xl", "⚠️" }
+                IconAlertTriangle { class: "w-12 h-12 text-warning".to_string() }
                 h3 { class: "text-lg font-semibold", "Error loading playlist" }
                 p { class: "text-base-content/60", "{err}" }
             }
@@ -94,9 +95,7 @@ pub fn PlaylistView(playlist_id: String) -> Element {
                     button {
                         class: "btn btn-primary btn-sm",
                         onclick: move |_| use_player::play_queue(player, tracks_for_play_all.clone(), 0),
-                        svg { class: "w-4 h-4", fill: "currentColor", view_box: "0 0 24 24",
-                            path { d: "M8 5v14l11-7z" }
-                        }
+                        IconPlay { class: "w-4 h-4".to_string() }
                         "Play All"
                     }
                 }
@@ -104,7 +103,7 @@ pub fn PlaylistView(playlist_id: String) -> Element {
 
             if track_list.is_empty() {
                 div { class: "flex flex-col items-center justify-center py-12 gap-3",
-                    div { class: "text-4xl", "🎵" }
+                    IconMusic { class: "w-10 h-10 text-base-content/30".to_string() }
                     p { class: "text-base-content/60", "This playlist is empty. Add tracks from the music library." }
                 }
             } else {
@@ -161,13 +160,9 @@ pub fn PlaylistView(playlist_id: String) -> Element {
                                                         }
                                                     },
                                                     if is_current && is_playing {
-                                                        svg { class: "w-3 h-3", fill: "currentColor", view_box: "0 0 24 24",
-                                                            path { d: "M6 19h4V5H6v14zm8-14v14h4V5h-4z" }
-                                                        }
+                                                        IconPause { class: "w-3 h-3".to_string() }
                                                     } else {
-                                                        svg { class: "w-3 h-3", fill: "currentColor", view_box: "0 0 24 24",
-                                                            path { d: "M8 5v14l11-7z" }
-                                                        }
+                                                        IconPlay { class: "w-3 h-3".to_string() }
                                                     }
                                                 }
                                             }

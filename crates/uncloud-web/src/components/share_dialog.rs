@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use crate::components::icons::{IconCheck, IconX};
 
 #[component]
 pub fn ShareDialog(
@@ -67,7 +68,7 @@ pub fn ShareDialog(
                     button {
                         class: "btn btn-sm btn-circle btn-ghost",
                         onclick: move |_| on_close.call(()),
-                        "✕"
+                        IconX {}
                     }
                 }
 
@@ -75,7 +76,8 @@ pub fn ShareDialog(
                 if share_url().is_some() {
                     div { class: "flex flex-col gap-3",
                         div { class: "alert alert-success",
-                            span { "✓ Share link created!" }
+                            IconCheck {}
+                            span { "Share link created!" }
                         }
                         div { class: "join w-full",
                             input {

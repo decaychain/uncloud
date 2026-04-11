@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 use uncloud_common::MusicAlbumResponse;
+use crate::components::icons::{IconMusic, IconPlay};
 use crate::hooks::api;
 
 #[component]
@@ -11,7 +12,7 @@ pub fn AlbumGrid(
     if albums.is_empty() {
         return rsx! {
             div { class: "flex flex-col items-center justify-center py-12 gap-3",
-                div { class: "text-4xl", "🎵" }
+                IconMusic { class: "w-10 h-10 text-base-content/30".to_string() }
                 p { class: "text-base-content/60", "No albums found" }
             }
         };
@@ -40,8 +41,8 @@ pub fn AlbumGrid(
                                             loading: "lazy",
                                         }
                                     } else {
-                                        div { class: "flex items-center justify-center h-32 text-4xl bg-base-200 rounded-t-xl",
-                                            "🎵"
+                                        div { class: "flex items-center justify-center h-32 bg-base-200 rounded-t-xl",
+                                            IconMusic { class: "w-10 h-10 text-base-content/30".to_string() }
                                         }
                                     }
                                     // Play button overlay
@@ -54,9 +55,7 @@ pub fn AlbumGrid(
                                                     handler.call(album_play.clone());
                                                 }
                                             },
-                                            svg { class: "w-4 h-4", fill: "currentColor", view_box: "0 0 24 24",
-                                                path { d: "M8 5v14l11-7z" }
-                                            }
+                                            IconPlay { class: "w-4 h-4".to_string() }
                                         }
                                     }
                                 }

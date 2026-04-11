@@ -5,6 +5,7 @@ pub mod file_viewer;
 pub mod upload;
 pub mod context_menu;
 pub mod share_dialog;
+pub mod icons;
 pub mod layout;
 pub mod lightbox;
 pub mod search;
