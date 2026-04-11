@@ -185,7 +185,14 @@ impl SyncEngine {
             let local_path_str = self.fs.join(&parent_base, server_rel_path);
             let local_path = &local_path_str;
 
-            let journal_entry = journal_map.get(&key);
+            // If the journal thinks this file is synced but it no longer exists
+            // at the resolved local path, treat it as new. This catches root-path
+            // changes (stale journal rows pointing at an old root) and accidental
+            // local deletes.
+            let local_exists = self.fs.is_file(local_path).await.unwrap_or(false);
+            let journal_entry = journal_map
+                .get(&key)
+                .filter(|_| local_exists);
 
             match journal_entry {
                 None => {
@@ -661,14 +668,23 @@ impl SyncEngine {
         let eff = self.client.get_effective_strategy(folder_id).await?;
         let effective_strategy = eff.strategy;
 
-        // Walk breadcrumb from leaf → root, returning the first journal override.
+        // Walk breadcrumb from leaf → root, stopping at the first journal
+        // override. Breadcrumb is ordered root → leaf, so the leaf is last.
+        // Names passed AFTER the override (descendants we walked over) get
+        // joined onto the anchor so the final path points at the folder's
+        // own local directory, not the ancestor's.
         let breadcrumb = self.client.get_folder_breadcrumb(folder_id).await?;
         let mut base_path: Option<String> = None;
         let mut base_source: BaseSource = BaseSource::None;
 
+        let mut descendant_names: Vec<&str> = Vec::new();
         for (i, f) in breadcrumb.iter().enumerate().rev() {
             if let Some(p) = self.get_folder_local_path(&f.id).await? {
-                base_path = Some(p);
+                let mut base = p;
+                for name in descendant_names.iter().rev() {
+                    base = self.fs.join(&base, name);
+                }
+                base_path = Some(base);
                 base_source = if i == breadcrumb.len() - 1 {
                     BaseSource::SelfOverride
                 } else {
@@ -676,11 +692,16 @@ impl SyncEngine {
                 };
                 break;
             }
+            descendant_names.push(&f.name);
         }
 
         if base_path.is_none() {
             if let Some(root) = self.root_local_path.as_ref() {
-                base_path = Some(root.clone());
+                let mut base = root.clone();
+                for name in descendant_names.iter().rev() {
+                    base = self.fs.join(&base, name);
+                }
+                base_path = Some(base);
                 base_source = BaseSource::ClientRoot;
             }
         }

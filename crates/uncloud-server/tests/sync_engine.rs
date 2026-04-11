@@ -90,6 +90,82 @@ async fn server_file_downloads_to_local() {
     assert_eq!(content, b"server content");
 }
 
+/// A file inside an Inherit-strategy folder (no explicit override anywhere)
+/// should be downloaded when the root default resolves to TwoWay.
+#[tokio::test]
+async fn server_file_in_inherit_folder_downloads_to_local() {
+    let app = BoundTestApp::new().await;
+    let client = app.setup_user("carol_nested").await;
+
+    // Server-side folder with no strategy set (Inherit by default).
+    let folder = client.create_folder("photos", None).await.unwrap();
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    tokio::fs::write(tmp.path().join("cat.jpg"), b"meow")
+        .await
+        .unwrap();
+    client
+        .upload_file(&tmp.path().join("cat.jpg"), Some(&folder.id))
+        .await
+        .unwrap();
+
+    let (engine, sync_dir) = app.new_sync_engine(Arc::clone(&client)).await;
+    let report = engine.incremental_sync().await.unwrap();
+
+    assert!(
+        report.errors.is_empty(),
+        "expected no errors, got: {:?}",
+        report.errors
+    );
+    assert_eq!(report.downloaded, vec!["cat.jpg"]);
+
+    let local = sync_dir.path().join("photos").join("cat.jpg");
+    assert!(local.exists(), "expected {} to exist", local.display());
+    assert_eq!(tokio::fs::read(&local).await.unwrap(), b"meow");
+}
+
+/// A file inside a nested subfolder (two levels deep) with all folders
+/// using default Inherit strategy should be downloaded, and its directory
+/// structure created on disk under the client root.
+#[tokio::test]
+async fn server_file_in_nested_inherit_folders_downloads() {
+    let app = BoundTestApp::new().await;
+    let client = app.setup_user("carol_deep").await;
+
+    // photos/vacation/beach.jpg — no strategies set anywhere.
+    let photos = client.create_folder("photos", None).await.unwrap();
+    let vacation = client
+        .create_folder("vacation", Some(&photos.id))
+        .await
+        .unwrap();
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    tokio::fs::write(tmp.path().join("beach.jpg"), b"sandy")
+        .await
+        .unwrap();
+    client
+        .upload_file(&tmp.path().join("beach.jpg"), Some(&vacation.id))
+        .await
+        .unwrap();
+
+    let (engine, sync_dir) = app.new_sync_engine(Arc::clone(&client)).await;
+    let report = engine.incremental_sync().await.unwrap();
+
+    assert!(
+        report.errors.is_empty(),
+        "expected no errors, got: {:?}",
+        report.errors
+    );
+    assert_eq!(report.downloaded, vec!["beach.jpg"]);
+
+    let local = sync_dir
+        .path()
+        .join("photos")
+        .join("vacation")
+        .join("beach.jpg");
+    assert!(local.exists(), "expected {} to exist", local.display());
+}
+
 /// After a server-side deletion the local copy is removed on next sync.
 #[tokio::test]
 async fn server_delete_removes_local_file() {

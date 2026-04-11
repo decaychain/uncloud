@@ -56,22 +56,38 @@ pub struct SyncConfigDto {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SyncErrorDto {
+    pub path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SyncReportDto {
     pub uploaded: Vec<String>,
     pub downloaded: Vec<String>,
     pub deleted_local: Vec<String>,
     pub conflict_count: usize,
     pub error_count: usize,
+    pub errors: Vec<SyncErrorDto>,
 }
 
 impl From<SyncReport> for SyncReportDto {
     fn from(r: SyncReport) -> Self {
+        let errors = r
+            .errors
+            .iter()
+            .map(|e| SyncErrorDto {
+                path: e.path.clone(),
+                reason: e.reason.clone(),
+            })
+            .collect();
         SyncReportDto {
             conflict_count: r.conflicts.len(),
             error_count: r.errors.len(),
             uploaded: r.uploaded,
             downloaded: r.downloaded,
             deleted_local: r.deleted_local,
+            errors,
         }
     }
 }
@@ -332,6 +348,17 @@ async fn sync_now(app: AppHandle, state: State<'_, DesktopState>) -> Result<Sync
     let result = engine.incremental_sync().await.map_err(|e| e.to_string());
     match result {
         Ok(report) => {
+            eprintln!(
+                "[uncloud-desktop] sync report: uploaded={} downloaded={} deleted_local={} conflicts={} errors={}",
+                report.uploaded.len(),
+                report.downloaded.len(),
+                report.deleted_local.len(),
+                report.conflicts.len(),
+                report.errors.len(),
+            );
+            for err in &report.errors {
+                eprintln!("[uncloud-desktop] sync error: {} — {}", err.path, err.reason);
+            }
             *state.status.lock().await = SyncStatus::Idle {
                 last_sync: Utc::now().to_rfc3339(),
             };

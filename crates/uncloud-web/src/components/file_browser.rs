@@ -1532,10 +1532,10 @@ fn FolderSettingsModal(
                                 }
                                 p { class: "text-xs text-base-content/60 mb-1",
                                     {match local_source().as_str() {
-                                        "self"      => "Override set on this folder.",
-                                        "inherited" => "Inherited from an ancestor folder.",
-                                        "root"      => "Using the client root default.",
-                                        _           => "No local folder resolved \u{2014} this folder will not sync on this device.",
+                                        "self"        => "Override set on this folder.",
+                                        "ancestor"    => "Inherited from an ancestor folder.",
+                                        "client_root" => "Using the client root default.",
+                                        _             => "No local folder resolved \u{2014} this folder will not sync on this device.",
                                     }}
                                 }
                                 div { class: "join w-full mb-2",
