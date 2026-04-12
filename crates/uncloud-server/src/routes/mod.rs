@@ -18,6 +18,8 @@ pub mod apps;
 pub mod shopping;
 pub mod folder_shares;
 pub mod vault_recents;
+pub mod tasks;
+pub mod task_items;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -158,7 +160,29 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/folder-shares/by-me", get(folder_shares::list_shares_by_me))
         .route("/folder-shares/with-me", get(folder_shares::list_shares_with_me))
         .route("/folder-shares/folder/{id}", get(folder_shares::list_folder_shares))
-        .route("/folder-shares/{id}", put(folder_shares::update_share).delete(folder_shares::delete_share));
+        .route("/folder-shares/{id}", put(folder_shares::update_share).delete(folder_shares::delete_share))
+        // Tasks
+        .route("/tasks/projects", get(tasks::list_projects).post(tasks::create_project))
+        .route("/tasks/projects/{id}", get(tasks::get_project).put(tasks::update_project).delete(tasks::delete_project))
+        .route("/tasks/projects/{id}/members", post(tasks::add_project_member))
+        .route("/tasks/projects/{id}/members/{user_id}", put(tasks::update_project_member).delete(tasks::remove_project_member))
+        .route("/tasks/projects/{id}/sections", get(tasks::list_sections).post(tasks::create_section))
+        .route("/tasks/projects/{id}/sections/reorder", put(tasks::reorder_sections))
+        .route("/tasks/projects/{id}/labels", get(tasks::list_labels).post(tasks::create_label))
+        .route("/tasks/projects/{id}/tasks", get(task_items::list_tasks).post(task_items::create_task))
+        .route("/tasks/projects/{id}/tasks/reorder", put(task_items::reorder_tasks))
+        .route("/tasks/sections/{id}", put(tasks::update_section).delete(tasks::delete_section))
+        .route("/tasks/labels/{id}", put(tasks::update_label).delete(tasks::delete_label))
+        .route("/tasks/{id}", get(task_items::get_task).put(task_items::update_task).delete(task_items::delete_task))
+        .route("/tasks/{id}/status", put(task_items::update_task_status))
+        .route("/tasks/{id}/subtasks", post(task_items::create_subtask))
+        .route("/tasks/{id}/promote", post(task_items::promote_subtask))
+        .route("/tasks/{id}/attachments", post(task_items::attach_files))
+        .route("/tasks/{id}/attachments/{file_id}", delete(task_items::detach_file))
+        .route("/tasks/{id}/comments", get(task_items::list_comments).post(task_items::create_comment))
+        .route("/tasks/comments/{id}", put(task_items::update_comment).delete(task_items::delete_comment))
+        .route("/tasks/schedule", get(task_items::get_schedule))
+        .route("/tasks/assigned-to-me", get(task_items::get_assigned_to_me));
 
     // v1-only routes (API tokens, S3 credentials, apps)
     let v1_only = Router::new()

@@ -1,11 +1,11 @@
 use dioxus::prelude::*;
 use wasm_bindgen::JsCast;
-use uncloud_common::{AlbumResponse, MusicFolderResponse, PlaylistSummary};
+use uncloud_common::{AlbumResponse, MusicFolderResponse, PlaylistSummary, TaskProjectResponse};
 use crate::components::icons::{
-    IconFolder, IconImage, IconKey, IconLink, IconListMusic, IconMusic, IconPalette, IconPencil,
+    IconCheckSquare, IconFolder, IconImage, IconKey, IconLink, IconListMusic, IconMusic, IconPalette, IconPencil,
     IconSettings, IconShield, IconShoppingCart, IconTrash, IconUser, IconUsers,
 };
-use crate::hooks::{use_apps, use_files, use_music, use_playlists};
+use crate::hooks::{use_apps, use_files, use_music, use_playlists, use_tasks};
 use crate::hooks::use_apps::AppEntry;
 use crate::router::Route;
 use crate::state::AuthState;
@@ -31,6 +31,8 @@ pub fn Sidebar() -> Element {
         "gallery"
     } else if matches!(route, Route::Music {} | Route::MusicArtist { .. } | Route::MusicAlbum { .. } | Route::MusicFolder { .. } | Route::MusicPlaylist { .. }) {
         "music"
+    } else if matches!(route, Route::Tasks {} | Route::TasksProject { .. }) {
+        "tasks"
     } else if matches!(route, Route::Shopping {} | Route::ShoppingList { .. }) {
         "shopping"
     } else if matches!(route, Route::Passwords {}) {
@@ -83,6 +85,15 @@ pub fn Sidebar() -> Element {
                         onclick: move |_| close_drawer(),
                         IconMusic {}
                         span { "Music" }
+                    }
+                }
+                li {
+                    Link {
+                        to: Route::Tasks {},
+                        class: if section == "tasks" { "active" } else { "" },
+                        onclick: move |_| close_drawer(),
+                        IconCheckSquare {}
+                        span { "Tasks" }
                     }
                 }
                 if shopping_enabled {
@@ -145,6 +156,19 @@ pub fn Sidebar() -> Element {
                             }
                             MusicSidebarPlaylists {}
                             MusicSidebarFolders {}
+                        },
+                        "tasks" => rsx! {
+                            li { class: "menu-title", span { "Tasks" } }
+                            li {
+                                Link {
+                                    to: Route::Tasks {},
+                                    class: if matches!(route, Route::Tasks {}) { "active" } else { "" },
+                                    onclick: move |_| close_drawer(),
+                                    IconCheckSquare {}
+                                    span { "Schedule" }
+                                }
+                            }
+                            TasksSidebarProjects {}
                         },
                         "shopping" => rsx! {
                             li { class: "menu-title", span { "Shopping" } }
@@ -854,6 +878,119 @@ fn MusicSidebarPlaylists() -> Element {
                         div { class: "modal-backdrop", onclick: move |_| delete_target.set(None) }
                     }
                 }
+            }
+        }
+    }
+}
+
+#[component]
+fn TasksSidebarProjects() -> Element {
+    let mut projects: Signal<Vec<TaskProjectResponse>> = use_signal(Vec::new);
+    let mut refresh = use_signal(|| 0u32);
+    let route = use_route::<Route>();
+    let nav = use_navigator();
+
+    // Create modal state
+    let mut show_create: Signal<bool> = use_signal(|| false);
+    let mut new_name: Signal<String> = use_signal(|| String::new());
+    let mut create_error: Signal<Option<String>> = use_signal(|| None);
+
+    use_effect(move || {
+        let _ = refresh();
+        spawn(async move {
+            if let Ok(p) = use_tasks::list_projects().await {
+                projects.set(p);
+            }
+        });
+    });
+
+    rsx! {
+        li { class: "menu-title mt-2", span { "Projects" } }
+        for project in projects() {
+            {
+                let pid = project.id.clone();
+                let is_active = matches!(&route, Route::TasksProject { id } if *id == pid);
+                let color = project.color.clone().unwrap_or_else(|| "#3B82F6".to_string());
+                rsx! {
+                    li {
+                        Link {
+                            to: Route::TasksProject { id: project.id.clone() },
+                            class: if is_active { "active" } else { "" },
+                            onclick: move |_| close_drawer(),
+                            span {
+                                class: "w-3 h-3 rounded-full inline-block",
+                                style: "background-color: {color}",
+                            }
+                            span { class: "truncate", "{project.name}" }
+                        }
+                    }
+                }
+            }
+        }
+        li {
+            a {
+                class: "text-base-content/50 hover:text-base-content",
+                onclick: move |_| {
+                    new_name.set(String::new());
+                    create_error.set(None);
+                    show_create.set(true);
+                },
+                "+ New project"
+            }
+        }
+
+        // Create project modal
+        if show_create() {
+            div { class: "modal modal-open",
+                div { class: "modal-box",
+                    h3 { class: "font-bold text-lg mb-4", "New Project" }
+                    if let Some(err) = create_error() {
+                        div { class: "alert alert-error mb-3 text-sm", "{err}" }
+                    }
+                    input {
+                        class: "input input-bordered w-full",
+                        r#type: "text",
+                        placeholder: "Project name",
+                        value: "{new_name}",
+                        oninput: move |e| new_name.set(e.value()),
+                    }
+                    div { class: "modal-action",
+                        button {
+                            class: "btn",
+                            onclick: move |_| show_create.set(false),
+                            "Cancel"
+                        }
+                        button {
+                            class: "btn btn-primary",
+                            disabled: new_name().trim().is_empty(),
+                            onclick: move |_| {
+                                let name = new_name().trim().to_string();
+                                spawn(async move {
+                                    let req = uncloud_common::CreateTaskProjectRequest {
+                                        name: name.clone(),
+                                        description: None,
+                                        color: None,
+                                        icon: None,
+                                        default_view: None,
+                                    };
+                                    match use_tasks::create_project(&req).await {
+                                        Ok(project) => {
+                                            show_create.set(false);
+                                            let next = *refresh.peek() + 1;
+                                            refresh.set(next);
+                                            nav.push(Route::TasksProject { id: project.id });
+                                        }
+                                        Err(e) => {
+                                            create_error.set(Some(e));
+                                        }
+                                    }
+                                });
+                            },
+                            "Create"
+                        }
+                    }
+                }
+                div { class: "modal-backdrop", onclick: move |_| show_create.set(false) }
             }
         }
     }

@@ -1,0 +1,879 @@
+use dioxus::prelude::*;
+use uncloud_common::{
+    CreateTaskRequest, RecurrenceRule, TaskCommentResponse, TaskPriority, TaskResponse,
+    TaskStatus, UpdateTaskRequest, UpdateTaskStatusRequest,
+};
+
+use crate::hooks::use_tasks;
+
+fn format_recurrence(rule: &RecurrenceRule) -> String {
+    match rule {
+        RecurrenceRule::Daily => "Every day".to_string(),
+        RecurrenceRule::Weekly { days } => {
+            let day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+            let selected: Vec<&str> = days.iter().filter_map(|d| day_names.get(*d as usize).copied()).collect();
+            if selected.len() == 7 {
+                "Every day".to_string()
+            } else if selected.is_empty() {
+                "Weekly".to_string()
+            } else {
+                format!("Every {}", selected.join(", "))
+            }
+        }
+        RecurrenceRule::Monthly { day_of_month } => format!("Monthly on the {}{}", day_of_month, ordinal_suffix(*day_of_month)),
+        RecurrenceRule::Yearly { month, day } => {
+            let month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+            let m = month_names.get((*month as usize).saturating_sub(1)).unwrap_or(&"???");
+            format!("Every {} {}", m, day)
+        }
+        RecurrenceRule::Custom { interval_days } => {
+            if *interval_days == 1 { "Every day".to_string() }
+            else { format!("Every {} days", interval_days) }
+        }
+    }
+}
+
+fn ordinal_suffix(n: u8) -> &'static str {
+    match (n % 10, n % 100) {
+        (1, 11) => "th",
+        (1, _) => "st",
+        (2, 12) => "th",
+        (2, _) => "nd",
+        (3, 13) => "th",
+        (3, _) => "rd",
+        _ => "th",
+    }
+}
+
+/// Helper to build an UpdateTaskRequest with a single field set.
+fn update_req() -> UpdateTaskRequest {
+    UpdateTaskRequest {
+        section_id: None,
+        title: None,
+        description: None,
+        status: None,
+        status_note: None,
+        priority: None,
+        assignee_id: None,
+        labels: None,
+        due_date: None,
+        recurrence_rule: None,
+        position: None,
+    }
+}
+
+#[component]
+pub fn TaskDetail(
+    task_id: String,
+    #[props(default = 0)] refresh_key: u32,
+    on_close: EventHandler<()>,
+    on_updated: EventHandler<()>,
+) -> Element {
+    let mut task: Signal<Option<TaskResponse>> = use_signal(|| None);
+    let mut comments: Signal<Vec<TaskCommentResponse>> = use_signal(Vec::new);
+    let mut subtasks: Signal<Vec<TaskResponse>> = use_signal(Vec::new);
+    let mut loading = use_signal(|| true);
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+
+    // Editing states
+    let mut editing_title = use_signal(|| false);
+    let mut title_draft = use_signal(String::new);
+    let mut desc_draft = use_signal(String::new);
+    let mut editing_desc = use_signal(|| false);
+    let mut new_comment = use_signal(String::new);
+    let mut new_subtask_title = use_signal(String::new);
+    let mut adding_subtask = use_signal(|| false);
+
+    // Recurrence editing
+    let mut editing_recurrence = use_signal(|| false);
+    let mut rec_type = use_signal(|| "none".to_string());
+    let mut rec_weekly_days: Signal<Vec<u8>> = use_signal(Vec::new);
+    let mut rec_monthly_day = use_signal(|| 1u8);
+    let mut rec_yearly_month = use_signal(|| 1u8);
+    let mut rec_yearly_day = use_signal(|| 1u8);
+    let mut rec_custom_days = use_signal(|| 7u32);
+
+    // Status note editing
+    let mut status_note_val = use_signal(String::new);
+
+    // Track refresh_key in a signal so the effect re-runs when it changes
+    let mut refresh_sig = use_signal(|| refresh_key);
+    if *refresh_sig.peek() != refresh_key {
+        refresh_sig.set(refresh_key);
+    }
+
+    // Fetch task + comments
+    let tid = task_id.clone();
+    use_effect(move || {
+        let _key = *refresh_sig.read(); // subscribe to refresh_key changes
+        let tid = tid.clone();
+        spawn(async move {
+            loading.set(true);
+            error.set(None);
+
+            let (task_res, comments_res) = futures::join!(
+                use_tasks::get_task(&tid),
+                use_tasks::list_comments(&tid),
+            );
+
+            match task_res {
+                Ok(t) => {
+                    title_draft.set(t.title.clone());
+                    desc_draft.set(t.description.clone().unwrap_or_default());
+                    if t.subtask_count > 0 {
+                        if let Ok(subs) = use_tasks::list_subtasks(&t.project_id, &t.id).await {
+                            subtasks.set(subs);
+                        }
+                    } else {
+                        subtasks.set(Vec::new());
+                    }
+                    task.set(Some(t));
+                }
+                Err(e) => error.set(Some(e)),
+            }
+            if let Ok(c) = comments_res {
+                comments.set(c);
+            }
+
+            loading.set(false);
+        });
+    });
+
+    // Shared save-title logic extracted into a plain fn that takes signals
+    let do_save_title = {
+        let task_id = task_id.clone();
+        move || {
+            let tid = task_id.clone();
+            let new_title = title_draft.peek().clone();
+            if new_title.trim().is_empty() {
+                editing_title.set(false);
+                return;
+            }
+            editing_title.set(false);
+            spawn(async move {
+                let mut req = update_req();
+                req.title = Some(new_title);
+                if let Ok(updated) = use_tasks::update_task(&tid, &req).await {
+                    task.set(Some(updated));
+                    on_updated.call(());
+                }
+            });
+        }
+    };
+
+    // Shared save-description logic
+    let do_save_desc = {
+        let task_id = task_id.clone();
+        move || {
+            let tid = task_id.clone();
+            let new_desc = desc_draft.peek().clone();
+            editing_desc.set(false);
+            spawn(async move {
+                let mut req = update_req();
+                req.description = Some(new_desc);
+                if let Ok(updated) = use_tasks::update_task(&tid, &req).await {
+                    task.set(Some(updated));
+                    on_updated.call(());
+                }
+            });
+        }
+    };
+
+    // Shared post-comment logic
+    let do_post_comment = {
+        let task_id = task_id.clone();
+        move || {
+            let body = new_comment.peek().trim().to_string();
+            if body.is_empty() {
+                return;
+            }
+            let tid = task_id.clone();
+            new_comment.set(String::new());
+            spawn(async move {
+                if let Ok(c) = use_tasks::create_comment(&tid, &body).await {
+                    comments.write().push(c);
+                }
+            });
+        }
+    };
+
+    if *loading.read() {
+        return rsx! {
+            div { class: "fixed inset-0 bg-black/30 z-40" }
+            div { class: "fixed top-0 right-0 h-full w-[28rem] max-w-full bg-base-100 shadow-xl z-50 flex items-center justify-center",
+                span { class: "loading loading-spinner loading-lg" }
+            }
+        };
+    }
+
+    if let Some(err) = error.read().as_ref() {
+        return rsx! {
+            div { class: "fixed inset-0 bg-black/30 z-40",
+                onclick: move |_| on_close.call(()),
+            }
+            div { class: "fixed top-0 right-0 h-full w-[28rem] max-w-full bg-base-100 shadow-xl z-50 p-6",
+                div { class: "alert alert-error", "{err}" }
+            }
+        };
+    }
+
+    let t = match task.read().as_ref() {
+        Some(t) => t.clone(),
+        None => return rsx! {},
+    };
+
+    let current_status_str = match &t.status {
+        TaskStatus::Todo => "todo",
+        TaskStatus::InProgress => "in_progress",
+        TaskStatus::Blocked => "blocked",
+        TaskStatus::Done => "done",
+        TaskStatus::Cancelled => "cancelled",
+    };
+
+    let current_priority_str = match &t.priority {
+        TaskPriority::High => "high",
+        TaskPriority::Medium => "medium",
+        TaskPriority::Low => "low",
+    };
+
+    let status_options: [(TaskStatus, &str); 5] = [
+        (TaskStatus::Todo, "Backlog"),
+        (TaskStatus::InProgress, "In Progress"),
+        (TaskStatus::Blocked, "Blocked"),
+        (TaskStatus::Done, "Done"),
+        (TaskStatus::Cancelled, "Cancelled"),
+    ];
+
+    let priority_options: [(TaskPriority, &str); 3] = [
+        (TaskPriority::High, "High"),
+        (TaskPriority::Medium, "Medium"),
+        (TaskPriority::Low, "Low"),
+    ];
+
+    // Pre-clone for closures that need separate copies
+    let (mut save_title_a, mut save_title_b) = (do_save_title.clone(), do_save_title.clone());
+    let (mut save_desc_a, mut _save_desc_b) = (do_save_desc.clone(), do_save_desc.clone());
+    let (mut post_comment_a, mut post_comment_b) = (do_post_comment.clone(), do_post_comment.clone());
+
+    let tid_status = task_id.clone();
+    let tid_priority = task_id.clone();
+    let tid_due = task_id.clone();
+    let tid_subtask = task_id.clone();
+
+    rsx! {
+        // Backdrop
+        div {
+            class: "fixed inset-0 bg-black/30 z-40",
+            onclick: move |_| on_close.call(()),
+        }
+
+        // Panel
+        div { class: "fixed top-0 right-0 h-full w-[28rem] max-w-full bg-base-100 shadow-xl z-50 flex flex-col overflow-y-auto",
+
+            // Header
+            div { class: "flex items-start justify-between p-4 border-b border-base-300",
+                div { class: "flex-1 mr-2",
+                    if *editing_title.read() {
+                        input {
+                            class: "input input-bordered input-sm w-full text-lg font-bold",
+                            value: "{title_draft}",
+                            autofocus: true,
+                            oninput: move |e| title_draft.set(e.value()),
+                            onkeydown: move |e: KeyboardEvent| {
+                                if e.key() == Key::Enter {
+                                    save_title_a();
+                                } else if e.key() == Key::Escape {
+                                    editing_title.set(false);
+                                    if let Some(t) = task.read().as_ref() {
+                                        title_draft.set(t.title.clone());
+                                    }
+                                }
+                            },
+                            onblur: move |_| save_title_b(),
+                        }
+                    } else {
+                        h2 {
+                            class: "text-lg font-bold cursor-pointer hover:text-primary",
+                            onclick: move |_| editing_title.set(true),
+                            "{t.title}"
+                        }
+                    }
+                }
+                button {
+                    class: "btn btn-ghost btn-sm btn-circle",
+                    onclick: move |_| on_close.call(()),
+                    svg {
+                        class: "w-4 h-4",
+                        xmlns: "http://www.w3.org/2000/svg",
+                        width: "24",
+                        height: "24",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        path { d: "M18 6 6 18" }
+                        path { d: "m6 6 12 12" }
+                    }
+                }
+            }
+
+            // Body
+            div { class: "p-4 flex flex-col gap-4",
+
+                // Status + Priority row
+                div { class: "grid grid-cols-2 gap-3",
+                    div {
+                        label { class: "label", span { class: "label-text text-xs font-semibold uppercase", "Status" } }
+                        select {
+                            class: "select select-bordered select-sm w-full",
+                            value: "{current_status_str}",
+                            onchange: move |e| {
+                                let val = e.value();
+                                let s = match val.as_str() {
+                                    "todo" => TaskStatus::Todo,
+                                    "in_progress" => TaskStatus::InProgress,
+                                    "blocked" => TaskStatus::Blocked,
+                                    "done" => TaskStatus::Done,
+                                    "cancelled" => TaskStatus::Cancelled,
+                                    _ => return,
+                                };
+                                let tid = tid_status.clone();
+                                spawn(async move {
+                                    let req = UpdateTaskStatusRequest { status: s, status_note: None };
+                                    if let Ok(updated) = use_tasks::update_task_status(&tid, &req).await {
+                                        title_draft.set(updated.title.clone());
+                                        desc_draft.set(updated.description.clone().unwrap_or_default());
+                                        task.set(Some(updated));
+                                        on_updated.call(());
+                                    }
+                                });
+                            },
+                            for (status, slabel) in status_options.iter() {
+                                {
+                                    let val = match status {
+                                        TaskStatus::Todo => "todo",
+                                        TaskStatus::InProgress => "in_progress",
+                                        TaskStatus::Blocked => "blocked",
+                                        TaskStatus::Done => "done",
+                                        TaskStatus::Cancelled => "cancelled",
+                                    };
+                                    rsx! {
+                                        option { value: "{val}", "{slabel}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    div {
+                        label { class: "label", span { class: "label-text text-xs font-semibold uppercase", "Priority" } }
+                        select {
+                            class: "select select-bordered select-sm w-full",
+                            value: "{current_priority_str}",
+                            onchange: move |e| {
+                                let val = e.value();
+                                let p = match val.as_str() {
+                                    "high" => TaskPriority::High,
+                                    "medium" => TaskPriority::Medium,
+                                    "low" => TaskPriority::Low,
+                                    _ => return,
+                                };
+                                let tid = tid_priority.clone();
+                                spawn(async move {
+                                    let mut req = update_req();
+                                    req.priority = Some(p);
+                                    if let Ok(updated) = use_tasks::update_task(&tid, &req).await {
+                                        task.set(Some(updated));
+                                        on_updated.call(());
+                                    }
+                                });
+                            },
+                            for (priority, plabel) in priority_options.iter() {
+                                {
+                                    let val = match priority {
+                                        TaskPriority::High => "high",
+                                        TaskPriority::Medium => "medium",
+                                        TaskPriority::Low => "low",
+                                    };
+                                    rsx! {
+                                        option { value: "{val}", "{plabel}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Status note
+                {
+                    let tid_note = task_id.clone();
+                    let current_note = t.status_note.clone().unwrap_or_default();
+                    rsx! {
+                        div {
+                            label { class: "label", span { class: "label-text text-xs font-semibold uppercase", "Status Note" } }
+                            input {
+                                class: "input input-bordered input-sm w-full",
+                                r#type: "text",
+                                placeholder: "e.g. waiting for delivery...",
+                                value: "{current_note}",
+                                oninput: move |e| {
+                                    status_note_val.set(e.value());
+                                },
+                                onblur: move |_| {
+                                    let note = status_note_val.peek().clone();
+                                    let tid = tid_note.clone();
+                                    spawn(async move {
+                                        let mut req = update_req();
+                                        req.status_note = Some(note);
+                                        if let Ok(updated) = use_tasks::update_task(&tid, &req).await {
+                                            task.set(Some(updated));
+                                            on_updated.call(());
+                                        }
+                                    });
+                                },
+                            }
+                        }
+                    }
+                }
+
+                // Due date
+                div {
+                    label { class: "label", span { class: "label-text text-xs font-semibold uppercase", "Due Date" } }
+                    input {
+                        class: "input input-bordered input-sm w-full",
+                        r#type: "date",
+                        value: "{t.due_date.as_deref().unwrap_or(\"\").get(..10).unwrap_or(\"\")}",
+                        onchange: move |e| {
+                            let date = e.value();
+                            let tid = tid_due.clone();
+                            spawn(async move {
+                                let mut req = update_req();
+                                req.due_date = Some(date);
+                                if let Ok(updated) = use_tasks::update_task(&tid, &req).await {
+                                    task.set(Some(updated));
+                                    on_updated.call(());
+                                }
+                            });
+                        },
+                    }
+                }
+
+                // Recurrence
+                div {
+                    label { class: "label", span { class: "label-text text-xs font-semibold uppercase", "Repeat" } }
+                    if *editing_recurrence.read() {
+                        {
+                            let tid_rec = task_id.clone();
+                            rsx! {
+                                div { class: "flex flex-col gap-2 p-3 bg-base-200 rounded-box",
+                                    select {
+                                        class: "select select-bordered select-sm w-full",
+                                        value: "{rec_type}",
+                                        onchange: move |e| rec_type.set(e.value()),
+                                        option { value: "none", "None" }
+                                        option { value: "daily", "Daily" }
+                                        option { value: "weekly", "Weekly" }
+                                        option { value: "monthly", "Monthly" }
+                                        option { value: "yearly", "Yearly" }
+                                        option { value: "custom", "Custom interval" }
+                                    }
+
+                                    // Weekly day picker
+                                    if rec_type() == "weekly" {
+                                        div { class: "flex gap-1 flex-wrap",
+                                            {
+                                                let days_labels = [("Mon",0u8),("Tue",1),("Wed",2),("Thu",3),("Fri",4),("Sat",5),("Sun",6)];
+                                                rsx! {
+                                                    for (label, num) in days_labels {
+                                                        {
+                                                            let selected = rec_weekly_days().contains(&num);
+                                                            rsx! {
+                                                                button {
+                                                                    class: if selected { "btn btn-xs btn-primary" } else { "btn btn-xs btn-outline" },
+                                                                    onclick: move |_| {
+                                                                        let mut d = rec_weekly_days.write();
+                                                                        if d.contains(&num) { d.retain(|&x| x != num); }
+                                                                        else { d.push(num); d.sort(); }
+                                                                    },
+                                                                    "{label}"
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Monthly day picker
+                                    if rec_type() == "monthly" {
+                                        div { class: "flex items-center gap-2",
+                                            span { class: "text-sm", "Day of month:" }
+                                            input {
+                                                class: "input input-bordered input-sm w-20",
+                                                r#type: "number",
+                                                min: "1",
+                                                max: "31",
+                                                value: "{rec_monthly_day}",
+                                                onchange: move |e| {
+                                                    if let Ok(v) = e.value().parse::<u8>() {
+                                                        rec_monthly_day.set(v.clamp(1, 31));
+                                                    }
+                                                },
+                                            }
+                                        }
+                                    }
+
+                                    // Yearly picker
+                                    if rec_type() == "yearly" {
+                                        div { class: "flex items-center gap-2",
+                                            select {
+                                                class: "select select-bordered select-sm",
+                                                value: "{rec_yearly_month}",
+                                                onchange: move |e| {
+                                                    if let Ok(v) = e.value().parse::<u8>() {
+                                                        rec_yearly_month.set(v);
+                                                    }
+                                                },
+                                                option { value: "1", "Jan" }
+                                                option { value: "2", "Feb" }
+                                                option { value: "3", "Mar" }
+                                                option { value: "4", "Apr" }
+                                                option { value: "5", "May" }
+                                                option { value: "6", "Jun" }
+                                                option { value: "7", "Jul" }
+                                                option { value: "8", "Aug" }
+                                                option { value: "9", "Sep" }
+                                                option { value: "10", "Oct" }
+                                                option { value: "11", "Nov" }
+                                                option { value: "12", "Dec" }
+                                            }
+                                            input {
+                                                class: "input input-bordered input-sm w-16",
+                                                r#type: "number",
+                                                min: "1",
+                                                max: "31",
+                                                value: "{rec_yearly_day}",
+                                                onchange: move |e| {
+                                                    if let Ok(v) = e.value().parse::<u8>() {
+                                                        rec_yearly_day.set(v.clamp(1, 31));
+                                                    }
+                                                },
+                                            }
+                                        }
+                                    }
+
+                                    // Custom interval
+                                    if rec_type() == "custom" {
+                                        div { class: "flex items-center gap-2",
+                                            span { class: "text-sm", "Every" }
+                                            input {
+                                                class: "input input-bordered input-sm w-20",
+                                                r#type: "number",
+                                                min: "1",
+                                                value: "{rec_custom_days}",
+                                                onchange: move |e| {
+                                                    if let Ok(v) = e.value().parse::<u32>() {
+                                                        rec_custom_days.set(v.max(1));
+                                                    }
+                                                },
+                                            }
+                                            span { class: "text-sm", "days" }
+                                        }
+                                    }
+
+                                    div { class: "flex gap-2 mt-2",
+                                        button {
+                                            class: "btn btn-primary btn-sm",
+                                            onclick: move |_| {
+                                                let rule = match rec_type().as_str() {
+                                                    "daily" => Some(RecurrenceRule::Daily),
+                                                    "weekly" => {
+                                                        let days = rec_weekly_days();
+                                                        if days.is_empty() { Some(RecurrenceRule::Daily) }
+                                                        else { Some(RecurrenceRule::Weekly { days }) }
+                                                    }
+                                                    "monthly" => Some(RecurrenceRule::Monthly { day_of_month: rec_monthly_day() }),
+                                                    "yearly" => Some(RecurrenceRule::Yearly { month: rec_yearly_month(), day: rec_yearly_day() }),
+                                                    "custom" => Some(RecurrenceRule::Custom { interval_days: rec_custom_days() }),
+                                                    _ => None,
+                                                };
+                                                let tid = tid_rec.clone();
+                                                editing_recurrence.set(false);
+                                                spawn(async move {
+                                                    let mut req = update_req();
+                                                    req.recurrence_rule = rule;
+                                                    if let Ok(updated) = use_tasks::update_task(&tid, &req).await {
+                                                        task.set(Some(updated));
+                                                        on_updated.call(());
+                                                    }
+                                                });
+                                            },
+                                            "Save"
+                                        }
+                                        button {
+                                            class: "btn btn-ghost btn-sm",
+                                            onclick: move |_| editing_recurrence.set(false),
+                                            "Cancel"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        {
+                            let has_rule = t.recurrence_rule.is_some();
+                            let display = t.recurrence_rule.as_ref().map(format_recurrence).unwrap_or_else(|| "None".to_string());
+                            rsx! {
+                                button {
+                                    class: "btn btn-ghost btn-sm justify-start font-normal",
+                                    onclick: move |_| {
+                                        // Initialize picker from current value
+                                        if let Some(ref t) = *task.read() {
+                                            match &t.recurrence_rule {
+                                                Some(RecurrenceRule::Daily) => rec_type.set("daily".to_string()),
+                                                Some(RecurrenceRule::Weekly { days }) => {
+                                                    rec_type.set("weekly".to_string());
+                                                    rec_weekly_days.set(days.clone());
+                                                }
+                                                Some(RecurrenceRule::Monthly { day_of_month }) => {
+                                                    rec_type.set("monthly".to_string());
+                                                    rec_monthly_day.set(*day_of_month);
+                                                }
+                                                Some(RecurrenceRule::Yearly { month, day }) => {
+                                                    rec_type.set("yearly".to_string());
+                                                    rec_yearly_month.set(*month);
+                                                    rec_yearly_day.set(*day);
+                                                }
+                                                Some(RecurrenceRule::Custom { interval_days }) => {
+                                                    rec_type.set("custom".to_string());
+                                                    rec_custom_days.set(*interval_days);
+                                                }
+                                                None => rec_type.set("none".to_string()),
+                                            }
+                                        }
+                                        editing_recurrence.set(true);
+                                    },
+                                    if has_rule {
+                                        span { class: "text-primary", "🔄 {display}" }
+                                    } else {
+                                        span { class: "text-base-content/40", "{display}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Labels display
+                if !t.labels.is_empty() {
+                    div {
+                        label { class: "label", span { class: "label-text text-xs font-semibold uppercase", "Labels" } }
+                        div { class: "flex flex-wrap gap-1",
+                            for lbl in t.labels.iter() {
+                                span { class: "badge badge-sm badge-outline", "{lbl}" }
+                            }
+                        }
+                    }
+                }
+
+                div { class: "divider my-0" }
+
+                // Description
+                div {
+                    label { class: "label", span { class: "label-text text-xs font-semibold uppercase", "Description" } }
+                    if *editing_desc.read() {
+                        textarea {
+                            class: "textarea textarea-bordered w-full min-h-[6rem]",
+                            value: "{desc_draft}",
+                            autofocus: true,
+                            oninput: move |e| desc_draft.set(e.value()),
+                            onblur: move |_| save_desc_a(),
+                            onkeydown: move |e: KeyboardEvent| {
+                                if e.key() == Key::Escape {
+                                    editing_desc.set(false);
+                                    if let Some(t) = task.read().as_ref() {
+                                        desc_draft.set(t.description.clone().unwrap_or_default());
+                                    }
+                                }
+                            },
+                        }
+                    } else {
+                        div {
+                            class: "min-h-[3rem] p-2 rounded cursor-pointer hover:bg-base-200 text-sm whitespace-pre-wrap",
+                            onclick: move |_| editing_desc.set(true),
+                            if t.description.as_ref().map_or(true, |d| d.is_empty()) {
+                                span { class: "text-base-content/40 italic", "Add a description..." }
+                            } else {
+                                "{t.description.as_deref().unwrap_or(\"\")}"
+                            }
+                        }
+                    }
+                }
+
+                div { class: "divider my-0" }
+
+                // Subtasks
+                div {
+                    div { class: "flex items-center justify-between",
+                        label { class: "label", span { class: "label-text text-xs font-semibold uppercase", "Subtasks" } }
+                        button {
+                            class: "btn btn-ghost btn-xs",
+                            onclick: move |_| adding_subtask.set(true),
+                            "+ Add"
+                        }
+                    }
+
+                    div { class: "flex flex-col gap-1",
+                        for sub in subtasks.read().iter() {
+                            {
+                                let sub_id = sub.id.clone();
+                                let sub_done = sub.status == TaskStatus::Done;
+                                let sub_title = sub.title.clone();
+                                rsx! {
+                                    div { class: "flex items-center gap-2 py-1",
+                                        input {
+                                            class: "checkbox checkbox-sm",
+                                            r#type: "checkbox",
+                                            checked: sub_done,
+                                            onchange: move |_| {
+                                                let sid = sub_id.clone();
+                                                let new_s = if sub_done { TaskStatus::Todo } else { TaskStatus::Done };
+                                                spawn(async move {
+                                                    let req = UpdateTaskStatusRequest {
+                                                        status: new_s,
+                                                        status_note: None,
+                                                    };
+                                                    if let Ok(updated) = use_tasks::update_task_status(&sid, &req).await {
+                                                        let mut sw = subtasks.write();
+                                                        if let Some(s) = sw.iter_mut().find(|s| s.id == updated.id) {
+                                                            *s = updated;
+                                                        }
+                                                        on_updated.call(());
+                                                    }
+                                                });
+                                            },
+                                        }
+                                        span {
+                                            class: if sub_done { "text-sm line-through text-base-content/50" } else { "text-sm" },
+                                            "{sub_title}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if *adding_subtask.read() {
+                            div { class: "flex items-center gap-2 py-1",
+                                input {
+                                    class: "input input-bordered input-sm flex-1",
+                                    r#type: "text",
+                                    placeholder: "Subtask title...",
+                                    autofocus: true,
+                                    value: "{new_subtask_title}",
+                                    oninput: move |e| new_subtask_title.set(e.value()),
+                                    onkeydown: move |e: KeyboardEvent| {
+                                        if e.key() == Key::Enter {
+                                            let title = new_subtask_title.peek().trim().to_string();
+                                            if title.is_empty() {
+                                                adding_subtask.set(false);
+                                                return;
+                                            }
+                                            let tid = tid_subtask.clone();
+                                            new_subtask_title.set(String::new());
+                                            adding_subtask.set(false);
+                                            spawn(async move {
+                                                let req = CreateTaskRequest {
+                                                    title,
+                                                    parent_task_id: Some(tid.clone()),
+                                                    section_id: None,
+                                                    description: None,
+                                                    status: None,
+                                                    priority: None,
+                                                    assignee_id: None,
+                                                    labels: None,
+                                                    due_date: None,
+                                                    recurrence_rule: None,
+                                                    position: None,
+                                                };
+                                                if let Ok(sub) = use_tasks::create_subtask(&tid, &req).await {
+                                                    subtasks.write().push(sub);
+                                                    if let Some(t) = task.write().as_mut() {
+                                                        t.subtask_count += 1;
+                                                    }
+                                                    on_updated.call(());
+                                                }
+                                            });
+                                        } else if e.key() == Key::Escape {
+                                            adding_subtask.set(false);
+                                            new_subtask_title.set(String::new());
+                                        }
+                                    },
+                                }
+                            }
+                        }
+
+                        if subtasks.read().is_empty() && !*adding_subtask.read() {
+                            p { class: "text-sm text-base-content/40 py-2", "No subtasks" }
+                        }
+                    }
+                }
+
+                div { class: "divider my-0" }
+
+                // Comments
+                div {
+                    label { class: "label", span { class: "label-text text-xs font-semibold uppercase", "Comments" } }
+
+                    div { class: "flex flex-col gap-3",
+                        for comment in comments.read().iter() {
+                            div { class: "bg-base-200 rounded-lg p-3",
+                                div { class: "flex items-center gap-2 mb-1",
+                                    div { class: "avatar placeholder",
+                                        div { class: "bg-neutral text-neutral-content w-5 h-5 rounded-full",
+                                            span { class: "text-[10px]",
+                                                {comment.author_username.chars().next().unwrap_or('?').to_uppercase().to_string()}
+                                            }
+                                        }
+                                    }
+                                    span { class: "text-xs font-semibold", "{comment.author_username}" }
+                                    span { class: "text-xs text-base-content/50",
+                                        {comment.created_at.get(..10).unwrap_or(&comment.created_at)}
+                                    }
+                                }
+                                p { class: "text-sm whitespace-pre-wrap", "{comment.body}" }
+                            }
+                        }
+
+                        if comments.read().is_empty() {
+                            p { class: "text-sm text-base-content/40 py-2", "No comments yet" }
+                        }
+
+                        // Add comment
+                        div { class: "flex gap-2",
+                            input {
+                                class: "input input-bordered input-sm flex-1",
+                                r#type: "text",
+                                placeholder: "Write a comment...",
+                                value: "{new_comment}",
+                                oninput: move |e| new_comment.set(e.value()),
+                                onkeydown: move |e: KeyboardEvent| {
+                                    if e.key() == Key::Enter {
+                                        post_comment_a();
+                                    }
+                                },
+                            }
+                            button {
+                                class: "btn btn-primary btn-sm",
+                                onclick: move |_| post_comment_b(),
+                                "Send"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

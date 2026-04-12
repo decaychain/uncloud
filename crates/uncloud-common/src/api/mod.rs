@@ -10,6 +10,7 @@ pub mod versions;
 pub mod shopping;
 pub mod folder_shares;
 pub mod vault_recents;
+pub mod tasks;
 
 pub use auth::*;
 pub use files::*;
@@ -23,3 +24,4 @@ pub use versions::*;
 pub use shopping::*;
 pub use folder_shares::*;
 pub use vault_recents::*;
+pub use tasks::*;

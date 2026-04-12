@@ -357,3 +357,8 @@ pub fn file_type_icon(mime: Option<&str>, is_folder: bool, class: &str) -> Eleme
         _ => rsx! { IconFile { class: class.to_string() } },
     }
 }
+
+lucide_icon!(IconCheckSquare,
+    polyline { points: "9 11 12 14 22 4" }
+    path { d: "M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 0 2-2h11" }
+);

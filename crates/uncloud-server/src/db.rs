@@ -370,6 +370,91 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         )
         .await?;
 
+    // Task projects indexes
+    let task_projects = db.collection::<mongodb::bson::Document>("task_projects");
+    task_projects
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1 })
+                .build(),
+        )
+        .await?;
+    task_projects
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "members.user_id": 1 })
+                .build(),
+        )
+        .await?;
+
+    // Task sections indexes
+    let task_sections = db.collection::<mongodb::bson::Document>("task_sections");
+    task_sections
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "project_id": 1, "position": 1 })
+                .build(),
+        )
+        .await?;
+
+    // Tasks indexes
+    let tasks = db.collection::<mongodb::bson::Document>("tasks");
+    tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "project_id": 1, "status": 1, "position": 1 })
+                .build(),
+        )
+        .await?;
+    tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "project_id": 1, "section_id": 1, "position": 1 })
+                .build(),
+        )
+        .await?;
+    tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "parent_task_id": 1 })
+                .build(),
+        )
+        .await?;
+    tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "assignee_id": 1, "due_date": 1 })
+                .build(),
+        )
+        .await?;
+    tasks
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "due_date": 1, "status": 1 })
+                .build(),
+        )
+        .await?;
+
+    // Task comments indexes
+    let task_comments = db.collection::<mongodb::bson::Document>("task_comments");
+    task_comments
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "task_id": 1, "created_at": 1 })
+                .build(),
+        )
+        .await?;
+
+    // Task labels indexes
+    let task_labels = db.collection::<mongodb::bson::Document>("task_labels");
+    task_labels
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "project_id": 1 })
+                .build(),
+        )
+        .await?;
+
     tracing::info!("Database indexes created successfully");
     Ok(())
 }
