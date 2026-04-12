@@ -197,7 +197,11 @@ impl SyncEngine {
             match journal_entry {
                 None => {
                     // New on server → download if strategy allows
-                    if strategy != SyncStrategy::ClientToServer {
+                    let can_download = !matches!(
+                        strategy,
+                        SyncStrategy::ClientToServer | SyncStrategy::UploadOnly
+                    );
+                    if can_download {
                         match self.download_to(&file.id, local_path).await {
                             Ok(()) => {
                                 let mtime = self.fs.mtime(local_path).await.ok().flatten();
@@ -225,40 +229,69 @@ impl SyncEngine {
                         .unwrap_or(false);
 
                     if server_newer && local_newer {
-                        // CONFLICT: copy current local aside, then pull server version.
-                        let conflict_rel = conflict_name(server_rel_path, today);
-                        let conflict_path = self.fs.join(&parent_base, &conflict_rel);
-                        match self.fs.read(local_path).await {
-                            Ok(cur) => {
-                                if let Err(e) = self.fs.write(&conflict_path, &cur).await {
-                                    warn!("Could not create conflict copy: {}", e);
+                        // Both sides changed. For upload-only strategies the
+                        // local version wins (push to server). For bidirectional
+                        // strategies, create a conflict copy and pull server.
+                        if matches!(
+                            strategy,
+                            SyncStrategy::ClientToServer | SyncStrategy::UploadOnly
+                        ) {
+                            // Local wins → upload to server.
+                            match self.upload_update(&file.id, server_rel_path, local_path).await {
+                                Ok(updated) => {
+                                    let new_mtime = self.fs.mtime(local_path).await.ok().flatten();
+                                    let _ = self.journal.upsert(
+                                        &updated.id, "file",
+                                        server_rel_path, &local_path_str,
+                                        Some(updated.size_bytes), None,
+                                        &updated.updated_at, new_mtime, "synced",
+                                    ).await;
+                                    report.uploaded.push(server_rel_path.clone());
                                 }
+                                Err(e) => report.errors.push(SyncError {
+                                    path: server_rel_path.clone(),
+                                    reason: e,
+                                }),
                             }
-                            Err(e) => warn!("Could not read local for conflict copy: {}", e),
-                        }
-                        match self.download_to(&file.id, local_path).await {
-                            Ok(()) => {
-                                let new_mtime = self.fs.mtime(local_path).await.ok().flatten();
-                                let _ = self.journal.upsert(
-                                    &file.id, "file",
-                                    server_rel_path, &local_path_str,
-                                    Some(file.size_bytes), None,
-                                    &file.updated_at, new_mtime, "synced",
-                                ).await;
-                                report.conflicts.push(SyncConflict {
-                                    server_path: server_rel_path.clone(),
-                                    local_path: local_path_str.clone(),
-                                    conflict_copy: conflict_path,
-                                });
+                        } else {
+                            let conflict_rel = conflict_name(server_rel_path, today);
+                            let conflict_path = self.fs.join(&parent_base, &conflict_rel);
+                            match self.fs.read(local_path).await {
+                                Ok(cur) => {
+                                    if let Err(e) = self.fs.write(&conflict_path, &cur).await {
+                                        warn!("Could not create conflict copy: {}", e);
+                                    }
+                                }
+                                Err(e) => warn!("Could not read local for conflict copy: {}", e),
                             }
-                            Err(e) => report.errors.push(SyncError {
-                                path: server_rel_path.clone(),
-                                reason: e,
-                            }),
+                            match self.download_to(&file.id, local_path).await {
+                                Ok(()) => {
+                                    let new_mtime = self.fs.mtime(local_path).await.ok().flatten();
+                                    let _ = self.journal.upsert(
+                                        &file.id, "file",
+                                        server_rel_path, &local_path_str,
+                                        Some(file.size_bytes), None,
+                                        &file.updated_at, new_mtime, "synced",
+                                    ).await;
+                                    report.conflicts.push(SyncConflict {
+                                        server_path: server_rel_path.clone(),
+                                        local_path: local_path_str.clone(),
+                                        conflict_copy: conflict_path,
+                                    });
+                                }
+                                Err(e) => report.errors.push(SyncError {
+                                    path: server_rel_path.clone(),
+                                    reason: e,
+                                }),
+                            }
                         }
                     } else if server_newer {
                         // Server changed only → download
-                        if strategy != SyncStrategy::ClientToServer {
+                        let can_download = !matches!(
+                            strategy,
+                            SyncStrategy::ClientToServer | SyncStrategy::UploadOnly
+                        );
+                        if can_download {
                             match self.download_to(&file.id, local_path).await {
                                 Ok(()) => {
                                     let new_mtime = self.fs.mtime(local_path).await.ok().flatten();
@@ -336,25 +369,29 @@ impl SyncEngine {
 
         // 7. Handle new local files not in journal.
         //
-        // We walk `root_local_path` (if set) and then determine which server
-        // folder each discovered file logically belongs to, by longest-prefix
-        // matching the file's absolute path against the resolved `base_path`
-        // of each synced folder. Files sitting directly at the client root map
-        // to `parent_id = None`. Files inside a subdirectory that does not
-        // correspond to any known server folder are skipped — they cannot yet
-        // be uploaded because we do not create server folders from the client.
-        if let Some(root) = self.root_local_path.as_ref() {
-            // Build a descending-length index of (base_path, folder_id, strategy).
-            let mut bases: Vec<(String, String, SyncStrategy)> = folder_info
-                .iter()
-                .filter_map(|(id, info)| {
-                    info.base_path
-                        .as_ref()
-                        .map(|p| (p.clone(), id.clone(), info.strategy))
-                })
-                .collect();
-            bases.sort_by_key(|(p, _, _)| std::cmp::Reverse(p.len()));
+        // Two passes:
+        //  (a) Walk `root_local_path` (desktop) — discovers files at the global
+        //      root and matches them to server folders by longest-prefix.
+        //  (b) Walk each folder that has a per-folder `base_path` override and
+        //      an upload-compatible strategy — covers Android (no global root)
+        //      and desktop folders with explicit local_path overrides.
+        //
+        // Pass (b) skips folders whose base_path is already a subtree of the
+        // root (those are covered by pass (a)).
 
+        // Build a descending-length index of (base_path, folder_id, strategy).
+        let mut bases: Vec<(String, String, SyncStrategy)> = folder_info
+            .iter()
+            .filter_map(|(id, info)| {
+                info.base_path
+                    .as_ref()
+                    .map(|p| (p.clone(), id.clone(), info.strategy))
+            })
+            .collect();
+        bases.sort_by_key(|(p, _, _)| std::cmp::Reverse(p.len()));
+
+        // Pass (a): walk the global root (desktop).
+        if let Some(root) = self.root_local_path.as_ref() {
             let local_entries = self.fs.walk(root).await?;
 
             for entry in local_entries {
@@ -369,10 +406,7 @@ impl SyncEngine {
                     continue;
                 }
 
-                // Longest-prefix match against folder bases. Parent is the
-                // folder whose base path directly contains this file (no
-                // further subdir). If nothing matches, fall back to the
-                // client root (parent_id = None).
+                // Longest-prefix match against folder bases.
                 let mut matched_parent: Option<(String, SyncStrategy)> = None;
                 for (base, fid, strat) in &bases {
                     if let Some(rest) = full_path.strip_prefix(base.as_str()) {
@@ -387,8 +421,6 @@ impl SyncEngine {
                 let (parent_id, strategy) = match matched_parent {
                     Some((fid, s)) => (Some(fid), s),
                     None => {
-                        // No folder base matched. The file must sit directly at
-                        // the client root to be uploadable here.
                         if entry.rel_path.contains('/') || entry.rel_path.contains('\\') {
                             continue;
                         }
@@ -406,46 +438,87 @@ impl SyncEngine {
                     continue;
                 }
 
-                let file_name = entry
-                    .rel_path
-                    .rsplit(['/', '\\'])
-                    .next()
-                    .unwrap_or(&entry.rel_path)
-                    .to_owned();
+                self.upload_new_local_file(
+                    &full_path,
+                    &entry.rel_path,
+                    entry.mtime,
+                    parent_id.as_deref(),
+                    &mut report,
+                )
+                .await;
+            }
+        }
 
-                match self.fs.read(&full_path).await {
-                    Ok(bytes) => match self
-                        .client
-                        .upload_bytes(&file_name, bytes, parent_id.as_deref())
-                        .await
-                    {
-                        Ok(new_file) => {
-                            let _ = self
-                                .journal
-                                .upsert(
-                                    &new_file.id,
-                                    "file",
-                                    &file_name,
-                                    &full_path,
-                                    Some(new_file.size_bytes),
-                                    None,
-                                    &new_file.updated_at,
-                                    Some(entry.mtime),
-                                    "synced",
-                                )
-                                .await;
-                            report.uploaded.push(file_name);
-                        }
-                        Err(e) => report.errors.push(SyncError {
-                            path: entry.rel_path.clone(),
-                            reason: e.to_string(),
-                        }),
-                    },
-                    Err(e) => report.errors.push(SyncError {
-                        path: entry.rel_path.clone(),
-                        reason: e.to_string(),
-                    }),
+        // Pass (b): walk per-folder base_path overrides.
+        // This covers Android (no root_local_path) and desktop folders with
+        // explicit local_path overrides that live outside the global root.
+        for (base_path, folder_id, strategy) in &bases {
+            let can_upload = matches!(
+                strategy,
+                SyncStrategy::TwoWay
+                    | SyncStrategy::ClientToServer
+                    | SyncStrategy::UploadOnly
+            );
+            if !can_upload {
+                continue;
+            }
+
+            // Skip if already covered by the root walk (pass a).
+            if let Some(root) = self.root_local_path.as_ref() {
+                if base_path.starts_with(root.as_str()) {
+                    continue;
                 }
+            }
+
+            // Only walk folders that have an explicit journal local_path
+            // override — otherwise base_path was derived from root + names
+            // and is already covered by pass (a).
+            let has_override = self
+                .journal
+                .get_folder_sync_config(folder_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, p)| p.is_some())
+                .unwrap_or(false);
+            if !has_override && self.root_local_path.is_some() {
+                continue;
+            }
+
+            let local_entries = match self.fs.walk(base_path).await {
+                Ok(entries) => entries,
+                Err(e) => {
+                    warn!("Cannot walk folder override {}: {}", base_path, e);
+                    continue;
+                }
+            };
+
+            for entry in local_entries {
+                // Only pick up files directly in this folder (not in
+                // subdirectories which map to child server folders).
+                if entry.rel_path.contains('/') || entry.rel_path.contains('\\') {
+                    continue;
+                }
+
+                let full_path = self.fs.join(base_path, &entry.rel_path);
+                if !self.fs.is_file(&full_path).await.unwrap_or(false) {
+                    continue;
+                }
+                let already_tracked = journal_map
+                    .values()
+                    .any(|j| j.item_type == "file" && j.local_path == full_path);
+                if already_tracked {
+                    continue;
+                }
+
+                self.upload_new_local_file(
+                    &full_path,
+                    &entry.rel_path,
+                    entry.mtime,
+                    Some(folder_id),
+                    &mut report,
+                )
+                .await;
             }
         }
 
@@ -474,6 +547,57 @@ impl SyncEngine {
             .write(path, &bytes)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    /// Upload a newly-discovered local file to the server and record it in
+    /// the journal. Used by both pass (a) and pass (b) of step 7.
+    async fn upload_new_local_file(
+        &self,
+        full_path: &str,
+        rel_path: &str,
+        mtime: i64,
+        parent_id: Option<&str>,
+        report: &mut SyncReport,
+    ) {
+        let file_name = rel_path
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(rel_path)
+            .to_owned();
+
+        match self.fs.read(full_path).await {
+            Ok(bytes) => match self
+                .client
+                .upload_bytes(&file_name, bytes, parent_id)
+                .await
+            {
+                Ok(new_file) => {
+                    let _ = self
+                        .journal
+                        .upsert(
+                            &new_file.id,
+                            "file",
+                            &file_name,
+                            full_path,
+                            Some(new_file.size_bytes),
+                            None,
+                            &new_file.updated_at,
+                            Some(mtime),
+                            "synced",
+                        )
+                        .await;
+                    report.uploaded.push(file_name);
+                }
+                Err(e) => report.errors.push(SyncError {
+                    path: rel_path.to_owned(),
+                    reason: e.to_string(),
+                }),
+            },
+            Err(e) => report.errors.push(SyncError {
+                path: rel_path.to_owned(),
+                reason: e.to_string(),
+            }),
+        }
     }
 
     /// Read `path` via the configured [`LocalFs`] and upload the bytes as a
