@@ -16,8 +16,8 @@ use uncloud_common::{
     AddShoppingListItemRequest, CategoryResponse, CreateCategoryRequest, CreateShopRequest,
     CreateShoppingItemRequest, CreateShoppingListRequest, PatchShoppingListItemRequest,
     RenameShoppingListRequest, ShareListRequest, ShopResponse, ShoppingItemResponse,
-    ShoppingListItemResponse, ShoppingListResponse, ShoppingListSummary, UpdatePositionRequest,
-    UpdateShopRequest, UpdateShoppingItemRequest,
+    ShoppingListItemResponse, ShoppingListResponse, ShoppingListSummary, UpdateCategoryRequest,
+    UpdatePositionRequest, UpdateShopRequest, UpdateShoppingItemRequest,
 };
 
 fn require_shopping(state: &AppState, user: &crate::models::User) -> Result<()> {
@@ -193,15 +193,108 @@ pub async fn delete_category(
         .map_err(|_| AppError::BadRequest("Invalid category ID".to_string()))?;
 
     let coll = state.db.collection::<ShoppingCategory>("shopping_categories");
-    let result = coll
-        .delete_one(doc! { "_id": cat_id, "owner_id": user.id })
+
+    // Fetch the category name before deleting so we can cascade
+    let cat = coll
+        .find_one(doc! { "_id": cat_id, "owner_id": user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Category".to_string()))?;
+
+    coll.delete_one(doc! { "_id": cat_id, "owner_id": user.id })
         .await?;
 
-    if result.deleted_count == 0 {
-        return Err(AppError::NotFound("Category".to_string()));
-    }
+    // Remove this category name from all shops belonging to this user
+    let shops_coll = state.db.collection::<Shop>("shopping_shops");
+    let _ = shops_coll
+        .update_many(
+            doc! { "owner_id": user.id },
+            doc! { "$pull": { "categories": &cat.name } },
+        )
+        .await;
+
+    // Remove this category name from all catalogue items belonging to this user
+    let items_coll = state.db.collection::<ShoppingItem>("shopping_items");
+    let _ = items_coll
+        .update_many(
+            doc! { "owner_id": user.id },
+            doc! { "$pull": { "categories": &cat.name } },
+        )
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /api/shopping/categories/{id}`
+pub async fn update_category(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateCategoryRequest>,
+) -> Result<Json<CategoryResponse>> {
+    require_shopping(&state, &user)?;
+
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return Err(AppError::BadRequest("Category name cannot be empty".to_string()));
+    }
+
+    let cat_id = ObjectId::parse_str(&id)
+        .map_err(|_| AppError::BadRequest("Invalid category ID".to_string()))?;
+
+    let coll = state.db.collection::<ShoppingCategory>("shopping_categories");
+
+    // Fetch old name before updating so we can cascade the rename
+    let old_cat = coll
+        .find_one(doc! { "_id": cat_id, "owner_id": user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Category".to_string()))?;
+    let old_name = old_cat.name.clone();
+
+    let result = coll
+        .update_one(
+            doc! { "_id": cat_id, "owner_id": user.id },
+            doc! { "$set": { "name": &name } },
+        )
+        .await;
+
+    match result {
+        Ok(r) if r.matched_count == 0 => Err(AppError::NotFound("Category".to_string())),
+        Ok(_) => {
+            // Cascade: rename in all items and shops that reference the old name
+            if old_name != name {
+                let items_coll = state.db.collection::<ShoppingItem>("shopping_items");
+                let _ = items_coll
+                    .update_many(
+                        doc! { "owner_id": user.id, "categories": &old_name },
+                        doc! { "$set": { "categories.$": &name } },
+                    )
+                    .await;
+
+                let shops_coll = state.db.collection::<Shop>("shopping_shops");
+                let _ = shops_coll
+                    .update_many(
+                        doc! { "owner_id": user.id, "categories": &old_name },
+                        doc! { "$set": { "categories.$": &name } },
+                    )
+                    .await;
+            }
+
+            Ok(Json(CategoryResponse {
+                id: cat_id.to_hex(),
+                name,
+                position: old_cat.position,
+            }))
+        }
+        Err(e) => {
+            if e.to_string().contains("E11000") {
+                Err(AppError::Conflict(
+                    "A category with this name already exists".to_string(),
+                ))
+            } else {
+                Err(AppError::Database(e))
+            }
+        }
+    }
 }
 
 /// `PUT /api/shopping/categories/{id}/position`
@@ -530,9 +623,21 @@ pub async fn update_item(
         update.insert("name", name);
     }
     if let Some(ref categories) = body.categories {
+        // Validate: strip out category names that no longer exist
+        let cat_coll = state.db.collection::<ShoppingCategory>("shopping_categories");
+        let mut valid_cats = Vec::new();
+        for cat_name in categories {
+            let exists = cat_coll
+                .count_documents(doc! { "owner_id": user.id, "name": cat_name })
+                .await
+                .unwrap_or(0);
+            if exists > 0 {
+                valid_cats.push(cat_name.clone());
+            }
+        }
         update.insert(
             "categories",
-            bson::to_bson(categories).map_err(|e| AppError::Internal(e.to_string()))?,
+            bson::to_bson(&valid_cats).map_err(|e| AppError::Internal(e.to_string()))?,
         );
     }
     if let Some(ref shop_ids) = body.shop_ids {
@@ -851,14 +956,25 @@ pub async fn share_list(
 pub async fn unshare_list(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
-    Path((id, target_user_id)): Path<(String, String)>,
+    Path((id, target_user_ref)): Path<(String, String)>,
 ) -> Result<StatusCode> {
     require_shopping(&state, &user)?;
 
     let list_id = ObjectId::parse_str(&id)
         .map_err(|_| AppError::BadRequest("Invalid list ID".to_string()))?;
-    let target_id = ObjectId::parse_str(&target_user_id)
-        .map_err(|_| AppError::BadRequest("Invalid user ID".to_string()))?;
+
+    // Accept either an ObjectId or a username
+    let target_id = if let Ok(oid) = ObjectId::parse_str(&target_user_ref) {
+        oid
+    } else {
+        // Look up by username
+        let users_coll = state.db.collection::<User>("users");
+        let target_user = users_coll
+            .find_one(doc! { "username": &target_user_ref })
+            .await?
+            .ok_or_else(|| AppError::NotFound("User".to_string()))?;
+        target_user.id
+    };
 
     // Only owner can unshare
     let coll = state.db.collection::<ShoppingList>("shopping_lists");

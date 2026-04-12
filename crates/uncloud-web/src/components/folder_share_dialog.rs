@@ -10,6 +10,7 @@ use crate::components::shared_with_me::PermissionBadge;
 #[component]
 pub fn FolderSharePanel(
     folder_id: String,
+    #[props(default)] on_changed: EventHandler<()>,
 ) -> Element {
     let mut username = use_signal(String::new);
     let mut permission = use_signal(|| SharePermission::ReadOnly);
@@ -19,6 +20,7 @@ pub fn FolderSharePanel(
     let mut shares: Signal<Vec<FolderShareResponse>> = use_signal(Vec::new);
     let mut shares_loading = use_signal(|| true);
     let mut refresh = use_signal(|| 0u32);
+    let mut all_usernames: Signal<Vec<String>> = use_signal(Vec::new);
 
     let folder_id_load = folder_id.clone();
     use_effect(move || {
@@ -28,6 +30,9 @@ pub fn FolderSharePanel(
             match use_folder_shares::list_folder_shares(&fid).await {
                 Ok(s) => shares.set(s),
                 Err(_) => {}
+            }
+            if let Ok(names) = crate::hooks::use_shopping::list_usernames().await {
+                all_usernames.set(names);
             }
             shares_loading.set(false);
         });
@@ -56,6 +61,7 @@ pub fn FolderSharePanel(
                     username.set(String::new());
                     let next = *refresh.peek() + 1;
                     refresh.set(next);
+                    on_changed.call(());
                 }
                 Err(e) => {
                     if e == "CONFLICT" {
@@ -82,12 +88,36 @@ pub fn FolderSharePanel(
                 label { class: "label",
                     span { class: "label-text", "Username" }
                 }
-                input {
-                    class: "input input-bordered w-full",
-                    r#type: "text",
-                    placeholder: "Enter username to share with",
-                    value: "{username}",
-                    oninput: move |e| username.set(e.value()),
+                {
+                    // Filter out users who already have a share
+                    let shared_names: Vec<String> = shares().iter().map(|s| s.grantee_username.clone()).collect();
+                    let available: Vec<String> = all_usernames()
+                        .into_iter()
+                        .filter(|u| !shared_names.contains(u))
+                        .collect();
+
+                    if available.is_empty() {
+                        rsx! {
+                            p { class: "text-sm text-base-content/50 py-2", "No more users to share with." }
+                        }
+                    } else {
+                        rsx! {
+                            select {
+                                class: "select select-bordered w-full",
+                                value: "{username}",
+                                oninput: move |e| username.set(e.value()),
+                                option { value: "", disabled: true, "Select a user..." }
+                                for uname in available.iter() {
+                                    {
+                                        let u = uname.clone();
+                                        rsx! {
+                                            option { value: "{u}", "{u}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -168,6 +198,7 @@ pub fn FolderSharePanel(
                                                     let _ = use_folder_shares::update_folder_share(&sid, &req).await;
                                                     let next = *refresh.peek() + 1;
                                                     refresh.set(next);
+                                                    on_changed.call(());
                                                 });
                                             },
                                             option { value: "read_only", "Read Only" }
@@ -183,6 +214,7 @@ pub fn FolderSharePanel(
                                                     let _ = use_folder_shares::delete_folder_share(&sid).await;
                                                     let next = *refresh.peek() + 1;
                                                     refresh.set(next);
+                                                    on_changed.call(());
                                                 });
                                             },
                                             IconX {}

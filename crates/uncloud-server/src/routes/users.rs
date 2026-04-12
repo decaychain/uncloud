@@ -77,6 +77,26 @@ pub async fn list_users(State(state): State<Arc<AppState>>) -> Result<Json<Vec<U
     Ok(Json(users))
 }
 
+/// `GET /api/users/names` — returns all usernames (non-admin, excludes current user)
+pub async fn list_usernames(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Vec<String>>> {
+    let collection = state.db.collection::<User>("users");
+    let mut cursor = collection.find(doc! {}).await?;
+
+    let mut names = Vec::new();
+    while cursor.advance().await? {
+        let u: User = cursor.deserialize_current()?;
+        if u.id != user.id {
+            names.push(u.username);
+        }
+    }
+
+    names.sort();
+    Ok(Json(names))
+}
+
 pub async fn create_user(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateUserRequest>,

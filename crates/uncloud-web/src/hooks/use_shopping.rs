@@ -2,8 +2,9 @@ use uncloud_common::{
     AddShoppingListItemRequest, CategoryResponse, CreateCategoryRequest, CreateShopRequest,
     CreateShoppingItemRequest, CreateShoppingListRequest, PatchShoppingListItemRequest,
     RenameShoppingListRequest, ShareListRequest, ShopResponse, ShoppingItemResponse,
-    ShoppingListItemResponse, ShoppingListResponse, ShoppingListSummary, UpdateFeaturesRequest,
-    UpdatePositionRequest, UpdateShopRequest, UpdateShoppingItemRequest, UserResponse,
+    ShoppingListItemResponse, ShoppingListResponse, ShoppingListSummary, UpdateCategoryRequest,
+    UpdateFeaturesRequest, UpdatePositionRequest, UpdateShopRequest, UpdateShoppingItemRequest,
+    UserResponse,
 };
 
 use super::api;
@@ -57,6 +58,24 @@ pub async fn delete_category(id: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err("Failed to delete category".to_string())
+    }
+}
+
+pub async fn rename_category(id: &str, name: &str) -> Result<CategoryResponse, String> {
+    let body = UpdateCategoryRequest { name: name.to_string() };
+    let response = api::put(&format!("/shopping/categories/{}", id))
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if response.ok() {
+        response.json::<CategoryResponse>().await.map_err(|e| e.to_string())
+    } else if response.status() == 409 {
+        Err("A category with this name already exists".to_string())
+    } else {
+        Err("Failed to rename category".to_string())
     }
 }
 
@@ -453,6 +472,19 @@ pub async fn remove_purchased(list_id: &str) -> Result<(), String> {
 
 pub async fn clear_checked(list_id: &str) -> Result<(), String> {
     remove_purchased(list_id).await
+}
+
+pub async fn list_usernames() -> Result<Vec<String>, String> {
+    let response = api::get("/users/names")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if response.ok() {
+        response.json::<Vec<String>>().await.map_err(|e| e.to_string())
+    } else {
+        Err("Failed to load users".to_string())
+    }
 }
 
 pub async fn update_my_features(req: UpdateFeaturesRequest) -> Result<UserResponse, String> {

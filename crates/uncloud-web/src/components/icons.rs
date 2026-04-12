@@ -330,6 +330,15 @@ lucide_icon!(IconArrowDown,
     polyline { points: "19 12 12 19 5 12" }
 );
 
+lucide_icon!(IconGripVertical,
+    circle { cx: "9", cy: "12", r: "1" }
+    circle { cx: "9", cy: "5", r: "1" }
+    circle { cx: "9", cy: "19", r: "1" }
+    circle { cx: "15", cy: "12", r: "1" }
+    circle { cx: "15", cy: "5", r: "1" }
+    circle { cx: "15", cy: "19", r: "1" }
+);
+
 /// Pick a file-type icon component based on MIME type.
 /// Returns a rendered Element with the given class.
 pub fn file_type_icon(mime: Option<&str>, is_folder: bool, class: &str) -> Element {

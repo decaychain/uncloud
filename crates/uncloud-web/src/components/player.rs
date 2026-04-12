@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use crate::components::icons::{IconMusic, IconPause, IconPlay, IconSkipBack, IconSkipForward, IconVolume2};
+use crate::components::icons::{IconMusic, IconPause, IconPlay, IconSkipBack, IconSkipForward, IconVolume2, IconX};
 use crate::hooks::{api, use_files::download_url};
 use crate::state::PlayerState;
 
@@ -280,6 +280,23 @@ pub fn Player() -> Element {
                             }
                         },
                     }
+                }
+
+                // Close button
+                button {
+                    class: "btn btn-ghost btn-sm btn-circle flex-shrink-0",
+                    title: "Close player",
+                    onclick: move |_| {
+                        if let Some(audio) = get_audio_element() {
+                            let _ = audio.pause();
+                            audio.set_src("");
+                        }
+                        let mut state = player.write();
+                        state.queue.clear();
+                        state.current_index = 0;
+                        state.playing = false;
+                    },
+                    IconX { class: "w-4 h-4".to_string() }
                 }
             }
         }
