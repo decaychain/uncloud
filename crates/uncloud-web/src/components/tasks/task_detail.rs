@@ -68,6 +68,7 @@ pub fn TaskDetail(
     #[props(default = 0)] refresh_key: u32,
     on_close: EventHandler<()>,
     on_updated: EventHandler<()>,
+    #[props(default)] on_deleted: EventHandler<String>,
 ) -> Element {
     let mut task: Signal<Option<TaskResponse>> = use_signal(|| None);
     let mut comments: Signal<Vec<TaskCommentResponse>> = use_signal(Vec::new);
@@ -95,6 +96,9 @@ pub fn TaskDetail(
 
     // Status note editing
     let mut status_note_val = use_signal(String::new);
+
+    // Delete confirmation
+    let mut confirm_delete = use_signal(|| false);
 
     // Track refresh_key in a signal so the effect re-runs when it changes
     let mut refresh_sig = use_signal(|| refresh_key);
@@ -869,6 +873,43 @@ pub fn TaskDetail(
                                 class: "btn btn-primary btn-sm",
                                 onclick: move |_| post_comment_b(),
                                 "Send"
+                            }
+                        }
+                    }
+
+                    // Delete task
+                    div { class: "divider" }
+                    {
+                        let tid_del = task_id.clone();
+                        rsx! {
+                            if *confirm_delete.read() {
+                                div { class: "flex items-center gap-2",
+                                    span { class: "text-sm text-error", "Delete this task?" }
+                                    button {
+                                        class: "btn btn-error btn-sm",
+                                        onclick: move |_| {
+                                            let tid = tid_del.clone();
+                                            spawn(async move {
+                                                if use_tasks::delete_task(&tid).await.is_ok() {
+                                                    on_deleted.call(tid);
+                                                    on_close.call(());
+                                                }
+                                            });
+                                        },
+                                        "Delete"
+                                    }
+                                    button {
+                                        class: "btn btn-ghost btn-sm",
+                                        onclick: move |_| confirm_delete.set(false),
+                                        "Cancel"
+                                    }
+                                }
+                            } else {
+                                button {
+                                    class: "btn btn-ghost btn-sm text-error",
+                                    onclick: move |_| confirm_delete.set(true),
+                                    "Delete task"
+                                }
                             }
                         }
                     }

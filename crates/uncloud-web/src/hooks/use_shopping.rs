@@ -474,17 +474,27 @@ pub async fn clear_checked(list_id: &str) -> Result<(), String> {
     remove_purchased(list_id).await
 }
 
-pub async fn list_usernames() -> Result<Vec<String>, String> {
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct UserNameEntry {
+    pub id: String,
+    pub username: String,
+}
+
+pub async fn list_user_entries() -> Result<Vec<UserNameEntry>, String> {
     let response = api::get("/users/names")
         .send()
         .await
         .map_err(|e| e.to_string())?;
 
     if response.ok() {
-        response.json::<Vec<String>>().await.map_err(|e| e.to_string())
+        response.json::<Vec<UserNameEntry>>().await.map_err(|e| e.to_string())
     } else {
         Err("Failed to load users".to_string())
     }
+}
+
+pub async fn list_usernames() -> Result<Vec<String>, String> {
+    list_user_entries().await.map(|entries| entries.into_iter().map(|e| e.username).collect())
 }
 
 pub async fn update_my_features(req: UpdateFeaturesRequest) -> Result<UserResponse, String> {

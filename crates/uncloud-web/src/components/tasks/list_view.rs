@@ -672,6 +672,10 @@ pub fn ListView(project_id: String) -> Element {
                         }
                     });
                 },
+                on_deleted: move |id: String| {
+                    tasks.write().retain(|t| t.id != id);
+                    detail_task_id.set(None);
+                },
             }
         }
     }
@@ -694,6 +698,8 @@ fn render_task_row(
     let task_id_drag = task.id.clone();
     let task_id_status = task.id.clone();
     let task_id_expand = task.id.clone();
+    let parent_id_check = task.parent_task_id.clone();
+    let parent_id_status = task.parent_task_id.clone();
 
     let is_done = task.status == TaskStatus::Done || task.status == TaskStatus::Cancelled;
     let has_subtasks = task.subtask_count > 0;
@@ -806,6 +812,7 @@ fn render_task_row(
                     },
                     onchange: move |_| {
                         let tid = task_id_check.clone();
+                        let pid = parent_id_check.clone();
                         let new_status = if is_done { TaskStatus::Todo } else { TaskStatus::Done };
                         spawn(async move {
                             let req = UpdateTaskStatusRequest {
@@ -816,6 +823,15 @@ fn render_task_row(
                                 let mut tw = tasks.write();
                                 if let Some(t) = tw.iter_mut().find(|t| t.id == updated.id) {
                                     *t = updated;
+                                }
+                            }
+                            // Re-fetch parent to update subtask counters
+                            if let Some(parent_id) = pid {
+                                if let Ok(parent) = use_tasks::get_task(&parent_id).await {
+                                    let mut tw = tasks.write();
+                                    if let Some(t) = tw.iter_mut().find(|t| t.id == parent.id) {
+                                        *t = parent;
+                                    }
                                 }
                             }
                         });
@@ -866,6 +882,7 @@ fn render_task_row(
                     onclick: move |e| {
                         e.stop_propagation();
                         let tid = task_id_status.clone();
+                        let pid = parent_id_status.clone();
                         let new_s = next_status(&status_click);
                         spawn(async move {
                             let req = UpdateTaskStatusRequest {
@@ -876,6 +893,15 @@ fn render_task_row(
                                 let mut tw = tasks.write();
                                 if let Some(t) = tw.iter_mut().find(|t| t.id == updated.id) {
                                     *t = updated;
+                                }
+                            }
+                            // Re-fetch parent to update subtask counters
+                            if let Some(parent_id) = pid {
+                                if let Ok(parent) = use_tasks::get_task(&parent_id).await {
+                                    let mut tw = tasks.write();
+                                    if let Some(t) = tw.iter_mut().find(|t| t.id == parent.id) {
+                                        *t = parent;
+                                    }
                                 }
                             }
                         });

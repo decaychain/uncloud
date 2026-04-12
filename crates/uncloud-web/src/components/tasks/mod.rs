@@ -28,6 +28,9 @@ pub fn TasksProjectPage(project_id: String) -> Element {
     let mut view_mode: Signal<ProjectView> = use_signal(|| ProjectView::Board);
     let mut project_name = use_signal(|| String::new());
     let mut project_color = use_signal(|| "#3B82F6".to_string());
+    let mut project_owner_id = use_signal(String::new);
+    let mut project_members: Signal<Vec<uncloud_common::ProjectMemberResponse>> =
+        use_signal(Vec::new);
     let mut show_settings = use_signal(|| false);
 
     // Fetch project to get name + default_view
@@ -38,6 +41,8 @@ pub fn TasksProjectPage(project_id: String) -> Element {
             if let Ok(p) = use_tasks::get_project(&pid).await {
                 project_name.set(p.name);
                 project_color.set(p.color.unwrap_or_else(|| "#3B82F6".to_string()));
+                project_owner_id.set(p.owner_id);
+                project_members.set(p.members);
                 view_mode.set(p.default_view);
             }
         });
@@ -134,6 +139,8 @@ pub fn TasksProjectPage(project_id: String) -> Element {
                 project_id: project_id.clone(),
                 project_name: project_name.read().clone(),
                 project_color: project_color.read().clone(),
+                owner_id: project_owner_id.read().clone(),
+                members: project_members.read().clone(),
                 on_close: move |_| show_settings.set(false),
                 on_updated: move |new_name: String| {
                     project_name.set(new_name);

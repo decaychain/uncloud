@@ -169,13 +169,37 @@ pub fn BoardView(project_id: String) -> Element {
                                     span { class: "font-semibold text-sm", "{col_label}" }
                                     span { class: "badge badge-sm badge-ghost", "{count}" }
                                 }
-                                button {
-                                    class: "btn btn-ghost btn-xs btn-circle",
-                                    onclick: move |_| {
-                                        adding_to.set(Some(col_status_add.clone()));
-                                        add_title.set(String::new());
-                                    },
-                                    "+"
+                                div { class: "flex items-center gap-1",
+                                    // Clear completed (Done/Cancelled columns only)
+                                    if col_status == TaskStatus::Done && count > 0 {
+                                        {
+                                            let done_task_ids: Vec<String> = col_tasks.iter().map(|t| t.id.clone()).collect();
+                                            rsx! {
+                                                button {
+                                                    class: "btn btn-ghost btn-xs text-error/60 hover:text-error",
+                                                    title: "Clear all done tasks",
+                                                    onclick: move |_| {
+                                                        let ids = done_task_ids.clone();
+                                                        spawn(async move {
+                                                            for id in &ids {
+                                                                let _ = use_tasks::delete_task(id).await;
+                                                            }
+                                                            tasks.write().retain(|t| !ids.contains(&t.id));
+                                                        });
+                                                    },
+                                                    "Clear"
+                                                }
+                                            }
+                                        }
+                                    }
+                                    button {
+                                        class: "btn btn-ghost btn-xs btn-circle",
+                                        onclick: move |_| {
+                                            adding_to.set(Some(col_status_add.clone()));
+                                            add_title.set(String::new());
+                                        },
+                                        "+"
+                                    }
                                 }
                             }
 
@@ -282,6 +306,10 @@ pub fn BoardView(project_id: String) -> Element {
                             tasks.set(t);
                         }
                     });
+                },
+                on_deleted: move |id: String| {
+                    tasks.write().retain(|t| t.id != id);
+                    detail_task_id.set(None);
                 },
             }
         }
