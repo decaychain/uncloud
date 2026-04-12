@@ -2,13 +2,14 @@ use std::sync::Arc;
 use axum::http::{HeaderValue, Method};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::routing::get;
+use clap::{Parser, Subcommand};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use chrono::Utc;
 use mongodb::bson::{self, doc};
-use uncloud_server::models::{File, FileVersion, Folder};
+use uncloud_server::models::{File, FileVersion, Folder, UserRole, UserStatus};
 
 use uncloud_server::{
     AppState,
@@ -21,8 +22,118 @@ use uncloud_server::{
     supervisor::Supervisor,
 };
 
+// ── CLI definition ──────────────────────────────────────────────────────────
+
+#[derive(Parser)]
+#[command(name = "uncloud-server", about = "Uncloud — self-hosted personal cloud")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Start the server (default)
+    Serve,
+    /// Create the first admin user
+    BootstrapAdmin {
+        /// Admin username
+        #[arg(long)]
+        username: String,
+        /// Admin password (generated if omitted)
+        #[arg(long)]
+        password: Option<String>,
+        /// Admin email (optional)
+        #[arg(long)]
+        email: Option<String>,
+    },
+}
+
+// ── Entry point ─────────────────────────────────────────────────────────────
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        None | Some(Command::Serve) => run_server().await,
+        Some(Command::BootstrapAdmin {
+            username,
+            password,
+            email,
+        }) => bootstrap_admin(username, password, email).await,
+    }
+}
+
+// ── bootstrap-admin ─────────────────────────────────────────────────────────
+
+async fn bootstrap_admin(
+    username: String,
+    password: Option<String>,
+    email: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::load_or_default();
+    let db = db::connect(&config.database).await?;
+    db::setup_indexes(&db).await?;
+
+    let auth = AuthService::new(&db, config.auth.clone());
+
+    // Check if user already exists
+    let users = db.collection::<models::User>("users");
+    if let Some(existing) = users.find_one(doc! { "username": &username }).await? {
+        if existing.role == UserRole::Admin {
+            println!("User '{}' already exists and is an admin.", username);
+            return Ok(());
+        }
+        eprintln!(
+            "Error: user '{}' already exists with role 'user'. \
+             Promote them manually or choose a different username.",
+            username
+        );
+        std::process::exit(1);
+    }
+
+    // Resolve or generate password
+    let password_was_generated = password.is_none();
+    let password = match password {
+        Some(p) => p,
+        None => {
+            use rand::RngCore;
+            let mut bytes = [0u8; 16];
+            rand::thread_rng().fill_bytes(&mut bytes);
+            hex::encode(bytes)
+        }
+    };
+
+    if password.len() < 8 {
+        eprintln!("Error: password must be at least 8 characters.");
+        std::process::exit(1);
+    }
+
+    let password_hash = auth.hash_password(&password)?;
+    let mut user = models::User::new(username.clone(), email.clone(), password_hash);
+    user.role = UserRole::Admin;
+    user.status = UserStatus::Active;
+
+    users.insert_one(&user).await?;
+
+    println!("Admin user created successfully.");
+    println!("  Username: {}", username);
+    if let Some(ref e) = email {
+        println!("  Email:    {}", e);
+    }
+    if password_was_generated {
+        println!("  Password: {}", password);
+        println!();
+        println!("  (Save this password — it will not be shown again.)");
+    }
+
+    Ok(())
+}
+
+// ── Server ──────────────────────────────────────────────────────────────────
+
+async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(
