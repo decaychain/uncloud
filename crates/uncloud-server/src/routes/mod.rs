@@ -115,6 +115,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/playlists/{id}/tracks", post(playlists::add_tracks))
         .route("/playlists/{id}/tracks", delete(playlists::remove_tracks))
         .route("/playlists/{id}/tracks/reorder", put(playlists::reorder_tracks))
+        // Users (non-admin)
+        .route("/users/names", get(users::list_usernames))
         // Shares
         .route("/shares", get(shares::list_shares))
         .route("/shares", post(shares::create_share))
@@ -146,7 +148,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/vault-recents/{file_id}", delete(vault_recents::remove_recent_vault))
         // Shopping categories
         .route("/shopping/categories", get(shopping::list_categories).post(shopping::create_category))
-        .route("/shopping/categories/{id}", delete(shopping::delete_category))
+        .route("/shopping/categories/{id}", put(shopping::update_category).delete(shopping::delete_category))
         .route("/shopping/categories/{id}/position", put(shopping::update_category_position))
         // Shopping shops
         .route("/shopping/shops", get(shopping::list_shops).post(shopping::create_shop))

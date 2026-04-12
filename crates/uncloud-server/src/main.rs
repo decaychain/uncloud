@@ -269,13 +269,16 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Graceful shutdown: Ctrl-C cancels the supervisor AND stops Axum.
+    // Force exit after a short grace period so long-lived SSE connections don't block shutdown.
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             tokio::signal::ctrl_c().await.ok();
             tracing::info!("Shutdown signal received, stopping managed apps...");
             app_shutdown.cancel();
-            // Give managed apps a moment to exit before the server drops connections.
+            // Give managed apps a moment to exit, then force-exit so SSE connections don't hang.
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            tracing::info!("Forcing exit.");
+            std::process::exit(0);
         })
         .await?;
 

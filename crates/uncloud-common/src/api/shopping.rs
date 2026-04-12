@@ -130,6 +130,11 @@ pub struct PatchShoppingListItemRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateCategoryRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdatePositionRequest {
     pub position: f64,
 }

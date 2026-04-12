@@ -688,6 +688,9 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                     folder_settings_target.set(None);
                     refresh.set(refresh() + 1);
                 },
+                on_refresh: move |_| {
+                    refresh.set(refresh() + 1);
+                },
             }
         }
 
@@ -1401,6 +1404,7 @@ fn FolderSettingsModal(
     music_include: MusicInclude,
     on_close: EventHandler<()>,
     on_saved: EventHandler<()>,
+    #[props(default)] on_refresh: EventHandler<()>,
 ) -> Element {
     let mut tab: Signal<&'static str> = use_signal(|| "sharing");
     // Server-side default (applies to all clients).
@@ -1473,6 +1477,9 @@ fn FolderSettingsModal(
                 if tab() == "sharing" {
                     crate::components::folder_share_dialog::FolderSharePanel {
                         folder_id: folder_id_for_sharing.clone(),
+                        on_changed: move |_| {
+                            on_refresh.call(());
+                        },
                     }
                 }
 

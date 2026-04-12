@@ -49,15 +49,21 @@ pub fn ShoppingPage() -> Element {
     let mut share_target: Signal<Option<String>> = use_signal(|| None);
     let mut share_username: Signal<String> = use_signal(String::new);
     let mut share_error: Signal<Option<String>> = use_signal(|| None);
+    let mut all_usernames: Signal<Vec<String>> = use_signal(Vec::new);
 
     // Settings panel
     let mut show_settings = use_signal(|| false);
 
-    // Load all data
+    // Load all data. Only show the loading spinner on the very first fetch
+    // (when we have no data yet). Subsequent refreshes update in-place without
+    // hiding the existing UI, eliminating flicker.
     use_effect(move || {
         let _ = refresh();
         spawn(async move {
-            loading.set(true);
+            let is_initial = lists().is_empty() && all_list_data().is_empty();
+            if is_initial {
+                loading.set(true);
+            }
             // Load lists
             match use_shopping::list_lists().await {
                 Ok(l) => {
@@ -307,6 +313,11 @@ pub fn ShoppingPage() -> Element {
                                                                 share_username.set(String::new());
                                                                 share_error.set(None);
                                                                 share_target.set(Some(list_id_share.clone()));
+                                                                spawn(async move {
+                                                                    if let Ok(names) = use_shopping::list_usernames().await {
+                                                                        all_usernames.set(names);
+                                                                    }
+                                                                });
                                                             },
                                                             "Share"
                                                         }
@@ -663,6 +674,12 @@ pub fn ShoppingPage() -> Element {
                     .map(|l| l.shared_with.clone())
                     .unwrap_or_default();
 
+                // Filter out users already shared with
+                let available_users: Vec<String> = all_usernames()
+                    .into_iter()
+                    .filter(|u| !current_shares.contains(u))
+                    .collect();
+
                 rsx! {
                     div { class: "modal modal-open",
                         div { class: "modal-box",
@@ -678,9 +695,25 @@ pub fn ShoppingPage() -> Element {
                                         for username in current_shares.iter() {
                                             {
                                                 let uname = username.clone();
+                                                let uname_rm = username.clone();
+                                                let slid_rm = slid2.clone();
                                                 rsx! {
                                                     div { class: "flex items-center justify-between bg-base-200 rounded px-3 py-1",
                                                         span { class: "text-sm", "{uname}" }
+                                                        button {
+                                                            class: "btn btn-ghost btn-xs text-error",
+                                                            title: "Remove",
+                                                            onclick: move |_| {
+                                                                let lid = slid_rm.clone();
+                                                                let uid = uname_rm.clone();
+                                                                spawn(async move {
+                                                                    let _ = use_shopping::unshare_list(&lid, &uid).await;
+                                                                    let next = *refresh.peek() + 1;
+                                                                    refresh.set(next);
+                                                                });
+                                                            },
+                                                            "\u{00D7}"
+                                                        }
                                                     }
                                                 }
                                             }
@@ -689,36 +722,47 @@ pub fn ShoppingPage() -> Element {
                                 }
                             }
 
-                            div { class: "flex items-center gap-2",
-                                input {
-                                    class: "input input-bordered input-sm flex-1",
-                                    r#type: "text",
-                                    placeholder: "Username to share with...",
-                                    value: "{share_username}",
-                                    oninput: move |e| {
-                                        share_username.set(e.value());
-                                        share_error.set(None);
-                                    },
-                                }
-                                button {
-                                    class: "btn btn-primary btn-sm",
-                                    disabled: share_username().trim().is_empty(),
-                                    onclick: move |_| {
-                                        let username = share_username().trim().to_string();
-                                        let lid = slid.clone();
-                                        spawn(async move {
-                                            match use_shopping::share_list(&lid, &username).await {
-                                                Ok(_) => {
-                                                    share_username.set(String::new());
-                                                    share_error.set(None);
-                                                    let next = *refresh.peek() + 1;
-                                                    refresh.set(next);
+                            if available_users.is_empty() {
+                                p { class: "text-sm text-base-content/50", "No more users to share with." }
+                            } else {
+                                div { class: "flex items-center gap-2",
+                                    select {
+                                        class: "select select-bordered select-sm flex-1",
+                                        value: "{share_username}",
+                                        oninput: move |e| {
+                                            share_username.set(e.value());
+                                            share_error.set(None);
+                                        },
+                                        option { value: "", disabled: true, "Select a user..." }
+                                        for uname in available_users.iter() {
+                                            {
+                                                let u = uname.clone();
+                                                rsx! {
+                                                    option { value: "{u}", "{u}" }
                                                 }
-                                                Err(e) => share_error.set(Some(e)),
                                             }
-                                        });
-                                    },
-                                    "Share"
+                                        }
+                                    }
+                                    button {
+                                        class: "btn btn-primary btn-sm",
+                                        disabled: share_username().trim().is_empty(),
+                                        onclick: move |_| {
+                                            let username = share_username().trim().to_string();
+                                            let lid = slid.clone();
+                                            spawn(async move {
+                                                match use_shopping::share_list(&lid, &username).await {
+                                                    Ok(_) => {
+                                                        share_username.set(String::new());
+                                                        share_error.set(None);
+                                                        let next = *refresh.peek() + 1;
+                                                        refresh.set(next);
+                                                    }
+                                                    Err(e) => share_error.set(Some(e)),
+                                                }
+                                            });
+                                        },
+                                        "Share"
+                                    }
                                 }
                             }
 
@@ -1175,6 +1219,7 @@ fn ItemInlet(
     on_dismiss: EventHandler<()>,
     on_updated: EventHandler<()>,
 ) -> Element {
+    let mut item_name: Signal<String> = use_signal(|| item.name.clone());
     let mut selected_categories: Signal<Vec<String>> =
         use_signal(|| item.categories.clone());
     let mut selected_shop_ids: Signal<Vec<String>> =
@@ -1193,6 +1238,17 @@ fn ItemInlet(
                     on_dismiss.call(());
                 }
             },
+
+            // Name row
+            div { class: "mb-2 flex items-center gap-2",
+                span { class: "text-xs font-medium text-base-content/60", "Name:" }
+                input {
+                    class: "input input-bordered input-xs flex-1",
+                    r#type: "text",
+                    value: "{item_name}",
+                    oninput: move |e| item_name.set(e.value()),
+                }
+            }
 
             // Categories row
             div { class: "mb-2",
@@ -1272,16 +1328,16 @@ fn ItemInlet(
                     disabled: saving(),
                     onclick: move |_| {
                         let item_id = catalogue_item_id.clone();
+                        let new_name = item_name().trim().to_string();
                         let cats = selected_categories();
                         let shop_ids = selected_shop_ids();
-                        let qty = quantity();
                         spawn(async move {
                             saving.set(true);
-                            // Update the catalogue item's categories and shops
+                            // Update the catalogue item's name, categories and shops
                             let _ = use_shopping::update_item(
                                 &item_id,
                                 UpdateShoppingItemRequest {
-                                    name: None,
+                                    name: if new_name.is_empty() { None } else { Some(new_name) },
                                     categories: Some(cats),
                                     shop_ids: Some(shop_ids),
                                     notes: None,
@@ -1320,6 +1376,11 @@ fn SettingsPanel(on_close: EventHandler<()>) -> Element {
     // New category
     let mut new_cat_name: Signal<String> = use_signal(String::new);
     let mut cat_error: Signal<Option<String>> = use_signal(|| None);
+
+    // Rename category: Some((id, current_name))
+    let mut rename_cat_target: Signal<Option<(String, String)>> = use_signal(|| None);
+    let mut rename_cat_name: Signal<String> = use_signal(String::new);
+    let mut rename_cat_error: Signal<Option<String>> = use_signal(|| None);
 
     // New shop
     let mut new_shop_name: Signal<String> = use_signal(String::new);
@@ -1377,9 +1438,21 @@ fn SettingsPanel(on_close: EventHandler<()>) -> Element {
                                             let cats_for_down = cats_list.clone();
                                             let idx = i;
 
+                                            let cid_rename = cat.id.clone();
+                                            let cname_rename = cat.name.clone();
+
                                             rsx! {
                                                 div { class: "flex items-center gap-2 bg-base-200 rounded px-3 py-1",
-                                                    span { class: "flex-1 text-sm", "{cname}" }
+                                                    span {
+                                                        class: "flex-1 text-sm cursor-pointer hover:underline",
+                                                        title: "Click to rename",
+                                                        onclick: move |_| {
+                                                            rename_cat_name.set(cname_rename.clone());
+                                                            rename_cat_error.set(None);
+                                                            rename_cat_target.set(Some((cid_rename.clone(), cname_rename.clone())));
+                                                        },
+                                                        "{cname}"
+                                                    }
                                                     if can_up {
                                                         button {
                                                             class: "btn btn-ghost btn-xs",
@@ -1573,6 +1646,57 @@ fn SettingsPanel(on_close: EventHandler<()>) -> Element {
                 }
             }
             div { class: "modal-backdrop", onclick: move |_| on_close.call(()) }
+        }
+
+        // Rename category modal
+        if let Some((ref cat_id, _)) = rename_cat_target() {
+            {
+                let cid = cat_id.clone();
+                rsx! {
+                    div { class: "modal modal-open",
+                        div { class: "modal-box",
+                            h3 { class: "font-bold text-lg mb-4", "Rename Category" }
+                            if let Some(err) = rename_cat_error() {
+                                div { class: "alert alert-error mb-3 text-sm", "{err}" }
+                            }
+                            input {
+                                class: "input input-bordered w-full",
+                                r#type: "text",
+                                placeholder: "Category name",
+                                value: "{rename_cat_name}",
+                                oninput: move |e| rename_cat_name.set(e.value()),
+                            }
+                            div { class: "modal-action",
+                                button {
+                                    class: "btn",
+                                    onclick: move |_| rename_cat_target.set(None),
+                                    "Cancel"
+                                }
+                                button {
+                                    class: "btn btn-primary",
+                                    disabled: rename_cat_name().trim().is_empty(),
+                                    onclick: move |_| {
+                                        let name = rename_cat_name().trim().to_string();
+                                        let id = cid.clone();
+                                        spawn(async move {
+                                            match use_shopping::rename_category(&id, &name).await {
+                                                Ok(_) => {
+                                                    rename_cat_target.set(None);
+                                                    let next = *refresh.peek() + 1;
+                                                    refresh.set(next);
+                                                }
+                                                Err(e) => rename_cat_error.set(Some(e)),
+                                            }
+                                        });
+                                    },
+                                    "Rename"
+                                }
+                            }
+                        }
+                        div { class: "modal-backdrop", onclick: move |_| rename_cat_target.set(None) }
+                    }
+                }
+            }
         }
 
         // Edit shop modal
