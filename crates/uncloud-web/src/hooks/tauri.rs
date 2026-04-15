@@ -49,11 +49,30 @@ pub struct DesktopConfig {
 }
 
 #[derive(Debug, Clone)]
-pub enum SyncStatus {
+pub enum SyncPhase {
     NotConfigured,
-    Idle { last_sync: String },
+    Idle,
     Syncing,
     Error { message: String },
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SyncStats {
+    pub session_uploaded: u32,
+    pub session_downloaded: u32,
+    pub session_deleted: u32,
+    pub session_errors: u32,
+    pub last_run_uploaded: u32,
+    pub last_run_downloaded: u32,
+    pub last_run_deleted: u32,
+    pub last_run_errors: u32,
+    pub last_sync_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SyncState {
+    pub phase: SyncPhase,
+    pub stats: SyncStats,
 }
 
 // ── Low-level invoke ──────────────────────────────────────────────────────────
@@ -112,31 +131,53 @@ pub async fn disconnect() -> Result<(), String> {
     invoke_raw("disconnect", &args).await.map(|_| ())
 }
 
-pub async fn get_status() -> Result<SyncStatus, String> {
+pub async fn get_status() -> Result<SyncState, String> {
     let args = Object::new();
     let result = invoke_raw("get_status", &args).await?;
-    let status_type = Reflect::get(&result, &JsValue::from_str("type"))
+    let phase_tag = Reflect::get(&result, &JsValue::from_str("phase"))
         .ok()
         .and_then(|v| v.as_string())
         .unwrap_or_default();
-    Ok(match status_type.as_str() {
-        "idle" => {
-            let last_sync = Reflect::get(&result, &JsValue::from_str("last_sync"))
-                .ok()
-                .and_then(|v| v.as_string())
-                .unwrap_or_default();
-            SyncStatus::Idle { last_sync }
-        }
-        "syncing" => SyncStatus::Syncing,
+    let phase = match phase_tag.as_str() {
+        "idle" => SyncPhase::Idle,
+        "syncing" => SyncPhase::Syncing,
         "error" => {
             let message = Reflect::get(&result, &JsValue::from_str("message"))
                 .ok()
                 .and_then(|v| v.as_string())
                 .unwrap_or_default();
-            SyncStatus::Error { message }
+            SyncPhase::Error { message }
         }
-        _ => SyncStatus::NotConfigured,
-    })
+        _ => SyncPhase::NotConfigured,
+    };
+
+    let stats_js = Reflect::get(&result, &JsValue::from_str("stats")).ok();
+    let stats = stats_js
+        .map(|s| {
+            let num = |k: &str| -> u32 {
+                Reflect::get(&s, &JsValue::from_str(k))
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .map(|f| f as u32)
+                    .unwrap_or(0)
+            };
+            SyncStats {
+                session_uploaded: num("session_uploaded"),
+                session_downloaded: num("session_downloaded"),
+                session_deleted: num("session_deleted"),
+                session_errors: num("session_errors"),
+                last_run_uploaded: num("last_run_uploaded"),
+                last_run_downloaded: num("last_run_downloaded"),
+                last_run_deleted: num("last_run_deleted"),
+                last_run_errors: num("last_run_errors"),
+                last_sync_at: Reflect::get(&s, &JsValue::from_str("last_sync_at"))
+                    .ok()
+                    .and_then(|v| v.as_string()),
+            }
+        })
+        .unwrap_or_default();
+
+    Ok(SyncState { phase, stats })
 }
 
 pub async fn sync_now() -> Result<(), String> {

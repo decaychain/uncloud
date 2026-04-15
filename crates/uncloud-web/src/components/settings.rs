@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 
-use crate::hooks::tauri::{self, SyncStatus};
+use crate::hooks::tauri::{self, SyncPhase, SyncState};
 use uncloud_common::{CreateInviteRequest, UserRole, UserStatus};
 use crate::hooks::use_auth;
 use crate::hooks::use_search;
@@ -403,17 +403,20 @@ fn S3AccessKeysSection() -> Element {
 
 #[component]
 fn SyncSection() -> Element {
-    let mut status = use_signal(|| None::<SyncStatus>);
+    let mut state = use_signal(|| None::<SyncState>);
     let mut sync_loading = use_signal(|| false);
     let mut sync_msg = use_signal(|| None::<(bool, String)>); // (ok, message)
 
-    // Load status on mount.
-    use_effect(move || {
-        spawn(async move {
+    // Poll status every 2s while the component is mounted so the UI stays live
+    // whether sync was triggered manually, by the background loop, or by the
+    // app resuming on mobile.
+    use_future(move || async move {
+        loop {
             if let Ok(s) = tauri::get_status().await {
-                status.set(Some(s));
+                state.set(Some(s));
             }
-        });
+            gloo_timers::future::TimeoutFuture::new(2000).await;
+        }
     });
 
     let on_sync_now = move |_| {
@@ -424,7 +427,7 @@ fn SyncSection() -> Element {
                 Ok(()) => {
                     sync_msg.set(Some((true, "Sync complete.".to_string())));
                     if let Ok(s) = tauri::get_status().await {
-                        status.set(Some(s));
+                        state.set(Some(s));
                     }
                 }
                 Err(e) => sync_msg.set(Some((false, e))),
@@ -433,20 +436,24 @@ fn SyncSection() -> Element {
         });
     };
 
-    let status_badge = match status() {
-        Some(SyncStatus::Idle { ref last_sync }) => rsx! {
+    let current = state();
+    let phase_ref = current.as_ref().map(|s| &s.phase);
+    let stats_ref = current.as_ref().map(|s| &s.stats);
+
+    let status_badge = match phase_ref {
+        Some(SyncPhase::Idle) => rsx! {
             div { class: "flex items-center gap-2",
                 span { class: "badge badge-success badge-sm" }
-                span { class: "text-sm text-base-content/70", "Up to date · {last_sync}" }
+                span { class: "text-sm text-base-content/70", "Up to date" }
             }
         },
-        Some(SyncStatus::Syncing) => rsx! {
+        Some(SyncPhase::Syncing) => rsx! {
             div { class: "flex items-center gap-2",
                 span { class: "loading loading-spinner loading-xs text-warning" }
                 span { class: "text-sm text-base-content/70", "Syncing…" }
             }
         },
-        Some(SyncStatus::Error { ref message }) => rsx! {
+        Some(SyncPhase::Error { message }) => rsx! {
             div { class: "flex items-center gap-2",
                 span { class: "badge badge-error badge-sm" }
                 span { class: "text-sm text-error", "{message}" }
@@ -456,6 +463,45 @@ fn SyncSection() -> Element {
             span { class: "text-sm text-base-content/50", "Not configured" }
         },
     };
+
+    let stats_panel = stats_ref.map(|s| {
+        let last_sync_label = s
+            .last_sync_at
+            .as_deref()
+            .map(format_last_sync)
+            .unwrap_or_else(|| "never".to_string());
+        rsx! {
+            div { class: "grid grid-cols-3 gap-2 text-center",
+                div { class: "rounded-lg bg-base-200 p-3",
+                    div { class: "text-xs uppercase tracking-wide text-base-content/50", "Uploaded" }
+                    div { class: "text-2xl font-semibold tabular-nums", "{s.session_uploaded}" }
+                    div { class: "text-xs text-base-content/50",
+                        "last run: {s.last_run_uploaded}"
+                    }
+                }
+                div { class: "rounded-lg bg-base-200 p-3",
+                    div { class: "text-xs uppercase tracking-wide text-base-content/50", "Downloaded" }
+                    div { class: "text-2xl font-semibold tabular-nums", "{s.session_downloaded}" }
+                    div { class: "text-xs text-base-content/50",
+                        "last run: {s.last_run_downloaded}"
+                    }
+                }
+                div { class: "rounded-lg bg-base-200 p-3",
+                    div { class: "text-xs uppercase tracking-wide text-base-content/50", "Errors" }
+                    div {
+                        class: if s.session_errors > 0 { "text-2xl font-semibold tabular-nums text-error" } else { "text-2xl font-semibold tabular-nums" },
+                        "{s.session_errors}"
+                    }
+                    div { class: "text-xs text-base-content/50",
+                        "last run: {s.last_run_errors}"
+                    }
+                }
+            }
+            div { class: "text-xs text-base-content/50",
+                "Last sync: {last_sync_label}"
+            }
+        }
+    });
 
     rsx! {
         div { class: "card bg-base-100 shadow",
@@ -482,6 +528,10 @@ fn SyncSection() -> Element {
                         class: if ok { "alert alert-success text-sm" } else { "alert alert-error text-sm" },
                         span { "{msg}" }
                     }
+                }
+
+                if let Some(panel) = stats_panel {
+                    {panel}
                 }
 
                 p { class: "text-xs text-base-content/50",
@@ -1675,5 +1725,25 @@ fn UserManagementSection() -> Element {
                 }
             }
         }
+    }
+}
+
+/// Format an RFC3339 timestamp as a relative label (e.g. "5s ago", "3m ago").
+fn format_last_sync(rfc: &str) -> String {
+    use chrono::{DateTime, Utc};
+    let Ok(then) = DateTime::parse_from_rfc3339(rfc) else {
+        return rfc.to_string();
+    };
+    let secs = (Utc::now() - then.with_timezone(&Utc)).num_seconds();
+    if secs < 5 {
+        "just now".to_string()
+    } else if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3_600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3_600)
+    } else {
+        format!("{}d ago", secs / 86_400)
     }
 }
