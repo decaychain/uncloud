@@ -576,13 +576,19 @@ pub fn run() {
         client: Arc::new(RwLock::new(None)),
     };
 
-    // Cloned handles for the tray menu (desktop) and resume handler (mobile).
+    // Cloned handles for the desktop tray menu handler.
+    #[cfg(desktop)]
     let engine_arc = state.engine.clone();
+    #[cfg(desktop)]
     let phase_arc = state.phase.clone();
+    #[cfg(desktop)]
     let stats_arc = state.stats.clone();
-    // Separate clones owned by the run-event handler (fires after setup).
+    // Separate clones owned by the run-event handler (mobile resume).
+    #[cfg(mobile)]
     let run_engine = state.engine.clone();
+    #[cfg(mobile)]
     let run_phase = state.phase.clone();
+    #[cfg(mobile)]
     let run_stats = state.stats.clone();
 
     let mut builder = tauri::Builder::default();
@@ -721,12 +727,6 @@ pub fn run() {
             #[cfg(mobile)]
             if let tauri::RunEvent::Resumed = &event {
                 spawn_sync(run_engine.clone(), run_phase.clone(), run_stats.clone());
-            }
-            #[cfg(desktop)]
-            {
-                let _ = &run_engine;
-                let _ = &run_phase;
-                let _ = &run_stats;
             }
         });
 }
