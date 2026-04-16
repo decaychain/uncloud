@@ -51,6 +51,7 @@ pub fn Layout() -> Element {
         Route::Music {} | Route::MusicArtist { .. } | Route::MusicAlbum { .. }
             | Route::MusicFolder { .. } | Route::MusicPlaylist { .. } => "Uncloud - Music",
         Route::Shopping {} | Route::ShoppingList { .. } => "Uncloud - Shopping",
+        Route::Tasks {} | Route::TasksProject { .. } => "Uncloud - Tasks",
         Route::Passwords {} => "Uncloud - Passwords",
         Route::Settings {} | Route::SettingsTab { .. } => "Uncloud - Settings",
         Route::Trash {} => "Uncloud - Trash",
@@ -112,6 +113,10 @@ fn Navbar() -> Element {
         "Music"
     } else if matches!(route, Route::Shopping {} | Route::ShoppingList { .. }) {
         "Shopping"
+    } else if matches!(route, Route::Tasks {} | Route::TasksProject { .. }) {
+        "Tasks"
+    } else if matches!(route, Route::Passwords {}) {
+        "Passwords"
     } else if matches!(route, Route::Settings {}) {
         "Settings"
     } else if matches!(route, Route::Trash {}) {

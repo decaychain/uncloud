@@ -4,9 +4,39 @@ use crate::components::icons::{IconAlertTriangle, IconGripVertical, IconMusic, I
 use crate::hooks::{use_playlists, use_player};
 use crate::state::PlayerState;
 
+/// Milliseconds the user must hold a touch on a row before it enters drag
+/// mode. Matches Android's typical long-press threshold.
+const LONG_PRESS_MS: u32 = 450;
+
+/// Finger movement (in CSS px) that cancels a pending long-press. Also used
+/// as the jitter tolerance before "press" becomes "drag".
+const MOVE_THRESHOLD_PX: f64 = 10.0;
+
 fn format_duration(secs: f64) -> String {
     let total = secs as u64;
     format!("{}:{:02}", total / 60, total % 60)
+}
+
+/// Walk up the DOM from `start` looking for an element with a `data-row-idx`
+/// attribute and return its parsed value.
+fn row_idx_at_point(x: f64, y: f64) -> Option<usize> {
+    let doc = web_sys::window()?.document()?;
+    let mut current = doc.element_from_point(x as f32, y as f32);
+    while let Some(el) = current {
+        if let Some(attr) = el.get_attribute("data-row-idx") {
+            if let Ok(n) = attr.parse::<usize>() {
+                return Some(n);
+            }
+        }
+        current = el.parent_element();
+    }
+    None
+}
+
+fn haptic_blip() {
+    if let Some(nav) = web_sys::window().map(|w| w.navigator()) {
+        let _ = nav.vibrate_with_duration(15);
+    }
 }
 
 #[component]
@@ -19,9 +49,23 @@ pub fn PlaylistView(playlist_id: String) -> Element {
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut refresh = use_signal(|| 0u32);
 
-    // Drag state
+    // Drag state.
+    //   drag_idx: index being dragged (source row)
+    //   drop_idx: index currently under the pointer (destination)
+    //   dragging: true once drag mode has actually engaged (handle-press or
+    //             long-press fired). Distinct from "drag_idx.is_some()" so we
+    //             can distinguish the pending long-press phase from active drag.
+    //   press_seq: monotonic token. Incremented on every pointerup/cancel; a
+    //             spawned long-press task only fires if its captured seq still
+    //             matches, which lets us cancel safely without managing a
+    //             setTimeout handle.
+    //   press_origin: pointerdown client xy. Used to cancel long-press if the
+    //             user moves more than MOVE_THRESHOLD_PX before it fires.
     let mut drag_idx: Signal<Option<usize>> = use_signal(|| None);
     let mut drop_idx: Signal<Option<usize>> = use_signal(|| None);
+    let mut dragging: Signal<bool> = use_signal(|| false);
+    let mut press_seq: Signal<u32> = use_signal(|| 0);
+    let mut press_origin: Signal<Option<(f64, f64)>> = use_signal(|| None);
 
     let pid_for_remove = playlist_id.clone();
     let pid_for_reorder = playlist_id.clone();
@@ -78,7 +122,50 @@ pub fn PlaylistView(playlist_id: String) -> Element {
     let is_playing = player().playing;
 
     let tracks_for_play_all = track_list.clone();
-    let is_dragging = drag_idx().is_some();
+    let dragging_now = dragging();
+    let is_dragging = dragging_now || drag_idx().is_some();
+
+    // Cancel any pending long-press and clear press origin in one place.
+    let mut cancel_pending_press = move || {
+        press_origin.set(None);
+        press_seq += 1;
+    };
+
+    // Commit the reorder to the server and local state, then clear drag state.
+    let mut finish_drag = move || {
+        if let (Some(from), Some(to)) = (drag_idx.peek().clone(), drop_idx.peek().clone()) {
+            if from != to && from < tracks.peek().len() {
+                let mut t = tracks.write();
+                let item = t.remove(from);
+                let to_clamped = to.min(t.len());
+                t.insert(to_clamped, item);
+                let ids: Vec<String> = t.iter().map(|tr| tr.file.id.clone()).collect();
+                drop(t);
+                let pid = pid_for_reorder.clone();
+                spawn(async move {
+                    let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+                    let _ = use_playlists::reorder_playlist(&pid, &id_refs).await;
+                });
+            }
+        }
+        drag_idx.set(None);
+        drop_idx.set(None);
+        dragging.set(false);
+    };
+
+    // Container classes — when dragging, disable text selection and (importantly
+    // for Android) touch-action: none so the browser won't intercept the drag
+    // as a scroll.
+    let container_class = if is_dragging {
+        "overflow-hidden rounded-box border border-base-300 select-none"
+    } else {
+        "overflow-hidden rounded-box border border-base-300"
+    };
+    let container_style = if is_dragging {
+        "touch-action: none;"
+    } else {
+        ""
+    };
 
     rsx! {
         div { class: "space-y-4",
@@ -113,34 +200,33 @@ pub fn PlaylistView(playlist_id: String) -> Element {
                 }
             } else {
                 div {
-                    class: "overflow-hidden rounded-box border border-base-300",
-                    // Cancel drag if pointer leaves the table area
+                    class: "{container_class}",
+                    style: "{container_style}",
+                    // Commit the drop on release anywhere inside the table.
+                    onpointerup: move |_| {
+                        cancel_pending_press();
+                        if drag_idx.peek().is_some() {
+                            finish_drag();
+                        }
+                    },
+                    // Cancel on pointer leaving the container (mouse drag drifts off).
                     onpointerleave: move |_| {
-                        if is_dragging {
+                        if dragging() {
                             drag_idx.set(None);
                             drop_idx.set(None);
+                            dragging.set(false);
                         }
+                        cancel_pending_press();
                     },
-                    // Complete the drop on pointer up anywhere in the table
-                    onpointerup: move |_| {
-                        if let (Some(from), Some(to)) = (drag_idx(), drop_idx()) {
-                            if from != to {
-                                let mut t = tracks.write();
-                                let item = t.remove(from);
-                                t.insert(to, item);
-                                let ids: Vec<String> = t.iter().map(|tr| tr.file.id.clone()).collect();
-                                let pid = pid_for_reorder.clone();
-                                drop(t);
-                                spawn(async move {
-                                    let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
-                                    let _ = use_playlists::reorder_playlist(&pid, &id_refs).await;
-                                });
-                            }
-                        }
+                    // Cancel if the system interrupts the gesture (e.g. Android
+                    // back-swipe, notification).
+                    onpointercancel: move |_| {
                         drag_idx.set(None);
                         drop_idx.set(None);
+                        dragging.set(false);
+                        cancel_pending_press();
                     },
-                    table { class: "table table-sm w-full select-none",
+                    table { class: "table table-sm w-full",
                         thead {
                             tr {
                                 th { class: "w-8 px-1" }  // drag handle
@@ -190,21 +276,85 @@ pub fn PlaylistView(playlist_id: String) -> Element {
                                     rsx! {
                                         tr {
                                             class: "{row_class} group transition-colors",
-                                            // Update drop target when pointer enters this row
-                                            onpointerenter: move |_| {
-                                                if drag_idx().is_some() {
+                                            "data-row-idx": "{idx}",
+                                            // Any pointer pressing on the row starts a possible long-press.
+                                            // (Mouse presses are ignored — desktop uses the grip handle for
+                                            // instant drag.) Buttons and the grip cell call stop_propagation
+                                            // so they never reach this handler.
+                                            onpointerdown: move |e: Event<PointerData>| {
+                                                let pt = e.pointer_type();
+                                                if pt != "touch" && pt != "pen" {
+                                                    return;
+                                                }
+                                                let p = e.client_coordinates();
+                                                let (x, y) = (p.x, p.y);
+                                                press_origin.set(Some((x, y)));
+                                                let my_seq = *press_seq.peek() + 1;
+                                                press_seq.set(my_seq);
+                                                let my_idx = idx;
+                                                spawn(async move {
+                                                    gloo_timers::future::TimeoutFuture::new(LONG_PRESS_MS).await;
+                                                    // Still the most recent press, and finger hasn't lifted or
+                                                    // moved out of tolerance?
+                                                    if *press_seq.peek() == my_seq
+                                                        && press_origin.peek().is_some()
+                                                    {
+                                                        drag_idx.set(Some(my_idx));
+                                                        drop_idx.set(Some(my_idx));
+                                                        dragging.set(true);
+                                                        haptic_blip();
+                                                    }
+                                                });
+                                            },
+                                            // Every move updates drop target during drag, and cancels a
+                                            // pending long-press if the finger wandered.
+                                            onpointermove: move |e: Event<PointerData>| {
+                                                let p = e.client_coordinates();
+                                                let (x, y) = (p.x, p.y);
+
+                                                if !dragging() {
+                                                    let origin = *press_origin.peek();
+                                                    if let Some((ox, oy)) = origin {
+                                                        let dx = x - ox;
+                                                        let dy = y - oy;
+                                                        if (dx * dx + dy * dy).sqrt() > MOVE_THRESHOLD_PX {
+                                                            press_origin.set(None);
+                                                            press_seq += 1;
+                                                        }
+                                                    }
+                                                }
+
+                                                if !drag_idx.peek().is_some() {
+                                                    return;
+                                                }
+                                                let pt = e.pointer_type();
+                                                if pt == "touch" || pt == "pen" {
+                                                    // Touch pointer is implicitly captured to the origin row,
+                                                    // so pointerenter on sibling rows never fires on mobile
+                                                    // — walk the DOM at the current coordinate instead.
+                                                    if let Some(n) = row_idx_at_point(x, y) {
+                                                        if *drop_idx.peek() != Some(n) {
+                                                            drop_idx.set(Some(n));
+                                                        }
+                                                    }
+                                                } else if *drop_idx.peek() != Some(idx) {
+                                                    // Mouse: we're hovering this row by virtue of the event
+                                                    // firing on it.
                                                     drop_idx.set(Some(idx));
                                                 }
                                             },
                                             // Drag handle
                                             td {
                                                 class: "px-1 cursor-grab active:cursor-grabbing",
-                                                // touch-action:none prevents scroll while dragging
                                                 style: "touch-action: none;",
-                                                onpointerdown: move |e| {
+                                                onpointerdown: move |e: Event<PointerData>| {
+                                                    // Starting from the handle means "drag right now",
+                                                    // regardless of pointer type. Stop propagation so the
+                                                    // row doesn't also arm its long-press timer.
+                                                    e.stop_propagation();
                                                     drag_idx.set(Some(idx));
                                                     drop_idx.set(Some(idx));
-                                                    e.prevent_default();
+                                                    dragging.set(true);
                                                 },
                                                 IconGripVertical { class: "w-4 h-4 text-base-content/30".to_string() }
                                             }
@@ -212,6 +362,10 @@ pub fn PlaylistView(playlist_id: String) -> Element {
                                             td { class: "text-center",
                                                 button {
                                                     class: "btn btn-ghost btn-xs btn-circle",
+                                                    // Interactive buttons must not arm long-press.
+                                                    onpointerdown: move |e: Event<PointerData>| {
+                                                        e.stop_propagation();
+                                                    },
                                                     onclick: move |_| {
                                                         if is_current {
                                                             player.write().playing = !is_playing;
@@ -241,6 +395,9 @@ pub fn PlaylistView(playlist_id: String) -> Element {
                                                 button {
                                                     class: "btn btn-ghost btn-xs btn-circle text-error opacity-0 group-hover:opacity-100 transition-opacity",
                                                     title: "Remove from playlist",
+                                                    onpointerdown: move |e: Event<PointerData>| {
+                                                        e.stop_propagation();
+                                                    },
                                                     onclick: move |_| {
                                                         let fid = file_id.clone();
                                                         let pid = pid_rm.clone();

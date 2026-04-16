@@ -21,6 +21,43 @@ const COLUMNS: &[Column] = &[
     Column { status: TaskStatus::Done, label: "Done" },
 ];
 
+fn status_to_attr(status: &TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Todo => "todo",
+        TaskStatus::InProgress => "in_progress",
+        TaskStatus::Blocked => "blocked",
+        TaskStatus::Done => "done",
+        TaskStatus::Cancelled => "cancelled",
+    }
+}
+
+fn attr_to_status(s: &str) -> Option<TaskStatus> {
+    match s {
+        "todo" => Some(TaskStatus::Todo),
+        "in_progress" => Some(TaskStatus::InProgress),
+        "blocked" => Some(TaskStatus::Blocked),
+        "done" => Some(TaskStatus::Done),
+        "cancelled" => Some(TaskStatus::Cancelled),
+        _ => None,
+    }
+}
+
+/// Walk up the DOM from `(x, y)` looking for an element with a
+/// `data-column-status` attribute and return the matching `TaskStatus`.
+fn column_status_at_point(x: f64, y: f64) -> Option<TaskStatus> {
+    let doc = web_sys::window()?.document()?;
+    let mut current = doc.element_from_point(x as f32, y as f32);
+    while let Some(el) = current {
+        if let Some(attr) = el.get_attribute("data-column-status") {
+            if let Some(s) = attr_to_status(&attr) {
+                return Some(s);
+            }
+        }
+        current = el.parent_element();
+    }
+    None
+}
+
 #[component]
 pub fn BoardView(project_id: String) -> Element {
     let mut project: Signal<Option<TaskProjectResponse>> = use_signal(|| None);
@@ -89,14 +126,16 @@ pub fn BoardView(project_id: String) -> Element {
         };
     }
 
+    let container_class = if drag_task_id.read().is_some() {
+        "flex gap-4 overflow-x-auto pb-4 cursor-grabbing"
+    } else {
+        "flex gap-4 overflow-x-auto pb-4"
+    };
+
     rsx! {
         // Board columns
         div {
-            class: if drag_task_id.read().is_some() {
-                "flex gap-4 overflow-x-auto pb-4 cursor-grabbing"
-            } else {
-                "flex gap-4 overflow-x-auto pb-4"
-            },
+            class: "{container_class}",
             onpointerup: move |_| {
                 let task_id = drag_task_id.peek().clone();
                 let target = drop_column.peek().clone();
@@ -124,7 +163,29 @@ pub fn BoardView(project_id: String) -> Element {
                     });
                 }
             },
+            // Touch pointers are implicitly captured to the card that received
+            // pointerdown, so onpointerenter on sibling columns never fires on
+            // mobile. Walk the DOM at the current coordinate instead.
+            onpointermove: move |e: Event<PointerData>| {
+                if drag_task_id.peek().is_none() {
+                    return;
+                }
+                let pt = e.pointer_type();
+                if pt != "touch" && pt != "pen" {
+                    return;
+                }
+                let p = e.client_coordinates();
+                if let Some(status) = column_status_at_point(p.x, p.y) {
+                    if drop_column.peek().as_ref() != Some(&status) {
+                        drop_column.set(Some(status));
+                    }
+                }
+            },
             onpointerleave: move |_| {
+                drag_task_id.set(None);
+                drop_column.set(None);
+            },
+            onpointercancel: move |_| {
                 drag_task_id.set(None);
                 drop_column.set(None);
             },
@@ -135,6 +196,7 @@ pub fn BoardView(project_id: String) -> Element {
                     let col_status_enter = col.status.clone();
                     let col_status_add = col.status.clone();
                     let col_status_submit = col.status.clone();
+                    let col_status_attr = status_to_attr(&col.status);
                     let col_label = col.label;
 
                     let col_tasks: Vec<TaskResponse> = tasks.read()
@@ -157,6 +219,10 @@ pub fn BoardView(project_id: String) -> Element {
                     rsx! {
                         div {
                             class: "{col_class}",
+                            "data-column-status": "{col_status_attr}",
+                            // Mouse drag: onpointerenter works because mouse
+                            // pointers are not captured. Touch uses the
+                            // container-level onpointermove + elementFromPoint.
                             onpointerenter: move |_| {
                                 if drag_task_id.read().is_some() {
                                     drop_column.set(Some(col_status_enter.clone()));

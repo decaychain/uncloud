@@ -1,6 +1,8 @@
 use dioxus::prelude::*;
 use uncloud_common::{TaskPriority, TaskResponse};
 
+use crate::components::icons::IconGripVertical;
+
 fn priority_dot_class(priority: &TaskPriority) -> &'static str {
     match priority {
         TaskPriority::High => "w-2 h-2 rounded-full bg-error shrink-0",
@@ -40,9 +42,9 @@ pub fn BoardCard(
     dragging: bool,
 ) -> Element {
     let card_class = if dragging {
-        "card bg-base-100 shadow-sm cursor-pointer select-none opacity-30"
+        "card bg-base-100 shadow-sm cursor-pointer select-none opacity-30 flex-row"
     } else {
-        "card bg-base-100 shadow-sm cursor-pointer select-none hover:shadow-md transition-shadow"
+        "card bg-base-100 shadow-sm cursor-pointer select-none hover:shadow-md transition-shadow flex-row"
     };
 
     let task_id_click = task.id.clone();
@@ -52,12 +54,28 @@ pub fn BoardCard(
         div {
             class: "{card_class}",
             onclick: move |_| on_click.call(task_id_click.clone()),
-            onpointerdown: move |e| {
-                e.stop_propagation();
-                on_drag_start.call(task_id_drag.clone());
-            },
 
-            div { class: "card-body p-3 gap-1",
+            // Grip handle — only this zone initiates drag. `touch-action: none`
+            // means the browser won't interpret a touch here as a scroll. Rest
+            // of the card keeps default touch-action so vertical column
+            // scrolling still works when you pull on the card body.
+            div {
+                class: "flex items-center justify-center w-10 shrink-0 text-base-content/30 cursor-grab active:cursor-grabbing rounded-l-box hover:bg-base-200 hover:text-base-content/60",
+                style: "touch-action: none;",
+                title: "Drag to move",
+                onpointerdown: move |e: Event<PointerData>| {
+                    e.stop_propagation();
+                    on_drag_start.call(task_id_drag.clone());
+                },
+                // Stop click from bubbling up to the card's onclick so
+                // tapping the grip doesn't open the task detail.
+                onclick: move |e: Event<MouseData>| {
+                    e.stop_propagation();
+                },
+                IconGripVertical { class: "w-4 h-4".to_string() }
+            }
+
+            div { class: "card-body p-3 gap-1 flex-1",
                 // Title row with priority dot
                 div { class: "flex items-start gap-2",
                     span { class: priority_dot_class(&task.priority) }
