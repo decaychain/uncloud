@@ -50,6 +50,8 @@ pub struct File {
     pub created_at: DateTime<Utc>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
+    #[serde(default, with = "super::opt_dt")]
+    pub captured_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub processing_tasks: Vec<ProcessingTask>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -86,6 +88,7 @@ impl File {
             checksum_sha256,
             created_at: now,
             updated_at: now,
+            captured_at: None,
             processing_tasks: vec![],
             metadata: HashMap::new(),
             deleted_at: None,

@@ -1,12 +1,74 @@
 use std::collections::HashMap;
 use dioxus::prelude::*;
 use uncloud_common::{AlbumResponse, FileResponse, ServerEvent};
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
 use crate::components::icons::{IconAlertTriangle, IconImage};
 use crate::components::lightbox::Lightbox;
 use crate::hooks::{api, use_files};
 use crate::router::Route;
 
+// ── Infinite-scroll sentinel ─────────────────────────────────────────────────
+
+/// Renders an invisible sentinel at the end of a list. When it enters the
+/// viewport (with 400px lead-in), `on_visible` fires. The parent uses that to
+/// fetch the next page.
+#[component]
+fn ScrollSentinel(on_visible: EventHandler<()>) -> Element {
+    // Stable id per mount so IntersectionObserver attaches once.
+    let id = use_hook(|| {
+        let r = js_sys::Math::random().to_bits();
+        format!("scroll-sentinel-{:x}", r)
+    });
+
+    let id_effect = id.clone();
+    use_effect(move || {
+        let Some(doc) = web_sys::window().and_then(|w| w.document()) else { return; };
+        let Some(sentinel) = doc.get_element_by_id(&id_effect) else { return; };
+
+        let callback = Closure::wrap(Box::new(
+            move |entries: js_sys::Array, _: web_sys::IntersectionObserver| {
+                for i in 0..entries.length() {
+                    if let Some(entry) = entries
+                        .get(i)
+                        .dyn_ref::<web_sys::IntersectionObserverEntry>()
+                    {
+                        if entry.is_intersecting() {
+                            on_visible.call(());
+                            break;
+                        }
+                    }
+                }
+            },
+        )
+            as Box<dyn FnMut(js_sys::Array, web_sys::IntersectionObserver)>);
+
+        let options = web_sys::IntersectionObserverInit::new();
+        options.set_root_margin("400px");
+
+        if let Ok(observer) = web_sys::IntersectionObserver::new_with_options(
+            callback.as_ref().unchecked_ref(),
+            &options,
+        ) {
+            observer.observe(&sentinel);
+            // Leak the JS handles — the observer is kept alive by the browser
+            // as long as it's observing a live element. When the sentinel is
+            // removed from the DOM (component unmount), observation ends.
+            callback.forget();
+            std::mem::forget(observer);
+        }
+    });
+
+    rsx! { div { id: "{id}", class: "h-px" } }
+}
+
 // ── Date grouping ────────────────────────────────────────────────────────────
+
+/// Gallery date = EXIF `captured_at` when known, else upload `created_at`.
+/// This matches the server's sort order.
+fn gallery_date(file: &FileResponse) -> &str {
+    file.captured_at.as_deref().unwrap_or(&file.created_at)
+}
 
 /// Groups files by date label. Returns `(label, indices_into_files)`.
 fn group_by_date(files: &[FileResponse]) -> Vec<(String, Vec<usize>)> {
@@ -14,7 +76,7 @@ fn group_by_date(files: &[FileResponse]) -> Vec<(String, Vec<usize>)> {
     let mut current_label = String::new();
 
     for (i, file) in files.iter().enumerate() {
-        let label = format_date_label(&file.created_at);
+        let label = format_date_label(gallery_date(file));
         if label != current_label {
             current_label = label.clone();
             groups.push((label, vec![i]));
@@ -51,13 +113,29 @@ fn format_date_label(iso: &str) -> String {
 
 #[component]
 fn GalleryThumbnail(id: String, name: String, thumb_ver: u32, on_click: EventHandler<()>) -> Element {
+    // Track which version last 404'd so a bumped `thumb_ver` (from an SSE
+    // ProcessingCompleted event) triggers a retry automatically.
+    let mut ver_when_failed: Signal<Option<u32>> = use_signal(|| None);
+    let show_thumb = ver_when_failed() != Some(thumb_ver);
     let src = api::authenticated_media_url(&format!("/files/{}/thumb?v={}", id, thumb_ver));
+
     rsx! {
         div {
             class: "aspect-square cursor-pointer overflow-hidden rounded bg-base-200 hover:ring-2 hover:ring-primary transition-all",
             title: "{name}",
             onclick: move |_| on_click.call(()),
-            img { class: "w-full h-full object-cover", src: "{src}", loading: "lazy" }
+            if show_thumb {
+                img {
+                    class: "w-full h-full object-cover",
+                    src: "{src}",
+                    loading: "lazy",
+                    onerror: move |_| ver_when_failed.set(Some(thumb_ver)),
+                }
+            } else {
+                div { class: "flex items-center justify-center w-full h-full text-base-content/30",
+                    IconImage { class: "w-8 h-8".to_string() }
+                }
+            }
         }
     }
 }
@@ -109,20 +187,24 @@ fn TimelineView() -> Element {
         });
     });
 
-    let load_more = move |_| {
-        if let Some(cursor) = next_cursor() {
-            spawn(async move {
-                loading_more.set(true);
-                match use_files::list_gallery(Some(&cursor), None, None).await {
-                    Ok(resp) => {
-                        images.write().extend(resp.files);
-                        next_cursor.set(resp.next_cursor);
-                    }
-                    Err(e) => error.set(Some(e)),
-                }
-                loading_more.set(false);
-            });
+    let load_more = move || {
+        if *loading_more.peek() {
+            return;
         }
+        let Some(cursor) = next_cursor.peek().clone() else {
+            return;
+        };
+        spawn(async move {
+            loading_more.set(true);
+            match use_files::list_gallery(Some(&cursor), None, None).await {
+                Ok(resp) => {
+                    images.write().extend(resp.files);
+                    next_cursor.set(resp.next_cursor);
+                }
+                Err(e) => error.set(Some(e)),
+            }
+            loading_more.set(false);
+        });
     };
 
     if loading() {
@@ -190,15 +272,10 @@ fn TimelineView() -> Element {
 
             if next_cursor().is_some() {
                 div { class: "flex justify-center py-6",
-                    button {
-                        class: "btn btn-ghost",
-                        disabled: loading_more(),
-                        onclick: load_more,
-                        if loading_more() {
-                            span { class: "loading loading-spinner loading-sm" }
-                        }
-                        "Load more"
+                    if loading_more() {
+                        span { class: "loading loading-spinner loading-sm" }
                     }
+                    ScrollSentinel { on_visible: move |_| load_more() }
                 }
             }
         }
@@ -339,21 +416,25 @@ fn AlbumView(album: AlbumResponse, on_back: EventHandler<()>) -> Element {
         });
     });
 
-    let load_more = move |_| {
-        if let Some(cursor) = next_cursor() {
-            let fid = folder_id_more.clone();
-            spawn(async move {
-                loading_more.set(true);
-                match use_files::list_gallery(Some(&cursor), None, Some(&fid)).await {
-                    Ok(resp) => {
-                        images.write().extend(resp.files);
-                        next_cursor.set(resp.next_cursor);
-                    }
-                    Err(e) => error.set(Some(e)),
-                }
-                loading_more.set(false);
-            });
+    let load_more = move || {
+        if *loading_more.peek() {
+            return;
         }
+        let Some(cursor) = next_cursor.peek().clone() else {
+            return;
+        };
+        let fid = folder_id_more.clone();
+        spawn(async move {
+            loading_more.set(true);
+            match use_files::list_gallery(Some(&cursor), None, Some(&fid)).await {
+                Ok(resp) => {
+                    images.write().extend(resp.files);
+                    next_cursor.set(resp.next_cursor);
+                }
+                Err(e) => error.set(Some(e)),
+            }
+            loading_more.set(false);
+        });
     };
 
     if loading() {
@@ -416,15 +497,10 @@ fn AlbumView(album: AlbumResponse, on_back: EventHandler<()>) -> Element {
 
                 if next_cursor().is_some() {
                     div { class: "flex justify-center py-6",
-                        button {
-                            class: "btn btn-ghost",
-                            disabled: loading_more(),
-                            onclick: load_more,
-                            if loading_more() {
-                                span { class: "loading loading-spinner loading-sm" }
-                            }
-                            "Load more"
+                        if loading_more() {
+                            span { class: "loading loading-spinner loading-sm" }
                         }
+                        ScrollSentinel { on_visible: move |_| load_more() }
                     }
                 }
             }

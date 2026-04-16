@@ -276,7 +276,12 @@ pub async fn list_gallery(
     let mut url = api::api_url("/gallery");
     let mut params = Vec::new();
     if let Some(c) = cursor {
-        params.push(format!("cursor={}", c));
+        // RFC3339 contains `+` and `:` — URL-encode so the server sees the
+        // same string it produced as `next_cursor`.
+        let encoded = js_sys::encode_uri_component(c)
+            .as_string()
+            .unwrap_or_else(|| c.to_string());
+        params.push(format!("cursor={}", encoded));
     }
     if let Some(l) = limit {
         params.push(format!("limit={}", l));

@@ -35,6 +35,7 @@ fn file_to_track(f: &File) -> TrackResponse {
             parent_id: file_resp.parent_id,
             created_at: file_resp.created_at,
             updated_at: file_resp.updated_at,
+            captured_at: file_resp.captured_at,
             metadata: file_resp.metadata,
         },
         audio,

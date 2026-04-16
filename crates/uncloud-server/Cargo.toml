@@ -45,6 +45,7 @@ base64 = "0.22"
 libc = "0.2"
 tokio-util = { version = "0.7", features = ["io"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+kamadak-exif = "0.5"
 lofty = "0.22"
 meilisearch-sdk = "0.28"
 pdf-extract = "0.7"

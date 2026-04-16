@@ -110,6 +110,7 @@ pub(crate) fn file_to_response(f: &File) -> FileResponse {
         parent_id: f.parent_id.map(|id| id.to_hex()),
         created_at: f.created_at.to_rfc3339(),
         updated_at: f.updated_at.to_rfc3339(),
+        captured_at: f.captured_at.map(|dt| dt.to_rfc3339()),
         metadata: f
             .metadata
             .iter()
@@ -697,6 +698,7 @@ pub async fn update_file_content(
         checksum_sha256: new_checksum,
         created_at: file.created_at,
         updated_at: now,
+        captured_at: None,
         processing_tasks: vec![],
         metadata: std::collections::HashMap::new(),
         deleted_at: None,
@@ -1383,44 +1385,18 @@ pub async fn list_gallery(
 ) -> Result<Json<GalleryResponse>> {
     let limit = query.limit.unwrap_or(60).min(200) as i64;
 
-    if let Some(ref folder_id_str) = query.folder_id {
+    // Gallery sort = coalesce(captured_at, created_at) DESC. The cursor is
+    // the RFC3339 of the last returned item's sort date.
+    let match_stage = if let Some(ref folder_id_str) = query.folder_id {
         // Album mode — scope to one folder (no owner_id filter needed;
         // folder_id is validated by being in the included set or via access check)
         let folder_id = ObjectId::parse_str(folder_id_str)
             .map_err(|_| AppError::BadRequest("Invalid folder ID".to_string()))?;
-
-        let files_coll = state.db.collection::<File>("files");
-        let mut filter = doc! {
+        doc! {
             "parent_id": folder_id,
             "mime_type": { "$regex": "^image/" },
             "deleted_at": mongodb::bson::Bson::Null,
-        };
-        if let Some(ref cursor_str) = query.cursor {
-            let cursor_dt = chrono::DateTime::parse_from_rfc3339(cursor_str)
-                .map_err(|_| AppError::BadRequest("Invalid cursor".to_string()))?;
-            filter.insert("created_at", doc! { "$lt": bson::DateTime::from_chrono(cursor_dt.with_timezone(&chrono::Utc)) });
         }
-
-        let options = mongodb::options::FindOptions::builder()
-            .sort(doc! { "created_at": -1 })
-            .limit(limit + 1)
-            .build();
-
-        let mut cursor = files_coll.find(filter).with_options(options).await?;
-        let mut files = Vec::new();
-        while cursor.advance().await? {
-            let file: File = cursor.deserialize_current()?;
-            files.push(file_to_response(&file));
-        }
-
-        let next_cursor = if files.len() as i64 > limit {
-            files.pop();
-            files.last().map(|f| f.created_at.clone())
-        } else {
-            None
-        };
-
-        Ok(Json(GalleryResponse { files, next_cursor }))
     } else {
         // Timeline mode — all included folders (owned + shared)
         let folders_coll = state.db.collection::<Folder>("folders");
@@ -1440,7 +1416,6 @@ pub async fn list_gallery(
             })
             .collect();
 
-        // Also include shared folders marked for gallery inclusion
         let shared = shared_gallery_folder_ids(&state, user.id).await?;
         parent_ids.extend(shared);
 
@@ -1448,39 +1423,59 @@ pub async fn list_gallery(
             return Ok(Json(GalleryResponse { files: Vec::new(), next_cursor: None }));
         }
 
-        let files_coll = state.db.collection::<File>("files");
-        let mut filter = doc! {
-            "parent_id": { "$in": &parent_ids },
+        doc! {
+            "parent_id": { "$in": parent_ids },
             "mime_type": { "$regex": "^image/" },
             "deleted_at": mongodb::bson::Bson::Null,
-        };
-        if let Some(ref cursor_str) = query.cursor {
-            let cursor_dt = chrono::DateTime::parse_from_rfc3339(cursor_str)
-                .map_err(|_| AppError::BadRequest("Invalid cursor".to_string()))?;
-            filter.insert("created_at", doc! { "$lt": bson::DateTime::from_chrono(cursor_dt.with_timezone(&chrono::Utc)) });
         }
+    };
 
-        let options = mongodb::options::FindOptions::builder()
-            .sort(doc! { "created_at": -1 })
-            .limit(limit + 1)
-            .build();
+    let mut pipeline = vec![
+        doc! { "$match": match_stage },
+        doc! { "$addFields": {
+            "_sort_date": { "$ifNull": ["$captured_at", "$created_at"] }
+        } },
+    ];
 
-        let mut cursor = files_coll.find(filter).with_options(options).await?;
-        let mut files = Vec::new();
-        while cursor.advance().await? {
-            let file: File = cursor.deserialize_current()?;
-            files.push(file_to_response(&file));
-        }
-
-        let next_cursor = if files.len() as i64 > limit {
-            files.pop();
-            files.last().map(|f| f.created_at.clone())
-        } else {
-            None
-        };
-
-        Ok(Json(GalleryResponse { files, next_cursor }))
+    if let Some(ref cursor_str) = query.cursor {
+        let cursor_dt = chrono::DateTime::parse_from_rfc3339(cursor_str)
+            .map_err(|_| AppError::BadRequest("Invalid cursor".to_string()))?;
+        pipeline.push(doc! { "$match": {
+            "_sort_date": { "$lt": bson::DateTime::from_chrono(cursor_dt.with_timezone(&chrono::Utc)) }
+        } });
     }
+
+    pipeline.push(doc! { "$sort": { "_sort_date": -1 } });
+    pipeline.push(doc! { "$limit": limit + 1 });
+
+    let files_coll = state.db.collection::<File>("files");
+    let mut cursor = files_coll
+        .aggregate(pipeline)
+        .with_type::<File>()
+        .await?;
+
+    let mut raw: Vec<File> = Vec::new();
+    while cursor.advance().await? {
+        raw.push(cursor.deserialize_current()?);
+    }
+
+    let has_more = raw.len() as i64 > limit;
+    if has_more {
+        raw.pop();
+    }
+
+    let next_cursor = if has_more {
+        raw.last().map(|f| {
+            f.captured_at
+                .unwrap_or(f.created_at)
+                .to_rfc3339()
+        })
+    } else {
+        None
+    };
+
+    let files: Vec<_> = raw.iter().map(file_to_response).collect();
+    Ok(Json(GalleryResponse { files, next_cursor }))
 }
 
 #[derive(Debug, Serialize)]
