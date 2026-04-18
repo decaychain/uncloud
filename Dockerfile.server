@@ -19,6 +19,9 @@ COPY crates/uncloud-server/Cargo.toml crates/uncloud-server/Cargo.toml
 COPY crates/uncloud-client/Cargo.toml crates/uncloud-client/Cargo.toml
 COPY crates/uncloud-sync/Cargo.toml crates/uncloud-sync/Cargo.toml
 COPY crates/uncloud-desktop/Cargo.toml crates/uncloud-desktop/Cargo.toml
+# uncloud-desktop has a path dep on vendor/tauri-plugin-native-audio;
+# cargo resolves the whole workspace even when building only the web crate.
+COPY vendor/ vendor/
 
 # Create stub files so cargo can resolve the workspace
 RUN mkdir -p crates/uncloud-web/src && echo "fn main() {}" > crates/uncloud-web/src/main.rs
@@ -51,6 +54,7 @@ COPY crates/uncloud-web/Cargo.toml crates/uncloud-web/Cargo.toml
 COPY crates/uncloud-client/Cargo.toml crates/uncloud-client/Cargo.toml
 COPY crates/uncloud-sync/Cargo.toml crates/uncloud-sync/Cargo.toml
 COPY crates/uncloud-desktop/Cargo.toml crates/uncloud-desktop/Cargo.toml
+COPY vendor/ vendor/
 
 # Create stub lib/main files so cargo can resolve the workspace
 RUN mkdir -p crates/uncloud-server/src && echo "fn main() {}" > crates/uncloud-server/src/main.rs && echo "" > crates/uncloud-server/src/lib.rs
