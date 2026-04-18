@@ -121,7 +121,7 @@ fn Navbar() -> Element {
         "Tasks"
     } else if matches!(route, Route::Passwords {}) {
         "Passwords"
-    } else if matches!(route, Route::Settings {}) {
+    } else if matches!(route, Route::Settings {} | Route::SettingsTab { .. }) {
         "Settings"
     } else if matches!(route, Route::Trash {}) {
         "Trash"
