@@ -43,6 +43,8 @@ jobs:
           cp -r target/dx/uncloud-web/release/web/public/* crates/uncloud-desktop/src-frontend/
 
       - name: Build desktop bundles
+        env:
+          UNCLOUD_DESKTOP_FALLBACK_KEY: ${{ secrets.UNCLOUD_DESKTOP_FALLBACK_KEY }}
         run: |
           cd crates/uncloud-desktop
           cargo tauri build --bundles deb,rpm
@@ -83,6 +85,8 @@ jobs:
           cp -r target/dx/uncloud-web/release/web/public/* crates/uncloud-desktop/src-frontend/
 
       - name: Build desktop bundles
+        env:
+          UNCLOUD_DESKTOP_FALLBACK_KEY: ${{ secrets.UNCLOUD_DESKTOP_FALLBACK_KEY }}
         run: |
           cd crates/uncloud-desktop
           cargo tauri build --bundles msi

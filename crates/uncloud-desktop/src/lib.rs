@@ -23,6 +23,8 @@ use uncloud_sync::{BaseSource, SyncEngine, SyncReport};
 #[cfg(mobile)]
 mod android_fs;
 
+mod secret_store;
+
 // ── App state ─────────────────────────────────────────────────────────────────
 
 pub struct DesktopState {
@@ -118,15 +120,17 @@ impl From<SyncReport> for SyncReportDto {
 
 // ── Persisted config ─────────────────────────────────────────────────────────
 
+/// Non-secret state persisted to disk as JSON. The password lives separately
+/// in the OS keyring (or an AES-GCM-encrypted file fallback) — see
+/// `secret_store.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedConfig {
     server_url: String,
     username: String,
-    password: String,
     root_path: String,
 }
 
-/// Struct returned to the frontend — password is intentionally omitted.
+/// Struct returned to the frontend.
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfigDto {
     pub server_url: String,
@@ -134,10 +138,21 @@ pub struct ConfigDto {
     pub root_path: String,
 }
 
+/// Subdirectory name for our config / data / fallback-credentials files.
+/// Debug builds use `uncloud-dev` so a locally-built binary can never read
+/// or overwrite a release install's state.
+fn app_namespace() -> &'static str {
+    if cfg!(debug_assertions) {
+        "uncloud-dev"
+    } else {
+        "uncloud"
+    }
+}
+
 fn config_path(app: &AppHandle) -> Option<PathBuf> {
     app.path().app_config_dir().ok()
         .or_else(|| dirs::config_dir())
-        .map(|d| d.join("uncloud").join("desktop.json"))
+        .map(|d| d.join(app_namespace()).join("desktop.json"))
 }
 
 /// Path to the sync journal database — stored in the user data dir, not inside
@@ -145,7 +160,15 @@ fn config_path(app: &AppHandle) -> Option<PathBuf> {
 fn sync_db_path(app: &AppHandle) -> Option<PathBuf> {
     app.path().app_data_dir().ok()
         .or_else(|| dirs::data_local_dir())
-        .map(|d| d.join("uncloud").join("sync.db"))
+        .map(|d| d.join(app_namespace()).join("sync.db"))
+}
+
+/// Directory the encrypted-file credential fallback lives in. Sits next to
+/// `sync.db` in the data dir.
+fn secrets_dir(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_data_dir().ok()
+        .or_else(|| dirs::data_local_dir())
+        .map(|d| d.join(app_namespace()).join("secrets"))
 }
 
 fn load_config_from(app: &AppHandle) -> Option<PersistedConfig> {
@@ -203,8 +226,11 @@ async fn ensure_engine(
         return Ok(eng);
     }
     let cfg = load_config_from(app).ok_or("Not configured (no saved config)")?;
+    let secrets = secrets_dir(app).ok_or("Cannot determine data directory")?;
+    let password = secret_store::load_password(&secrets, &cfg.server_url, &cfg.username)
+        .ok_or("No saved credentials")?;
     let client = Arc::new(Client::new(&cfg.server_url));
-    client.login(&cfg.username, &cfg.password).await.map_err(|e| {
+    client.login(&cfg.username, &password).await.map_err(|e| {
         let msg = format!("Login failed during lazy init: {e}");
         eprintln!("[uncloud-desktop] {msg}");
         msg
@@ -381,7 +407,9 @@ async fn login(
         s.last_sync_at = Some(Utc::now().to_rfc3339());
     }
 
-    save_config(&app, &PersistedConfig { server_url: server, username, password, root_path });
+    let secrets = secrets_dir(&app).ok_or("Cannot determine data directory")?;
+    secret_store::store_password(&secrets, &server, &username, &password)?;
+    save_config(&app, &PersistedConfig { server_url: server, username, root_path });
     info!("Logged in and sync engine initialised");
     Ok(())
 }
@@ -397,11 +425,19 @@ fn get_config(app: AppHandle) -> Option<ConfigDto> {
 
 #[tauri::command]
 async fn disconnect(app: AppHandle, state: State<'_, DesktopState>) -> Result<(), String> {
+    // Capture identity before we wipe the file so we know which keyring/file
+    // entry to remove.
+    let prev = load_config_from(&app);
+
     *state.engine.write().await = None;
     *state.client.write().await = None;
     *state.phase.lock().await = SyncPhase::NotConfigured;
     *state.stats.lock().await = SyncStats::default();
     clear_config(&app);
+
+    if let (Some(cfg), Some(secrets)) = (prev, secrets_dir(&app)) {
+        secret_store::delete_password(&secrets, &cfg.server_url, &cfg.username);
+    }
     Ok(())
 }
 
@@ -603,7 +639,7 @@ pub fn run() {
     builder
         .manage(state)
         .setup(move |app| {
-            // Auto-login from persisted config if one exists.
+            // Auto-login from persisted config + stored credentials if both exist.
             if let Some(cfg) = load_config_from(app.handle()) {
                 let ds = app.state::<DesktopState>();
                 let engine_arc = ds.engine.clone();
@@ -611,8 +647,16 @@ pub fn run() {
                 let client_arc = ds.client.clone();
                 let app_handle = app.handle().clone();
                 async_runtime::spawn(async move {
+                    let Some(secrets) = secrets_dir(&app_handle) else {
+                        error!("Auto-login: cannot determine data directory");
+                        return;
+                    };
+                    let Some(password) = secret_store::load_password(&secrets, &cfg.server_url, &cfg.username) else {
+                        eprintln!("[uncloud-desktop] Auto-login skipped: no stored credentials");
+                        return;
+                    };
                     let client = Arc::new(Client::new(&cfg.server_url));
-                    let login_result = client.login(&cfg.username, &cfg.password).await.map_err(|e| e.to_string());
+                    let login_result = client.login(&cfg.username, &password).await.map_err(|e| e.to_string());
                     match login_result {
                         Ok(_) => {
                             let db = match sync_db_path(&app_handle) {
