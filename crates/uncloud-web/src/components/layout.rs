@@ -37,6 +37,12 @@ pub fn Layout() -> Element {
 
     let theme_state = use_context::<Signal<ThemeState>>();
     let theme = if theme_state().dark { "dark" } else { "light" };
+
+    // Push the active theme to the Android shell so the status/nav bar
+    // backgrounds match the app. No-op on desktop and web.
+    use_effect(move || {
+        tauri::set_android_theme(theme_state().dark);
+    });
     let player_state = use_context::<Signal<PlayerState>>();
     let player_visible = !player_state().queue.is_empty();
     let main_class = if player_visible {
