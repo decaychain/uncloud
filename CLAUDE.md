@@ -215,6 +215,7 @@ cargo run -p uncloud-desktop
 - **Assets**: Dioxus requires `asset!()` macro for any file to appear in the build output. CSS is loaded via `document::Stylesheet { href: TAILWIND }` in `app.rs`.
 - **DaisyUI themes**: `light` and `dark` only. Theme state lives in `Signal<ThemeState>` context, written to `data-theme` on the root div.
 - **Datetime storage**: All model fields use `chrono::DateTime<Utc>` annotated with `#[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]` (via the `bson` crate's `chrono-0_4` feature). `Option<DateTime<Utc>>` fields use a custom `models::opt_dt` serde module. This keeps domain models free of MongoDB-specific types while storing proper BSON Date objects on disk.
+- **Mobile safe-area / Android system bars**: the Android app runs edge-to-edge — web content paints under the status bar (top) and gesture-nav bar (bottom). Any `fixed inset-0`, `fixed top-0`, or `fixed bottom-0` overlay (drawers, modals, full-screen panels, lightboxes) must add `env(safe-area-inset-top)` / `env(safe-area-inset-bottom)` to its top/bottom padding so content doesn't sit under the system bars. Use `pt-safe` / `pb-safe` utilities (defined in `input.css`) when no existing padding needs preserving, or inline `style: "padding-top: calc(<base> + env(safe-area-inset-top))"` to add to existing padding. Prefer the shared `RightDrawer` component (`components/right_drawer.rs`) for right-side panels — it already handles this correctly.
 
 ## Storage Design
 

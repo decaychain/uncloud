@@ -30,8 +30,10 @@ pub fn RightDrawer(
         // Panel — fixed to the right, full-height, scrollable body.
         div {
             class: "fixed top-0 right-0 h-full w-full sm:w-[28rem] max-w-full bg-base-100 shadow-2xl z-50 flex flex-col",
-            // Header
-            div { class: "flex items-center justify-between px-4 py-3 border-b border-base-300 shrink-0",
+            // Header — extra top padding so the title clears the Android status bar.
+            div {
+                class: "flex items-center justify-between px-4 pb-3 border-b border-base-300 shrink-0",
+                style: "padding-top: calc(0.75rem + env(safe-area-inset-top))",
                 h3 { class: "font-bold text-lg truncate", "{title}" }
                 button {
                     class: "btn btn-ghost btn-sm btn-circle",
@@ -39,8 +41,11 @@ pub fn RightDrawer(
                     IconX { class: "w-4 h-4".to_string() }
                 }
             }
-            // Body — scrolls independently.
-            div { class: "flex-1 overflow-y-auto p-4",
+            // Body — scrolls independently. Extra bottom padding so the last
+            // row clears the Android nav bar.
+            div {
+                class: "flex-1 overflow-y-auto px-4 pt-4",
+                style: "padding-bottom: calc(1rem + env(safe-area-inset-bottom))",
                 {children}
             }
         }

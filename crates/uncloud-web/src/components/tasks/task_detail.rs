@@ -205,6 +205,7 @@ pub fn TaskDetail(
         return rsx! {
             div { class: "fixed inset-0 bg-black/30 z-40" }
             div { class: "fixed top-0 right-0 h-full w-[28rem] max-w-full bg-base-100 shadow-xl z-50 flex items-center justify-center",
+                style: "padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom)",
                 span { class: "loading loading-spinner loading-lg" }
             }
         };
@@ -215,7 +216,8 @@ pub fn TaskDetail(
             div { class: "fixed inset-0 bg-black/30 z-40",
                 onclick: move |_| on_close.call(()),
             }
-            div { class: "fixed top-0 right-0 h-full w-[28rem] max-w-full bg-base-100 shadow-xl z-50 p-6",
+            div { class: "fixed top-0 right-0 h-full w-[28rem] max-w-full bg-base-100 shadow-xl z-50 px-6",
+                style: "padding-top: calc(1.5rem + env(safe-area-inset-top)); padding-bottom: calc(1.5rem + env(safe-area-inset-bottom))",
                 div { class: "alert alert-error", "{err}" }
             }
         };
@@ -271,11 +273,15 @@ pub fn TaskDetail(
             onclick: move |_| on_close.call(()),
         }
 
-        // Panel
-        div { class: "fixed top-0 right-0 h-full w-[28rem] max-w-full bg-base-100 shadow-xl z-50 flex flex-col overflow-y-auto",
+        // Panel — extra bottom padding so the last item clears the Android nav bar.
+        div {
+            class: "fixed top-0 right-0 h-full w-[28rem] max-w-full bg-base-100 shadow-xl z-50 flex flex-col overflow-y-auto",
+            style: "padding-bottom: env(safe-area-inset-bottom)",
 
-            // Header
-            div { class: "flex items-start justify-between p-4 border-b border-base-300",
+            // Header — extra top padding so the title clears the Android status bar.
+            div {
+                class: "flex items-start justify-between px-4 pb-4 border-b border-base-300",
+                style: "padding-top: calc(1rem + env(safe-area-inset-top))",
                 div { class: "flex-1 mr-2",
                     if *editing_title.read() {
                         input {

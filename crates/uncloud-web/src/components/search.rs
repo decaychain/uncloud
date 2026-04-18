@@ -172,9 +172,12 @@ pub fn SearchIconMobile() -> Element {
             IconSearch { class: "w-5 h-5".to_string() }
         }
 
-        // Full-screen overlay
+        // Full-screen overlay — extra top/bottom padding so controls clear
+        // the Android system bars.
         if open() {
-            div { class: "fixed inset-0 z-50 bg-base-100 p-4 flex flex-col gap-3",
+            div {
+                class: "fixed inset-0 z-50 bg-base-100 px-4 flex flex-col gap-3",
+                style: "padding-top: calc(1rem + env(safe-area-inset-top)); padding-bottom: calc(1rem + env(safe-area-inset-bottom))",
                 div { class: "flex items-center gap-2",
                     button {
                         class: "btn btn-ghost btn-circle btn-sm",

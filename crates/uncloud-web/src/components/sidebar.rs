@@ -52,8 +52,11 @@ pub fn Sidebar() -> Element {
 
     rsx! {
         aside { class: "min-h-full w-64 bg-base-200 flex flex-col",
-            // Logo
-            div { class: "flex items-center gap-2 px-4 py-4 border-b border-base-300",
+            // Logo — extra top padding so the bg extends up under the Android
+            // status bar without crushing the logo against it
+            div {
+                class: "flex items-center gap-2 px-4 pb-4 border-b border-base-300",
+                style: "padding-top: calc(1rem + env(safe-area-inset-top))",
                 img { src: LOGO, alt: "Uncloud", class: "w-7 h-7" }
                 span { class: "text-xl font-bold", "Uncloud" }
             }
@@ -280,8 +283,11 @@ pub fn Sidebar() -> Element {
                 }
             }
 
-            // Storage usage at the bottom
-            div { class: "border-t border-base-300 p-3",
+            // Storage usage at the bottom — extra bottom padding so the bg
+            // extends down under the Android nav bar
+            div {
+                class: "border-t border-base-300 px-3 pt-3",
+                style: "padding-bottom: calc(0.75rem + env(safe-area-inset-bottom))",
                 StorageUsage {}
             }
         }

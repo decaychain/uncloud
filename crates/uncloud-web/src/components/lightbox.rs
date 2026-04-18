@@ -68,9 +68,10 @@ pub fn Lightbox(
             class: "fixed inset-0 z-50 bg-black/90 flex items-center justify-center",
             onclick: move |_| on_close.call(()),
 
-            // Close button
+            // Close button — offset down past the Android status bar.
             button {
-                class: "absolute top-4 right-4 btn btn-ghost btn-circle text-white z-50",
+                class: "absolute right-4 btn btn-ghost btn-circle text-white z-50",
+                style: "top: calc(1rem + env(safe-area-inset-top))",
                 onclick: move |e| { e.stop_propagation(); on_close.call(()); },
                 IconX { class: "w-6 h-6".to_string() }
             }

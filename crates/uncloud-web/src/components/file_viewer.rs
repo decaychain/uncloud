@@ -178,9 +178,15 @@ pub fn TextViewer(file: FileResponse, #[props(default = false)] start_editing: b
                 if !editing() { on_close.call(()); }
             },
 
-            // Modal box
+            // Modal box — when editing (full-bleed on mobile) add safe-area
+            // padding so header/footer clear the Android system bars.
             div {
                 class: "modal-box w-full {modal_width} {modal_height} flex flex-col rounded-none sm:rounded-2xl",
+                style: if editing() {
+                    "padding-top: calc(1.5rem + env(safe-area-inset-top)); padding-bottom: calc(1.5rem + env(safe-area-inset-bottom))"
+                } else {
+                    ""
+                },
                 onclick: move |e| e.stop_propagation(),
 
                 // Header
