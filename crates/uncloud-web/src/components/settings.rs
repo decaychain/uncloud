@@ -71,7 +71,12 @@ fn AppearanceSection() -> Element {
                             class: "toggle toggle-primary",
                             checked: is_dark,
                             onchange: move |_| {
-                                theme_state.write().dark = !is_dark;
+                                let new_dark = !is_dark;
+                                theme_state.write().dark = new_dark;
+                                // Flip the Android system bar icons (light vs
+                                // dark glyphs) to stay legible against the new
+                                // theme. No-op on desktop / web.
+                                tauri::set_android_theme(new_dark);
                             },
                         }
                     }

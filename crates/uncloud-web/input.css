@@ -9,3 +9,11 @@
 .uc-highlight {
   animation: uc-blink 0.5s ease-in-out 3;
 }
+
+/* Safe-area insets for edge-to-edge on Android (and iOS, if we ever get
+   there). The navbar uses `.pt-safe` so its `bg-base-200` extends up under
+   the status bar; the player / bottom page uses `.pb-safe` so their
+   backgrounds extend down under the nav bar. `max(..., N)` keeps a sensible
+   fallback on devices or browsers where `env()` returns 0. */
+.pt-safe { padding-top: env(safe-area-inset-top); }
+.pb-safe { padding-bottom: max(env(safe-area-inset-bottom), 0.5rem); }

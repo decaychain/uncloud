@@ -37,18 +37,16 @@ pub fn Layout() -> Element {
 
     let theme_state = use_context::<Signal<ThemeState>>();
     let theme = if theme_state().dark { "dark" } else { "light" };
-
-    // Push the active theme to the Android shell so the status/nav bar
-    // backgrounds match the app. No-op on desktop and web.
-    use_effect(move || {
-        tauri::set_android_theme(theme_state().dark);
-    });
     let player_state = use_context::<Signal<PlayerState>>();
     let player_visible = !player_state().queue.is_empty();
+    // When the player is hidden, the main content's bottom flush is the
+    // page edge — on Android that's under the gesture/nav bar, so we pad
+    // with the safe-area inset. When the player is visible, it handles its
+    // own safe-area and main just needs space for the fixed bar (`pb-20`).
     let main_class = if player_visible {
         "flex-1 p-4 md:p-6 pb-20"
     } else {
-        "flex-1 p-4 md:p-6"
+        "flex-1 p-4 md:p-6 pb-safe"
     };
 
     let route = use_route::<Route>();
@@ -136,7 +134,7 @@ fn Navbar() -> Element {
     let search_enabled = use_context::<Signal<bool>>()();
 
     rsx! {
-        div { class: "navbar bg-base-200 shadow-sm sticky top-0 z-30 gap-2",
+        div { class: "navbar bg-base-200 shadow-sm sticky top-0 z-30 gap-2 pt-safe",
             // Left: hamburger + section title (mobile only)
             div { class: "flex-shrink-0 flex items-center gap-1",
                 label {

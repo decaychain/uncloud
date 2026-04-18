@@ -44,15 +44,18 @@ pub fn is_android() -> bool {
 /// inlets (status bar, navigation bar) match the app background instead of
 /// showing the OEM default colour. No-op on desktop / non-Android platforms.
 /// Mirrors `MainActivity.AndroidBridge.setTheme` exposed as `window.UncloudAndroid`.
+///
+/// Uses `js_sys::eval` rather than `Reflect::get` + `dyn_into::<Function>`
+/// because Android WebView's `addJavascriptInterface` methods are host-bound
+/// and don't satisfy wasm-bindgen's `Function` instanceof check, even though
+/// they are callable from plain JS.
 pub fn set_android_theme(dark: bool) {
-    let Some(window) = web_sys::window() else { return };
-    let Ok(bridge) = Reflect::get(&window, &JsValue::from_str("UncloudAndroid")) else { return };
-    if bridge.is_undefined() || bridge.is_null() {
-        return;
-    }
-    let Ok(method) = Reflect::get(&bridge, &JsValue::from_str("setTheme")) else { return };
-    let Ok(func) = method.dyn_into::<Function>() else { return };
-    let _ = func.call1(&bridge, &JsValue::from_bool(dark));
+    let code = format!(
+        "try {{ if (window.UncloudAndroid && window.UncloudAndroid.setTheme) \
+                  window.UncloudAndroid.setTheme({dark}); }} \
+         catch (e) {{ console.error('UncloudAndroid.setTheme failed', e); }}"
+    );
+    let _ = js_sys::eval(&code);
 }
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────
