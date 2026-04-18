@@ -90,6 +90,21 @@ impl ProcessingService {
         }
     }
 
+    /// Strips every processing task from every file and re-enqueues the full
+    /// pipeline. Used by the admin "rerun post-processing" button to refresh
+    /// stale thumbnails/metadata after a bug fix or config change.
+    pub async fn rerun_all(&self, state: Arc<AppState>) {
+        let types: Vec<TaskType> = self
+            .processors
+            .iter()
+            .map(|p| p.task_type())
+            .collect();
+        info!("rerun_all: clearing {} task type(s) and re-enqueueing", types.len());
+        for task_type in &types {
+            self.reindex_task_type(task_type, state.clone()).await;
+        }
+    }
+
     /// Strips all existing tasks of the given type from every file and re-enqueues
     /// them. Used by the admin reindex endpoint when search was previously disabled
     /// and files were incorrectly marked as Done.

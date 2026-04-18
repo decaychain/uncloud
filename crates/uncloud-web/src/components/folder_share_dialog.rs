@@ -6,7 +6,7 @@ use crate::components::icons::IconX;
 use crate::hooks::use_folder_shares;
 use crate::components::shared_with_me::PermissionBadge;
 
-/// Embeddable sharing panel — used inside FolderSettingsModal's "Sharing" tab.
+/// Embeddable sharing panel — used inside FolderSettingsDrawer's "Sharing" tab.
 #[component]
 pub fn FolderSharePanel(
     folder_id: String,

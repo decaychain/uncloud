@@ -14,6 +14,22 @@ pub struct FileResponse {
     pub captured_at: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub processing_tasks: Vec<ProcessingTaskInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProcessingTaskInfo {
+    /// `"thumbnail"`, `"audio_metadata"`, `"text_extract"`, `"search_index"`.
+    pub task_type: String,
+    /// `"pending"`, `"done"`, `"error"`.
+    pub status: String,
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub queued_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

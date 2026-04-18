@@ -22,4 +22,6 @@ pub mod passwords;
 pub mod shared_with_me;
 pub mod shares_page;
 pub mod folder_share_dialog;
+pub mod right_drawer;
+pub mod file_properties;
 pub mod tasks;

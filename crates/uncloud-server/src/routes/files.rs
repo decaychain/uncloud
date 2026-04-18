@@ -120,6 +120,29 @@ pub(crate) fn file_to_response(f: &File) -> FileResponse {
                     .map(|json| (k.clone(), json))
             })
             .collect(),
+        processing_tasks: f
+            .processing_tasks
+            .iter()
+            .map(|t| uncloud_common::ProcessingTaskInfo {
+                task_type: match t.task_type {
+                    crate::models::TaskType::Thumbnail => "thumbnail",
+                    crate::models::TaskType::AudioMetadata => "audio_metadata",
+                    crate::models::TaskType::TextExtract => "text_extract",
+                    crate::models::TaskType::SearchIndex => "search_index",
+                }
+                .to_string(),
+                status: match t.status {
+                    crate::models::ProcessingStatus::Pending => "pending",
+                    crate::models::ProcessingStatus::Done => "done",
+                    crate::models::ProcessingStatus::Error => "error",
+                }
+                .to_string(),
+                attempts: t.attempts,
+                error: t.error.clone(),
+                queued_at: t.queued_at.to_rfc3339(),
+                completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),
+            })
+            .collect(),
     }
 }
 

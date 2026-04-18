@@ -20,6 +20,7 @@ pub mod folder_shares;
 pub mod vault_recents;
 pub mod tasks;
 pub mod task_items;
+pub mod admin_processing;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -222,7 +223,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Invites
         .route("/admin/invites", get(invites::list_invites))
         .route("/admin/invites", post(invites::create_invite))
-        .route("/admin/invites/{id}", delete(invites::delete_invite));
+        .route("/admin/invites/{id}", delete(invites::delete_invite))
+        // Processing
+        .route("/admin/processing/rerun", post(admin_processing::rerun_all));
 
     let admin_v1_only = Router::new()
         .route("/apps/{name}", delete(apps::delete_app))

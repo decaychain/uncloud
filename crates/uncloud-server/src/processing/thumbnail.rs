@@ -21,6 +21,7 @@ const IMAGE_MIME_TYPES: &[&str] = &[
 
 pub struct ThumbnailProcessor {
     pub size: u32,
+    pub max_pixels: u64,
 }
 
 struct ExifInfo {
@@ -102,12 +103,41 @@ impl FileProcessor for ThumbnailProcessor {
             .map_err(|e| format!("Failed to read image: {}", e))?;
 
         let size = self.size;
+        let max_pixels = self.max_pixels;
 
         let (jpeg_bytes, captured_at) = tokio::task::spawn_blocking(
             move || -> Result<(Vec<u8>, Option<DateTime<Utc>>), String> {
                 let exif = parse_exif(&data);
 
-                let mut img = image::load_from_memory(&data)
+                // Probe dimensions cheaply and reject oversized inputs with a
+                // clear message before we commit to a full decode.
+                let (width, height) = image::ImageReader::new(Cursor::new(&data))
+                    .with_guessed_format()
+                    .map_err(|e| format!("Failed to read image header: {}", e))?
+                    .into_dimensions()
+                    .map_err(|e| format!("Failed to read dimensions: {}", e))?;
+                let pixels = (width as u64).saturating_mul(height as u64);
+                if pixels > max_pixels {
+                    return Err(format!(
+                        "Image too large: {}×{} = {} pixels (limit {}). Raise processing.thumbnail_max_pixels to process it.",
+                        width, height, pixels, max_pixels
+                    ));
+                }
+
+                // Decode with an allocation budget scaled to the actual pixel
+                // count — the crate's default 512MB cap rejects >~130MP images.
+                let mut reader = image::ImageReader::new(Cursor::new(&data))
+                    .with_guessed_format()
+                    .map_err(|e| format!("Failed to read image: {}", e))?;
+                let mut limits = image::Limits::default();
+                limits.max_image_width = None;
+                limits.max_image_height = None;
+                // 4 bytes/pixel RGBA + 128MB slack for decoder scratch space.
+                limits.max_alloc = Some(pixels.saturating_mul(4).saturating_add(128 * 1024 * 1024));
+                reader.limits(limits);
+
+                let mut img = reader
+                    .decode()
                     .map_err(|e| format!("Failed to decode image: {}", e))?;
                 img.apply_orientation(exif.orientation);
 

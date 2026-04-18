@@ -163,6 +163,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     )
     .register(processing::ThumbnailProcessor {
         size: config.processing.thumbnail_size,
+        max_pixels: config.processing.thumbnail_max_pixels,
     })
     .register(processing::AudioMetadataProcessor {
         thumbnail_size: config.processing.thumbnail_size,

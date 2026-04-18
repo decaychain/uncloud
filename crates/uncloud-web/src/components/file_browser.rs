@@ -3,6 +3,7 @@ use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use uncloud_common::{AudioMeta, EffectiveStrategyResponse, FileResponse, FolderResponse, GalleryInclude, MusicInclude, ServerEvent, SyncStrategy, TrackResponse};
 use crate::components::file_item::FileItem;
+use crate::components::file_properties::FilePropertiesDrawer;
 use crate::components::icons::{
     IconAlertTriangle, IconChevronRight, IconClipboard, IconFileText, IconFolder, IconFolderOpen,
     IconFolderPlus, IconGrid, IconList, IconTrash, IconUpload, IconX,
@@ -119,6 +120,8 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
     let mut viewer_target: Signal<Option<ViewerTarget>> = use_signal(|| None);
     // Version history modal target: Some((file_id, file_name))
     let mut version_history_target: Signal<Option<(String, String)>> = use_signal(|| None);
+    // File properties drawer target
+    let mut file_properties_target: Signal<Option<String>> = use_signal(|| None);
 
     let player = use_context::<Signal<PlayerState>>();
     let mut vault_open_target = use_context::<Signal<VaultOpenTarget>>();
@@ -394,13 +397,14 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                 }
                 for file in files() {
                     {
-                        let (id_t, id_r, name_r, id_m, name_m, id_c, name_c, id_d, name_d, id_v, name_v, id_sl, name_sl) = (
+                        let (id_t, id_r, name_r, id_m, name_m, id_c, name_c, id_d, name_d, id_v, name_v, id_sl, name_sl, id_p) = (
                             file.id.clone(), file.id.clone(), file.name.clone(),
                             file.id.clone(), file.name.clone(),
                             file.id.clone(), file.name.clone(),
                             file.id.clone(), file.name.clone(),
                             file.id.clone(), file.name.clone(),
                             file.id.clone(), file.name.clone(),
+                            file.id.clone(),
                         );
                         let file_for_open = file.clone();
                         let file_for_edit = file.clone();
@@ -420,6 +424,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                 on_rename_request: move |_| rename_target.set(Some((id_r.clone(), false, name_r.clone()))),
                                 on_move_request: move |_| move_target.set(Some((vec![(id_m.clone(), false, name_m.clone())], false))),
                                 on_copy_request: move |_| move_target.set(Some((vec![(id_c.clone(), false, name_c.clone())], true))),
+                                on_properties_request: move |_| file_properties_target.set(Some(id_p.clone())),
                                 on_open_request: {
                                     let f = file_for_open.clone();
                                     move |_| {
@@ -535,13 +540,14 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                         }
                         for file in files() {
                             {
-                                let (id_t, id_r, name_r, id_m, name_m, id_c, name_c, id_d, name_d, id_v, name_v, id_sl, name_sl) = (
+                                let (id_t, id_r, name_r, id_m, name_m, id_c, name_c, id_d, name_d, id_v, name_v, id_sl, name_sl, id_p) = (
                                     file.id.clone(), file.id.clone(), file.name.clone(),
                                     file.id.clone(), file.name.clone(),
                                     file.id.clone(), file.name.clone(),
                                     file.id.clone(), file.name.clone(),
                                     file.id.clone(), file.name.clone(),
                                     file.id.clone(), file.name.clone(),
+                                    file.id.clone(),
                                 );
                                 let file_for_open = file.clone();
                                 let file_for_edit = file.clone();
@@ -561,6 +567,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                         on_rename_request: move |_| rename_target.set(Some((id_r.clone(), false, name_r.clone()))),
                                         on_move_request: move |_| move_target.set(Some((vec![(id_m.clone(), false, name_m.clone())], false))),
                                         on_copy_request: move |_| move_target.set(Some((vec![(id_c.clone(), false, name_c.clone())], true))),
+                                        on_properties_request: move |_| file_properties_target.set(Some(id_p.clone())),
                                         on_open_request: {
                                             let f = file_for_open.clone();
                                             move |_| {
@@ -677,7 +684,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
         }
 
         if let Some((folder_id, folder_name, sync_strategy, gallery_include, music_include)) = folder_settings_target() {
-            FolderSettingsModal {
+            FolderSettingsDrawer {
                 folder_id,
                 folder_name,
                 sync_strategy,
@@ -692,6 +699,11 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                     refresh.set(refresh() + 1);
                 },
             }
+        }
+
+        FilePropertiesDrawer {
+            file_id: file_properties_target(),
+            on_close: move |_| file_properties_target.set(None),
         }
 
         if let Some((file_id, file_name)) = version_history_target() {
@@ -1396,7 +1408,7 @@ fn strategy_label(s: SyncStrategy) -> &'static str {
 }
 
 #[component]
-fn FolderSettingsModal(
+fn FolderSettingsDrawer(
     folder_id: String,
     folder_name: String,
     sync_strategy: SyncStrategy,
@@ -1457,12 +1469,14 @@ fn FolderSettingsModal(
         });
     });
 
+    let drawer_title = format!("Folder settings \u{2014} {}", folder_name);
     rsx! {
-        div { class: "modal modal-open",
-            div { class: "modal-box max-w-md",
-                h3 { class: "font-bold text-lg mb-4", "Folder settings \u{2014} {folder_name}" }
+        crate::components::right_drawer::RightDrawer {
+            open: true,
+            title: drawer_title,
+            on_close: move |_| on_close.call(()),
 
-                div { role: "tablist", class: "tabs tabs-bordered mb-4",
+            div { role: "tablist", class: "tabs tabs-bordered mb-4",
                     a { role: "tab", class: if tab() == "sharing" { "tab tab-active" } else { "tab" },
                         onclick: move |_| tab.set("sharing"), "Sharing" }
                     a { role: "tab", class: if tab() == "sync" { "tab tab-active" } else { "tab" },
@@ -1727,22 +1741,8 @@ fn FolderSettingsModal(
                     div { class: "alert alert-error mt-3 py-2 text-sm", "{err}" }
                 }
 
-                div { class: "modal-action",
-                    if tab() == "sharing" || tab() == "sync" {
-                        button {
-                            class: "btn btn-ghost",
-                            r#type: "button",
-                            onclick: move |_| on_close.call(()),
-                            "Close"
-                        }
-                    } else {
-                        button {
-                            class: "btn btn-ghost",
-                            r#type: "button",
-                            disabled: saving_gm(),
-                            onclick: move |_| on_close.call(()),
-                            "Cancel"
-                        }
+                if tab() == "gallery" || tab() == "music" {
+                    div { class: "mt-4 flex justify-end",
                         button {
                             class: "btn btn-primary",
                             r#type: "button",
@@ -1772,8 +1772,6 @@ fn FolderSettingsModal(
                         }
                     }
                 }
-            }
-            div { class: "modal-backdrop", onclick: move |_| on_close.call(()) }
         }
     }
 }

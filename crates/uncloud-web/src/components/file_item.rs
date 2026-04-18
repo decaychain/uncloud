@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use crate::components::icons::{
-    file_type_icon, IconClipboard, IconDownload, IconEye, IconFolderOpen, IconHistory, IconLink,
-    IconMoreVertical, IconPencil, IconSettings, IconTrash, IconUsers,
+    file_type_icon, IconClipboard, IconDownload, IconEye, IconFolderOpen, IconHistory, IconInfo,
+    IconLink, IconMoreVertical, IconPencil, IconTrash, IconUsers,
 };
 use crate::hooks::api;
 use crate::router::Route;
@@ -47,6 +47,8 @@ pub fn FileItem(
     on_edit_request: EventHandler<()>,
     on_version_history_request: EventHandler<()>,
     on_folder_settings_request: EventHandler<()>,
+    #[props(default)]
+    on_properties_request: EventHandler<()>,
     #[props(default)]
     on_share_folder_request: EventHandler<()>,
     #[props(default)]
@@ -207,6 +209,7 @@ pub fn FileItem(
                         on_copy: move |_| on_copy_request.call(()),
                         on_version_history: move |_| on_version_history_request.call(()),
                         on_folder_settings: move |_| on_folder_settings_request.call(()),
+                        on_properties: move |_| on_properties_request.call(()),
                         on_share_folder: move |_| on_share_folder_request.call(()),
                         on_share_link: move |_| on_share_link_request.call(()),
                     }
@@ -298,6 +301,7 @@ pub fn FileItem(
                     on_copy: move |_| on_copy_request.call(()),
                     on_version_history: move |_| on_version_history_request.call(()),
                     on_folder_settings: move |_| on_folder_settings_request.call(()),
+                    on_properties: move |_| on_properties_request.call(()),
                     on_share_folder: move |_| on_share_folder_request.call(()),
                     on_share_link: move |_| on_share_link_request.call(()),
                 }
@@ -326,6 +330,7 @@ fn FileContextMenu(
     on_copy: EventHandler<()>,
     on_version_history: EventHandler<()>,
     on_folder_settings: EventHandler<()>,
+    on_properties: EventHandler<()>,
     on_share_folder: EventHandler<()>,
     on_share_link: EventHandler<()>,
 ) -> Element {
@@ -413,8 +418,15 @@ fn FileContextMenu(
             if is_folder {
                 li {
                     a { onclick: move |_| { on_folder_settings.call(()); on_close.call(()); },
-                        IconSettings {}
-                        span { "Folder settings\u{2026}" }
+                        IconInfo {}
+                        span { "Properties" }
+                    }
+                }
+            } else {
+                li {
+                    a { onclick: move |_| { on_properties.call(()); on_close.call(()); },
+                        IconInfo {}
+                        span { "Properties" }
                     }
                 }
             }

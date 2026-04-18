@@ -27,17 +27,7 @@ fn file_to_track(f: &File) -> TrackResponse {
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
     TrackResponse {
-        file: uncloud_common::FileResponse {
-            id: file_resp.id,
-            name: file_resp.name,
-            mime_type: file_resp.mime_type,
-            size_bytes: file_resp.size_bytes,
-            parent_id: file_resp.parent_id,
-            created_at: file_resp.created_at,
-            updated_at: file_resp.updated_at,
-            captured_at: file_resp.captured_at,
-            metadata: file_resp.metadata,
-        },
+        file: file_resp,
         audio,
     }
 }

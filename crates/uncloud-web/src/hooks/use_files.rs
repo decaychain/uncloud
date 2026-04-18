@@ -16,6 +16,22 @@ pub async fn list_contents(
     Ok((files, folders))
 }
 
+pub async fn get_file(file_id: &str) -> Result<FileResponse, String> {
+    let response = api::get(&format!("/files/{}", file_id))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if response.ok() {
+        response
+            .json::<FileResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(format!("Failed to load file ({})", response.status()))
+    }
+}
+
 pub async fn list_files(parent_id: Option<&str>) -> Result<Vec<FileResponse>, String> {
     let url = match parent_id {
         Some(id) => format!("{}/files?parent_id={}", api::api_url(""), id),

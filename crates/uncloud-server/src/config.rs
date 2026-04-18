@@ -96,6 +96,16 @@ pub struct ProcessingConfig {
     pub max_concurrency: usize,
     pub thumbnail_size: u32,
     pub max_attempts: u32,
+    /// Maximum input pixel count (width × height) the thumbnail processor will
+    /// accept. Raise this to support higher-resolution cameras at the cost of
+    /// peak memory use during decode.
+    #[serde(default = "default_thumbnail_max_pixels")]
+    pub thumbnail_max_pixels: u64,
+}
+
+fn default_thumbnail_max_pixels() -> u64 {
+    // 200 megapixels — fits 50MP phone bursts and common 100MP cameras.
+    200_000_000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -255,6 +265,7 @@ impl Default for ProcessingConfig {
             max_concurrency: 4,
             thumbnail_size: 320,
             max_attempts: 3,
+            thumbnail_max_pixels: default_thumbnail_max_pixels(),
         }
     }
 }

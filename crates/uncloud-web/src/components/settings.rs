@@ -4,6 +4,7 @@ use gloo_storage::{LocalStorage, Storage};
 use crate::hooks::tauri::{self, SyncPhase, SyncState};
 use uncloud_common::{CreateInviteRequest, UserRole, UserStatus};
 use crate::hooks::use_auth;
+use crate::hooks::use_processing;
 use crate::hooks::use_search;
 use crate::hooks::use_s3;
 use crate::hooks::use_shopping;
@@ -622,6 +623,9 @@ fn ConnectionSection() -> Element {
 fn AdminSection(search_enabled: bool) -> Element {
     let mut reindex_loading = use_signal(|| false);
     let mut reindex_msg: Signal<Option<(bool, String)>> = use_signal(|| None);
+    let mut rerun_loading = use_signal(|| false);
+    let mut rerun_msg: Signal<Option<(bool, String)>> = use_signal(|| None);
+    let mut confirm_rerun = use_signal(|| false);
 
     let on_reindex = move |_| {
         spawn(async move {
@@ -632,6 +636,22 @@ fn AdminSection(search_enabled: bool) -> Element {
                 Err(e) => reindex_msg.set(Some((false, e))),
             }
             reindex_loading.set(false);
+        });
+    };
+
+    let on_confirm_rerun = move |_| {
+        confirm_rerun.set(false);
+        spawn(async move {
+            rerun_loading.set(true);
+            rerun_msg.set(None);
+            match use_processing::rerun_all().await {
+                Ok(()) => rerun_msg.set(Some((
+                    true,
+                    "Post-processing queued for every file. Thumbnails and metadata will refresh over the next few minutes.".to_string(),
+                ))),
+                Err(e) => rerun_msg.set(Some((false, e))),
+            }
+            rerun_loading.set(false);
         });
     };
 
@@ -667,6 +687,59 @@ fn AdminSection(search_enabled: bool) -> Element {
                         class: if ok { "alert alert-success text-sm" } else { "alert alert-error text-sm" },
                         span { "{msg}" }
                     }
+                }
+
+                div { class: "divider my-0" }
+
+                div { class: "flex items-center justify-between gap-4",
+                    div {
+                        p { class: "font-medium text-sm", "Rerun post-processing" }
+                        p { class: "text-base-content/60 text-xs mt-0.5",
+                            "Drops thumbnails, audio metadata, and text extraction state for every file and re-queues the full pipeline. Use after fixing a bug or raising thumbnail_max_pixels."
+                        }
+                    }
+                    button {
+                        class: "btn btn-sm btn-outline btn-warning shrink-0",
+                        disabled: rerun_loading(),
+                        onclick: move |_| confirm_rerun.set(true),
+                        if rerun_loading() {
+                            span { class: "loading loading-spinner loading-xs" }
+                        }
+                        "Rerun"
+                    }
+                }
+
+                if let Some((ok, msg)) = rerun_msg() {
+                    div {
+                        class: if ok { "alert alert-success text-sm" } else { "alert alert-error text-sm" },
+                        span { "{msg}" }
+                    }
+                }
+            }
+        }
+
+        if confirm_rerun() {
+            div { class: "modal modal-open",
+                div { class: "modal-box",
+                    h3 { class: "font-bold text-lg", "Rerun post-processing?" }
+                    p { class: "py-3 text-sm",
+                        "This will clear every file's processing state (thumbnails, audio metadata, text extraction, search index) and re-queue the pipeline. Thumbnails may appear blank for a few minutes on large libraries."
+                    }
+                    div { class: "modal-action",
+                        button {
+                            class: "btn btn-ghost",
+                            onclick: move |_| confirm_rerun.set(false),
+                            "Cancel"
+                        }
+                        button {
+                            class: "btn btn-warning",
+                            onclick: on_confirm_rerun,
+                            "Yes, rerun"
+                        }
+                    }
+                }
+                div { class: "modal-backdrop",
+                    onclick: move |_| confirm_rerun.set(false),
                 }
             }
         }
