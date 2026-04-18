@@ -6,12 +6,32 @@ pub mod task_detail;
 pub mod schedule_view;
 
 use dioxus::prelude::*;
+use gloo_storage::{LocalStorage, Storage};
 use uncloud_common::ProjectView;
 
 pub use schedule_view::ScheduleView;
 
 use crate::hooks::use_tasks;
 use project_settings::ProjectSettings;
+
+const LS_VIEW_MODE: &str = "tasks-view-mode";
+
+fn load_view_mode() -> Option<ProjectView> {
+    let s: String = LocalStorage::get(LS_VIEW_MODE).ok()?;
+    match s.as_str() {
+        "board" => Some(ProjectView::Board),
+        "list" => Some(ProjectView::List),
+        _ => None,
+    }
+}
+
+fn save_view_mode(v: &ProjectView) {
+    let s = match v {
+        ProjectView::Board => "board",
+        ProjectView::List => "list",
+    };
+    let _ = LocalStorage::set(LS_VIEW_MODE, s);
+}
 
 #[component]
 pub fn TasksSchedulePage() -> Element {
@@ -25,7 +45,8 @@ pub fn TasksSchedulePage() -> Element {
 #[component]
 pub fn TasksProjectPage(project_id: String) -> Element {
     let nav = use_navigator();
-    let mut view_mode: Signal<ProjectView> = use_signal(|| ProjectView::Board);
+    let mut view_mode: Signal<ProjectView> =
+        use_signal(|| load_view_mode().unwrap_or(ProjectView::Board));
     let mut project_name = use_signal(|| String::new());
     let mut project_color = use_signal(|| "#3B82F6".to_string());
     let mut project_owner_id = use_signal(String::new);
@@ -43,7 +64,9 @@ pub fn TasksProjectPage(project_id: String) -> Element {
                 project_color.set(p.color.unwrap_or_else(|| "#3B82F6".to_string()));
                 project_owner_id.set(p.owner_id);
                 project_members.set(p.members);
-                view_mode.set(p.default_view);
+                if load_view_mode().is_none() {
+                    view_mode.set(p.default_view);
+                }
             }
         });
     });
@@ -81,7 +104,10 @@ pub fn TasksProjectPage(project_id: String) -> Element {
                         } else {
                             "btn btn-sm join-item"
                         },
-                        onclick: move |_| view_mode.set(ProjectView::Board),
+                        onclick: move |_| {
+                            view_mode.set(ProjectView::Board);
+                            save_view_mode(&ProjectView::Board);
+                        },
                         // Kanban icon
                         svg {
                             class: "w-4 h-4 mr-1",
@@ -105,7 +131,10 @@ pub fn TasksProjectPage(project_id: String) -> Element {
                         } else {
                             "btn btn-sm join-item"
                         },
-                        onclick: move |_| view_mode.set(ProjectView::List),
+                        onclick: move |_| {
+                            view_mode.set(ProjectView::List);
+                            save_view_mode(&ProjectView::List);
+                        },
                         // List icon
                         svg {
                             class: "w-4 h-4 mr-1",

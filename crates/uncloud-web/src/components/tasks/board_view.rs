@@ -127,9 +127,9 @@ pub fn BoardView(project_id: String) -> Element {
     }
 
     let container_class = if drag_task_id.read().is_some() {
-        "flex gap-4 overflow-x-auto pb-4 cursor-grabbing"
+        "flex gap-4 overflow-x-auto lg:overflow-x-visible pb-4 cursor-grabbing"
     } else {
-        "flex gap-4 overflow-x-auto pb-4"
+        "flex gap-4 overflow-x-auto lg:overflow-x-visible pb-4"
     };
 
     rsx! {
@@ -209,9 +209,9 @@ pub fn BoardView(project_id: String) -> Element {
                     let is_drop_target = drop_column.read().as_ref() == Some(&col_status);
                     let has_drag = drag_task_id.read().is_some();
                     let col_class = if is_drop_target && has_drag {
-                        "flex-shrink-0 w-72 bg-base-200 rounded-box p-3 flex flex-col gap-2 max-h-[calc(100vh-12rem)] overflow-y-auto ring-2 ring-primary"
+                        "flex-shrink-0 w-72 lg:flex-1 lg:min-w-0 lg:w-auto bg-base-200 rounded-box p-3 flex flex-col gap-2 max-h-[calc(100vh-12rem)] overflow-y-auto ring-2 ring-primary"
                     } else {
-                        "flex-shrink-0 w-72 bg-base-200 rounded-box p-3 flex flex-col gap-2 max-h-[calc(100vh-12rem)] overflow-y-auto"
+                        "flex-shrink-0 w-72 lg:flex-1 lg:min-w-0 lg:w-auto bg-base-200 rounded-box p-3 flex flex-col gap-2 max-h-[calc(100vh-12rem)] overflow-y-auto"
                     };
 
                     let is_adding = adding_to.read().as_ref() == Some(&col_status);
