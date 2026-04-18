@@ -18,8 +18,10 @@ pub fn ArtistList(artists: Vec<ArtistResponse>, on_select: EventHandler<String>)
     }
 
     rsx! {
-        div { class: "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4",
-            for artist in &artists {
+        div { class: "space-y-2",
+            h2 { class: "text-lg font-semibold", "Artists" }
+            div { class: "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4",
+                for artist in &artists {
                 {
                     let name = artist.name.clone();
                     let name_click = artist.name.clone();
@@ -43,6 +45,7 @@ pub fn ArtistList(artists: Vec<ArtistResponse>, on_select: EventHandler<String>)
                             }
                         }
                     }
+                }
                 }
             }
         }

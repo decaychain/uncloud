@@ -4,13 +4,14 @@ mod album_grid;
 mod artist_view;
 mod album_view;
 mod folder_view;
+mod playlist_list;
 pub mod playlist_view;
 
 use dioxus::prelude::*;
-use uncloud_common::{ArtistResponse, MusicAlbumResponse, ServerEvent};
+use uncloud_common::{ArtistResponse, MusicAlbumResponse, PlaylistSummary, ServerEvent};
 
 use crate::components::icons::IconAlertTriangle;
-use crate::hooks::use_music;
+use crate::hooks::{use_music, use_playlists};
 
 pub use album_view::AlbumView as MusicAlbumView;
 pub use artist_view::ArtistView as MusicArtistView;
@@ -32,6 +33,7 @@ enum MetadataNav {
 fn MetadataView() -> Element {
     let mut nav_state: Signal<MetadataNav> = use_signal(|| MetadataNav::Artists);
     let mut artists: Signal<Vec<ArtistResponse>> = use_signal(Vec::new);
+    let mut playlists: Signal<Vec<PlaylistSummary>> = use_signal(Vec::new);
     let mut loading = use_signal(|| true);
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut refresh = use_signal(|| 0u32);
@@ -60,6 +62,9 @@ fn MetadataView() -> Element {
                 Ok(a) => artists.set(a),
                 Err(e) => error.set(Some(e)),
             }
+            if let Ok(p) = use_playlists::list_playlists().await {
+                playlists.set(p);
+            }
             loading.set(false);
         });
     });
@@ -84,9 +89,12 @@ fn MetadataView() -> Element {
 
     match nav_state() {
         MetadataNav::Artists => rsx! {
-            artist_list::ArtistList {
-                artists: artists(),
-                on_select: move |name: String| nav_state.set(MetadataNav::Artist(name)),
+            div { class: "space-y-6",
+                playlist_list::PlaylistList { playlists: playlists() }
+                artist_list::ArtistList {
+                    artists: artists(),
+                    on_select: move |name: String| nav_state.set(MetadataNav::Artist(name)),
+                }
             }
         },
         MetadataNav::Artist(name) => {
