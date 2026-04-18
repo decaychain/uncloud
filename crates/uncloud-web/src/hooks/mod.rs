@@ -1,4 +1,6 @@
 pub mod api;
+pub mod media_session;
+pub mod native_audio;
 pub mod tauri;
 pub mod use_auth;
 pub mod use_files;

@@ -138,6 +138,7 @@ pub fn Sidebar() -> Element {
                                 Link {
                                     to: Route::Gallery {},
                                     class: if matches!(route, Route::Gallery {}) { "active" } else { "" },
+                                    onclick: move |_| close_drawer(),
                                     IconImage {}
                                     span { "Timeline" }
                                 }
@@ -150,6 +151,7 @@ pub fn Sidebar() -> Element {
                                 Link {
                                     to: Route::Music {},
                                     class: if matches!(route, Route::Music {}) { "active" } else { "" },
+                                    onclick: move |_| close_drawer(),
                                     IconMusic {}
                                     span { "Library" }
                                 }
@@ -176,6 +178,7 @@ pub fn Sidebar() -> Element {
                                 Link {
                                     to: Route::Shopping {},
                                     class: if matches!(route, Route::Shopping {}) { "active" } else { "" },
+                                    onclick: move |_| close_drawer(),
                                     IconShoppingCart {}
                                     span { "All Lists" }
                                 }
@@ -187,6 +190,7 @@ pub fn Sidebar() -> Element {
                                 Link {
                                     to: Route::Passwords {},
                                     class: "active",
+                                    onclick: move |_| close_drawer(),
                                     IconKey {}
                                     span { "Vault" }
                                 }
@@ -247,6 +251,7 @@ pub fn Sidebar() -> Element {
                                 Link {
                                     to: Route::Home {},
                                     class: if matches!(route, Route::Home {} | Route::Folder { .. }) { "active" } else { "" },
+                                    onclick: move |_| close_drawer(),
                                     IconFolder {}
                                     span { "All Files" }
                                 }
@@ -264,6 +269,7 @@ pub fn Sidebar() -> Element {
                                 Link {
                                     to: Route::Trash {},
                                     class: if matches!(route, Route::Trash {}) { "active" } else { "" },
+                                    onclick: move |_| close_drawer(),
                                     IconTrash {}
                                     span { "Trash" }
                                 }
@@ -434,6 +440,7 @@ fn GallerySidebarAlbums() -> Element {
                             to: Route::GalleryAlbum { id: album.folder_id.clone() },
                             class: if is_active { "active" } else { "" },
                             style: "padding-left: calc(0.75rem + {indent_px}px)",
+                            onclick: move |_| close_drawer(),
                             if depth > 0 {
                                 span { class: "opacity-30 mr-1 text-xs", "└" }
                             }
@@ -629,6 +636,7 @@ fn MusicSidebarFolders() -> Element {
                                     } else {
                                         "flex-1 text-sm break-words min-w-0 flex items-center gap-2"
                                     },
+                                    onclick: move |_| close_drawer(),
                                     IconFolder {}
                                     span { class: "truncate", "{folder.name}" }
                                 }
@@ -686,6 +694,7 @@ fn MusicSidebarPlaylists() -> Element {
                         Link {
                             to: Route::MusicPlaylist { id: pl.id.clone() },
                             class: if is_active { "active" } else { "" },
+                            onclick: move |_| close_drawer(),
                             IconListMusic {}
                             span { class: "flex-1 truncate", "{pl_name}" }
                             // Rename + delete buttons — inside the <a> so they sit on the same line;

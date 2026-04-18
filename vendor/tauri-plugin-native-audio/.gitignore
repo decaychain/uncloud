@@ -1,0 +1,8 @@
+/android/build/
+/android/.tauri/
+/android/.gradle/
+/target/
+/dist/
+/dist-js/
+/node_modules/
+Cargo.lock

@@ -3599,6 +3599,192 @@
           "type": "string",
           "const": "dialog:deny-save",
           "markdownDescription": "Denies the save command without any pre-configured scope."
+        },
+        {
+          "description": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-initialize`\n- `allow-register-listener`\n- `allow-remove-listener`\n- `allow-set-source`\n- `allow-set-queue`\n- `allow-seek-to-item`\n- `allow-set-repeat-mode`\n- `allow-play`\n- `allow-pause`\n- `allow-seek-to`\n- `allow-set-rate`\n- `allow-get-state`\n- `allow-get-progress-checkpoint`\n- `allow-clear-progress-checkpoint`\n- `allow-dispose`",
+          "type": "string",
+          "const": "native-audio:default",
+          "markdownDescription": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-initialize`\n- `allow-register-listener`\n- `allow-remove-listener`\n- `allow-set-source`\n- `allow-set-queue`\n- `allow-seek-to-item`\n- `allow-set-repeat-mode`\n- `allow-play`\n- `allow-pause`\n- `allow-seek-to`\n- `allow-set-rate`\n- `allow-get-state`\n- `allow-get-progress-checkpoint`\n- `allow-clear-progress-checkpoint`\n- `allow-dispose`"
+        },
+        {
+          "description": "Enables the clear_progress_checkpoint command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:allow-clear-progress-checkpoint",
+          "markdownDescription": "Enables the clear_progress_checkpoint command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the dispose command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:allow-dispose",
+          "markdownDescription": "Enables the dispose command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_progress_checkpoint command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:allow-get-progress-checkpoint",
+          "markdownDescription": "Enables the get_progress_checkpoint command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:allow-get-state",
+          "markdownDescription": "Enables the get_state command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the initialize command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:allow-initialize",
+          "markdownDescription": "Enables the initialize command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the pause command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:allow-pause",
+          "markdownDescription": "Enables the pause command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the play command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:allow-play",
+          "markdownDescription": "Enables the play command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the register_listener command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:allow-register-listener",
+          "markdownDescription": "Enables the register_listener command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the remove_listener command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:allow-remove-listener",
+          "markdownDescription": "Enables the remove_listener command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the seek_to command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:allow-seek-to",
+          "markdownDescription": "Enables the seek_to command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the seek_to_item command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:allow-seek-to-item",
+          "markdownDescription": "Enables the seek_to_item command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_queue command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:allow-set-queue",
+          "markdownDescription": "Enables the set_queue command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_rate command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:allow-set-rate",
+          "markdownDescription": "Enables the set_rate command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_repeat_mode command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:allow-set-repeat-mode",
+          "markdownDescription": "Enables the set_repeat_mode command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:allow-set-source",
+          "markdownDescription": "Enables the set_source command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the clear_progress_checkpoint command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:deny-clear-progress-checkpoint",
+          "markdownDescription": "Denies the clear_progress_checkpoint command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the dispose command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:deny-dispose",
+          "markdownDescription": "Denies the dispose command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_progress_checkpoint command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:deny-get-progress-checkpoint",
+          "markdownDescription": "Denies the get_progress_checkpoint command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:deny-get-state",
+          "markdownDescription": "Denies the get_state command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the initialize command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:deny-initialize",
+          "markdownDescription": "Denies the initialize command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the pause command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:deny-pause",
+          "markdownDescription": "Denies the pause command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the play command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:deny-play",
+          "markdownDescription": "Denies the play command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the register_listener command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:deny-register-listener",
+          "markdownDescription": "Denies the register_listener command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the remove_listener command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:deny-remove-listener",
+          "markdownDescription": "Denies the remove_listener command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the seek_to command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:deny-seek-to",
+          "markdownDescription": "Denies the seek_to command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the seek_to_item command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:deny-seek-to-item",
+          "markdownDescription": "Denies the seek_to_item command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_queue command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:deny-set-queue",
+          "markdownDescription": "Denies the set_queue command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_rate command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:deny-set-rate",
+          "markdownDescription": "Denies the set_rate command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_repeat_mode command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:deny-set-repeat-mode",
+          "markdownDescription": "Denies the set_repeat_mode command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_source command without any pre-configured scope.",
+          "type": "string",
+          "const": "native-audio:deny-set-source",
+          "markdownDescription": "Denies the set_source command without any pre-configured scope."
         }
       ]
     },

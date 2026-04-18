@@ -7051,6 +7051,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tauri-plugin-native-audio"
+version = "1.0.5"
+dependencies = [
+ "tauri",
+ "tauri-plugin",
+]
+
+[[package]]
 name = "tauri-runtime"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7801,6 +7809,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-android-fs",
  "tauri-plugin-dialog",
+ "tauri-plugin-native-audio",
  "tokio",
  "tracing",
  "tracing-subscriber",

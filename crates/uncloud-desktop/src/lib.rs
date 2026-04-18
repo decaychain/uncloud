@@ -595,7 +595,10 @@ pub fn run() {
     #[cfg(desktop)]
     { builder = builder.plugin(tauri_plugin_dialog::init()); }
     #[cfg(mobile)]
-    { builder = builder.plugin(tauri_plugin_android_fs::init()); }
+    {
+        builder = builder.plugin(tauri_plugin_android_fs::init());
+        builder = builder.plugin(tauri_plugin_native_audio::init());
+    }
 
     builder
         .manage(state)
