@@ -28,6 +28,17 @@ tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
 async-trait = "0.1"
 
+# Credential storage fallback (when OS keyring is unavailable): AES-GCM
+# with a build-time-embedded key. See build.rs + secret_store.rs.
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.22"
+
+# OS keyring — only on the three desktop platforms. Android has its own
+# keystore APIs and isn't covered by the `keyring` crate.
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "vendored"] }
+
 [[bin]]
 name = "uncloud-desktop"
 path = "src/main.rs"
