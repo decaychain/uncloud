@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use crate::components::{
     auth::{Login, Register},
+    dashboard::DashboardPage,
     file_browser::FileBrowser,
     layout::Layout,
     gallery::{Gallery, GalleryAlbum},
@@ -33,6 +34,9 @@ pub enum Route {
     #[layout(Layout)]
         #[route("/")]
         Home {},
+
+        #[route("/dashboard")]
+        Dashboard {},
 
         #[route("/folder/:id")]
         Folder { id: String },
@@ -94,6 +98,13 @@ pub enum Route {
 fn Home() -> Element {
     rsx! {
         FileBrowser { parent_id: None }
+    }
+}
+
+#[component]
+fn Dashboard() -> Element {
+    rsx! {
+        DashboardPage {}
     }
 }
 

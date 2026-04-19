@@ -1,14 +1,16 @@
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 
+use crate::components::dashboard::{all_tile_ids, default_tile_ids, tile_label};
 use crate::hooks::tauri::{self, SyncPhase, SyncState};
-use uncloud_common::{CreateInviteRequest, UserRole, UserStatus};
+use uncloud_common::{CreateInviteRequest, UpdatePreferencesRequest, UserRole, UserStatus};
 use crate::hooks::use_auth;
+use crate::hooks::use_preferences;
 use crate::hooks::use_processing;
 use crate::hooks::use_search;
 use crate::hooks::use_s3;
 use crate::hooks::use_shopping;
-use crate::state::{AuthState, ThemeState};
+use crate::state::{AuthState, FontScale, ThemeState};
 
 #[component]
 pub fn SettingsPage(tab: String) -> Element {
@@ -33,6 +35,7 @@ pub fn SettingsPage(tab: String) -> Element {
                 "preferences" => rsx! {
                     h1 { class: "text-2xl font-bold", "Preferences" }
                     AppearanceSection {}
+                    DashboardTilesSection {}
                     OptionalFeaturesSection {}
                     MusicSection {}
                 },
@@ -58,6 +61,14 @@ pub fn SettingsPage(tab: String) -> Element {
 fn AppearanceSection() -> Element {
     let mut theme_state = use_context::<Signal<ThemeState>>();
     let is_dark = theme_state().dark;
+    let font_scale = theme_state().font_scale;
+
+    let scale_options: &[(FontScale, &str)] = &[
+        (FontScale::Small, "Small"),
+        (FontScale::Default, "Default"),
+        (FontScale::Large, "Large"),
+        (FontScale::XLarge, "Extra large"),
+    ];
 
     rsx! {
         div { class: "card bg-base-100 shadow",
@@ -78,6 +89,126 @@ fn AppearanceSection() -> Element {
                                 // theme. No-op on desktop / web.
                                 tauri::set_android_theme(new_dark);
                             },
+                        }
+                    }
+                }
+
+                div { class: "flex items-start justify-between gap-4 pt-2",
+                    div {
+                        p { class: "font-medium text-sm", "Font size" }
+                        p { class: "text-base-content/60 text-xs mt-0.5",
+                            "Scales the UI for readability. Takes effect immediately."
+                        }
+                    }
+                    select {
+                        class: "select select-bordered select-sm w-40 shrink-0",
+                        value: "{font_scale.as_str()}",
+                        onchange: move |evt| {
+                            if let Some(s) = FontScale::from_str(&evt.value()) {
+                                theme_state.write().font_scale = s;
+                                let _ = LocalStorage::set("uncloud_font_scale", s.as_str());
+                            }
+                        },
+                        for (value, label) in scale_options {
+                            option {
+                                value: "{value.as_str()}",
+                                selected: font_scale == *value,
+                                "{label}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn DashboardTilesSection() -> Element {
+    let mut auth_state = use_context::<Signal<AuthState>>();
+    let mut saving = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+
+    let shopping_enabled = auth_state()
+        .user
+        .as_ref()
+        .map(|u| u.features_enabled.contains(&"shopping".to_string()))
+        .unwrap_or(false);
+
+    // Current enabled set: user's stored preference, or defaults if unset.
+    let enabled: Vec<String> = {
+        let configured = auth_state()
+            .user
+            .as_ref()
+            .map(|u| u.preferences.dashboard_tiles.clone())
+            .unwrap_or_default();
+        if configured.is_empty() { default_tile_ids() } else { configured }
+    };
+
+    let save = move |next: Vec<String>| {
+        spawn(async move {
+            saving.set(true);
+            error.set(None);
+            let req = UpdatePreferencesRequest { dashboard_tiles: Some(next) };
+            match use_preferences::update_preferences(req).await {
+                Ok(updated) => {
+                    auth_state.write().user = Some(updated);
+                }
+                Err(e) => error.set(Some(e)),
+            }
+            saving.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "card bg-base-100 shadow",
+            div { class: "card-body gap-3",
+                div { class: "flex items-center justify-between",
+                    h2 { class: "card-title text-lg", "Dashboard tiles" }
+                    if saving() {
+                        span { class: "loading loading-spinner loading-xs" }
+                    }
+                }
+                p { class: "text-base-content/60 text-xs",
+                    "Choose which shortcut tiles appear on the "
+                    code { class: "text-xs", "/dashboard" }
+                    " page. Useful mainly on mobile."
+                }
+                if let Some(msg) = error() {
+                    div { class: "alert alert-error text-sm", "{msg}" }
+                }
+                div { class: "grid grid-cols-2 gap-2",
+                    for id in all_tile_ids() {
+                        {
+                            let id_s = id.to_string();
+                            let is_on = enabled.iter().any(|x| x == id);
+                            let disabled_for_feature = *id == "shopping" && !shopping_enabled;
+                            let enabled_now = enabled.clone();
+                            let mut save = save.clone();
+                            rsx! {
+                                label {
+                                    class: if disabled_for_feature { "label cursor-not-allowed opacity-50" } else { "label cursor-pointer" },
+                                    input {
+                                        r#type: "checkbox",
+                                        class: "checkbox checkbox-sm",
+                                        checked: is_on,
+                                        disabled: disabled_for_feature || saving(),
+                                        onchange: move |_| {
+                                            // Toggle: preserve current order; append on turn-on, remove on turn-off.
+                                            let mut next: Vec<String> = enabled_now
+                                                .iter()
+                                                .filter(|x| *x != &id_s)
+                                                .cloned()
+                                                .collect();
+                                            if !is_on {
+                                                next.push(id_s.clone());
+                                            }
+                                            save(next);
+                                        },
+                                    }
+                                    span { class: "label-text ml-2", "{tile_label(id)}" }
+                                }
+                            }
                         }
                     }
                 }

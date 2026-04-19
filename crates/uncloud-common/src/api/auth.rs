@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::preferences::UserPreferences;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UserRole {
@@ -103,6 +105,8 @@ pub struct UserResponse {
     pub totp_enabled: bool,
     #[serde(default)]
     pub features_enabled: Vec<String>,
+    #[serde(default)]
+    pub preferences: UserPreferences,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub session_token: Option<String>,
 }

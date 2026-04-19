@@ -10,7 +10,7 @@ use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
-use crate::models::{RecentVault, UserPreferences};
+use crate::models::{RecentVault, VaultRecentsDoc};
 use crate::AppState;
 use uncloud_common::{AddRecentVaultRequest, RecentVaultEntry};
 
@@ -29,7 +29,7 @@ pub async fn list_recent_vaults(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<Json<Vec<RecentVaultEntry>>> {
-    let coll = state.db.collection::<UserPreferences>("user_preferences");
+    let coll = state.db.collection::<VaultRecentsDoc>("user_preferences");
     let prefs = coll
         .find_one(doc! { "user_id": user.id })
         .await
@@ -58,7 +58,7 @@ pub async fn add_recent_vault(
         last_opened_at: now,
     };
 
-    let coll = state.db.collection::<UserPreferences>("user_preferences");
+    let coll = state.db.collection::<VaultRecentsDoc>("user_preferences");
 
     // Pull any existing entry for this file_id first, then push the new one
     // This is done in two operations to act as an upsert-then-reorder.
@@ -126,7 +126,7 @@ pub async fn remove_recent_vault(
     let file_oid = ObjectId::parse_str(&file_id)
         .map_err(|_| AppError::BadRequest("Invalid file_id".into()))?;
 
-    let coll = state.db.collection::<UserPreferences>("user_preferences");
+    let coll = state.db.collection::<VaultRecentsDoc>("user_preferences");
     coll.update_one(
         doc! { "user_id": user.id },
         doc! { "$pull": { "recent_vaults": { "file_id": file_oid } } },

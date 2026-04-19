@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
 
-pub use uncloud_common::UserStatus;
+pub use uncloud_common::{UserPreferences, UserStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -46,6 +46,9 @@ pub struct User {
     /// True for ephemeral demo accounts (auto-purged).
     #[serde(default)]
     pub demo: bool,
+    /// Per-user UI preferences (dashboard tiles, etc.).
+    #[serde(default)]
+    pub preferences: UserPreferences,
     #[serde(with = "chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]
@@ -69,6 +72,7 @@ impl User {
             totp_enabled: false,
             recovery_codes: Vec::new(),
             demo: false,
+            preferences: UserPreferences::default(),
             created_at: now,
             updated_at: now,
         }

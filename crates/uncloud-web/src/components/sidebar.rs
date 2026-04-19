@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use wasm_bindgen::JsCast;
 use uncloud_common::{AlbumResponse, MusicFolderResponse, PlaylistSummary, TaskProjectResponse};
 use crate::components::icons::{
-    IconCheckSquare, IconFolder, IconImage, IconKey, IconLink, IconListMusic, IconMusic, IconPalette, IconPencil,
+    IconCheckSquare, IconFolder, IconImage, IconKey, IconLayoutGrid, IconLink, IconListMusic, IconMusic, IconPalette, IconPencil,
     IconSettings, IconShield, IconShoppingCart, IconTrash, IconUser, IconUsers,
 };
 use crate::hooks::{use_apps, use_files, use_music, use_playlists, use_tasks};
@@ -27,7 +27,9 @@ fn close_drawer() {
 pub fn Sidebar() -> Element {
     let route = use_route::<Route>();
 
-    let section = if matches!(route, Route::Gallery {} | Route::GalleryAlbum { .. }) {
+    let section = if matches!(route, Route::Dashboard {}) {
+        "dashboard"
+    } else if matches!(route, Route::Gallery {} | Route::GalleryAlbum { .. }) {
         "gallery"
     } else if matches!(route, Route::Music {} | Route::MusicArtist { .. } | Route::MusicAlbum { .. } | Route::MusicFolder { .. } | Route::MusicPlaylist { .. }) {
         "music"
@@ -63,6 +65,15 @@ pub fn Sidebar() -> Element {
 
             // Top-level section nav
             ul { class: "menu menu-sm px-2 pt-2 pb-0 w-full",
+                li {
+                    Link {
+                        to: Route::Dashboard {},
+                        class: if section == "dashboard" { "active" } else { "" },
+                        onclick: move |_| close_drawer(),
+                        IconLayoutGrid {}
+                        span { "Dashboard" }
+                    }
+                }
                 li {
                     Link {
                         to: Route::Home {},

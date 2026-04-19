@@ -46,6 +46,7 @@ fn user_to_response(user: &User, config: &crate::config::Config) -> UserResponse
         used_bytes: user.used_bytes,
         totp_enabled: user.totp_enabled,
         features_enabled: compute_features_enabled(config, &user.disabled_features),
+        preferences: user.preferences.clone(),
         session_token: None,
     }
 }
@@ -77,6 +78,7 @@ pub struct UserResponse {
     pub used_bytes: i64,
     pub totp_enabled: bool,
     pub features_enabled: Vec<String>,
+    pub preferences: uncloud_common::UserPreferences,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_token: Option<String>,
 }
@@ -470,6 +472,34 @@ pub async fn update_my_features(
                 )
                 .await?;
         }
+    }
+
+    let updated_user = users_coll
+        .find_one(doc! { "_id": user.id })
+        .await?
+        .ok_or(AppError::NotFound("User not found".to_string()))?;
+
+    Ok(Json(user_to_response(&updated_user, &state.config)))
+}
+
+// ── Authenticated: UI preferences ────────────────────────────────────────────
+
+pub async fn update_my_preferences(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(body): Json<uncloud_common::UpdatePreferencesRequest>,
+) -> Result<Json<UserResponse>> {
+    let users_coll = state.db.collection::<User>("users");
+
+    let mut update = mongodb::bson::Document::new();
+    if let Some(tiles) = body.dashboard_tiles {
+        update.insert("preferences.dashboard_tiles", tiles);
+    }
+
+    if !update.is_empty() {
+        users_coll
+            .update_one(doc! { "_id": user.id }, doc! { "$set": update })
+            .await?;
     }
 
     let updated_user = users_coll
