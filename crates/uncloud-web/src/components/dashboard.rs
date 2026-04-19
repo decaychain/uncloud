@@ -7,10 +7,9 @@
 use dioxus::prelude::*;
 
 use crate::components::icons::{
-    IconCheckSquare, IconFolder, IconImage, IconKey, IconLink, IconMusic, IconShoppingCart,
-    IconTrash,
+    IconCheckSquare, IconFolder, IconImage, IconKey, IconMusic, IconShoppingCart,
 };
-use crate::hooks::{use_files, use_shares, use_shopping, use_tasks};
+use crate::hooks::{api, use_files, use_playlists, use_shopping, use_tasks};
 use crate::router::Route;
 use crate::state::AuthState;
 
@@ -25,19 +24,13 @@ pub fn all_tile_ids() -> &'static [&'static str] {
         "tasks",
         "shopping",
         "passwords",
-        "shares",
-        "trash",
     ]
 }
 
 /// Default tiles shown when the user has not customised their preference.
+/// Everything is on by default so users discover the features.
 pub fn default_tile_ids() -> Vec<String> {
-    vec![
-        "files".to_string(),
-        "gallery".to_string(),
-        "tasks".to_string(),
-        "passwords".to_string(),
-    ]
+    all_tile_ids().iter().map(|s| s.to_string()).collect()
 }
 
 pub fn tile_label(id: &str) -> &'static str {
@@ -48,8 +41,6 @@ pub fn tile_label(id: &str) -> &'static str {
         "tasks" => "Tasks",
         "shopping" => "Shopping",
         "passwords" => "Passwords",
-        "shares" => "Shares",
-        "trash" => "Trash",
         _ => "Unknown",
     }
 }
@@ -62,8 +53,6 @@ fn tile_route(id: &str) -> Option<Route> {
         "tasks" => Some(Route::Tasks {}),
         "shopping" => Some(Route::Shopping {}),
         "passwords" => Some(Route::Passwords {}),
-        "shares" => Some(Route::Shares {}),
-        "trash" => Some(Route::Trash {}),
         _ => None,
     }
 }
@@ -79,7 +68,8 @@ pub fn DashboardPage() -> Element {
         .unwrap_or(false);
 
     // Resolve enabled tiles: user's preference, or the default set.
-    // Filter out tiles for features the user has disabled (e.g. shopping).
+    // Drop any ids we no longer render (e.g. "shares"/"trash" from older prefs),
+    // and filter out tiles for features the user has disabled (e.g. shopping).
     let enabled: Vec<String> = {
         let configured = auth_state()
             .user
@@ -91,7 +81,10 @@ pub fn DashboardPage() -> Element {
         } else {
             configured
         };
+        let known: std::collections::HashSet<&str> =
+            all_tile_ids().iter().copied().collect();
         base.into_iter()
+            .filter(|id| known.contains(id.as_str()))
             .filter(|id| id != "shopping" || shopping_enabled)
             .collect()
     };
@@ -134,7 +127,7 @@ fn DashboardTile(tile_id: String) -> Element {
     rsx! {
         Link {
             to: route,
-            class: "card bg-base-200 hover:bg-base-300 transition-colors shadow-sm",
+            class: "card bg-base-100 border border-base-300 shadow-md hover:shadow-lg hover:bg-base-200 transition-all",
             div { class: "card-body p-4 gap-1",
                 div { class: "flex items-center gap-2",
                     TileIcon { tile_id: tile_id.clone() }
@@ -145,6 +138,7 @@ fn DashboardTile(tile_id: String) -> Element {
                         TileCount::Loading => rsx! { span { class: "opacity-40", "…" } },
                         TileCount::None => rsx! { span { "" } },
                         TileCount::Value(v, suffix) => rsx! { span { "{v} {suffix}" } },
+                        TileCount::Text(s) => rsx! { span { "{s}" } },
                     }
                 }
             }
@@ -162,8 +156,6 @@ fn TileIcon(tile_id: String) -> Element {
         "tasks" => rsx! { IconCheckSquare { class } },
         "shopping" => rsx! { IconShoppingCart { class } },
         "passwords" => rsx! { IconKey { class } },
-        "shares" => rsx! { IconLink { class } },
-        "trash" => rsx! { IconTrash { class } },
         _ => rsx! {},
     }
 }
@@ -173,13 +165,22 @@ enum TileCount {
     Loading,
     None,
     Value(usize, &'static str),
+    Text(String),
 }
 
-/// Fetches the tile's summary count in the background. Returns `None` for
-/// tiles that don't have a cheap count endpoint.
+/// Fetches the tile's summary in the background. Returns `None` for tiles
+/// without a meaningful cheap summary.
 fn use_tile_count(tile_id: &str) -> Signal<TileCount> {
+    let auth_state = use_context::<Signal<AuthState>>();
     let mut state = use_signal(|| TileCount::Loading);
     let tid = tile_id.to_string();
+
+    // Synchronous summaries (no network) — resolve from auth state.
+    if tid == "files" {
+        let used = auth_state().user.as_ref().map(|u| u.used_bytes).unwrap_or(0);
+        let text = format!("{} used", uncloud_common::validation::format_bytes(used));
+        return use_signal(move || TileCount::Text(text.clone()));
+    }
 
     use_effect(move || {
         let tid = tid.clone();
@@ -193,20 +194,15 @@ fn use_tile_count(tile_id: &str) -> Signal<TileCount> {
                     .await
                     .map(|v| TileCount::Value(v.len(), "lists"))
                     .unwrap_or(TileCount::None),
-                "shares" => use_shares::list_shares()
-                    .await
-                    .map(|v| TileCount::Value(v.len(), "shares"))
-                    .unwrap_or(TileCount::None),
-                "trash" => use_files::list_trash()
-                    .await
-                    .map(|v| TileCount::Value(v.len(), "items"))
-                    .unwrap_or(TileCount::None),
                 "gallery" => use_files::list_gallery_albums()
                     .await
                     .map(|v| TileCount::Value(v.len(), "albums"))
                     .unwrap_or(TileCount::None),
-                // Files/music/passwords have no cheap total-count API; we'd
-                // have to page through. Leave blank rather than lie.
+                "music" => use_playlists::list_playlists()
+                    .await
+                    .map(|v| TileCount::Value(v.len(), "playlists"))
+                    .unwrap_or(TileCount::None),
+                "passwords" => fetch_recent_vaults_count().await,
                 _ => TileCount::None,
             };
             state.set(result);
@@ -214,4 +210,18 @@ fn use_tile_count(tile_id: &str) -> Signal<TileCount> {
     });
 
     state
+}
+
+async fn fetch_recent_vaults_count() -> TileCount {
+    let resp = match api::get("/vault-recents").send().await {
+        Ok(r) => r,
+        Err(_) => return TileCount::None,
+    };
+    if !resp.ok() {
+        return TileCount::None;
+    }
+    match resp.json::<Vec<serde_json::Value>>().await {
+        Ok(v) if !v.is_empty() => TileCount::Value(v.len(), "recent"),
+        _ => TileCount::None,
+    }
 }

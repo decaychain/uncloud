@@ -187,7 +187,11 @@ fn DashboardTilesSection() -> Element {
                             let mut save = save.clone();
                             rsx! {
                                 label {
-                                    class: if disabled_for_feature { "label cursor-not-allowed opacity-50" } else { "label cursor-pointer" },
+                                    class: if disabled_for_feature {
+                                        "flex items-center gap-2 py-1 cursor-not-allowed opacity-50"
+                                    } else {
+                                        "flex items-center gap-2 py-1 cursor-pointer"
+                                    },
                                     input {
                                         r#type: "checkbox",
                                         class: "checkbox checkbox-sm",
@@ -206,7 +210,7 @@ fn DashboardTilesSection() -> Element {
                                             save(next);
                                         },
                                     }
-                                    span { class: "label-text ml-2", "{tile_label(id)}" }
+                                    span { class: "text-sm", "{tile_label(id)}" }
                                 }
                             }
                         }
