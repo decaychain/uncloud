@@ -124,6 +124,7 @@ impl TestApp {
             versioning: VersioningConfig::default(),
             apps: AppsConfig::default(),
             features: FeaturesConfig::default(),
+            logging: uncloud_server::config::LoggingConfig::default(),
         };
 
         customize(&mut config);
@@ -331,6 +332,7 @@ impl BoundTestApp {
             versioning: VersioningConfig::default(),
             apps: AppsConfig::default(),
             features: FeaturesConfig::default(),
+            logging: uncloud_server::config::LoggingConfig::default(),
         };
 
         let database = db::connect(&config.database)
