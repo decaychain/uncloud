@@ -84,6 +84,7 @@ jobs:
           KEY_ALIAS: uncloud
           KEY_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
+          UNCLOUD_DESKTOP_FALLBACK_KEY: ${{ secrets.UNCLOUD_DESKTOP_FALLBACK_KEY }}
         run: |
           cd crates/uncloud-desktop
           cargo tauri android build
