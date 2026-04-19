@@ -13,8 +13,12 @@ pub struct RecentVault {
     pub last_opened_at: DateTime<Utc>,
 }
 
+/// MongoDB document stored in the `user_preferences` collection, keyed by `user_id`.
+/// Holds the per-user "recent vaults" list for the passwords feature.
+/// Distinct from `uncloud_common::UserPreferences`, which is the embedded
+/// UI-preferences struct on the `User` document itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UserPreferences {
+pub struct VaultRecentsDoc {
     #[serde(rename = "_id")]
     pub id: ObjectId,
     pub user_id: ObjectId,

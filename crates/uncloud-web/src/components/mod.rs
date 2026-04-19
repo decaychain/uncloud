@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod dashboard;
 pub mod file_browser;
 pub mod file_item;
 pub mod file_viewer;

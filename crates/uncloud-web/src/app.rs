@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use crate::hooks::{use_auth, use_search};
 use crate::router::Route;
-use crate::state::{AuthState, HighlightTarget, PlayerState, ThemeState, VaultOpenTarget, ViewMode};
+use crate::state::{AuthState, FontScale, HighlightTarget, PlayerState, ThemeState, VaultOpenTarget, ViewMode};
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
 const FAVICON: Asset = asset!("/assets/favicon.ico");
@@ -34,7 +34,29 @@ pub fn App() -> Element {
             .unwrap_or(false)
     });
 
-    use_context_provider(move || Signal::new(ThemeState { dark: is_dark() }));
+    let initial_font_scale: FontScale = LocalStorage::get::<String>("uncloud_font_scale")
+        .ok()
+        .and_then(|s| FontScale::from_str(&s))
+        .unwrap_or_default();
+
+    let theme_state = use_context_provider(move || {
+        Signal::new(ThemeState {
+            dark: is_dark(),
+            font_scale: initial_font_scale,
+        })
+    });
+
+    // Apply the font scale to the document root so all Tailwind rem-based
+    // sizes scale uniformly. Re-runs whenever the preference changes.
+    use_effect(move || {
+        let px = theme_state().font_scale.px();
+        if let Some(html) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.document_element())
+        {
+            let _ = html.set_attribute("style", &format!("font-size: {}px", px));
+        }
+    });
 
     let initial_view_mode = LocalStorage::get::<String>("uncloud_view_mode")
         .ok()

@@ -194,7 +194,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/s3/credentials", get(s3_credentials::list_credentials))
         .route("/s3/credentials/{id}", delete(s3_credentials::delete_credential))
         .route("/apps", get(apps::list_apps))
-        .route("/auth/me/features", put(auth::update_my_features));
+        .route("/auth/me/features", put(auth::update_my_features))
+        .route("/auth/me/preferences", put(auth::update_my_preferences));
 
     let auth_routes = Router::new()
         .nest("/api", auth_api.clone())

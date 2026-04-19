@@ -11,9 +11,56 @@ pub enum Section {
     Settings,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FontScale {
+    Small,
+    Default,
+    Large,
+    XLarge,
+}
+
+impl Default for FontScale {
+    fn default() -> Self {
+        FontScale::Default
+    }
+}
+
+impl FontScale {
+    /// Base font size in pixels applied to the document root.
+    /// All Tailwind rem-based sizes scale from this.
+    pub fn px(self) -> u32 {
+        match self {
+            FontScale::Small => 14,
+            FontScale::Default => 16,
+            FontScale::Large => 18,
+            FontScale::XLarge => 20,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FontScale::Small => "small",
+            FontScale::Default => "default",
+            FontScale::Large => "large",
+            FontScale::XLarge => "xlarge",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "small" => Some(FontScale::Small),
+            "default" => Some(FontScale::Default),
+            "large" => Some(FontScale::Large),
+            "xlarge" => Some(FontScale::XLarge),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ThemeState {
     pub dark: bool,
+    pub font_scale: FontScale,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
