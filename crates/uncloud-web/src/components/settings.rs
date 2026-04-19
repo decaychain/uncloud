@@ -8,6 +8,7 @@ use crate::hooks::use_auth;
 use crate::hooks::use_preferences;
 use crate::hooks::use_processing;
 use crate::hooks::use_search;
+use crate::hooks::use_storages;
 use crate::hooks::use_s3;
 use crate::hooks::use_shopping;
 use crate::state::{AuthState, FontScale, ThemeState};
@@ -766,6 +767,34 @@ fn AdminSection(search_enabled: bool) -> Element {
     let mut rerun_loading = use_signal(|| false);
     let mut rerun_msg: Signal<Option<(bool, String)>> = use_signal(|| None);
     let mut confirm_rerun = use_signal(|| false);
+    let mut rescan_loading = use_signal(|| false);
+    let mut rescan_result: Signal<Option<Result<use_storages::RescanResult, String>>> =
+        use_signal(|| None);
+
+    let on_rescan = move |_| {
+        spawn(async move {
+            rescan_loading.set(true);
+            rescan_result.set(None);
+            let storages = match use_storages::list_storages().await {
+                Ok(v) => v,
+                Err(e) => {
+                    rescan_result.set(Some(Err(e)));
+                    rescan_loading.set(false);
+                    return;
+                }
+            };
+            // Prefer the default storage; fall back to the first one.
+            let target = storages.iter().find(|s| s.is_default).or_else(|| storages.first());
+            let Some(storage) = target else {
+                rescan_result.set(Some(Err("No storage configured.".to_string())));
+                rescan_loading.set(false);
+                return;
+            };
+            let res = use_storages::rescan(&storage.id).await;
+            rescan_result.set(Some(res));
+            rescan_loading.set(false);
+        });
+    };
 
     let on_reindex = move |_| {
         spawn(async move {
@@ -853,6 +882,53 @@ fn AdminSection(search_enabled: bool) -> Element {
                     div {
                         class: if ok { "alert alert-success text-sm" } else { "alert alert-error text-sm" },
                         span { "{msg}" }
+                    }
+                }
+
+                div { class: "divider my-0" }
+
+                div { class: "flex items-center justify-between gap-4",
+                    div {
+                        p { class: "font-medium text-sm", "Rescan storage" }
+                        p { class: "text-base-content/60 text-xs mt-0.5",
+                            "Walks the default storage on disk and imports any folder or file that's missing from the database. Useful after copying files directly into the storage root."
+                        }
+                    }
+                    button {
+                        class: "btn btn-sm btn-outline shrink-0",
+                        disabled: rescan_loading(),
+                        onclick: on_rescan,
+                        if rescan_loading() {
+                            span { class: "loading loading-spinner loading-xs" }
+                        }
+                        "Rescan"
+                    }
+                }
+
+                if let Some(res) = rescan_result() {
+                    match res {
+                        Ok(r) => rsx! {
+                            div { class: "alert alert-success text-sm flex-col items-start",
+                                span {
+                                    "Scanned {r.scanned_entries} entries — imported {r.imported_folders} folder(s) and {r.imported_files} file(s), skipped {r.skipped_existing} already tracked."
+                                }
+                                if !r.conflicts.is_empty() {
+                                    div { class: "mt-2 w-full",
+                                        p { class: "font-medium", "{r.conflicts.len()} conflict(s):" }
+                                        ul { class: "list-disc list-inside text-xs mt-1 max-h-40 overflow-y-auto",
+                                            for c in r.conflicts.iter() {
+                                                li { key: "{c.path}", "{c.path} — {c.reason}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        Err(e) => rsx! {
+                            div { class: "alert alert-error text-sm",
+                                span { "Rescan failed: {e}" }
+                            }
+                        },
                     }
                 }
             }

@@ -4,7 +4,7 @@ use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
-use super::{BoxedAsyncRead, StorageBackend};
+use super::{BoxedAsyncRead, ScanEntry, StorageBackend};
 use crate::error::{AppError, Result};
 
 pub struct LocalStorage {
@@ -230,6 +230,58 @@ impl StorageBackend for LocalStorage {
 
     async fn restore_from_trash(&self, trash: &str, restore: &str) -> Result<()> {
         self.rename(trash, restore).await
+    }
+
+    async fn scan(&self, prefix: &str) -> Result<Vec<ScanEntry>> {
+        let root = self.resolve_path(prefix);
+        if !root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        let mut stack: Vec<(PathBuf, String)> = vec![(root, prefix.trim_start_matches('/').to_string())];
+
+        while let Some((dir, rel)) = stack.pop() {
+            let mut entries = match fs::read_dir(&dir).await {
+                Ok(e) => e,
+                Err(e) => {
+                    return Err(AppError::Storage(format!(
+                        "Failed to read directory {:?}: {}",
+                        dir, e
+                    )));
+                }
+            };
+            while let Some(entry) = entries
+                .next_entry()
+                .await
+                .map_err(|e| AppError::Storage(format!("Failed to iterate dir: {}", e)))?
+            {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let child_rel = if rel.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}/{}", rel, name)
+                };
+                let meta = match entry.metadata().await {
+                    Ok(m) => m,
+                    Err(_) => continue, // skip unreadable entries
+                };
+                if meta.is_dir() {
+                    out.push(ScanEntry {
+                        path: child_rel.clone(),
+                        is_dir: true,
+                        size_bytes: 0,
+                    });
+                    stack.push((entry.path(), child_rel));
+                } else if meta.is_file() {
+                    out.push(ScanEntry {
+                        path: child_rel,
+                        is_dir: false,
+                        size_bytes: meta.len(),
+                    });
+                }
+            }
+        }
+        Ok(out)
     }
 }
 

@@ -9,6 +9,15 @@ use crate::error::Result;
 pub type BoxedAsyncRead = Pin<Box<dyn AsyncRead + Send + Unpin>>;
 pub type BoxedAsyncWrite = Pin<Box<dyn AsyncWrite + Send + Unpin>>;
 
+/// One on-disk entry surfaced by `StorageBackend::scan`.
+#[derive(Debug, Clone)]
+pub struct ScanEntry {
+    /// Path relative to the backend root, using `/` separators.
+    pub path: String,
+    pub is_dir: bool,
+    pub size_bytes: u64,
+}
+
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
     /// Read a file, returning an async reader
@@ -56,6 +65,12 @@ pub trait StorageBackend: Send + Sync {
 
     /// Restore a file blob from the trash directory.
     async fn restore_from_trash(&self, trash: &str, restore: &str) -> Result<()>;
+
+    /// Recursively enumerate files and directories under `prefix` (relative to
+    /// backend root). Used by the admin rescan/import endpoint. `prefix` of
+    /// `""` means the entire backend. Returned paths are relative to the
+    /// backend root.
+    async fn scan(&self, prefix: &str) -> Result<Vec<ScanEntry>>;
 }
 
 pub use local::LocalStorage;

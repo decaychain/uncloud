@@ -211,6 +211,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/admin/storages", post(storages::create_storage))
         .route("/admin/storages/{id}", put(storages::update_storage))
         .route("/admin/storages/{id}", delete(storages::delete_storage))
+        .route("/admin/storages/{id}/rescan", post(storages::rescan_storage))
         .route("/admin/users", get(users::list_users))
         .route("/admin/users", post(users::create_user))
         .route("/admin/users/{id}", put(users::update_user))
