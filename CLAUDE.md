@@ -544,6 +544,12 @@ search:
 versioning:
   max_versions: 50                 # per file; oldest pruned beyond this
   trash_retention_days: 30         # auto-purge trash after N days (0 = never)
+
+logging:
+  # `tracing_subscriber::EnvFilter` directive. `RUST_LOG` env var, when set,
+  # always overrides this value. Defaults to `uncloud_server=info,tower_http=info`
+  # in release builds, `uncloud_server=debug,tower_http=debug` in debug builds.
+  level: "uncloud_server=info,tower_http=info"
 ```
 
 All config sections have sensible `Default` implementations, so existing `config.yaml` files remain valid when new fields are added.

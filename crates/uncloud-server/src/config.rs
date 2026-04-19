@@ -21,6 +21,8 @@ pub struct Config {
     pub apps: AppsConfig,
     #[serde(default)]
     pub features: FeaturesConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -123,6 +125,31 @@ pub struct VersioningConfig {
     pub max_versions: u32,
     #[serde(default = "default_trash_retention_days")]
     pub trash_retention_days: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoggingConfig {
+    /// `tracing_subscriber::EnvFilter` directive string. Falls back to
+    /// `default_log_level()` (debug builds → `debug`, release builds → `info`).
+    /// The `RUST_LOG` env var, when set, always wins over this.
+    #[serde(default = "default_log_level")]
+    pub level: String,
+}
+
+fn default_log_level() -> String {
+    if cfg!(debug_assertions) {
+        "uncloud_server=debug,tower_http=debug".to_string()
+    } else {
+        "uncloud_server=info,tower_http=info".to_string()
+    }
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -319,6 +346,7 @@ impl Default for Config {
             versioning: VersioningConfig::default(),
             apps: AppsConfig::default(),
             features: FeaturesConfig::default(),
+            logging: LoggingConfig::default(),
         }
     }
 }

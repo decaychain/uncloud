@@ -56,3 +56,14 @@ search:
   url: "http://localhost:7700"
   # Meilisearch API key (optional)
   # api_key: "your-api-key"
+
+# Logging
+logging:
+  # tracing_subscriber EnvFilter directive. `RUST_LOG` env var, when set,
+  # always overrides this value. Default: `uncloud_server=info,tower_http=info`
+  # in release builds, `uncloud_server=debug,tower_http=debug` in debug builds.
+  # Examples:
+  #   level: "uncloud_server=info,tower_http=info"   # quiet, production-friendly
+  #   level: "uncloud_server=debug,tower_http=info"  # server debug, http info
+  #   level: "warn"                                   # only warnings and errors
+  # level: "uncloud_server=info,tower_http=info"

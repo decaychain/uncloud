@@ -134,19 +134,19 @@ async fn bootstrap_admin(
 // ── Server ──────────────────────────────────────────────────────────────────
 
 async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing
+    // Load configuration first so the logging filter honours `logging.level`.
+    // `RUST_LOG` still wins when set; config supplies the default otherwise.
+    let config = Config::load_or_default();
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "uncloud_server=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| config.logging.level.clone().into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
     tracing::info!("Starting Uncloud server...");
-
-    // Load configuration
-    let config = Config::load_or_default();
     tracing::info!("Configuration loaded");
 
     // Connect to database
