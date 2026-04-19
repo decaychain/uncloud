@@ -33,7 +33,14 @@ pub fn Login() -> Element {
         spawn(async move {
             let enabled = use_search::fetch_search_enabled().await;
             search_enabled.set(enabled);
-            nav.replace("/");
+            // Mobile (below Tailwind's `lg` breakpoint) lands on the Dashboard;
+            // desktop keeps the traditional Files view because the sidebar
+            // already exposes everything there.
+            let is_mobile = web_sys::window()
+                .and_then(|w| w.match_media("(max-width: 1023px)").ok().flatten())
+                .map(|mql| mql.matches())
+                .unwrap_or(false);
+            nav.replace(if is_mobile { "/dashboard" } else { "/" });
         });
     };
 

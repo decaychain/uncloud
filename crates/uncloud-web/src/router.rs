@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use gloo_storage::Storage;
 use crate::components::{
     auth::{Login, Register},
     dashboard::DashboardPage,
@@ -96,6 +97,27 @@ pub enum Route {
 
 #[component]
 fn Home() -> Element {
+    // On mobile, the first visit to `/` in a session bounces to the Dashboard.
+    // Tapping "Files" in the sidebar afterwards works normally because the
+    // session flag is already set.
+    let nav = use_navigator();
+    use_effect(move || {
+        let already = gloo_storage::SessionStorage::get::<String>("uc_landed")
+            .ok()
+            .is_some();
+        if already {
+            return;
+        }
+        let _ = gloo_storage::SessionStorage::set("uc_landed", "1");
+        let is_mobile = web_sys::window()
+            .and_then(|w| w.match_media("(max-width: 1023px)").ok().flatten())
+            .map(|mql| mql.matches())
+            .unwrap_or(false);
+        if is_mobile {
+            nav.replace(Route::Dashboard {});
+        }
+    });
+
     rsx! {
         FileBrowser { parent_id: None }
     }

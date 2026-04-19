@@ -50,7 +50,11 @@ pub fn Layout() -> Element {
     };
 
     let route = use_route::<Route>();
+    // NOTE: when adding a new top-level Route, add it here AND in
+    // `section_title` below AND in the sidebar section-matcher. Missing one
+    // results in the wrong caption/title — a recurring regression.
     let page_title = match route {
+        Route::Dashboard {} => "Uncloud - Dashboard",
         Route::Gallery {} | Route::GalleryAlbum { .. } => "Uncloud - Gallery",
         Route::Music {} | Route::MusicArtist { .. } | Route::MusicAlbum { .. }
             | Route::MusicFolder { .. } | Route::MusicPlaylist { .. } => "Uncloud - Music",
@@ -111,7 +115,9 @@ fn Navbar() -> Element {
         });
     };
 
-    let section_title = if matches!(route, Route::Gallery {} | Route::GalleryAlbum { .. }) {
+    let section_title = if matches!(route, Route::Dashboard {}) {
+        "Dashboard"
+    } else if matches!(route, Route::Gallery {} | Route::GalleryAlbum { .. }) {
         "Gallery"
     } else if matches!(route, Route::Music {} | Route::MusicArtist { .. } | Route::MusicAlbum { .. } | Route::MusicFolder { .. } | Route::MusicPlaylist { .. }) {
         "Music"
