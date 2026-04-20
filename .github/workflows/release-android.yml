@@ -95,7 +95,7 @@ jobs:
           serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
           packageName: de.lunarstream.uncloud
           releaseFiles: crates/uncloud-desktop/gen/android/app/build/outputs/bundle/universalRelease/app-universal-release.aab
-          track: internal
+          tracks: internal
           status: draft
 
       - name: Create GitHub Release
