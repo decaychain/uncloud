@@ -72,7 +72,9 @@ pub fn PlaylistView(playlist_id: String) -> Element {
 
     use_effect(use_reactive!(|(playlist_id, refresh)| {
         spawn(async move {
-            loading.set(true);
+            // Don't flip `loading` on refresh — the router keys this view on
+            // playlist_id, so navigation remounts it and the initial `use_signal(|| true)`
+            // covers that case. Internal refreshes (track removal, reorder) update silently.
             error.set(None);
             match use_playlists::get_playlist(&playlist_id).await {
                 Ok(resp) => {

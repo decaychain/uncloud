@@ -14,14 +14,23 @@ pub fn FolderView(folder_id: String) -> Element {
     let mut refresh = use_signal(|| 0u32);
 
     let sse_event = use_context::<Signal<Option<ServerEvent>>>();
+    // Debounce CRUD-driven refreshes: coalesce bursts into one relist.
+    let mut refresh_epoch = use_signal(|| 0u32);
     use_effect(move || {
         if let Some(event) = sse_event() {
             match event {
                 ServerEvent::FileCreated { .. }
                 | ServerEvent::FileDeleted { .. }
                 | ServerEvent::FileUpdated { .. } => {
-                    let next = *refresh.peek() + 1;
-                    refresh.set(next);
+                    let epoch = *refresh_epoch.peek() + 1;
+                    refresh_epoch.set(epoch);
+                    spawn(async move {
+                        gloo_timers::future::TimeoutFuture::new(150).await;
+                        if *refresh_epoch.peek() == epoch {
+                            let next = *refresh.peek() + 1;
+                            refresh.set(next);
+                        }
+                    });
                 }
                 _ => {}
             }
@@ -31,7 +40,9 @@ pub fn FolderView(folder_id: String) -> Element {
     use_effect(use_reactive!(|(folder_id, refresh)| {
         let _ = refresh;
         spawn(async move {
-            loading.set(true);
+            // Don't flip `loading` on refresh — the router keys this view on
+            // folder_id, so navigation remounts it and the initial `use_signal(|| true)`
+            // covers that case. SSE-driven refreshes update silently.
             match use_music::list_music_tracks(Some(&folder_id), None).await {
                 Ok(resp) => tracks.set(resp.tracks),
                 Err(e) => error.set(Some(e)),

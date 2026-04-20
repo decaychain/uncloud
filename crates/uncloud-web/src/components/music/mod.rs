@@ -39,14 +39,23 @@ fn MetadataView() -> Element {
     let mut refresh = use_signal(|| 0u32);
 
     let sse_event = use_context::<Signal<Option<ServerEvent>>>();
+    // Debounce CRUD-driven refreshes: coalesce bursts into one relist.
+    let mut refresh_epoch = use_signal(|| 0u32);
     use_effect(move || {
         if let Some(event) = sse_event() {
             match event {
                 ServerEvent::FileCreated { .. }
                 | ServerEvent::FileDeleted { .. }
                 | ServerEvent::FileUpdated { .. } => {
-                    let next = *refresh.peek() + 1;
-                    refresh.set(next);
+                    let epoch = *refresh_epoch.peek() + 1;
+                    refresh_epoch.set(epoch);
+                    spawn(async move {
+                        gloo_timers::future::TimeoutFuture::new(150).await;
+                        if *refresh_epoch.peek() == epoch {
+                            let next = *refresh.peek() + 1;
+                            refresh.set(next);
+                        }
+                    });
                 }
                 _ => {}
             }
@@ -56,13 +65,19 @@ fn MetadataView() -> Element {
     use_effect(move || {
         let _ = refresh();
         spawn(async move {
-            loading.set(true);
+            // Don't flip `loading` on refresh — only the initial mount shows
+            // the spinner (via use_signal(|| true)). Otherwise an SSE event
+            // would cover any Artist/Album sub-view rendered below.
             error.set(None);
-            match use_music::list_artists().await {
+            let (artists_res, playlists_res) = futures::join!(
+                use_music::list_artists(),
+                use_playlists::list_playlists(),
+            );
+            match artists_res {
                 Ok(a) => artists.set(a),
                 Err(e) => error.set(Some(e)),
             }
-            if let Ok(p) = use_playlists::list_playlists().await {
+            if let Ok(p) = playlists_res {
                 playlists.set(p);
             }
             loading.set(false);
