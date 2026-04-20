@@ -18,7 +18,7 @@ use uncloud_server::{
     models,
     processing,
     routes,
-    services::{AuthService, EventService, SearchService, StorageService},
+    services::{AuthService, EventService, RescanService, SearchService, StorageService},
     supervisor::Supervisor,
 };
 
@@ -193,6 +193,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         events,
         processing,
         search,
+        rescan: RescanService::new(),
         http_client: reqwest::Client::new(),
     });
 
