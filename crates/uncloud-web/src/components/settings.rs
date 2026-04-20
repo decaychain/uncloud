@@ -767,33 +767,67 @@ fn AdminSection(search_enabled: bool) -> Element {
     let mut rerun_loading = use_signal(|| false);
     let mut rerun_msg: Signal<Option<(bool, String)>> = use_signal(|| None);
     let mut confirm_rerun = use_signal(|| false);
-    let mut rescan_loading = use_signal(|| false);
-    let mut rescan_result: Signal<Option<Result<use_storages::RescanResult, String>>> =
-        use_signal(|| None);
+    let mut rescan_starting = use_signal(|| false);
+    let mut rescan_job: Signal<Option<use_storages::RescanJob>> = use_signal(|| None);
+    let mut rescan_error: Signal<Option<String>> = use_signal(|| None);
 
     let on_rescan = move |_| {
         spawn(async move {
-            rescan_loading.set(true);
-            rescan_result.set(None);
+            rescan_starting.set(true);
+            rescan_error.set(None);
+            rescan_job.set(None);
             let storages = match use_storages::list_storages().await {
                 Ok(v) => v,
                 Err(e) => {
-                    rescan_result.set(Some(Err(e)));
-                    rescan_loading.set(false);
+                    rescan_error.set(Some(e));
+                    rescan_starting.set(false);
                     return;
                 }
             };
             // Prefer the default storage; fall back to the first one.
             let target = storages.iter().find(|s| s.is_default).or_else(|| storages.first());
             let Some(storage) = target else {
-                rescan_result.set(Some(Err("No storage configured.".to_string())));
-                rescan_loading.set(false);
+                rescan_error.set(Some("No storage configured.".to_string()));
+                rescan_starting.set(false);
                 return;
             };
-            let res = use_storages::rescan(&storage.id).await;
-            rescan_result.set(Some(res));
-            rescan_loading.set(false);
+            match use_storages::start_rescan(&storage.id).await {
+                Ok(job) => {
+                    let job_id = job.id.clone();
+                    rescan_job.set(Some(job));
+                    rescan_starting.set(false);
+                    // Poll for updates until the job reaches a terminal state.
+                    loop {
+                        gloo_timers::future::TimeoutFuture::new(2000).await;
+                        match use_storages::get_rescan_job(&job_id).await {
+                            Ok(latest) => {
+                                let done = latest.status != use_storages::RescanStatus::Running;
+                                rescan_job.set(Some(latest));
+                                if done {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                rescan_error.set(Some(e));
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    rescan_error.set(Some(e));
+                    rescan_starting.set(false);
+                }
+            }
         });
+    };
+
+    let on_cancel_rescan = move |_| {
+        if let Some(job) = rescan_job() {
+            spawn(async move {
+                let _ = use_storages::cancel_rescan_job(&job.id).await;
+            });
+        }
     };
 
     let on_reindex = move |_| {
@@ -887,36 +921,71 @@ fn AdminSection(search_enabled: bool) -> Element {
 
                 div { class: "divider my-0" }
 
-                div { class: "flex items-center justify-between gap-4",
-                    div {
-                        p { class: "font-medium text-sm", "Rescan storage" }
-                        p { class: "text-base-content/60 text-xs mt-0.5",
-                            "Walks the default storage on disk and imports any folder or file that's missing from the database. Useful after copying files directly into the storage root."
+                {
+                    let running = matches!(
+                        rescan_job().as_ref().map(|j| j.status.clone()),
+                        Some(use_storages::RescanStatus::Running)
+                    );
+                    let busy = rescan_starting() || running;
+                    rsx! {
+                        div { class: "flex items-center justify-between gap-4",
+                            div {
+                                p { class: "font-medium text-sm", "Rescan storage" }
+                                p { class: "text-base-content/60 text-xs mt-0.5",
+                                    "Walks the default storage on disk and imports any folder or file that's missing from the database. Useful after copying files directly into the storage root."
+                                }
+                            }
+                            div { class: "flex gap-2 shrink-0",
+                                if running {
+                                    button {
+                                        class: "btn btn-sm btn-outline btn-error",
+                                        onclick: on_cancel_rescan,
+                                        "Cancel"
+                                    }
+                                }
+                                button {
+                                    class: "btn btn-sm btn-outline",
+                                    disabled: busy,
+                                    onclick: on_rescan,
+                                    if busy {
+                                        span { class: "loading loading-spinner loading-xs" }
+                                    }
+                                    "Rescan"
+                                }
+                            }
                         }
-                    }
-                    button {
-                        class: "btn btn-sm btn-outline shrink-0",
-                        disabled: rescan_loading(),
-                        onclick: on_rescan,
-                        if rescan_loading() {
-                            span { class: "loading loading-spinner loading-xs" }
-                        }
-                        "Rescan"
                     }
                 }
 
-                if let Some(res) = rescan_result() {
-                    match res {
-                        Ok(r) => rsx! {
+                if let Some(job) = rescan_job() {
+                    match job.status {
+                        use_storages::RescanStatus::Running => rsx! {
+                            div { class: "alert alert-info text-sm flex-col items-start",
+                                div { class: "flex items-center gap-2 w-full",
+                                    span { class: "loading loading-spinner loading-xs" }
+                                    span {
+                                        if let Some(total) = job.total_entries {
+                                            "Scanning… {job.processed_entries} / {total} entries processed"
+                                        } else {
+                                            "Scanning… {job.processed_entries} entries processed"
+                                        }
+                                    }
+                                }
+                                span { class: "text-xs opacity-70",
+                                    "Imported {job.imported_files} file(s), {job.imported_folders} folder(s); skipped {job.skipped_existing} already tracked."
+                                }
+                            }
+                        },
+                        use_storages::RescanStatus::Completed => rsx! {
                             div { class: "alert alert-success text-sm flex-col items-start",
                                 span {
-                                    "Scanned {r.scanned_entries} entries — imported {r.imported_folders} folder(s) and {r.imported_files} file(s), skipped {r.skipped_existing} already tracked."
+                                    "Scanned {job.processed_entries} entries — imported {job.imported_folders} folder(s) and {job.imported_files} file(s), skipped {job.skipped_existing} already tracked."
                                 }
-                                if !r.conflicts.is_empty() {
+                                if !job.conflicts.is_empty() {
                                     div { class: "mt-2 w-full",
-                                        p { class: "font-medium", "{r.conflicts.len()} conflict(s):" }
+                                        p { class: "font-medium", "{job.conflicts.len()} conflict(s):" }
                                         ul { class: "list-disc list-inside text-xs mt-1 max-h-40 overflow-y-auto",
-                                            for c in r.conflicts.iter() {
+                                            for c in job.conflicts.iter() {
                                                 li { key: "{c.path}", "{c.path} — {c.reason}" }
                                             }
                                         }
@@ -924,11 +993,36 @@ fn AdminSection(search_enabled: bool) -> Element {
                                 }
                             }
                         },
-                        Err(e) => rsx! {
-                            div { class: "alert alert-error text-sm",
-                                span { "Rescan failed: {e}" }
+                        use_storages::RescanStatus::Cancelled => rsx! {
+                            div { class: "alert alert-warning text-sm flex-col items-start",
+                                span {
+                                    "Rescan cancelled after {job.processed_entries} entries — imported {job.imported_folders} folder(s) and {job.imported_files} file(s)."
+                                }
+                                if !job.conflicts.is_empty() {
+                                    div { class: "mt-2 w-full",
+                                        p { class: "font-medium", "{job.conflicts.len()} conflict(s):" }
+                                        ul { class: "list-disc list-inside text-xs mt-1 max-h-40 overflow-y-auto",
+                                            for c in job.conflicts.iter() {
+                                                li { key: "{c.path}", "{c.path} — {c.reason}" }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         },
+                        use_storages::RescanStatus::Failed => rsx! {
+                            div { class: "alert alert-error text-sm",
+                                span {
+                                    "Rescan failed: {job.error.clone().unwrap_or_else(|| \"unknown error\".to_string())}"
+                                }
+                            }
+                        },
+                    }
+                }
+
+                if let Some(err) = rescan_error() {
+                    div { class: "alert alert-error text-sm",
+                        span { "Rescan failed: {err}" }
                     }
                 }
             }
