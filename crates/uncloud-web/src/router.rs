@@ -210,9 +210,7 @@ fn MusicFolder(id: String) -> Element {
 #[component]
 fn MusicPlaylist(id: String) -> Element {
     rsx! {
-        div { class: "p-4",
-            MusicPlaylistView { key: "{id}", playlist_id: id }
-        }
+        MusicPlaylistView { key: "{id}", playlist_id: id }
     }
 }
 

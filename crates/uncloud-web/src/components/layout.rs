@@ -43,8 +43,10 @@ pub fn Layout() -> Element {
     // page edge — on Android that's under the gesture/nav bar, so we pad
     // with the safe-area inset. When the player is visible, it handles its
     // own safe-area and main just needs space for the fixed bar (`pb-20`).
+    // `pb-player` reserves player-content (rem, scales with font) + safe-area
+    // inset. Defined in `input.css`; taller on mobile for the two-row bar.
     let main_class = if player_visible {
-        "flex-1 p-4 md:p-6 pb-20"
+        "flex-1 p-4 md:p-6 pb-player"
     } else {
         "flex-1 p-4 md:p-6 pb-safe"
     };

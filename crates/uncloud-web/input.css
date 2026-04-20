@@ -17,3 +17,17 @@
    fallback on devices or browsers where `env()` returns 0. */
 .pt-safe { padding-top: env(safe-area-inset-top); }
 .pb-safe { padding-bottom: max(env(safe-area-inset-bottom), 0.5rem); }
+
+/* Bottom reservation for scrolling content when the fixed player bar is
+   visible. The rem portion covers the player's content height (which scales
+   with the user's font-size preference), and the `env()` portion adds the
+   OS safe-area inset (Android gesture bar). The mobile player is two rows;
+   desktop is one row. */
+.pb-player {
+  padding-bottom: calc(9rem + env(safe-area-inset-bottom));
+}
+@media (min-width: 640px) {
+  .pb-player {
+    padding-bottom: calc(5rem + env(safe-area-inset-bottom));
+  }
+}
