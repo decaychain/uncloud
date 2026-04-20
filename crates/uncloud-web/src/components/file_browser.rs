@@ -131,6 +131,10 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
     let mut thumb_vers: Signal<HashMap<String, u32>> = use_signal(HashMap::new);
 
     let sse_event = use_context::<Signal<Option<ServerEvent>>>();
+    // Debounce CRUD-driven refreshes: coalesce bursts into one relist. Each
+    // event bumps `refresh_epoch`; a 150ms timer fires only if no newer epoch
+    // has arrived, meaning the burst has quieted down.
+    let mut refresh_epoch = use_signal(|| 0u32);
     use_effect(move || {
         if let Some(event) = sse_event() {
             match event {
@@ -144,8 +148,15 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                 | ServerEvent::FolderUpdated { .. } | ServerEvent::FolderDeleted { .. }
                 | ServerEvent::FileRestored { .. }
                 | ServerEvent::FolderShared { .. } | ServerEvent::FolderShareRevoked { .. } => {
-                    let next = *refresh.peek() + 1;
-                    refresh.set(next);
+                    let epoch = *refresh_epoch.peek() + 1;
+                    refresh_epoch.set(epoch);
+                    spawn(async move {
+                        gloo_timers::future::TimeoutFuture::new(150).await;
+                        if *refresh_epoch.peek() == epoch {
+                            let next = *refresh.peek() + 1;
+                            refresh.set(next);
+                        }
+                    });
                 }
                 _ => {}
             }
@@ -173,10 +184,24 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
             error.set(None);
             match use_files::list_contents(parent.as_deref()).await {
                 Ok((f, d)) => {
-                    files.set(f);
-                    folders.set(d);
+                    // Guard against stale responses: if the user has navigated to
+                    // a different folder while this fetch was in flight, discard
+                    // the result. Without this, slow fetches for the previous
+                    // parent can overwrite the newer folder's contents and flicker.
+                    if *parent_sig.peek() == parent {
+                        files.set(f);
+                        folders.set(d);
+                    } else {
+                        return;
+                    }
                 }
-                Err(e) => error.set(Some(e)),
+                Err(e) => {
+                    if *parent_sig.peek() == parent {
+                        error.set(Some(e));
+                    } else {
+                        return;
+                    }
+                }
             }
             if show_spinner {
                 loading.set(false);

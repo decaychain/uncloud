@@ -11,9 +11,8 @@ use super::api;
 pub async fn list_contents(
     parent_id: Option<&str>,
 ) -> Result<(Vec<FileResponse>, Vec<FolderResponse>), String> {
-    let files = list_files(parent_id).await?;
-    let folders = list_folders(parent_id).await?;
-    Ok((files, folders))
+    // Fire both requests in parallel — halves the network wait for large folders.
+    futures::try_join!(list_files(parent_id), list_folders(parent_id))
 }
 
 pub async fn get_file(file_id: &str) -> Result<FileResponse, String> {
