@@ -145,6 +145,17 @@ pub struct VaultOpenTarget {
     pub file_name: Option<String>,
 }
 
+
+/// App-level live state for the admin storage rescan. Lifted out of the
+/// Settings component so it survives navigation away from the settings
+/// page — the SSE stream keeps updating it from anywhere.
+#[derive(Clone, Default, PartialEq)]
+pub struct RescanState {
+    pub job: Option<crate::hooks::use_storages::RescanJob>,
+    pub error: Option<String>,
+    pub starting: bool,
+}
+
 impl PlayerState {
     pub fn current_track(&self) -> Option<&TrackResponse> {
         self.queue.get(self.current_index)

@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
-use crate::models::{File, Folder, TaskType};
+use crate::models::{File, Folder, TaskType, UserRole};
+use crate::services::rescan::{RescanConflict, RescanJob, RescanStatus};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -20,6 +21,44 @@ pub enum Event {
     FileRestored { file_id: String },
     FolderShared { folder_id: String, share_id: String },
     FolderShareRevoked { folder_id: String, share_id: String },
+    RescanProgress {
+        job_id: String,
+        storage_id: String,
+        status: String,
+        processed_entries: u64,
+        total_entries: Option<u64>,
+        imported_folders: u64,
+        imported_files: u64,
+        skipped_existing: u64,
+        conflicts_count: u64,
+    },
+    RescanFinished {
+        job_id: String,
+        storage_id: String,
+        status: String,
+        processed_entries: u64,
+        total_entries: Option<u64>,
+        imported_folders: u64,
+        imported_files: u64,
+        skipped_existing: u64,
+        conflicts: Vec<RescanConflictData>,
+        error: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RescanConflictData {
+    pub path: String,
+    pub reason: String,
+}
+
+impl From<&RescanConflict> for RescanConflictData {
+    fn from(c: &RescanConflict) -> Self {
+        Self {
+            path: c.path.clone(),
+            reason: c.reason.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -60,9 +99,15 @@ impl From<&Folder> for FolderEvent {
     }
 }
 
+struct Channel {
+    role: UserRole,
+    sender: broadcast::Sender<Event>,
+}
+
 pub struct EventService {
-    // Per-user broadcast channels
-    channels: Arc<RwLock<HashMap<ObjectId, broadcast::Sender<Event>>>>,
+    // Per-user broadcast channels, tagged with the subscriber's role so we can
+    // fan out admin-scoped events without a DB lookup per emit.
+    channels: Arc<RwLock<HashMap<ObjectId, Channel>>>,
 }
 
 impl EventService {
@@ -72,23 +117,44 @@ impl EventService {
         }
     }
 
-    pub async fn subscribe(&self, user_id: ObjectId) -> broadcast::Receiver<Event> {
+    pub async fn subscribe(
+        &self,
+        user_id: ObjectId,
+        role: UserRole,
+    ) -> broadcast::Receiver<Event> {
         let mut channels = self.channels.write().await;
 
-        if let Some(sender) = channels.get(&user_id) {
-            sender.subscribe()
-        } else {
-            let (sender, receiver) = broadcast::channel(100);
-            channels.insert(user_id, sender);
-            receiver
+        match channels.get_mut(&user_id) {
+            Some(channel) => {
+                // Refresh role in case it changed since last subscribe.
+                channel.role = role;
+                channel.sender.subscribe()
+            }
+            None => {
+                let (sender, receiver) = broadcast::channel(100);
+                channels.insert(user_id, Channel { role, sender });
+                receiver
+            }
         }
     }
 
     pub async fn emit(&self, user_id: ObjectId, event: Event) {
         let channels = self.channels.read().await;
-        if let Some(sender) = channels.get(&user_id) {
+        if let Some(channel) = channels.get(&user_id) {
             // Ignore send errors (no active subscribers)
-            let _ = sender.send(event);
+            let _ = channel.sender.send(event);
+        }
+    }
+
+    /// Fan out to every subscriber whose role is `Admin`. Used for events that
+    /// any admin may observe (e.g. storage rescan progress), not tied to a
+    /// single initiator.
+    pub async fn emit_to_admins(&self, event: Event) {
+        let channels = self.channels.read().await;
+        for channel in channels.values() {
+            if channel.role == UserRole::Admin {
+                let _ = channel.sender.send(event.clone());
+            }
         }
     }
 
@@ -229,8 +295,48 @@ impl EventService {
         .await;
     }
 
+    pub async fn emit_rescan_progress(&self, job: &RescanJob) {
+        self.emit_to_admins(Event::RescanProgress {
+            job_id: job.id.clone(),
+            storage_id: job.storage_id.clone(),
+            status: rescan_status_str(&job.status).to_string(),
+            processed_entries: job.processed_entries,
+            total_entries: job.total_entries,
+            imported_folders: job.imported_folders,
+            imported_files: job.imported_files,
+            skipped_existing: job.skipped_existing,
+            conflicts_count: job.conflicts.len() as u64,
+        })
+        .await;
+    }
+
+    pub async fn emit_rescan_finished(&self, job: &RescanJob) {
+        self.emit_to_admins(Event::RescanFinished {
+            job_id: job.id.clone(),
+            storage_id: job.storage_id.clone(),
+            status: rescan_status_str(&job.status).to_string(),
+            processed_entries: job.processed_entries,
+            total_entries: job.total_entries,
+            imported_folders: job.imported_folders,
+            imported_files: job.imported_files,
+            skipped_existing: job.skipped_existing,
+            conflicts: job.conflicts.iter().map(RescanConflictData::from).collect(),
+            error: job.error.clone(),
+        })
+        .await;
+    }
+
     pub async fn cleanup_user(&self, user_id: ObjectId) {
         self.channels.write().await.remove(&user_id);
+    }
+}
+
+fn rescan_status_str(status: &RescanStatus) -> &'static str {
+    match status {
+        RescanStatus::Running => "running",
+        RescanStatus::Completed => "completed",
+        RescanStatus::Failed => "failed",
+        RescanStatus::Cancelled => "cancelled",
     }
 }
 

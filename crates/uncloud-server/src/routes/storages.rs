@@ -231,7 +231,9 @@ pub async fn rescan_storage(
             }
         }
         job.finished_at = Some(Utc::now());
+        let final_snapshot = job.clone();
         drop(job);
+        worker_state.events.emit_rescan_finished(&final_snapshot).await;
         worker_state.rescan.release(storage_id).await;
     });
 
@@ -248,6 +250,17 @@ pub async fn get_rescan_job(
     match state.rescan.get(job_id).await {
         Some(handle) => Ok(Json(handle.job.read().await.clone())),
         None => Err(AppError::NotFound("Rescan job".to_string())),
+    }
+}
+
+/// Returns the currently-running rescan job, if any. Used by the frontend to
+/// restore the live-progress panel on reload or in a fresh admin session.
+pub async fn get_active_rescan_job(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Option<RescanJob>>> {
+    match state.rescan.any_active().await {
+        Some(handle) => Ok(Json(Some(handle.job.read().await.clone()))),
+        None => Ok(Json(None)),
     }
 }
 
@@ -331,6 +344,7 @@ async fn run_rescan_worker(
             let first = rel_within_user.split('/').next().unwrap_or("");
             if matches!(first, ".uncloud" | ".thumbs" | ".tmp") || entry.path == user_prefix {
                 maybe_flush(
+                    &state,
                     &handle,
                     &mut processed,
                     &mut imported_folders,
@@ -355,6 +369,7 @@ async fn run_rescan_worker(
                                 reason: "parent folder not yet imported".into(),
                             });
                             maybe_flush(
+                                &state,
                                 &handle,
                                 &mut processed,
                                 &mut imported_folders,
@@ -400,6 +415,7 @@ async fn run_rescan_worker(
                                 reason: "parent folder not yet imported".into(),
                             });
                             maybe_flush(
+                                &state,
                                 &handle,
                                 &mut processed,
                                 &mut imported_folders,
@@ -429,6 +445,7 @@ async fn run_rescan_worker(
                         skipped += 1;
                     }
                     maybe_flush(
+                        &state,
                         &handle,
                         &mut processed,
                         &mut imported_folders,
@@ -448,6 +465,7 @@ async fn run_rescan_worker(
                             reason: format!("failed to hash: {}", e),
                         });
                         maybe_flush(
+                            &state,
                             &handle,
                             &mut processed,
                             &mut imported_folders,
@@ -488,6 +506,7 @@ async fn run_rescan_worker(
             }
 
             maybe_flush(
+                &state,
                 &handle,
                 &mut processed,
                 &mut imported_folders,
@@ -500,6 +519,7 @@ async fn run_rescan_worker(
 
         // Final flush for this user.
         flush_counters(
+            &state,
             &handle,
             &mut processed,
             &mut imported_folders,
@@ -520,6 +540,7 @@ async fn run_rescan_worker(
 }
 
 async fn maybe_flush(
+    state: &AppState,
     handle: &RescanJobHandle,
     processed: &mut u64,
     imported_folders: &mut u64,
@@ -529,6 +550,7 @@ async fn maybe_flush(
 ) {
     if *processed >= COUNTER_FLUSH_EVERY || !conflicts.is_empty() {
         flush_counters(
+            state,
             handle,
             processed,
             imported_folders,
@@ -541,6 +563,7 @@ async fn maybe_flush(
 }
 
 async fn flush_counters(
+    state: &AppState,
     handle: &RescanJobHandle,
     processed: &mut u64,
     imported_folders: &mut u64,
@@ -556,20 +579,24 @@ async fn flush_counters(
     {
         return;
     }
-    let mut job = handle.job.write().await;
-    job.processed_entries = job.processed_entries.saturating_add(*processed);
-    job.imported_folders = job.imported_folders.saturating_add(*imported_folders);
-    job.imported_files = job.imported_files.saturating_add(*imported_files);
-    job.skipped_existing = job.skipped_existing.saturating_add(*skipped);
-    for c in conflicts.drain(..) {
-        if job.conflicts.len() < MAX_CONFLICTS {
-            job.conflicts.push(c);
+    let snapshot = {
+        let mut job = handle.job.write().await;
+        job.processed_entries = job.processed_entries.saturating_add(*processed);
+        job.imported_folders = job.imported_folders.saturating_add(*imported_folders);
+        job.imported_files = job.imported_files.saturating_add(*imported_files);
+        job.skipped_existing = job.skipped_existing.saturating_add(*skipped);
+        for c in conflicts.drain(..) {
+            if job.conflicts.len() < MAX_CONFLICTS {
+                job.conflicts.push(c);
+            }
         }
-    }
+        job.clone()
+    };
     *processed = 0;
     *imported_folders = 0;
     *imported_files = 0;
     *skipped = 0;
+    state.events.emit_rescan_progress(&snapshot).await;
 }
 
 /// Seed the storage_path -> folder_id lookup with folders already in the DB,

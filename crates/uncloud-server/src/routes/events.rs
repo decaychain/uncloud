@@ -17,7 +17,7 @@ pub async fn events_stream(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> impl IntoResponse {
-    let receiver = state.events.subscribe(user.id).await;
+    let receiver = state.events.subscribe(user.id, user.role).await;
 
     let stream = tokio_stream::wrappers::BroadcastStream::new(receiver)
         .filter_map(|result| {

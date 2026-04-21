@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
-use crate::hooks::{use_auth, use_search};
+use crate::hooks::{use_auth, use_search, use_storages};
 use crate::router::Route;
-use crate::state::{AuthState, FontScale, HighlightTarget, PlayerState, ThemeState, VaultOpenTarget, ViewMode};
+use crate::state::{AuthState, FontScale, HighlightTarget, PlayerState, RescanState, ThemeState, VaultOpenTarget, ViewMode};
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
 const FAVICON: Asset = asset!("/assets/favicon.ico");
@@ -70,6 +70,27 @@ pub fn App() -> Element {
     use_context_provider(|| Signal::new(PlayerState::default()));
     use_context_provider(|| Signal::new(HighlightTarget::default()));
     use_context_provider(|| Signal::new(VaultOpenTarget::default()));
+    let mut rescan_state = use_context_provider(|| Signal::new(RescanState::default()));
+
+    // Hydrate the live rescan panel when the logged-in user is an admin.
+    // A rescan may already be running (restarted session, different browser,
+    // or a reload mid-scan); SSE will take over from whatever snapshot comes
+    // back here.
+    use_effect(move || {
+        let auth = auth_state.read();
+        if !auth.loading && auth.is_admin() {
+            drop(auth);
+            spawn(async move {
+                if let Ok(Some(job)) = use_storages::get_active_rescan_job().await {
+                    rescan_state.set(RescanState {
+                        job: Some(job),
+                        error: None,
+                        starting: false,
+                    });
+                }
+            });
+        }
+    });
 
     rsx! {
         document::Stylesheet { href: TAILWIND }
