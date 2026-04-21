@@ -35,6 +35,7 @@ Uncloud/
           events.rs            ← ServerEvent enum
           search.rs            ← SearchResponse, SearchStatus
           versions.rs          ← VersionResponse
+          shopping.rs          ← ShoppingList/Item/Category/Shop request/response types
     uncloud-server/
       src/
         main.rs                ← AppState, startup, trash auto-purge task
@@ -54,6 +55,7 @@ Uncloud/
           storages.rs          ← admin: CRUD storage backends
           users.rs             ← admin: CRUD users
           events.rs            ← SSE stream
+          shopping.rs          ← lists/items/categories/shops + list sharing, mark-purchased
         services/
           auth.rs              ← AuthService (sessions, password hashing, user bytes)
           storage.rs           ← StorageService (backend registry, get_or_create_default)
@@ -70,6 +72,7 @@ Uncloud/
           storage.rs           ← Storage (backend config doc)
           share.rs             ← Share, ShareResourceType
           playlist.rs          ← Playlist, PlaylistTrack
+          shopping.rs          ← ShoppingCategory, Shop, ShoppingItem, ShoppingList, ShoppingListItem
         middleware/
           auth.rs              ← AuthUser extractor, auth_middleware, admin_middleware
         processing/
@@ -110,6 +113,7 @@ Uncloud/
           setup.rs             ← First-run onboarding (Tauri desktop only)
           trash.rs             ← Trash view (restore / permanently delete)
           version_history.rs   ← Version history panel for a file
+          shopping.rs          ← Shopping page: lists, items, categories, shops, share list
           auth/
             login.rs
             register.rs
@@ -124,6 +128,7 @@ Uncloud/
           use_playlists.rs     ← playlist CRUD API calls
           use_search.rs        ← search API calls
           use_shares.rs        ← share link API calls
+          use_shopping.rs      ← shopping lists/items/categories/shops API calls
       assets/
         tailwind.css           ← generated; do not edit by hand
       input.css                ← Tailwind entry point (@tailwind base/components/utilities)
@@ -436,6 +441,21 @@ Tray-only desktop application that bundles the Dioxus web frontend and provides 
 
 Events include: file/folder CRUD notifications, `ProcessingCompleted`, and other state changes. `FileBrowser` refreshes on relevant events; thumbnail updates trigger image re-render.
 
+### Shopping Lists
+
+A lightweight shopping-list companion app that shares the Uncloud session. Users maintain a per-user catalogue of items (with categories and shops) and group them into shareable lists; items on a list can be checked off as purchased, and a list can be shared with other Uncloud users.
+
+- **Model** (MongoDB collections):
+  - `shopping_categories` — `ShoppingCategory { owner_id, name, position }` (ordered labels used to tag items and shops)
+  - `shopping_shops` — `Shop { owner_id, name, categories: Vec<String> }` (user's stores; each shop claims a set of categories so items auto-associate)
+  - `shopping_items` — `ShoppingItem { owner_id, name, categories, shop_ids, notes }` (the catalogue; re-used across lists)
+  - `shopping_lists` — `ShoppingList { owner_id, name, shared_with: Vec<ObjectId> }`
+  - `shopping_list_items` — `ShoppingListItem { list_id, item_id, checked, recurring, quantity, position }` (join row; `recurring` items stay on the list when "remove purchased" is invoked)
+- **Access control**: `list_access_filter` lets either the owner or any user in `shared_with` read/mutate a list's rows; catalogue (categories/shops/items) is always owner-scoped.
+- **Feature flag**: `require_shopping` gate at the top of every handler checks `config.features.shopping` (server-wide) AND `user.disabled_features` (per-user opt-out via `PUT /api/auth/me` `{ "shopping": false }`). Disabled users get 404.
+- **Frontend**: `components/shopping.rs` provides `ShoppingPage` (list index + shops/categories/items management) and `ShoppingListView` (per-list view with check/uncheck, inline item inlet, drag-to-reorder, "remove purchased" bulk action); routes `/shopping` and `/shopping/list/:id`.
+- **Marking as purchased**: `PATCH /api/shopping/lists/{id}/items/{item_id}` with `{ "checked": true }`; bulk cleanup via `POST /api/shopping/lists/{id}/remove-purchased` which deletes all checked non-recurring rows.
+
 ---
 
 ## API Route Summary
@@ -497,6 +517,21 @@ Events include: file/folder CRUD notifications, `ProcessingCompleted`, and other
 | `/api/search/status` | GET | Search index status |
 | `/api/search/reindex` | POST | Admin: rebuild search index |
 | `/api/events` | GET | SSE event stream |
+| `/api/shopping/categories` | GET/POST | List/create shopping categories |
+| `/api/shopping/categories/{id}` | PUT/DELETE | Update/delete category |
+| `/api/shopping/categories/{id}/position` | PUT | Reorder category |
+| `/api/shopping/shops` | GET/POST | List/create shops |
+| `/api/shopping/shops/{id}` | PUT/DELETE | Update/delete shop |
+| `/api/shopping/items` | GET/POST | List/create catalogue items |
+| `/api/shopping/items/{id}` | PUT/DELETE | Update/delete catalogue item |
+| `/api/shopping/lists` | GET/POST | List/create shopping lists |
+| `/api/shopping/lists/{id}` | PUT/DELETE | Rename/delete list |
+| `/api/shopping/lists/{id}/items` | GET/POST | Get/add items on a list |
+| `/api/shopping/lists/{id}/items/{item_id}` | PATCH/DELETE | Toggle checked/quantity/recurring, or remove from list |
+| `/api/shopping/lists/{id}/items/{item_id}/position` | PUT | Reorder list item |
+| `/api/shopping/lists/{id}/remove-purchased` | POST | Delete all checked non-recurring items from a list |
+| `/api/shopping/lists/{id}/share` | POST | Share list with a user |
+| `/api/shopping/lists/{id}/share/{user_id}` | DELETE | Revoke share |
 
 ### Admin (requires admin role)
 | Route | Method | Purpose |
@@ -544,6 +579,9 @@ search:
 versioning:
   max_versions: 50                 # per file; oldest pruned beyond this
   trash_retention_days: 30         # auto-purge trash after N days (0 = never)
+
+features:
+  shopping: true                   # server-wide shopping-list feature toggle; per-user opt-out stored on User.disabled_features
 
 logging:
   # `tracing_subscriber::EnvFilter` directive. `RUST_LOG` env var, when set,
