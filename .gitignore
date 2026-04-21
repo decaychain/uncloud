@@ -42,3 +42,12 @@ config.yaml
 
 # Claude Code
 .claude/
+
+# MCP Vector Search index directory
+.mcp-vector-search/
+
+# MCP server config (local per-developer)
+.mcp.json
+
+# Serena MCP project cache
+.serena/
