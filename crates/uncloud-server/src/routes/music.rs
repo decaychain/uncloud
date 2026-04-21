@@ -127,51 +127,9 @@ pub async fn list_music_folders(
     let by_id: HashMap<ObjectId, &Folder> = all_folders.iter().map(|f| (f.id, f)).collect();
     let included_ids: HashSet<ObjectId> = included.iter().filter_map(|x| *x).collect();
 
-    let mut result = Vec::new();
-    for opt_id in &included {
-        let folder_id = match opt_id {
-            Some(id) => *id,
-            None => continue,
-        };
-
-        let folder = match by_id.get(&folder_id) {
-            Some(f) => f,
-            None => continue,
-        };
-
-        let track_count = files_coll
-            .count_documents(doc! {
-                "parent_id": folder_id,
-                "mime_type": { "$regex": "^audio/" },
-                "deleted_at": bson::Bson::Null,
-            })
-            .await?;
-
-        let cover = files_coll
-            .find_one(doc! {
-                "parent_id": folder_id,
-                "mime_type": { "$regex": "^audio/" },
-                "deleted_at": bson::Bson::Null,
-            })
-            .sort(doc! { "created_at": -1 })
-            .await?;
-
-        let parent_folder_id = folder
-            .parent_id
-            .filter(|pid| included_ids.contains(pid))
-            .map(|pid| pid.to_hex());
-
-        result.push(MusicFolderResponse {
-            folder_id: folder_id.to_hex(),
-            parent_folder_id,
-            name: folder.name.clone(),
-            path: build_folder_path(folder_id, &by_id),
-            track_count: track_count as i64,
-            cover_file_id: cover.map(|f| f.id.to_hex()),
-        });
-    }
-
     // --- Shared folders marked for music inclusion ---
+    // Gather these up-front so the track-count/cover aggregation can include
+    // their folder ids in one pass.
     let shares_coll = state.db.collection::<FolderShare>("folder_shares");
     let shares: Vec<FolderShare> = shares_coll
         .find(doc! { "grantee_id": user.id, "music_include": "include" })
@@ -179,10 +137,9 @@ pub async fn list_music_folders(
         .try_collect()
         .await?;
 
-    // Collect all shared folder IDs (root + descendants) and build a lookup map
-    let mut shared_folder_ids: HashSet<ObjectId> = HashSet::new();
-    // Map of owner_id → all their folders (loaded once per owner)
+    // Map of owner_id → all their folders (loaded once per distinct owner).
     let mut owner_folders_cache: HashMap<ObjectId, Vec<Folder>> = HashMap::new();
+    let mut shared_folder_ids: HashSet<ObjectId> = HashSet::new();
 
     for share in &shares {
         if !owner_folders_cache.contains_key(&share.owner_id) {
@@ -198,7 +155,6 @@ pub async fn list_music_folders(
 
         let owner_folders = owner_folders_cache.get(&share.owner_id).unwrap();
 
-        // BFS from the shared folder root to find all descendant folder IDs
         let mut children_map: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
         for f in owner_folders {
             if let Some(pid) = f.parent_id {
@@ -218,6 +174,44 @@ pub async fn list_music_folders(
         }
     }
 
+    // Single aggregation for track counts + cover art across ALL displayed
+    // folder ids (owned + shared). Replaces N × (count_documents + find_one)
+    // sequential round-trips with one query.
+    let mut all_target_ids: Vec<ObjectId> = included_ids.iter().copied().collect();
+    all_target_ids.extend(shared_folder_ids.iter().copied());
+    let stats = batch_audio_folder_stats(&files_coll, &all_target_ids).await?;
+
+    let empty = FolderAudioStats::default();
+    let mut result = Vec::new();
+
+    for opt_id in &included {
+        let folder_id = match opt_id {
+            Some(id) => *id,
+            None => continue,
+        };
+
+        let folder = match by_id.get(&folder_id) {
+            Some(f) => f,
+            None => continue,
+        };
+
+        let s = stats.get(&folder_id).unwrap_or(&empty);
+
+        let parent_folder_id = folder
+            .parent_id
+            .filter(|pid| included_ids.contains(pid))
+            .map(|pid| pid.to_hex());
+
+        result.push(MusicFolderResponse {
+            folder_id: folder_id.to_hex(),
+            parent_folder_id,
+            name: folder.name.clone(),
+            path: build_folder_path(folder_id, &by_id),
+            track_count: s.track_count,
+            cover_file_id: s.cover_file_id.map(|id| id.to_hex()),
+        });
+    }
+
     // Build folder responses for shared folders
     for (_, owner_folders) in &owner_folders_cache {
         let shared_by_id: HashMap<ObjectId, &Folder> = owner_folders.iter().map(|f| (f.id, f)).collect();
@@ -226,22 +220,7 @@ pub async fn list_music_folders(
                 continue;
             }
 
-            let track_count = files_coll
-                .count_documents(doc! {
-                    "parent_id": folder.id,
-                    "mime_type": { "$regex": "^audio/" },
-                    "deleted_at": bson::Bson::Null,
-                })
-                .await?;
-
-            let cover = files_coll
-                .find_one(doc! {
-                    "parent_id": folder.id,
-                    "mime_type": { "$regex": "^audio/" },
-                    "deleted_at": bson::Bson::Null,
-                })
-                .sort(doc! { "created_at": -1 })
-                .await?;
+            let s = stats.get(&folder.id).unwrap_or(&empty);
 
             let parent_folder_id = folder
                 .parent_id
@@ -253,8 +232,8 @@ pub async fn list_music_folders(
                 parent_folder_id,
                 name: folder.name.clone(),
                 path: build_folder_path(folder.id, &shared_by_id),
-                track_count: track_count as i64,
-                cover_file_id: cover.map(|f| f.id.to_hex()),
+                track_count: s.track_count,
+                cover_file_id: s.cover_file_id.map(|id| id.to_hex()),
             });
         }
     }
@@ -262,6 +241,61 @@ pub async fn list_music_folders(
     result.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
 
     Ok(Json(result))
+}
+
+#[derive(Default, Clone)]
+struct FolderAudioStats {
+    track_count: i64,
+    cover_file_id: Option<ObjectId>,
+}
+
+/// Return track-count and most-recent cover file per folder in one aggregation
+/// query. Folders with no audio files are absent from the map.
+async fn batch_audio_folder_stats(
+    files_coll: &mongodb::Collection<File>,
+    folder_ids: &[ObjectId],
+) -> Result<HashMap<ObjectId, FolderAudioStats>> {
+    use futures::StreamExt;
+
+    if folder_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let pipeline = vec![
+        doc! {
+            "$match": {
+                "parent_id": { "$in": folder_ids },
+                "mime_type": { "$regex": "^audio/" },
+                "deleted_at": bson::Bson::Null,
+            }
+        },
+        doc! { "$sort": { "created_at": -1 } },
+        doc! {
+            "$group": {
+                "_id": "$parent_id",
+                "count": { "$sum": 1 },
+                "cover": { "$first": "$_id" },
+            }
+        },
+    ];
+
+    let mut cursor = files_coll.aggregate(pipeline).await?;
+    let mut out: HashMap<ObjectId, FolderAudioStats> = HashMap::new();
+
+    while let Some(doc) = cursor.next().await {
+        let doc = doc?;
+        if let Ok(id) = doc.get_object_id("_id") {
+            let count = doc
+                .get_i32("count")
+                .map(|n| n as i64)
+                .or_else(|_| doc.get_i64("count"))
+                .unwrap_or(0);
+            let cover = doc.get_object_id("cover").ok();
+            out.insert(id, FolderAudioStats { track_count: count, cover_file_id: cover });
+        }
+    }
+
+    Ok(out)
 }
 
 /// Helper: collect folder IDs from shared folders where the grantee has set
