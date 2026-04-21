@@ -4,8 +4,10 @@ use axum::{
     Json,
 };
 use chrono::Utc;
+use futures::StreamExt;
 use mongodb::{Database, bson::{self, doc, oid::ObjectId}};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use uncloud_common::{EffectiveStrategyResponse, GalleryInclude, InheritableSetting, MusicInclude, SyncStrategy};
@@ -151,6 +153,50 @@ async fn folder_to_response_with_shared(
     })
 }
 
+/// Resolve a child folder's effective setting given the parent's already-resolved
+/// effective value. Used by the list endpoint to avoid an O(depth) chain walk per
+/// child — all siblings share the same parent, so we resolve the parent once.
+fn resolve_from_parent<T: InheritableSetting>(
+    parent_effective: T,
+    folder: &Folder,
+    get: fn(&Folder) -> T,
+) -> T {
+    let v = get(folder);
+    if v.is_inherit() { parent_effective } else { v }
+}
+
+/// Return share counts for the given folder ids in a single aggregation query.
+/// Folders with zero shares are simply absent from the map.
+async fn batch_share_counts(
+    db: &Database,
+    folder_ids: &[ObjectId],
+) -> Result<HashMap<ObjectId, u32>> {
+    if folder_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let shares_coll = db.collection::<FolderShare>("folder_shares");
+    let pipeline = vec![
+        doc! { "$match": { "folder_id": { "$in": folder_ids } } },
+        doc! { "$group": { "_id": "$folder_id", "count": { "$sum": 1 } } },
+    ];
+    let mut cursor = shares_coll.aggregate(pipeline).await?;
+    let mut out: HashMap<ObjectId, u32> = HashMap::new();
+    while let Some(doc) = cursor.next().await {
+        let doc = doc?;
+        if let Ok(id) = doc.get_object_id("_id") {
+            let count = doc
+                .get_i32("count")
+                .map(|n| n as i64)
+                .or_else(|_| doc.get_i64("count"))
+                .unwrap_or(0);
+            if count > 0 {
+                out.insert(id, count as u32);
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub async fn list_folders(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -166,14 +212,16 @@ pub async fn list_folders(
 
     let collection = state.db.collection::<Folder>("folders");
 
-    // Determine the effective owner_id for the query.
-    // If parent_id is set and the user doesn't own it, check share access.
-    let effective_owner_id = if let Some(pid) = parent_id {
+    // Determine the effective owner_id for the query, and — if we have a parent
+    // — also resolve the parent's effective settings ONCE. All children inherit
+    // from this same parent, so we avoid walking the chain per child (O(N*D) ->
+    // O(D + N)).
+    let (effective_owner_id, parent_effective) = if let Some(pid) = parent_id {
         let parent = collection
             .find_one(doc! { "_id": pid, "deleted_at": bson::Bson::Null })
             .await?
             .ok_or_else(|| AppError::NotFound("Parent folder not found".to_string()))?;
-        if parent.owner_id == user.id {
+        let owner = if parent.owner_id == user.id {
             user.id
         } else {
             let access = check_folder_access(&state.db, user.id, pid).await?;
@@ -181,26 +229,77 @@ pub async fn list_folders(
                 return Err(AppError::NotFound("Parent folder not found".to_string()));
             }
             parent.owner_id
-        }
+        };
+        let (sync_eff, _) = resolve_setting(&state.db, owner, &parent, |f| f.sync_strategy).await?;
+        let (gal_eff, _) = resolve_setting(&state.db, owner, &parent, |f| f.gallery_include).await?;
+        let (mus_eff, _) = resolve_setting(&state.db, owner, &parent, |f| f.music_include).await?;
+        (owner, Some((sync_eff, gal_eff, mus_eff)))
     } else {
-        user.id
+        (user.id, None)
     };
+
+    let (sync_from_parent, gallery_from_parent, music_from_parent) = parent_effective
+        .unwrap_or_else(|| (
+            SyncStrategy::root_default(),
+            GalleryInclude::root_default(),
+            MusicInclude::root_default(),
+        ));
 
     let filter = match parent_id {
         Some(pid) => doc! { "owner_id": effective_owner_id, "parent_id": pid, "deleted_at": bson::Bson::Null },
         None => doc! { "owner_id": user.id, "parent_id": null, "deleted_at": bson::Bson::Null },
     };
 
+    // Collect all child folders in one query.
     let mut cursor = collection.find(filter).await?;
-
-    let mut folders = Vec::new();
+    let mut children: Vec<Folder> = Vec::new();
     while cursor.advance().await? {
-        let folder: Folder = cursor.deserialize_current()?;
-        folders.push(folder_to_response(&state.db, effective_owner_id, &folder).await?);
+        children.push(cursor.deserialize_current()?);
     }
 
+    // Batch share counts for children owned by the caller (only the owner sees
+    // non-zero `shared_with_count`).
+    let owned_child_ids: Vec<ObjectId> = children
+        .iter()
+        .filter(|f| f.owner_id == user.id)
+        .map(|f| f.id)
+        .collect();
+    let share_counts = batch_share_counts(&state.db, &owned_child_ids).await?;
+
+    let mut folders: Vec<FolderResponse> = children
+        .into_iter()
+        .map(|folder| {
+            let effective = resolve_from_parent(sync_from_parent, &folder, |f| f.sync_strategy);
+            let effective_gallery =
+                resolve_from_parent(gallery_from_parent, &folder, |f| f.gallery_include);
+            let effective_music =
+                resolve_from_parent(music_from_parent, &folder, |f| f.music_include);
+            let shared_with_count = if folder.owner_id == user.id {
+                share_counts.get(&folder.id).copied().unwrap_or(0)
+            } else {
+                0
+            };
+            FolderResponse {
+                id: folder.id.to_hex(),
+                name: folder.name,
+                parent_id: folder.parent_id.map(|id| id.to_hex()),
+                created_at: folder.created_at.to_rfc3339(),
+                updated_at: folder.updated_at.to_rfc3339(),
+                sync_strategy: folder.sync_strategy,
+                effective_strategy: effective,
+                gallery_include: folder.gallery_include,
+                effective_gallery_include: effective_gallery,
+                music_include: folder.music_include,
+                effective_music_include: effective_music,
+                shared_by: None,
+                shared_with_count,
+            }
+        })
+        .collect();
+
     // Append mounted shares: folder_shares where grantee_id == user.id
-    // and mount_parent_id matches the current listing context.
+    // and mount_parent_id matches the current listing context. These are
+    // typically few per listing, so the per-share chain walk is fine.
     let shares_coll = state.db.collection::<FolderShare>("folder_shares");
     let mount_filter = match parent_id {
         Some(pid) => doc! { "grantee_id": user.id, "mount_parent_id": pid },
@@ -209,7 +308,6 @@ pub async fn list_folders(
     let mut share_cursor = shares_coll.find(mount_filter).await?;
     while share_cursor.advance().await? {
         let share: FolderShare = share_cursor.deserialize_current()?;
-        // Load the actual shared folder
         if let Some(shared_folder) = collection
             .find_one(doc! { "_id": share.folder_id, "deleted_at": bson::Bson::Null })
             .await?
