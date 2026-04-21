@@ -18,7 +18,7 @@ use uncloud_server::{
     db,
     processing::ProcessingService,
     routes,
-    services::{AuthService, EventService, SearchService, StorageService},
+    services::{AuthService, EventService, RescanService, SearchService, StorageService},
 };
 
 // Shared MongoDB container — started once per test binary, port stored here.
@@ -156,6 +156,7 @@ impl TestApp {
             events,
             processing,
             search,
+            rescan: RescanService::new(),
             http_client: reqwest::Client::new(),
         });
 
@@ -360,6 +361,7 @@ impl BoundTestApp {
             events,
             processing,
             search,
+            rescan: RescanService::new(),
             http_client: reqwest::Client::new(),
         });
 
