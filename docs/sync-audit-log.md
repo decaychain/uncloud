@@ -9,7 +9,12 @@ sync client, browsable and updated live.
 - Server log is **searchable** (partial path, client ID, source) and **retention-limited**.
 - Client log is **local-only**, **not searchable**, and records both directions plus
   manual sync start/end markers.
-- Updates are **live** — no polling. The existing SSE infrastructure carries events.
+- **Everything is live. No polling.** Two push paths, not one:
+  - Server → web UI over the existing **SSE** channel.
+  - Sync engine → desktop UI over **Tauri events** (`tauri::emit`).
+  - The desktop "Sync" panel's existing stat counters (uploaded / downloaded /
+    errors / last run / current state) switch from their periodic refresh to
+    push as part of this work. Same for the local log view.
 - Logging a write never blocks or fails the user's operation: if the log insert
   errors we warn-log and move on.
 
@@ -240,6 +245,60 @@ ManualSyncStart` / `ManualSyncEnd` so it reads differently in the UI.
 
 Settings exposed via `syncaudit.retention_days` in the desktop config TOML.
 
+### Live updates (push, not poll)
+
+The desktop app currently polls its own sync engine on a timer to refresh the
+Sync panel's stats. That gets replaced wholesale. The engine becomes the
+source of truth and pushes state to the webview whenever it changes.
+
+Two event streams:
+
+| Tauri event | Payload | Fires when |
+|---|---|---|
+| `sync-log-appended` | `SyncLogRow` | After every successful `INSERT` into the local `sync_log` table (including meta `SyncStart` / `SyncEnd` rows) |
+| `sync-stats-changed` | `SyncStats { state, uploaded, downloaded, errors, pending, last_run_at, current_op: Option<String> }` | On any counter change, queue-depth change, or state transition (`Idle` ↔ `Running` ↔ `Error`) |
+
+Emission sits inside the engine, not in a wrapper:
+
+```rust
+// uncloud-sync/src/engine.rs
+fn update_stats(&self, mutator: impl FnOnce(&mut SyncStats)) {
+    let mut s = self.stats.write().unwrap();
+    mutator(&mut s);
+    (self.on_stats_changed)(&*s);    // injected callback; desktop app wires it
+                                      // to `app_handle.emit("sync-stats-changed", s)`
+}
+
+fn record_local(&self, row: SyncLogRow) -> Result<()> {
+    self.journal.insert_sync_log(&row)?;
+    (self.on_log_appended)(&row);    // same pattern
+    Ok(())
+}
+```
+
+The engine itself never calls Tauri — it takes two boxed closures at
+construction and invokes them. That keeps `uncloud-sync` usable without Tauri
+(CLI sync, tests, the eventual daemon mode) and lets the desktop crate wire
+the events in a single place.
+
+Frontend subscribes once on mount:
+
+```rust
+// components/settings.rs (desktop branch)
+use_effect(move || {
+    let unlisten_stats = listen("sync-stats-changed", move |e| {
+        stats_signal.set(e.payload::<SyncStats>());
+    });
+    let unlisten_log = listen("sync-log-appended", move |e| {
+        log_rows.write().push_front(e.payload::<SyncLogRow>());
+    });
+    // ...
+});
+```
+
+No timer, no `invoke` polling loop. The existing `get_sync_status` command is
+removed along with any `setInterval` / `use_effect` polling glue.
+
 ### Hooking client → server headers
 
 The sync client already uses `uncloud-client`'s reqwest wrapper. Add a
@@ -295,8 +354,10 @@ Device** (reads local SQLite via a new Tauri command `get_local_sync_log`).
 The local view is identical visually but pulls from `sync_log.db` and isn't
 filter-heavy — just a time-ordered list with a "clear" button.
 
-Live updates on desktop: after every insert into `sync_log`, Tauri emits a
-`sync-log-updated` event; the frontend refreshes the current page of rows.
+Both panels — the local log list and the stat counters at the top — are
+driven by the `sync-log-appended` and `sync-stats-changed` Tauri events
+described in **Client → Live updates**. There is no polling anywhere in the
+desktop UI after this change lands.
 
 ---
 
@@ -326,12 +387,16 @@ Tested via curl / integration tests before any UI lands.
 - `use_sync_log` hook.
 - Live-append on SSE.
 
-### Phase 4 — Client emission
+### Phase 4 — Client emission + push-based desktop panel
 
 - Sync client sets `X-Uncloud-*` headers.
 - Local SQLite `sync_log` table + retention.
 - `record_local()` helper wired into the engine's mutation paths.
 - Meta rows around `run_sync()`.
+- Engine gains `on_stats_changed` / `on_log_appended` callbacks; desktop crate
+  wires them to `sync-stats-changed` / `sync-log-appended` Tauri events.
+- Settings / Sync panel: rip out the polling loop; subscribe to the events
+  on mount. Counter + log updates become instant and free of network chatter.
 
 ### Phase 5 — Desktop UI + admin view
 
