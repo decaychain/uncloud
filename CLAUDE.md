@@ -152,44 +152,67 @@ Uncloud/
       tauri.conf.json          ← Tauri config (frontendDist: src-frontend, tray icon)
 ```
 
-## Git Workflow for Agents
+## Git Workflow
 
-Every agent implementing a feature or fix **must** follow this workflow — never commit directly to `main`:
+Scope the workflow to the size of the change.
 
-1. **Create a feature branch** before making any changes:
+### Large features → feature branch + PR + manual test
+
+New features, significant refactors, schema changes, multi-file behaviour changes:
+
+1. **Create a feature branch**:
    ```bash
    git checkout -b feature/<short-description>
    ```
-2. **Commit all changes** to that branch.
-3. **Push the branch** to origin:
+2. **Commit changes** to that branch.
+3. **Push** to origin:
    ```bash
    git push -u origin feature/<short-description>
    ```
-4. **Open a Pull Request** using `gh` (GitHub CLI):
+4. **Open a PR** with `gh`:
    ```bash
    gh pr create --fill --base main
    ```
-5. **Stop — do not merge**. Leave the PR open for the user to review and merge via the GitHub UI or `gh pr merge`.
+5. **Stop — do not merge**. The user manually tests the branch, then merges via GitHub UI or `gh pr merge` once satisfied.
 
-> **Why**: every change is reviewable before landing in `main`, avoids cherry-pick gymnastics, and mirrors a real team workflow. The repo remote is `https://github.com/decaychain/uncloud.git`.
+### Small fixes → direct to `main` (or the relevant open branch)
 
-### Main working directory stays on `main`
-
-The main working directory must **always** be on the `main` branch. Agents work in isolated worktrees. This keeps file edits, git status, and builds predictable.
+Bug fixes, doc updates, config tweaks, CI adjustments, small maintenance — commit directly on `main`. No branch, no PR. If a feature branch is already open and the fix belongs there, push to it directly.
 
 ### Amending an open PR
 
-When a quick fix is needed on an open PR (e.g. a bug found during review):
-
 ```bash
-git checkout feature/<branch-name>   # switch to the PR branch
+git checkout feature/<branch-name>
 # make the fix
 git add <files> && git commit -m "Fix: ..."
 git push                              # updates the PR automatically
-git checkout main                     # return to main
+git checkout main
 ```
 
-The PR is updated in place; no new PR needed.
+### Main working directory stays on `main`
+
+The primary checkout must always be on `main`. For large features, work in isolated worktrees so the primary tree's `git status` / builds stay predictable.
+
+> Remote: `https://github.com/decaychain/uncloud.git`.
+
+## CI / GitHub Actions
+
+Workflows in `.github/workflows/` are triggered manually or on release tags — never on every push/PR:
+
+| Workflow | Auto trigger | Manual trigger |
+|---|---|---|
+| `ci.yml` | — | `workflow_dispatch` |
+| `release-server.yml` | push tag `v*` | `workflow_dispatch` |
+| `release-desktop.yml` | push tag `v*` | `workflow_dispatch` |
+| `release-android.yml` | push tag `v*` | `workflow_dispatch` |
+
+Run a workflow manually from the Actions tab or:
+```bash
+gh workflow run ci.yml                         # on default branch
+gh workflow run ci.yml --ref feature/foo       # on a specific branch
+```
+
+This keeps the feedback loop tight locally and avoids long CI queues on every commit. Verify builds locally before pushing.
 
 ---
 
