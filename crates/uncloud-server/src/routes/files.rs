@@ -364,6 +364,7 @@ pub async fn download_file(
 pub async fn update_file(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    meta: crate::middleware::RequestMeta,
     Path(id): Path<String>,
     Json(req): Json<UpdateFileRequest>,
 ) -> Result<Json<FileResponse>> {
@@ -461,6 +462,26 @@ pub async fn update_file(
         .ok_or_else(|| AppError::NotFound("File not found".to_string()))?;
 
     state.events.emit_file_updated(owner_id, &updated).await;
+
+    if name_changed || parent_changed {
+        let op = if parent_changed {
+            uncloud_common::SyncOperation::Moved
+        } else {
+            uncloud_common::SyncOperation::Renamed
+        };
+        state
+            .sync_log
+            .record(super::audit::file_event(
+                owner_id,
+                op,
+                updated.id,
+                file.storage_path.clone(),
+                Some(updated.storage_path.clone()),
+                &meta,
+            ))
+            .await;
+    }
+
     {
         let state_clone = state.clone();
         let file_id = updated.id.to_hex();
@@ -571,20 +592,14 @@ pub async fn delete_file(
 
     state
         .sync_log
-        .record(crate::models::SyncEvent {
-            id: ObjectId::new(),
-            owner_id: file_owner_id,
-            timestamp: now,
-            operation: uncloud_common::SyncOperation::Deleted,
-            resource_type: uncloud_common::SyncResourceType::File,
-            resource_id: Some(file.id),
-            path: file.storage_path.clone(),
-            new_path: None,
-            source: meta.source,
-            client_id: meta.client_id.clone(),
-            client_os: meta.client_os,
-            affected_count: None,
-        })
+        .record(super::audit::file_event(
+            file_owner_id,
+            uncloud_common::SyncOperation::Deleted,
+            file.id,
+            file.storage_path.clone(),
+            None,
+            &meta,
+        ))
         .await;
 
     {
@@ -634,6 +649,7 @@ pub(crate) fn version_path(storage_path: &str) -> String {
 pub async fn update_file_content(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    meta: crate::middleware::RequestMeta,
     Path(id): Path<String>,
     mut multipart: Multipart,
 ) -> Result<Json<FileResponse>> {
@@ -753,6 +769,19 @@ pub async fn update_file_content(
     let _ = backend.delete(&format!(".thumbs/{}.jpg", file_id.to_hex())).await;
 
     state.events.emit_file_created(user.id, &updated).await;
+
+    state
+        .sync_log
+        .record(super::audit::file_event(
+            user.id,
+            uncloud_common::SyncOperation::ContentReplaced,
+            updated.id,
+            updated.storage_path.clone(),
+            None,
+            &meta,
+        ))
+        .await;
+
     {
         let state_clone = state.clone();
         let file_id = updated.id.to_hex();
@@ -776,6 +805,7 @@ pub async fn update_file_content(
 pub async fn simple_upload(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    meta: crate::middleware::RequestMeta,
     mut multipart: Multipart,
 ) -> Result<Json<FileResponse>> {
     let mut filename = None;
@@ -905,6 +935,19 @@ pub async fn simple_upload(
     state.auth.update_user_bytes(effective_owner_id, size).await?;
 
     state.events.emit_file_created(effective_owner_id, &file).await;
+
+    state
+        .sync_log
+        .record(super::audit::file_event(
+            effective_owner_id,
+            uncloud_common::SyncOperation::Created,
+            file.id,
+            file.storage_path.clone(),
+            None,
+            &meta,
+        ))
+        .await;
+
     {
         let state_clone = state.clone();
         let file_id = file.id.to_hex();
@@ -1049,6 +1092,7 @@ pub async fn upload_chunk(
 pub async fn complete_upload(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    meta: crate::middleware::RequestMeta,
     Path(upload_id): Path<String>,
 ) -> Result<Json<FileResponse>> {
     let collection = state.db.collection::<UploadChunk>("upload_chunks");
@@ -1154,6 +1198,19 @@ pub async fn complete_upload(
         .await?;
 
     state.events.emit_file_created(effective_owner_id, &file).await;
+
+    state
+        .sync_log
+        .record(super::audit::file_event(
+            effective_owner_id,
+            uncloud_common::SyncOperation::Created,
+            file.id,
+            file.storage_path.clone(),
+            None,
+            &meta,
+        ))
+        .await;
+
     {
         let state_clone = state.clone();
         let file_id = file.id.to_hex();
@@ -1177,6 +1234,7 @@ pub async fn complete_upload(
 pub async fn copy_file(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    meta: crate::middleware::RequestMeta,
     Path(id): Path<String>,
     Json(req): Json<CopyFileRequest>,
 ) -> Result<Json<FileResponse>> {
@@ -1252,6 +1310,19 @@ pub async fn copy_file(
     state.auth.update_user_bytes(user.id, file.size_bytes).await?;
     state.processing.enqueue(&new_file, state.clone()).await;
     state.events.emit_file_created(user.id, &new_file).await;
+
+    state
+        .sync_log
+        .record(super::audit::file_event(
+            user.id,
+            uncloud_common::SyncOperation::Copied,
+            new_file.id,
+            file.storage_path.clone(),
+            Some(new_file.storage_path.clone()),
+            &meta,
+        ))
+        .await;
+
     {
         let state_clone = state.clone();
         let file_id = new_file.id.to_hex();

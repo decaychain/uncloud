@@ -22,6 +22,7 @@ pub mod tasks;
 pub mod task_items;
 pub mod admin_processing;
 pub mod sync_events;
+pub mod audit;
 
 use axum::{
     extract::DefaultBodyLimit,

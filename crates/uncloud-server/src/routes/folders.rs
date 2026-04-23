@@ -332,6 +332,7 @@ pub async fn list_folders(
 pub async fn create_folder(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    meta: crate::middleware::RequestMeta,
     Json(req): Json<CreateFolderRequest>,
 ) -> Result<(StatusCode, Json<FolderResponse>)> {
     if req.name.is_empty() || req.name.len() > 255 {
@@ -398,6 +399,19 @@ pub async fn create_folder(
 
     state.events.emit_folder_created(effective_owner_id, &folder).await;
 
+    state
+        .sync_log
+        .record(super::audit::folder_event(
+            effective_owner_id,
+            uncloud_common::SyncOperation::Created,
+            folder.id,
+            folder.name.clone(),
+            None,
+            None,
+            &meta,
+        ))
+        .await;
+
     let resp = folder_to_response(&state.db, effective_owner_id, &folder).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -435,6 +449,7 @@ pub async fn get_folder(
 pub async fn update_folder(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    meta: crate::middleware::RequestMeta,
     Path(id): Path<String>,
     Json(req): Json<UpdateFolderRequest>,
 ) -> Result<Json<FolderResponse>> {
@@ -632,6 +647,26 @@ pub async fn update_folder(
         .ok_or_else(|| AppError::NotFound("Folder not found".to_string()))?;
 
     state.events.emit_folder_updated(owner_id, &updated).await;
+
+    if name_changed || parent_changed {
+        let op = if parent_changed {
+            uncloud_common::SyncOperation::Moved
+        } else {
+            uncloud_common::SyncOperation::Renamed
+        };
+        state
+            .sync_log
+            .record(super::audit::folder_event(
+                owner_id,
+                op,
+                updated.id,
+                folder.name.clone(),
+                Some(updated.name.clone()),
+                None,
+                &meta,
+            ))
+            .await;
+    }
 
     Ok(Json(folder_to_response(&state.db, owner_id, &updated).await?))
 }
@@ -895,6 +930,7 @@ pub struct CopyFolderRequest {
 pub async fn copy_folder(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    meta: crate::middleware::RequestMeta,
     Path(id): Path<String>,
     Json(req): Json<CopyFolderRequest>,
 ) -> Result<(StatusCode, Json<FolderResponse>)> {
@@ -941,6 +977,19 @@ pub async fn copy_folder(
     state.events.emit_folder_created(user.id, &new_folder).await;
 
     copy_folder_contents(&state, user.id, &user.username, source_id, new_folder.id).await?;
+
+    state
+        .sync_log
+        .record(super::audit::folder_event(
+            user.id,
+            uncloud_common::SyncOperation::Copied,
+            new_folder.id,
+            source.name.clone(),
+            Some(new_folder.name.clone()),
+            None,
+            &meta,
+        ))
+        .await;
 
     let resp = folder_to_response(&state.db, user.id, &new_folder).await?;
     Ok((StatusCode::CREATED, Json(resp)))
@@ -1018,6 +1067,7 @@ async fn copy_folder_contents(
 pub async fn delete_folder(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    meta: crate::middleware::RequestMeta,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
     let folder_id = ObjectId::parse_str(&id)
@@ -1058,6 +1108,35 @@ pub async fn delete_folder(
         .await?;
 
     state.events.emit_folder_deleted(owner_id, folder_id).await;
+
+    // Count how many resources were soft-deleted under this batch (files +
+    // subfolders + the folder itself). One summary event covers the lot.
+    let files_deleted = state
+        .db
+        .collection::<bson::Document>("files")
+        .count_documents(doc! { "batch_delete_id": &batch_id })
+        .await
+        .unwrap_or(0);
+    let folders_deleted = state
+        .db
+        .collection::<bson::Document>("folders")
+        .count_documents(doc! { "batch_delete_id": &batch_id })
+        .await
+        .unwrap_or(0);
+    let affected = (files_deleted + folders_deleted) as u32;
+
+    state
+        .sync_log
+        .record(super::audit::folder_event(
+            owner_id,
+            uncloud_common::SyncOperation::Deleted,
+            folder.id,
+            folder.name.clone(),
+            None,
+            Some(affected),
+            &meta,
+        ))
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }

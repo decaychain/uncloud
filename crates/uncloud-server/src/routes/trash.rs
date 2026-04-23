@@ -152,6 +152,7 @@ pub async fn list_trash(
 pub async fn restore_from_trash(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    meta: crate::middleware::RequestMeta,
     Path(id): Path<String>,
     body: Option<Json<RestoreRequest>>,
 ) -> Result<axum::response::Response> {
@@ -231,6 +232,18 @@ pub async fn restore_from_trash(
         state.processing.enqueue(&restored, state.clone()).await;
         state.events.emit_file_restored(user.id, item_id).await;
 
+        state
+            .sync_log
+            .record(super::audit::file_event(
+                user.id,
+                uncloud_common::SyncOperation::Restored,
+                restored.id,
+                restored.storage_path.clone(),
+                None,
+                &meta,
+            ))
+            .await;
+
         return Ok(StatusCode::OK.into_response());
     }
 
@@ -279,6 +292,19 @@ pub async fn restore_from_trash(
         restore_folder_recursive(&state, user.id, item_id).await?;
 
         state.events.emit_file_restored(user.id, item_id).await;
+
+        state
+            .sync_log
+            .record(super::audit::folder_event(
+                user.id,
+                uncloud_common::SyncOperation::Restored,
+                folder.id,
+                folder.name.clone(),
+                None,
+                None,
+                &meta,
+            ))
+            .await;
 
         return Ok(StatusCode::OK.into_response());
     }
@@ -394,6 +420,7 @@ async fn restore_ancestor_chain(
 pub async fn permanently_delete(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    meta: crate::middleware::RequestMeta,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
     let item_id = ObjectId::parse_str(&id)
@@ -431,18 +458,42 @@ pub async fn permanently_delete(
         // Update user's used bytes (quota released on permanent purge)
         state.auth.update_user_bytes(user.id, -file.size_bytes).await?;
 
+        state
+            .sync_log
+            .record(super::audit::file_event(
+                user.id,
+                uncloud_common::SyncOperation::PermanentlyDeleted,
+                file.id,
+                file.storage_path.clone(),
+                None,
+                &meta,
+            ))
+            .await;
+
         return Ok(StatusCode::NO_CONTENT);
     }
 
     // Try folder
     let folders_coll = state.db.collection::<Folder>("folders");
-    if folders_coll
+    if let Some(folder) = folders_coll
         .find_one(doc! { "_id": item_id, "owner_id": user.id, "deleted_at": { "$ne": bson::Bson::Null } })
         .await?
-        .is_some()
     {
         // Permanently delete folder and its contents recursively
         permanently_delete_folder_recursive(&state, user.id, item_id).await?;
+
+        state
+            .sync_log
+            .record(super::audit::folder_event(
+                user.id,
+                uncloud_common::SyncOperation::PermanentlyDeleted,
+                folder.id,
+                folder.name.clone(),
+                None,
+                None,
+                &meta,
+            ))
+            .await;
 
         return Ok(StatusCode::NO_CONTENT);
     }
@@ -525,6 +576,7 @@ async fn permanently_delete_folder_recursive(
 pub async fn empty_trash(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    meta: crate::middleware::RequestMeta,
 ) -> Result<StatusCode> {
     let files_coll = state.db.collection::<File>("files");
     let folders_coll = state.db.collection::<Folder>("folders");
@@ -551,6 +603,16 @@ pub async fn empty_trash(
         versions_coll.delete_many(doc! { "file_id": file.id }).await?;
     }
 
+    // Count trashed folders before deletion so the summary event is accurate.
+    let trashed_folders = folders_coll
+        .count_documents(
+            doc! { "owner_id": user.id, "deleted_at": { "$ne": bson::Bson::Null } },
+        )
+        .await
+        .unwrap_or(0);
+
+    let files_purged = file_ids.len() as u64;
+
     // Delete all trashed file records
     files_coll
         .delete_many(doc! { "owner_id": user.id, "deleted_at": { "$ne": bson::Bson::Null } })
@@ -564,6 +626,21 @@ pub async fn empty_trash(
     // Update quota
     if total_size > 0 {
         state.auth.update_user_bytes(user.id, -total_size).await?;
+    }
+
+    let total = (files_purged + trashed_folders) as u32;
+    if total > 0 {
+        state
+            .sync_log
+            .record(super::audit::summary_event(
+                user.id,
+                uncloud_common::SyncOperation::PermanentlyDeleted,
+                uncloud_common::SyncResourceType::File,
+                "trash",
+                total,
+                &meta,
+            ))
+            .await;
     }
 
     Ok(StatusCode::NO_CONTENT)
