@@ -406,6 +406,27 @@ Tested via curl / integration tests before any UI lands.
 
 ---
 
+## Known caveats carried over from Phase 1
+
+Items we accepted during the emission fan-out and should clean up before the
+log graduates out of "skeleton" status.
+
+- **Folder paths are just the folder `name`, not a full logical path.** File
+  events carry the full `storage_path` (username + folder chain + filename);
+  `Folder` docs don't persist an equivalent. Fix is a small helper that
+  walks `parent_id` upward once per emission — cheap (one round trip) and
+  intentionally deferred because the skeleton doesn't need it yet.
+- **`copy_folder` emits without `affected_count`.** `copy_folder_contents`
+  in `routes/folders.rs` recurses without accumulating a count back to the
+  caller. Refactor it to return `(files_copied, folders_copied)` and pass
+  the sum into the summary event.
+- **`delete_folder`'s summary count is post-hoc.** We
+  `count_documents({ batch_delete_id })` after the recursive soft-delete
+  finishes — two extra queries. Not incorrect, just not free. If emission
+  throughput matters, thread the count out of `soft_delete_folder_contents`.
+
+---
+
 ## Open questions
 
 1. **Folder copy / recursive delete:** one summary event (with
