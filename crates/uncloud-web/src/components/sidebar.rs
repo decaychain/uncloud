@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use wasm_bindgen::JsCast;
 use uncloud_common::{AlbumResponse, MusicFolderResponse, PlaylistSummary, TaskProjectResponse};
 use crate::components::icons::{
-    IconCheckSquare, IconFolder, IconImage, IconKey, IconLayoutGrid, IconLink, IconListMusic, IconMusic, IconPalette, IconPencil,
+    IconCheckSquare, IconFolder, IconHistory, IconImage, IconKey, IconLayoutGrid, IconLink, IconListMusic, IconMusic, IconPalette, IconPencil,
     IconSettings, IconShield, IconShoppingCart, IconTrash, IconUser, IconUsers,
 };
 use crate::hooks::{use_apps, use_files, use_music, use_playlists, use_tasks};
@@ -235,6 +235,15 @@ pub fn Sidebar() -> Element {
                                         onclick: move |_| close_drawer(),
                                         IconPalette {}
                                         span { "Preferences" }
+                                    }
+                                }
+                                li {
+                                    Link {
+                                        to: Route::SettingsTab { tab: "activity".to_string() },
+                                        class: if active_tab == "activity" { "active" } else { "" },
+                                        onclick: move |_| close_drawer(),
+                                        IconHistory {}
+                                        span { "Activity" }
                                     }
                                 }
                                 if is_admin {

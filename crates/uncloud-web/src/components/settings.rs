@@ -40,6 +40,10 @@ pub fn SettingsPage(tab: String) -> Element {
                     OptionalFeaturesSection {}
                     MusicSection {}
                 },
+                "activity" => rsx! {
+                    h1 { class: "text-2xl font-bold", "Activity" }
+                    crate::components::activity::ActivitySection {}
+                },
                 "users" if is_admin => rsx! {
                     h1 { class: "text-2xl font-bold", "Users" }
                     UserManagementSection {}

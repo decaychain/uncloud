@@ -17,4 +17,5 @@ pub mod use_folder_shares;
 pub mod use_s3;
 pub mod use_apps;
 pub mod use_shopping;
+pub mod use_sync_events;
 pub mod use_tasks;
