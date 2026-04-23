@@ -152,11 +152,13 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     // Connect to database
     let db = db::connect(&config.database).await?;
     db::setup_indexes(&db).await?;
+    db::setup_sync_audit_indexes(&db, &config.sync_audit).await?;
 
     // Initialize services
     let auth = AuthService::new(&db, config.auth.clone());
     let storage = StorageService::new(&db, &config.storage).await?;
     let events = EventService::new();
+    let sync_log = uncloud_server::services::SyncLog::new(&db, events.clone(), config.sync_audit.enabled);
     let processing = processing::ProcessingService::new(
         config.processing.max_concurrency,
         config.processing.max_attempts,
@@ -194,6 +196,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         processing,
         search,
         rescan: RescanService::new(),
+        sync_log,
         http_client: reqwest::Client::new(),
     });
 

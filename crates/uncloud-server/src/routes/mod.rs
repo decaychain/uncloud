@@ -21,6 +21,7 @@ pub mod vault_recents;
 pub mod tasks;
 pub mod task_items;
 pub mod admin_processing;
+pub mod sync_events;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -30,7 +31,10 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::middleware::{admin_middleware, auth_middleware, sigv4_middleware};
+use crate::middleware::{
+    admin_meta_middleware, admin_middleware, auth_middleware, request_meta_middleware,
+    sigv4_middleware,
+};
 use crate::AppState;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -183,7 +187,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/tasks/{id}/comments", get(task_items::list_comments).post(task_items::create_comment))
         .route("/tasks/comments/{id}", put(task_items::update_comment).delete(task_items::delete_comment))
         .route("/tasks/schedule", get(task_items::get_schedule))
-        .route("/tasks/assigned-to-me", get(task_items::get_assigned_to_me));
+        .route("/tasks/assigned-to-me", get(task_items::get_assigned_to_me))
+        // Sync audit log
+        .route("/sync-events", get(sync_events::list_sync_events));
 
     // v1-only routes (API tokens, S3 credentials, apps)
     let v1_only = Router::new()
@@ -200,6 +206,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     let auth_routes = Router::new()
         .nest("/api", auth_api.clone())
         .nest("/api/v1", auth_api.merge(v1_only))
+        .layer(middleware::from_fn(request_meta_middleware))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -239,6 +246,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     let admin_routes = Router::new()
         .nest("/api", admin_api.clone())
         .nest("/api/v1", admin_api.merge(admin_v1_only))
+        .layer(middleware::from_fn(admin_meta_middleware))
+        .layer(middleware::from_fn(request_meta_middleware))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             admin_middleware,

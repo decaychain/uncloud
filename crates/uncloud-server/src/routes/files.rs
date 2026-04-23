@@ -506,6 +506,7 @@ pub async fn update_file(
 pub async fn delete_file(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    meta: crate::middleware::RequestMeta,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
     let file_id = ObjectId::parse_str(&id)
@@ -567,6 +568,25 @@ pub async fn delete_file(
     }
 
     state.events.emit_file_deleted(file_owner_id, file_id).await;
+
+    state
+        .sync_log
+        .record(crate::models::SyncEvent {
+            id: ObjectId::new(),
+            owner_id: file_owner_id,
+            timestamp: now,
+            operation: uncloud_common::SyncOperation::Deleted,
+            resource_type: uncloud_common::SyncResourceType::File,
+            resource_id: Some(file.id),
+            path: file.storage_path.clone(),
+            new_path: None,
+            source: meta.source,
+            client_id: meta.client_id.clone(),
+            client_os: meta.client_os,
+            affected_count: None,
+        })
+        .await;
+
     {
         let state_clone = state.clone();
         let file_id_str = id.clone();

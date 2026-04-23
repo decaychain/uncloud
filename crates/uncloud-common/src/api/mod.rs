@@ -12,6 +12,7 @@ pub mod folder_shares;
 pub mod vault_recents;
 pub mod tasks;
 pub mod preferences;
+pub mod sync_events;
 
 pub use auth::*;
 pub use files::*;
@@ -27,3 +28,4 @@ pub use folder_shares::*;
 pub use vault_recents::*;
 pub use tasks::*;
 pub use preferences::*;
+pub use sync_events::*;

@@ -57,6 +57,15 @@ search:
   # Meilisearch API key (optional)
   # api_key: "your-api-key"
 
+# Sync audit log — per-user record of change-inducing operations
+sync_audit:
+  # Master switch; when false the log is not written
+  enabled: true
+  # Days to keep events before MongoDB TTL purges them
+  retention_days: 7
+  # Hard cap on events per user (prune task trims older rows past this)
+  max_records_per_user: 10000
+
 # Logging
 logging:
   # tracing_subscriber EnvFilter directive. `RUST_LOG` env var, when set,

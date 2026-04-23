@@ -15,6 +15,7 @@ pub mod totp_challenge;
 pub mod folder_share;
 pub mod user_preferences;
 pub mod task;
+pub mod sync_event;
 
 pub use folder_share::*;
 pub use user::*;
@@ -33,6 +34,7 @@ pub use invite::*;
 pub use totp_challenge::*;
 pub use user_preferences::*;
 pub use task::*;
+pub use sync_event::*;
 
 /// Serde module for `Option<chrono::DateTime<Utc>>` ↔ BSON Date (nullable).
 /// Usage: `#[serde(with = "crate::models::opt_dt")]`

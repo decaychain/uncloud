@@ -23,6 +23,8 @@ pub struct Config {
     pub features: FeaturesConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub sync_audit: SyncAuditConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -233,6 +235,34 @@ pub struct FeaturesConfig {
     pub shopping: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncAuditConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_sync_audit_retention_days")]
+    pub retention_days: u32,
+    #[serde(default = "default_sync_audit_max_records_per_user")]
+    pub max_records_per_user: u32,
+}
+
+fn default_sync_audit_retention_days() -> u32 {
+    7
+}
+
+fn default_sync_audit_max_records_per_user() -> u32 {
+    10_000
+}
+
+impl Default for SyncAuditConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            retention_days: default_sync_audit_retention_days(),
+            max_records_per_user: default_sync_audit_max_records_per_user(),
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -347,6 +377,7 @@ impl Default for Config {
             apps: AppsConfig::default(),
             features: FeaturesConfig::default(),
             logging: LoggingConfig::default(),
+            sync_audit: SyncAuditConfig::default(),
         }
     }
 }
