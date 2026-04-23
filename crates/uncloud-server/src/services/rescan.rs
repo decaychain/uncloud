@@ -113,6 +113,21 @@ impl RescanService {
         self.jobs.read().await.get(&job_id).cloned()
     }
 
+    /// Returns a handle to any currently-running rescan, or `None` if nothing is
+    /// active. There is at most one active job per storage, but across all
+    /// storages there could be more than one; this returns the first we find
+    /// (matches today's single-storage deployments).
+    pub async fn any_active(&self) -> Option<Arc<RescanJobHandle>> {
+        let active = self.active_by_storage.read().await;
+        let jobs = self.jobs.read().await;
+        for (_storage_id, job_id) in active.iter() {
+            if let Some(handle) = jobs.get(job_id) {
+                return Some(handle.clone());
+            }
+        }
+        None
+    }
+
     pub async fn cancel(&self, job_id: ObjectId) -> bool {
         let jobs = self.jobs.read().await;
         match jobs.get(&job_id) {

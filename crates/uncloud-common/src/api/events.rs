@@ -14,6 +14,35 @@ pub enum ServerEvent {
     FileRestored { file_id: String },
     FolderShared { folder_id: String, share_id: String },
     FolderShareRevoked { folder_id: String, share_id: String },
+    RescanProgress {
+        job_id: String,
+        storage_id: String,
+        status: String,
+        processed_entries: u64,
+        total_entries: Option<u64>,
+        imported_folders: u64,
+        imported_files: u64,
+        skipped_existing: u64,
+        conflicts_count: u64,
+    },
+    RescanFinished {
+        job_id: String,
+        storage_id: String,
+        status: String,
+        processed_entries: u64,
+        total_entries: Option<u64>,
+        imported_folders: u64,
+        imported_files: u64,
+        skipped_existing: u64,
+        conflicts: Vec<RescanConflictEventData>,
+        error: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RescanConflictEventData {
+    pub path: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

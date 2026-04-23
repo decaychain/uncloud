@@ -11,7 +11,7 @@ use crate::hooks::use_search;
 use crate::hooks::use_storages;
 use crate::hooks::use_s3;
 use crate::hooks::use_shopping;
-use crate::state::{AuthState, FontScale, ThemeState};
+use crate::state::{AuthState, FontScale, RescanState, ThemeState};
 
 #[component]
 pub fn SettingsPage(tab: String) -> Element {
@@ -767,63 +767,54 @@ fn AdminSection(search_enabled: bool) -> Element {
     let mut rerun_loading = use_signal(|| false);
     let mut rerun_msg: Signal<Option<(bool, String)>> = use_signal(|| None);
     let mut confirm_rerun = use_signal(|| false);
-    let mut rescan_starting = use_signal(|| false);
-    let mut rescan_job: Signal<Option<use_storages::RescanJob>> = use_signal(|| None);
-    let mut rescan_error: Signal<Option<String>> = use_signal(|| None);
+
+    // Rescan state lives at the app level so it survives navigation away from
+    // Settings, and SSE events from `layout.rs` keep it fresh.
+    let mut rescan_state = use_context::<Signal<RescanState>>();
 
     let on_rescan = move |_| {
         spawn(async move {
-            rescan_starting.set(true);
-            rescan_error.set(None);
-            rescan_job.set(None);
+            {
+                let mut s = rescan_state.write();
+                s.starting = true;
+                s.error = None;
+                s.job = None;
+            }
             let storages = match use_storages::list_storages().await {
                 Ok(v) => v,
                 Err(e) => {
-                    rescan_error.set(Some(e));
-                    rescan_starting.set(false);
+                    let mut s = rescan_state.write();
+                    s.error = Some(e);
+                    s.starting = false;
                     return;
                 }
             };
             // Prefer the default storage; fall back to the first one.
             let target = storages.iter().find(|s| s.is_default).or_else(|| storages.first());
             let Some(storage) = target else {
-                rescan_error.set(Some("No storage configured.".to_string()));
-                rescan_starting.set(false);
+                let mut s = rescan_state.write();
+                s.error = Some("No storage configured.".to_string());
+                s.starting = false;
                 return;
             };
             match use_storages::start_rescan(&storage.id).await {
                 Ok(job) => {
-                    let job_id = job.id.clone();
-                    rescan_job.set(Some(job));
-                    rescan_starting.set(false);
-                    // Poll for updates until the job reaches a terminal state.
-                    loop {
-                        gloo_timers::future::TimeoutFuture::new(2000).await;
-                        match use_storages::get_rescan_job(&job_id).await {
-                            Ok(latest) => {
-                                let done = latest.status != use_storages::RescanStatus::Running;
-                                rescan_job.set(Some(latest));
-                                if done {
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                rescan_error.set(Some(e));
-                                break;
-                            }
-                        }
-                    }
+                    let mut s = rescan_state.write();
+                    s.job = Some(job);
+                    s.starting = false;
+                    // SSE will drive subsequent updates.
                 }
                 Err(e) => {
-                    rescan_error.set(Some(e));
-                    rescan_starting.set(false);
+                    let mut s = rescan_state.write();
+                    s.error = Some(e);
+                    s.starting = false;
                 }
             }
         });
     };
 
     let on_cancel_rescan = move |_| {
-        if let Some(job) = rescan_job() {
+        if let Some(job) = rescan_state.read().job.clone() {
             spawn(async move {
                 let _ = use_storages::cancel_rescan_job(&job.id).await;
             });
@@ -922,11 +913,12 @@ fn AdminSection(search_enabled: bool) -> Element {
                 div { class: "divider my-0" }
 
                 {
+                    let state = rescan_state();
                     let running = matches!(
-                        rescan_job().as_ref().map(|j| j.status.clone()),
+                        state.job.as_ref().map(|j| j.status.clone()),
                         Some(use_storages::RescanStatus::Running)
                     );
-                    let busy = rescan_starting() || running;
+                    let busy = state.starting || running;
                     rsx! {
                         div { class: "flex items-center justify-between gap-4",
                             div {
@@ -957,7 +949,7 @@ fn AdminSection(search_enabled: bool) -> Element {
                     }
                 }
 
-                if let Some(job) = rescan_job() {
+                if let Some(job) = rescan_state().job.clone() {
                     match job.status {
                         use_storages::RescanStatus::Running => rsx! {
                             div { class: "alert alert-info text-sm flex-col items-start",
@@ -1020,7 +1012,7 @@ fn AdminSection(search_enabled: bool) -> Element {
                     }
                 }
 
-                if let Some(err) = rescan_error() {
+                if let Some(err) = rescan_state().error.clone() {
                     div { class: "alert alert-error text-sm",
                         span { "Rescan failed: {err}" }
                     }

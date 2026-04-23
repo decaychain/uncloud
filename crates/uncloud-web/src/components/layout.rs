@@ -3,7 +3,17 @@ use uncloud_common::ServerEvent;
 use crate::hooks::use_events::use_events;
 use crate::components::icons::IconMenu;
 use crate::hooks::tauri;
-use crate::state::{AuthState, PlayerState, ThemeState};
+use crate::hooks::use_storages::{RescanConflict, RescanJob, RescanStatus};
+
+fn parse_rescan_status(status: &str) -> RescanStatus {
+    match status {
+        "completed" => RescanStatus::Completed,
+        "failed" => RescanStatus::Failed,
+        "cancelled" => RescanStatus::Cancelled,
+        _ => RescanStatus::Running,
+    }
+}
+use crate::state::{AuthState, PlayerState, RescanState, ThemeState};
 use crate::router::Route;
 
 #[component]
@@ -12,7 +22,86 @@ pub fn Layout() -> Element {
     let nav = use_navigator();
 
     let mut sse_event: Signal<Option<ServerEvent>> = use_context_provider(|| Signal::new(None));
+    let mut rescan_state = use_context::<Signal<RescanState>>();
     use_events(move |event| {
+        // Update the app-level rescan state directly — the panel in Settings
+        // reads this signal, and we want the state to persist even when the
+        // Settings component is unmounted.
+        match &event {
+            ServerEvent::RescanProgress {
+                job_id,
+                storage_id,
+                status,
+                processed_entries,
+                total_entries,
+                imported_folders,
+                imported_files,
+                skipped_existing,
+                conflicts_count: _,
+            } => {
+                let parsed_status = parse_rescan_status(status);
+                let mut current = rescan_state.write();
+                // Progress events carry a count, not the conflicts themselves —
+                // the full list arrives in RescanFinished. Preserve whatever
+                // we already had so a late-mounted UI doesn't flash empty.
+                let conflicts = current
+                    .job
+                    .as_ref()
+                    .map(|j| j.conflicts.clone())
+                    .unwrap_or_default();
+                current.job = Some(RescanJob {
+                    id: job_id.clone(),
+                    storage_id: storage_id.clone(),
+                    status: parsed_status,
+                    total_entries: *total_entries,
+                    processed_entries: *processed_entries,
+                    imported_folders: *imported_folders,
+                    imported_files: *imported_files,
+                    skipped_existing: *skipped_existing,
+                    conflicts,
+                    error: None,
+                });
+                current.error = None;
+                current.starting = false;
+            }
+            ServerEvent::RescanFinished {
+                job_id,
+                storage_id,
+                status,
+                processed_entries,
+                total_entries,
+                imported_folders,
+                imported_files,
+                skipped_existing,
+                conflicts,
+                error,
+            } => {
+                let parsed_status = parse_rescan_status(status);
+                let conflicts = conflicts
+                    .iter()
+                    .map(|c| RescanConflict {
+                        path: c.path.clone(),
+                        reason: c.reason.clone(),
+                    })
+                    .collect();
+                let mut current = rescan_state.write();
+                current.job = Some(RescanJob {
+                    id: job_id.clone(),
+                    storage_id: storage_id.clone(),
+                    status: parsed_status,
+                    total_entries: *total_entries,
+                    processed_entries: *processed_entries,
+                    imported_folders: *imported_folders,
+                    imported_files: *imported_files,
+                    skipped_existing: *skipped_existing,
+                    conflicts,
+                    error: error.clone(),
+                });
+                current.error = None;
+                current.starting = false;
+            }
+            _ => {}
+        }
         sse_event.set(Some(event));
     });
 

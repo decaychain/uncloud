@@ -18,13 +18,13 @@ pub enum RescanStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct RescanConflict {
     pub path: String,
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct RescanJob {
     pub id: String,
     pub storage_id: String,
@@ -69,14 +69,18 @@ pub async fn start_rescan(storage_id: &str) -> Result<RescanJob, String> {
     response.json().await.map_err(|e| e.to_string())
 }
 
-/// Admin-only: GET /api/admin/rescan-jobs/{id} — latest snapshot of a job.
-pub async fn get_rescan_job(job_id: &str) -> Result<RescanJob, String> {
-    let response = api::get(&format!("/admin/rescan-jobs/{}", job_id))
+
+
+
+/// Admin-only: GET /api/admin/rescan-jobs/active — current running job, if any.
+/// Used on mount to restore the live-progress panel after navigation/reload.
+pub async fn get_active_rescan_job() -> Result<Option<RescanJob>, String> {
+    let response = api::get("/admin/rescan-jobs/active")
         .send()
         .await
         .map_err(|e| e.to_string())?;
     if response.status() != 200 {
-        return Err(format!("Failed to fetch rescan job ({})", response.status()));
+        return Err(format!("Failed to fetch active rescan job ({})", response.status()));
     }
     response.json().await.map_err(|e| e.to_string())
 }
