@@ -387,16 +387,29 @@ Tested via curl / integration tests before any UI lands.
 - `use_sync_log` hook.
 - Live-append on SSE.
 
-### Phase 4 — Client emission + push-based desktop panel
+### Phase 4 — Client emission + push-based desktop panel ✅
 
-- Sync client sets `X-Uncloud-*` headers.
-- Local SQLite `sync_log` table + retention.
-- `record_local()` helper wired into the engine's mutation paths.
-- Meta rows around `run_sync()`.
-- Engine gains `on_stats_changed` / `on_log_appended` callbacks; desktop crate
-  wires them to `sync-stats-changed` / `sync-log-appended` Tauri events.
-- Settings / Sync panel: rip out the polling loop; subscribe to the events
-  on mount. Counter + log updates become instant and free of network chatter.
+- ✅ Sync client sets `X-Uncloud-*` headers (via `ClientIdentity` in
+  `uncloud-client`; desktop wires `sync_identity()` into `make_client`).
+- ✅ Local SQLite `sync_log` table + retention (`migrations/003_sync_log.sql`;
+  `Journal::{insert,recent,prune}_sync_log`; engine prunes at 7 days /
+  10 000 rows at the end of every run).
+- ✅ `record_local()` equivalent wired into the engine's mutation paths
+  (`log_download` / `log_upload` / `log_delete_local` sprinkled alongside the
+  existing `report.X.push(...)` sites).
+- ✅ Meta rows around `run_sync_inner()` — `SyncStart` / `SyncEnd` with a
+  `reason` drawn from `SyncTrigger::{Auto,Manual}`. The run summary lands in
+  the `note` field of the `SyncEnd` row (`N up, N down, N deleted, N
+  conflicts, N errors, T.Ts`).
+- ✅ Engine gained a single `on_log_appended` callback (stats are derived on
+  the desktop side rather than in the engine — the desktop's `SyncPhase` /
+  `SyncStats` types already exist and the engine has no need to reinvent
+  them). Desktop emits `sync-stats-changed` at each phase transition in
+  `run_sync_once` and wires `on_log_appended` → `sync-log-appended`.
+- ✅ Settings / Sync panel: polling loop removed; mount-only `use_effect`
+  does a one-shot `get_status` + `get_local_sync_log`, then subscribes via
+  `listen_sync_stats` / `listen_sync_log_appended`. Counters and the new
+  "This device — local activity" table update live.
 
 ### Phase 5 — Desktop UI + admin view
 

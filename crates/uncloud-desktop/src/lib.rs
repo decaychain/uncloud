@@ -9,7 +9,7 @@ use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri::async_runtime;
 #[cfg(desktop)]
 use tauri_plugin_dialog::DialogExt;
@@ -17,8 +17,10 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_android_fs::AndroidFsExt;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info};
-use uncloud_client::Client;
-use uncloud_sync::{BaseSource, SyncEngine, SyncReport};
+use uncloud_client::{Client, ClientIdentity};
+use uncloud_sync::{
+    BaseSource, SyncEngine, SyncEngineHooks, SyncLogRow, SyncReport,
+};
 
 #[cfg(mobile)]
 mod android_fs;
@@ -193,6 +195,47 @@ fn clear_config(app: &AppHandle) {
     }
 }
 
+/// Identity advertised on every HTTP request to the server. Picked up by
+/// the server's `request_meta_middleware` and attributed to the audit log.
+fn sync_identity() -> ClientIdentity {
+    let client_id = hostname::get()
+        .ok()
+        .and_then(|s| s.into_string().ok())
+        .unwrap_or_else(|| "desktop".to_owned());
+    ClientIdentity::sync(client_id, std::env::consts::OS)
+}
+
+/// Construct a [`Client`] that always sends the `X-Uncloud-*` headers.
+fn make_client(base_url: &str) -> Client {
+    Client::with_identity(base_url, sync_identity())
+}
+
+/// Snapshot of the current sync state shipped over the `sync-stats-changed`
+/// Tauri event. Identical shape to [`SyncState`] so the frontend can deserialize
+/// either `get_status` responses or event payloads interchangeably.
+fn emit_stats(app: &AppHandle, phase: SyncPhase, stats: SyncStats) {
+    let payload = SyncState { phase, stats };
+    if let Err(e) = app.emit("sync-stats-changed", payload) {
+        error!("emit sync-stats-changed: {}", e);
+    }
+}
+
+/// Wire the engine's `on_log_appended` hook to emit a Tauri event. Called
+/// each time an engine is freshly constructed (auto-login, manual login,
+/// lazy init).
+fn wire_engine_hooks(engine: &Arc<SyncEngine>, app: AppHandle) {
+    let app_for_hook = app.clone();
+    let on_log_appended: uncloud_sync::LogAppendedHook =
+        Arc::new(move |row: &SyncLogRow| {
+            if let Err(e) = app_for_hook.emit("sync-log-appended", row.clone()) {
+                error!("emit sync-log-appended: {}", e);
+            }
+        });
+    engine.set_hooks(SyncEngineHooks {
+        on_log_appended: Some(on_log_appended),
+    });
+}
+
 /// Build a [`SyncEngine`] with the platform-appropriate [`LocalFs`] backend:
 /// [`uncloud_sync::NativeFs`] on desktop, `AndroidSafFs` on mobile.
 async fn build_engine(
@@ -229,7 +272,7 @@ async fn ensure_engine(
     let secrets = secrets_dir(app).ok_or("Cannot determine data directory")?;
     let password = secret_store::load_password(&secrets, &cfg.server_url, &cfg.username)
         .ok_or("No saved credentials")?;
-    let client = Arc::new(Client::new(&cfg.server_url));
+    let client = Arc::new(make_client(&cfg.server_url));
     client.login(&cfg.username, &password).await.map_err(|e| {
         let msg = format!("Login failed during lazy init: {e}");
         eprintln!("[uncloud-desktop] {msg}");
@@ -254,9 +297,11 @@ async fn ensure_engine(
             msg
         })?;
     let engine = Arc::new(engine);
+    wire_engine_hooks(&engine, app.clone());
     *state.client.write().await = Some(client);
     *state.engine.write().await = Some(engine.clone());
     *state.phase.lock().await = SyncPhase::Idle;
+    emit_stats(app, SyncPhase::Idle, state.stats.lock().await.clone());
     eprintln!("[uncloud-desktop] Engine initialized lazily");
     Ok(engine)
 }
@@ -268,21 +313,27 @@ async fn get_status(state: State<'_, DesktopState>) -> Result<SyncState, String>
     Ok(SyncState { phase, stats })
 }
 
-/// Run a single incremental sync, updating phase + stats as it progresses.
+/// Run a single incremental sync, updating phase + stats as it progresses
+/// and emitting a `sync-stats-changed` Tauri event at every transition so
+/// the desktop UI can push-refresh without polling.
 /// Shared by `sync_now`, the poll loop, the desktop tray menu, and the mobile
 /// resume handler.
 async fn run_sync_once(
+    app: AppHandle,
     engine: Arc<SyncEngine>,
     phase: Arc<Mutex<SyncPhase>>,
     stats: Arc<Mutex<SyncStats>>,
 ) -> Result<SyncReport, String> {
-    *phase.lock().await = SyncPhase::Syncing {
+    let start_phase = SyncPhase::Syncing {
         started_at: Utc::now().to_rfc3339(),
     };
+    *phase.lock().await = start_phase.clone();
+    emit_stats(&app, start_phase, stats.lock().await.clone());
+
     let result = engine.incremental_sync().await.map_err(|e| e.to_string());
     match result {
         Ok(report) => {
-            {
+            let stats_snapshot = {
                 let mut s = stats.lock().await;
                 let uploaded = report.uploaded.len() as u32;
                 let downloaded = report.downloaded.len() as u32;
@@ -297,14 +348,18 @@ async fn run_sync_once(
                 s.last_run_deleted = deleted;
                 s.last_run_errors = errors;
                 s.last_sync_at = Some(Utc::now().to_rfc3339());
-            }
+                s.clone()
+            };
             *phase.lock().await = SyncPhase::Idle;
+            emit_stats(&app, SyncPhase::Idle, stats_snapshot);
             Ok(report)
         }
         Err(msg) => {
-            *phase.lock().await = SyncPhase::Error {
+            let err_phase = SyncPhase::Error {
                 message: msg.clone(),
             };
+            *phase.lock().await = err_phase.clone();
+            emit_stats(&app, err_phase, stats.lock().await.clone());
             Err(msg)
         }
     }
@@ -370,7 +425,7 @@ async fn login(
     password: String,
     root_path: String,
 ) -> Result<(), String> {
-    let client = Arc::new(Client::new(&server));
+    let client = Arc::new(make_client(&server));
     client
         .login(&username, &password)
         .await
@@ -399,13 +454,17 @@ async fn login(
         .await
         .map_err(|e| e.to_string())?;
 
+    let engine = Arc::new(engine);
+    wire_engine_hooks(&engine, app.clone());
     *state.client.write().await = Some(client);
-    *state.engine.write().await = Some(Arc::new(engine));
+    *state.engine.write().await = Some(engine);
     *state.phase.lock().await = SyncPhase::Idle;
-    {
+    let stats_snapshot = {
         let mut s = state.stats.lock().await;
         s.last_sync_at = Some(Utc::now().to_rfc3339());
-    }
+        s.clone()
+    };
+    emit_stats(&app, SyncPhase::Idle, stats_snapshot);
 
     let secrets = secrets_dir(&app).ok_or("Cannot determine data directory")?;
     secret_store::store_password(&secrets, &server, &username, &password)?;
@@ -438,13 +497,21 @@ async fn disconnect(app: AppHandle, state: State<'_, DesktopState>) -> Result<()
     if let (Some(cfg), Some(secrets)) = (prev, secrets_dir(&app)) {
         secret_store::delete_password(&secrets, &cfg.server_url, &cfg.username);
     }
+
+    emit_stats(&app, SyncPhase::NotConfigured, SyncStats::default());
     Ok(())
 }
 
 #[tauri::command]
 async fn sync_now(app: AppHandle, state: State<'_, DesktopState>) -> Result<SyncReportDto, String> {
     let engine = ensure_engine(&app, &state).await?;
-    let report = run_sync_once(engine, state.phase.clone(), state.stats.clone()).await?;
+    let report = run_sync_once(
+        app.clone(),
+        engine,
+        state.phase.clone(),
+        state.stats.clone(),
+    )
+    .await?;
     eprintln!(
         "[uncloud-desktop] sync report: uploaded={} downloaded={} deleted_local={} conflicts={} errors={}",
         report.uploaded.len(),
@@ -457,6 +524,23 @@ async fn sync_now(app: AppHandle, state: State<'_, DesktopState>) -> Result<Sync
         eprintln!("[uncloud-desktop] sync error: {} — {}", err.path, err.reason);
     }
     Ok(SyncReportDto::from(report))
+}
+
+/// Read the last `limit` rows from the local sync audit log. The desktop
+/// "This Device" tab calls this once on mount and thereafter relies on
+/// `sync-log-appended` Tauri events to stay fresh.
+#[tauri::command]
+async fn get_local_sync_log(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    limit: Option<i64>,
+) -> Result<Vec<SyncLogRow>, String> {
+    let engine = ensure_engine(&app, &state).await?;
+    let cap = limit.unwrap_or(200).clamp(1, 1000);
+    engine
+        .recent_sync_log(cap)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -539,6 +623,7 @@ fn default_sync_folder() -> Option<String> {
 // ── Polling scheduler ─────────────────────────────────────────────────────────
 
 fn start_poll_loop(
+    app: AppHandle,
     engine: Arc<RwLock<Option<Arc<SyncEngine>>>>,
     phase: Arc<Mutex<SyncPhase>>,
     stats: Arc<Mutex<SyncStats>>,
@@ -555,7 +640,7 @@ fn start_poll_loop(
             let maybe_engine = engine.read().await.as_ref().map(Arc::clone);
             if let Some(eng) = maybe_engine {
                 if let Err(msg) =
-                    run_sync_once(eng, phase.clone(), stats.clone()).await
+                    run_sync_once(app.clone(), eng, phase.clone(), stats.clone()).await
                 {
                     error!("Sync error: {}", msg);
                 }
@@ -567,6 +652,7 @@ fn start_poll_loop(
 /// Spawn an immediate sync (best-effort; no-op if no engine yet). Used by the
 /// mobile resume handler and the tray menu.
 fn spawn_sync(
+    app: AppHandle,
     engine: Arc<RwLock<Option<Arc<SyncEngine>>>>,
     phase: Arc<Mutex<SyncPhase>>,
     stats: Arc<Mutex<SyncStats>>,
@@ -574,7 +660,7 @@ fn spawn_sync(
     async_runtime::spawn(async move {
         let maybe_engine = engine.read().await.as_ref().map(Arc::clone);
         if let Some(eng) = maybe_engine {
-            if let Err(msg) = run_sync_once(eng, phase, stats).await {
+            if let Err(msg) = run_sync_once(app, eng, phase, stats).await {
                 error!("Sync error: {}", msg);
             }
         }
@@ -655,7 +741,7 @@ pub fn run() {
                         eprintln!("[uncloud-desktop] Auto-login skipped: no stored credentials");
                         return;
                     };
-                    let client = Arc::new(Client::new(&cfg.server_url));
+                    let client = Arc::new(make_client(&cfg.server_url));
                     let login_result = client.login(&cfg.username, &password).await.map_err(|e| e.to_string());
                     match login_result {
                         Ok(_) => {
@@ -671,9 +757,17 @@ pub fn run() {
                             let engine_result = build_engine(&app_handle, &db, client.clone(), effective_root).await.map_err(|e| e.to_string());
                             match engine_result {
                                 Ok(engine) => {
+                                    let engine = Arc::new(engine);
+                                    wire_engine_hooks(&engine, app_handle.clone());
                                     *client_arc.write().await = Some(client);
-                                    *engine_arc.write().await = Some(Arc::new(engine));
+                                    *engine_arc.write().await = Some(engine);
                                     *phase_arc.lock().await = SyncPhase::Idle;
+                                    let stats_snapshot = {
+                                        let ds = app_handle.state::<DesktopState>();
+                                        let guard = ds.stats.lock().await;
+                                        guard.clone()
+                                    };
+                                    emit_stats(&app_handle, SyncPhase::Idle, stats_snapshot);
                                     eprintln!("[uncloud-desktop] Auto-login successful");
                                     info!("Auto-login successful");
                                 }
@@ -724,6 +818,7 @@ pub fn run() {
                         "open" => open_browser(app),
                         "sync_now" => {
                             spawn_sync(
+                                app.clone(),
                                 tray_engine.clone(),
                                 tray_phase.clone(),
                                 tray_stats.clone(),
@@ -736,6 +831,7 @@ pub fn run() {
 
             // Poll loop runs on both desktop and mobile.
             start_poll_loop(
+                app.handle().clone(),
                 app.state::<DesktopState>().engine.clone(),
                 app.state::<DesktopState>().phase.clone(),
                 app.state::<DesktopState>().stats.clone(),
@@ -750,6 +846,7 @@ pub fn run() {
             login,
             disconnect,
             sync_now,
+            get_local_sync_log,
             set_folder_local_strategy,
             set_folder_local_path,
             get_folder_effective_config,
@@ -773,7 +870,12 @@ pub fn run() {
             // current state and sync actually resumes.
             #[cfg(mobile)]
             if let tauri::RunEvent::Resumed = &event {
-                spawn_sync(run_engine.clone(), run_phase.clone(), run_stats.clone());
+                spawn_sync(
+                    _app.clone(),
+                    run_engine.clone(),
+                    run_phase.clone(),
+                    run_stats.clone(),
+                );
             }
         });
 }

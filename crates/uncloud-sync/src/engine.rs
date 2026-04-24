@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use chrono::{NaiveDate, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -9,7 +9,7 @@ use uncloud_client::Client;
 use uncloud_common::SyncStrategy;
 
 use crate::fs::{LocalFs, NativeFs};
-use crate::journal::Journal;
+use crate::journal::{Journal, SyncLogRow};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -46,7 +46,25 @@ struct ResolvedFolder {
     base_path: Option<String>,
 }
 
-// ── Engine ────────────────────────────────────────────────────────────────────
+// ── Hooks ─────────────────────────────────────────────────────────────────────
+
+/// Why a sync run is happening — drives the `reason` field of the bracketing
+/// `SyncStart` / `SyncEnd` meta rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncTrigger {
+    Auto,
+    Manual,
+}
+
+pub type LogAppendedHook = Arc<dyn Fn(&SyncLogRow) + Send + Sync>;
+
+/// Callbacks fired by the engine so embedding apps (Tauri desktop, future
+/// mobile daemon) can push state to their UI without polling. Stored via
+/// interior mutability so hooks can be wired after construction.
+#[derive(Default, Clone)]
+pub struct SyncEngineHooks {
+    pub on_log_appended: Option<LogAppendedHook>,
+}
 
 pub struct SyncEngine {
     journal: Journal,
@@ -55,6 +73,7 @@ pub struct SyncEngine {
     /// Client-wide root path. `None` on mobile where there is no global sync
     /// root — each picked folder carries its own `local_path` instead.
     root_local_path: Option<String>,
+    hooks: RwLock<SyncEngineHooks>,
 }
 
 impl SyncEngine {
@@ -91,7 +110,131 @@ impl SyncEngine {
             client,
             fs,
             root_local_path,
+            hooks: RwLock::new(SyncEngineHooks::default()),
         })
+    }
+
+    /// Wire (or replace) the callbacks fired by the engine. The desktop/mobile
+    /// apps point `on_log_appended` at a closure that emits a Tauri event so
+    /// the UI sees new audit rows without polling.
+    pub fn set_hooks(&self, hooks: SyncEngineHooks) {
+        if let Ok(mut guard) = self.hooks.write() {
+            *guard = hooks;
+        }
+    }
+
+    fn fire_log_append(&self, row: &SyncLogRow) {
+        let hook = self
+            .hooks
+            .read()
+            .ok()
+            .and_then(|h| h.on_log_appended.clone());
+        if let Some(cb) = hook {
+            (cb)(row);
+        }
+    }
+
+    /// Insert an audit row, fire the `on_log_appended` hook with the assigned
+    /// id. Errors are warn-logged — a sync_log failure must never break the
+    /// surrounding sync operation.
+    async fn log_row(&self, mut row: SyncLogRow) {
+        match self.journal.insert_sync_log(&row).await {
+            Ok(id) => {
+                row.id = id;
+                self.fire_log_append(&row);
+            }
+            Err(e) => warn!("sync_log insert failed: {}", e),
+        }
+    }
+
+    /// Return the most recent `limit` rows from the local audit log, newest
+    /// first. Used by the desktop `get_local_sync_log` Tauri command.
+    pub async fn recent_sync_log(&self, limit: i64) -> sqlx::Result<Vec<SyncLogRow>> {
+        self.journal.recent_sync_log(limit).await
+    }
+
+    /// Drop rows older than `retention_days` and cap the table at `max_rows`.
+    /// Called once at the end of every successful sync.
+    pub async fn prune_sync_log(
+        &self,
+        retention_days: i64,
+        max_rows: i64,
+    ) -> sqlx::Result<u64> {
+        let cutoff = (Utc::now() - chrono::Duration::days(retention_days)).to_rfc3339();
+        self.journal.prune_sync_log(&cutoff, max_rows).await
+    }
+
+    // ── Per-op instrumentation helpers ────────────────────────────────────
+    //
+    // Each helper just writes a row to the local audit log and fires the
+    // on_log_appended hook. They are sprinkled next to the existing
+    // `report.X.push(...)` calls in `incremental_sync`.
+
+    async fn log_download(&self, path: &str, is_update: bool) {
+        let op = if is_update { "ContentReplaced" } else { "Created" };
+        self.log_row(SyncLogRow {
+            id: 0,
+            timestamp: Utc::now().to_rfc3339(),
+            operation: op.to_owned(),
+            direction: Some("Down".to_owned()),
+            resource_type: Some("File".to_owned()),
+            path: path.to_owned(),
+            new_path: None,
+            reason: "Sync".to_owned(),
+            note: None,
+        })
+        .await;
+    }
+
+    async fn log_upload(&self, path: &str, is_update: bool) {
+        let op = if is_update { "ContentReplaced" } else { "Created" };
+        self.log_row(SyncLogRow {
+            id: 0,
+            timestamp: Utc::now().to_rfc3339(),
+            operation: op.to_owned(),
+            direction: Some("Up".to_owned()),
+            resource_type: Some("File".to_owned()),
+            path: path.to_owned(),
+            new_path: None,
+            reason: "Sync".to_owned(),
+            note: None,
+        })
+        .await;
+    }
+
+    async fn log_delete_local(&self, path: &str) {
+        self.log_row(SyncLogRow {
+            id: 0,
+            timestamp: Utc::now().to_rfc3339(),
+            operation: "Deleted".to_owned(),
+            direction: Some("Down".to_owned()),
+            resource_type: Some("File".to_owned()),
+            path: path.to_owned(),
+            new_path: None,
+            reason: "Sync".to_owned(),
+            note: None,
+        })
+        .await;
+    }
+
+    async fn log_sync_marker(
+        &self,
+        operation: &str,
+        reason: &str,
+        note: Option<String>,
+    ) {
+        self.log_row(SyncLogRow {
+            id: 0,
+            timestamp: Utc::now().to_rfc3339(),
+            operation: operation.to_owned(),
+            direction: None,
+            resource_type: None,
+            path: "run".to_owned(),
+            new_path: None,
+            reason: reason.to_owned(),
+            note,
+        })
+        .await;
     }
 
     /// Full sync: rebuild journal from server tree + local walk, apply all diffs.
@@ -100,9 +243,32 @@ impl SyncEngine {
         self.incremental_sync().await
     }
 
-    /// Incremental sync: re-fetch server tree, compare with journal and local mtimes.
+    /// Incremental sync triggered automatically (poll timer, tray "Sync Now"
+    /// ends up here too for now — see `run_sync_manual` if we want to
+    /// distinguish). Brackets the run with `SyncStart` / `SyncEnd` meta rows
+    /// in the local audit log.
     pub async fn incremental_sync(&self) -> Result<SyncReport, Box<dyn std::error::Error>> {
+        self.run_sync_inner(SyncTrigger::Auto).await
+    }
+
+    /// Variant used by the tray's "Sync Now" entry — tags the bracketing
+    /// meta rows with `ManualSyncStart` / `ManualSyncEnd` so the activity
+    /// view reads as a human-initiated run.
+    pub async fn run_sync_manual(&self) -> Result<SyncReport, Box<dyn std::error::Error>> {
+        self.run_sync_inner(SyncTrigger::Manual).await
+    }
+
+    async fn run_sync_inner(
+        &self,
+        trigger: SyncTrigger,
+    ) -> Result<SyncReport, Box<dyn std::error::Error>> {
         info!("Starting incremental sync");
+        let (start_reason, end_reason) = match trigger {
+            SyncTrigger::Auto => ("Sync", "Sync"),
+            SyncTrigger::Manual => ("ManualSyncStart", "ManualSyncEnd"),
+        };
+        self.log_sync_marker("SyncStart", start_reason, None).await;
+        let started = std::time::Instant::now();
         let mut report = SyncReport::default();
 
         // 1. Fetch server tree
@@ -212,6 +378,7 @@ impl SyncEngine {
                                     &file.updated_at, mtime, "synced",
                                 ).await;
                                 report.downloaded.push(server_rel_path.clone());
+                                self.log_download(server_rel_path, false).await;
                             }
                             Err(e) => report.errors.push(SyncError {
                                 path: server_rel_path.clone(),
@@ -247,6 +414,7 @@ impl SyncEngine {
                                         &updated.updated_at, new_mtime, "synced",
                                     ).await;
                                     report.uploaded.push(server_rel_path.clone());
+                                    self.log_upload(server_rel_path, true).await;
                                 }
                                 Err(e) => report.errors.push(SyncError {
                                     path: server_rel_path.clone(),
@@ -273,6 +441,7 @@ impl SyncEngine {
                                         Some(file.size_bytes), None,
                                         &file.updated_at, new_mtime, "synced",
                                     ).await;
+                                    self.log_download(server_rel_path, true).await;
                                     report.conflicts.push(SyncConflict {
                                         server_path: server_rel_path.clone(),
                                         local_path: local_path_str.clone(),
@@ -302,6 +471,7 @@ impl SyncEngine {
                                         &file.updated_at, new_mtime, "synced",
                                     ).await;
                                     report.downloaded.push(server_rel_path.clone());
+                                    self.log_download(server_rel_path, true).await;
                                 }
                                 Err(e) => report.errors.push(SyncError {
                                     path: server_rel_path.clone(),
@@ -330,6 +500,7 @@ impl SyncEngine {
                                         &updated.updated_at, new_mtime, "synced",
                                     ).await;
                                     report.uploaded.push(server_rel_path.clone());
+                                    self.log_upload(server_rel_path, true).await;
                                 }
                                 Err(e) => report.errors.push(SyncError {
                                     path: server_rel_path.clone(),
@@ -356,7 +527,10 @@ impl SyncEngine {
                 let strategy = SyncStrategy::TwoWay; // default; ideally look up parent folder
                 if matches!(strategy, SyncStrategy::TwoWay | SyncStrategy::ServerToClient) {
                     match self.fs.remove_file(&j.local_path).await {
-                        Ok(()) => report.deleted_local.push(j.server_path.clone()),
+                        Ok(()) => {
+                            report.deleted_local.push(j.server_path.clone());
+                            self.log_delete_local(&j.server_path).await;
+                        }
                         Err(e) => report.errors.push(SyncError {
                             path: j.server_path.clone(),
                             reason: e.to_string(),
@@ -524,14 +698,26 @@ impl SyncEngine {
 
         self.journal.set_config("last_full_sync_at", &Utc::now().to_rfc3339()).await?;
 
-        info!(
-            "Sync complete: {} uploaded, {} downloaded, {} deleted, {} conflicts, {} errors",
+        let elapsed = started.elapsed();
+        let note = format!(
+            "{} up, {} down, {} deleted, {} conflicts, {} errors, {:.1}s",
             report.uploaded.len(),
             report.downloaded.len(),
             report.deleted_local.len(),
             report.conflicts.len(),
             report.errors.len(),
+            elapsed.as_secs_f32(),
         );
+        info!("Sync complete: {}", note);
+        self.log_sync_marker("SyncEnd", end_reason, Some(note)).await;
+
+        // Cap retention so the log doesn't grow without bound. Defaults match
+        // the server (7 days / 10k rows) and are fine without a config knob
+        // yet — if either matters we'll lift them into the desktop config.
+        if let Err(e) = self.prune_sync_log(7, 10_000).await {
+            warn!("sync_log prune failed: {}", e);
+        }
+
         Ok(report)
     }
 
@@ -586,6 +772,7 @@ impl SyncEngine {
                             "synced",
                         )
                         .await;
+                    self.log_upload(&file_name, false).await;
                     report.uploaded.push(file_name);
                 }
                 Err(e) => report.errors.push(SyncError {
