@@ -74,6 +74,21 @@ pub struct SyncEngine {
     /// root — each picked folder carries its own `local_path` instead.
     root_local_path: Option<String>,
     hooks: RwLock<SyncEngineHooks>,
+    /// Per-run state that lets us defer the `SyncStart` audit row until we
+    /// actually have something to log. Empty runs therefore leave the audit
+    /// log untouched.
+    run_state: RwLock<Option<RunState>>,
+}
+
+#[derive(Debug, Clone)]
+struct RunState {
+    /// Reason tag to use for the `SyncStart` marker — `"Sync"` for auto,
+    /// `"ManualSyncStart"` when the user triggered the run. The matching
+    /// `SyncEnd` reason is derived separately from [`SyncTrigger`] at the
+    /// bottom of `run_sync_inner`.
+    start_reason: String,
+    /// Set to true the first time a real op row is logged in this run.
+    emitted_start: bool,
 }
 
 impl SyncEngine {
@@ -111,6 +126,7 @@ impl SyncEngine {
             fs,
             root_local_path,
             hooks: RwLock::new(SyncEngineHooks::default()),
+            run_state: RwLock::new(None),
         })
     }
 
@@ -166,19 +182,55 @@ impl SyncEngine {
 
     // ── Per-op instrumentation helpers ────────────────────────────────────
     //
-    // Each helper just writes a row to the local audit log and fires the
-    // on_log_appended hook. They are sprinkled next to the existing
-    // `report.X.push(...)` calls in `incremental_sync`.
+    // Each helper writes a row to the local audit log and fires the
+    // on_log_appended hook. They also emit the deferred `SyncStart` marker
+    // on first call so empty runs leave the log untouched. They are
+    // sprinkled next to the existing `report.X.push(...)` calls in
+    // `incremental_sync`.
 
-    async fn log_download(&self, path: &str, is_update: bool) {
-        let op = if is_update { "ContentReplaced" } else { "Created" };
+    /// Strip `root_local_path` from an absolute local path so the log shows
+    /// `photos/vacation/cat.jpg` rather than the full OS path. Falls back to
+    /// the raw path on mobile (where there is no global root) or when the
+    /// path lives outside the configured root.
+    fn relative_display_path(&self, local_path: &str) -> String {
+        if let Some(root) = &self.root_local_path {
+            if let Some(rest) = local_path.strip_prefix(root.as_str()) {
+                let rest = rest.trim_start_matches(['/', '\\']);
+                if !rest.is_empty() {
+                    return rest.to_owned();
+                }
+            }
+        }
+        local_path.to_owned()
+    }
+
+    /// Insert the deferred `SyncStart` marker if a run is active and it
+    /// hasn't been emitted yet. Cheap to call repeatedly — noop once the
+    /// flag is set.
+    async fn ensure_start_emitted(&self) {
+        let reason = {
+            let mut guard = self.run_state.write().unwrap();
+            match guard.as_mut() {
+                Some(state) if !state.emitted_start => {
+                    state.emitted_start = true;
+                    state.start_reason.clone()
+                }
+                _ => return,
+            }
+        };
+        self.log_sync_marker("SyncStart", &reason, None).await;
+    }
+
+    async fn log_download(&self, local_path: &str, is_update: bool) {
+        self.ensure_start_emitted().await;
+        let op = if is_update { "Updated from server" } else { "Downloaded" };
         self.log_row(SyncLogRow {
             id: 0,
             timestamp: Utc::now().to_rfc3339(),
             operation: op.to_owned(),
             direction: Some("Down".to_owned()),
             resource_type: Some("File".to_owned()),
-            path: path.to_owned(),
+            path: self.relative_display_path(local_path),
             new_path: None,
             reason: "Sync".to_owned(),
             note: None,
@@ -186,15 +238,16 @@ impl SyncEngine {
         .await;
     }
 
-    async fn log_upload(&self, path: &str, is_update: bool) {
-        let op = if is_update { "ContentReplaced" } else { "Created" };
+    async fn log_upload(&self, local_path: &str, is_update: bool) {
+        self.ensure_start_emitted().await;
+        let op = if is_update { "Updated on server" } else { "Uploaded" };
         self.log_row(SyncLogRow {
             id: 0,
             timestamp: Utc::now().to_rfc3339(),
             operation: op.to_owned(),
             direction: Some("Up".to_owned()),
             resource_type: Some("File".to_owned()),
-            path: path.to_owned(),
+            path: self.relative_display_path(local_path),
             new_path: None,
             reason: "Sync".to_owned(),
             note: None,
@@ -202,14 +255,15 @@ impl SyncEngine {
         .await;
     }
 
-    async fn log_delete_local(&self, path: &str) {
+    async fn log_delete_local(&self, local_path: &str) {
+        self.ensure_start_emitted().await;
         self.log_row(SyncLogRow {
             id: 0,
             timestamp: Utc::now().to_rfc3339(),
             operation: "Deleted".to_owned(),
             direction: Some("Down".to_owned()),
             resource_type: Some("File".to_owned()),
-            path: path.to_owned(),
+            path: self.relative_display_path(local_path),
             new_path: None,
             reason: "Sync".to_owned(),
             note: None,
@@ -267,7 +321,12 @@ impl SyncEngine {
             SyncTrigger::Auto => ("Sync", "Sync"),
             SyncTrigger::Manual => ("ManualSyncStart", "ManualSyncEnd"),
         };
-        self.log_sync_marker("SyncStart", start_reason, None).await;
+        // Arm the deferred `SyncStart` — it only lands in the log if a real
+        // op fires below. Empty no-op runs produce zero rows.
+        *self.run_state.write().unwrap() = Some(RunState {
+            start_reason: start_reason.to_owned(),
+            emitted_start: false,
+        });
         let started = std::time::Instant::now();
         let mut report = SyncReport::default();
 
@@ -378,7 +437,7 @@ impl SyncEngine {
                                     &file.updated_at, mtime, "synced",
                                 ).await;
                                 report.downloaded.push(server_rel_path.clone());
-                                self.log_download(server_rel_path, false).await;
+                                self.log_download(local_path, false).await;
                             }
                             Err(e) => report.errors.push(SyncError {
                                 path: server_rel_path.clone(),
@@ -414,7 +473,7 @@ impl SyncEngine {
                                         &updated.updated_at, new_mtime, "synced",
                                     ).await;
                                     report.uploaded.push(server_rel_path.clone());
-                                    self.log_upload(server_rel_path, true).await;
+                                    self.log_upload(local_path, true).await;
                                 }
                                 Err(e) => report.errors.push(SyncError {
                                     path: server_rel_path.clone(),
@@ -441,7 +500,7 @@ impl SyncEngine {
                                         Some(file.size_bytes), None,
                                         &file.updated_at, new_mtime, "synced",
                                     ).await;
-                                    self.log_download(server_rel_path, true).await;
+                                    self.log_download(local_path, true).await;
                                     report.conflicts.push(SyncConflict {
                                         server_path: server_rel_path.clone(),
                                         local_path: local_path_str.clone(),
@@ -471,7 +530,7 @@ impl SyncEngine {
                                         &file.updated_at, new_mtime, "synced",
                                     ).await;
                                     report.downloaded.push(server_rel_path.clone());
-                                    self.log_download(server_rel_path, true).await;
+                                    self.log_download(local_path, true).await;
                                 }
                                 Err(e) => report.errors.push(SyncError {
                                     path: server_rel_path.clone(),
@@ -500,7 +559,7 @@ impl SyncEngine {
                                         &updated.updated_at, new_mtime, "synced",
                                     ).await;
                                     report.uploaded.push(server_rel_path.clone());
-                                    self.log_upload(server_rel_path, true).await;
+                                    self.log_upload(local_path, true).await;
                                 }
                                 Err(e) => report.errors.push(SyncError {
                                     path: server_rel_path.clone(),
@@ -529,7 +588,7 @@ impl SyncEngine {
                     match self.fs.remove_file(&j.local_path).await {
                         Ok(()) => {
                             report.deleted_local.push(j.server_path.clone());
-                            self.log_delete_local(&j.server_path).await;
+                            self.log_delete_local(&j.local_path).await;
                         }
                         Err(e) => report.errors.push(SyncError {
                             path: j.server_path.clone(),
@@ -709,7 +768,17 @@ impl SyncEngine {
             elapsed.as_secs_f32(),
         );
         info!("Sync complete: {}", note);
-        self.log_sync_marker("SyncEnd", end_reason, Some(note)).await;
+
+        // Only emit `SyncEnd` when we already emitted `SyncStart` — i.e. when
+        // at least one real op landed. Empty runs leave the log untouched.
+        let end_state = {
+            let mut guard = self.run_state.write().unwrap();
+            guard.take()
+        };
+        if matches!(end_state, Some(s) if s.emitted_start) {
+            self.log_sync_marker("SyncEnd", end_reason, Some(note))
+                .await;
+        }
 
         // Cap retention so the log doesn't grow without bound. Defaults match
         // the server (7 days / 10k rows) and are fine without a config knob
@@ -772,7 +841,7 @@ impl SyncEngine {
                             "synced",
                         )
                         .await;
-                    self.log_upload(&file_name, false).await;
+                    self.log_upload(full_path, false).await;
                     report.uploaded.push(file_name);
                 }
                 Err(e) => report.errors.push(SyncError {

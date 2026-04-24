@@ -22,10 +22,10 @@ pub fn SettingsPage(tab: String) -> Element {
     let search_enabled = use_context::<Signal<bool>>();
     let is_admin = auth_state().is_admin();
 
-    // Activity's table has five columns — give it more horizontal room than
-    // the narrow form-oriented sections.
+    // Activity's table + the Sync panel's local-log table both benefit from
+    // more horizontal room than the narrow form-oriented sections.
     let wrapper_class = match tab.as_str() {
-        "activity" => "space-y-6 max-w-6xl",
+        "activity" | "sync" => "space-y-6 max-w-6xl",
         _ => "space-y-6 max-w-2xl",
     };
 
@@ -34,13 +34,14 @@ pub fn SettingsPage(tab: String) -> Element {
             match tab.as_str() {
                 "account" => rsx! {
                     h1 { class: "text-2xl font-bold", "Account" }
-                    if is_desktop {
-                        SyncSection {}
-                        ConnectionSection {}
-                    }
                     ChangePasswordSection {}
                     TotpSection {}
                     S3AccessKeysSection {}
+                },
+                "sync" if is_desktop => rsx! {
+                    h1 { class: "text-2xl font-bold", "Sync" }
+                    SyncSection {}
+                    ConnectionSection {}
                 },
                 "preferences" => rsx! {
                     h1 { class: "text-2xl font-bold", "Preferences" }
@@ -699,7 +700,6 @@ fn SyncSection() -> Element {
                         tr {
                             th { "Time" }
                             th { "Event" }
-                            th { "Path" }
                             th { "Details" }
                         }
                     }
@@ -708,25 +708,23 @@ fn SyncSection() -> Element {
                             {
                                 let time = format_local_log_time(&row.timestamp);
                                 let op_badge_class = local_log_badge_class(&row.operation);
-                                let direction_suffix = match row.direction.as_deref() {
-                                    Some("Up")   => " ↑",
-                                    Some("Down") => " ↓",
-                                    _            => "",
+                                // One merged column: summary note wins for
+                                // SyncEnd markers, `path → new_path` for
+                                // renames/moves, otherwise the path itself.
+                                let details = if let Some(note) = row.note.clone() {
+                                    note
+                                } else if let Some(new_path) = row.new_path.as_deref() {
+                                    format!("{} → {}", row.path, new_path)
+                                } else {
+                                    row.path.clone()
                                 };
-                                let details = row.note.clone()
-                                    .or_else(|| row.new_path.as_ref().map(|p| format!("→ {p}")))
-                                    .unwrap_or_default();
                                 rsx! {
                                     tr { key: "{row.id}",
                                         td { class: "text-base-content/60 whitespace-nowrap", "{time}" }
                                         td {
-                                            span {
-                                                class: "{op_badge_class}",
-                                                "{row.operation}{direction_suffix}"
-                                            }
+                                            span { class: "{op_badge_class}", "{row.operation}" }
                                         }
-                                        td { class: "truncate max-w-[24rem]", title: "{row.path}", "{row.path}" }
-                                        td { class: "text-base-content/60 truncate max-w-[20rem]", "{details}" }
+                                        td { class: "truncate max-w-[40rem]", title: "{details}", "{details}" }
                                     }
                                 }
                             }
@@ -2228,15 +2226,17 @@ fn format_local_log_time(rfc: &str) -> String {
     }
 }
 
-/// DaisyUI badge class for a local sync_log operation. Mirrors the server-
-/// side activity view's colour coding so the two logs look consistent.
+/// DaisyUI badge class for a local sync_log operation. The labels match the
+/// names the engine writes in `uncloud-sync::engine::log_*`.
 fn local_log_badge_class(op: &str) -> &'static str {
     match op {
-        "Created"          => "badge badge-success badge-sm",
-        "ContentReplaced"  => "badge badge-info badge-sm",
-        "Deleted"          => "badge badge-error badge-sm",
-        "SyncStart"        => "badge badge-ghost badge-sm",
-        "SyncEnd"          => "badge badge-ghost badge-sm",
-        _                  => "badge badge-neutral badge-sm",
+        "Uploaded"            => "badge badge-success badge-sm",
+        "Downloaded"          => "badge badge-success badge-sm",
+        "Updated on server"   => "badge badge-info badge-sm",
+        "Updated from server" => "badge badge-info badge-sm",
+        "Deleted"             => "badge badge-error badge-sm",
+        "SyncStart"           => "badge badge-ghost badge-sm",
+        "SyncEnd"             => "badge badge-ghost badge-sm",
+        _                     => "badge badge-neutral badge-sm",
     }
 }

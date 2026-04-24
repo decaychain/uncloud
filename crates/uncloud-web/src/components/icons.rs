@@ -231,6 +231,14 @@ lucide_icon!(IconHistory,
     path { d: "M12 7v5l4 2" }
 );
 
+// lucide refresh-cw — the circular-arrows "sync" glyph.
+lucide_icon!(IconRefreshCw,
+    path { d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" }
+    path { d: "M21 3v5h-5" }
+    path { d: "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" }
+    path { d: "M8 16H3v5" }
+);
+
 lucide_icon!(IconMoreVertical,
     circle { cx: "12", cy: "12", r: "1" }
     circle { cx: "12", cy: "5", r: "1" }
