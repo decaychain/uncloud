@@ -411,11 +411,11 @@ Tested via curl / integration tests before any UI lands.
 Items we accepted during the emission fan-out and should clean up before the
 log graduates out of "skeleton" status.
 
-- **Folder paths are just the folder `name`, not a full logical path.** File
-  events carry the full `storage_path` (username + folder chain + filename);
-  `Folder` docs don't persist an equivalent. Fix is a small helper that
-  walks `parent_id` upward once per emission — cheap (one round trip) and
-  intentionally deferred because the skeleton doesn't need it yet.
+- ~~**Folder paths are just the folder `name`.**~~ Resolved: folder events
+  now carry the same `{username}/{chain}/{folder_name}` format as file events.
+  `routes/audit.rs::resolve_folder_path` wraps `files::resolve_storage_path`
+  and every folder emission site uses it (create / update / delete / copy /
+  trash restore / permanent delete).
 - **`copy_folder` emits without `affected_count`.** `copy_folder_contents`
   in `routes/folders.rs` recurses without accumulating a count back to the
   caller. Refactor it to return `(files_copied, folders_copied)` and pass

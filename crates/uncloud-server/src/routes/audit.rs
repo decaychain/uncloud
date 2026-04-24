@@ -8,11 +8,11 @@
 //! )).await;
 //! ```
 
-use mongodb::bson::oid::ObjectId;
+use mongodb::{Database, bson::{doc, oid::ObjectId}};
 use uncloud_common::{SyncOperation, SyncResourceType};
 
 use crate::middleware::RequestMeta;
-use crate::models::SyncEvent;
+use crate::models::{Folder, SyncEvent, User};
 
 pub fn file_event(
     owner_id: ObjectId,
@@ -60,6 +60,43 @@ pub fn folder_event(
         client_id: meta.client_id.clone(),
         client_os: meta.client_os,
         affected_count,
+    }
+}
+
+/// Build the logical path `{username}/{ancestor/chain}/{folder_name}` for a
+/// folder audit event. Reuses [`crate::routes::files::resolve_storage_path`] so
+/// the format matches the file-event `path`. Falls back to the bare folder
+/// name on any lookup error — the audit log must never break a real op.
+pub async fn resolve_folder_path(
+    db: &Database,
+    owner_id: ObjectId,
+    username: &str,
+    folder: &Folder,
+) -> String {
+    match crate::routes::files::resolve_storage_path(
+        db,
+        owner_id,
+        username,
+        folder.parent_id,
+        &folder.name,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(_) => folder.name.clone(),
+    }
+}
+
+/// Look up a username for a given user ID. Returns `"unknown"` if the lookup
+/// fails — same fallback spirit as [`resolve_folder_path`].
+pub async fn username_of(db: &Database, user_id: ObjectId) -> String {
+    match db
+        .collection::<User>("users")
+        .find_one(doc! { "_id": user_id })
+        .await
+    {
+        Ok(Some(u)) => u.username,
+        _ => "unknown".to_string(),
     }
 }
 

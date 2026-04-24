@@ -20,8 +20,15 @@ pub fn SettingsPage(tab: String) -> Element {
     let search_enabled = use_context::<Signal<bool>>();
     let is_admin = auth_state().is_admin();
 
+    // Activity's table has five columns — give it more horizontal room than
+    // the narrow form-oriented sections.
+    let wrapper_class = match tab.as_str() {
+        "activity" => "space-y-6 max-w-6xl",
+        _ => "space-y-6 max-w-2xl",
+    };
+
     rsx! {
-        div { class: "space-y-6 max-w-2xl",
+        div { class: "{wrapper_class}",
             match tab.as_str() {
                 "account" => rsx! {
                     h1 { class: "text-2xl font-bold", "Account" }

@@ -293,13 +293,26 @@ pub async fn restore_from_trash(
 
         state.events.emit_file_restored(user.id, item_id).await;
 
+        // Fetch the restored folder so the path reflects the (possibly
+        // renamed) final state.
+        let restored_folder = folders_coll
+            .find_one(doc! { "_id": item_id })
+            .await?
+            .unwrap_or_else(|| folder.clone());
+        let path = super::audit::resolve_folder_path(
+            &state.db,
+            user.id,
+            &user.username,
+            &restored_folder,
+        )
+        .await;
         state
             .sync_log
             .record(super::audit::folder_event(
                 user.id,
                 uncloud_common::SyncOperation::Restored,
                 folder.id,
-                folder.name.clone(),
+                path,
                 None,
                 None,
                 &meta,
@@ -479,6 +492,11 @@ pub async fn permanently_delete(
         .find_one(doc! { "_id": item_id, "owner_id": user.id, "deleted_at": { "$ne": bson::Bson::Null } })
         .await?
     {
+        // Resolve the path BEFORE the recursive purge so parent chain lookups
+        // still work. After purge the parents may be gone.
+        let path =
+            super::audit::resolve_folder_path(&state.db, user.id, &user.username, &folder).await;
+
         // Permanently delete folder and its contents recursively
         permanently_delete_folder_recursive(&state, user.id, item_id).await?;
 
@@ -488,7 +506,7 @@ pub async fn permanently_delete(
                 user.id,
                 uncloud_common::SyncOperation::PermanentlyDeleted,
                 folder.id,
-                folder.name.clone(),
+                path,
                 None,
                 None,
                 &meta,

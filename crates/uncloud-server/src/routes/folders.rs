@@ -399,13 +399,21 @@ pub async fn create_folder(
 
     state.events.emit_folder_created(effective_owner_id, &folder).await;
 
+    let owner_username = super::audit::username_of(&state.db, effective_owner_id).await;
+    let path = super::audit::resolve_folder_path(
+        &state.db,
+        effective_owner_id,
+        &owner_username,
+        &folder,
+    )
+    .await;
     state
         .sync_log
         .record(super::audit::folder_event(
             effective_owner_id,
             uncloud_common::SyncOperation::Created,
             folder.id,
-            folder.name.clone(),
+            path,
             None,
             None,
             &meta,
@@ -654,14 +662,18 @@ pub async fn update_folder(
         } else {
             uncloud_common::SyncOperation::Renamed
         };
+        let old_path =
+            super::audit::resolve_folder_path(&state.db, owner_id, &owner_username, &folder).await;
+        let new_path =
+            super::audit::resolve_folder_path(&state.db, owner_id, &owner_username, &updated).await;
         state
             .sync_log
             .record(super::audit::folder_event(
                 owner_id,
                 op,
                 updated.id,
-                folder.name.clone(),
-                Some(updated.name.clone()),
+                old_path,
+                Some(new_path),
                 None,
                 &meta,
             ))
@@ -978,14 +990,18 @@ pub async fn copy_folder(
 
     copy_folder_contents(&state, user.id, &user.username, source_id, new_folder.id).await?;
 
+    let src_path =
+        super::audit::resolve_folder_path(&state.db, user.id, &user.username, &source).await;
+    let dst_path =
+        super::audit::resolve_folder_path(&state.db, user.id, &user.username, &new_folder).await;
     state
         .sync_log
         .record(super::audit::folder_event(
             user.id,
             uncloud_common::SyncOperation::Copied,
             new_folder.id,
-            source.name.clone(),
-            Some(new_folder.name.clone()),
+            src_path,
+            Some(dst_path),
             None,
             &meta,
         ))
@@ -1125,13 +1141,16 @@ pub async fn delete_folder(
         .unwrap_or(0);
     let affected = (files_deleted + folders_deleted) as u32;
 
+    let owner_username = super::audit::username_of(&state.db, owner_id).await;
+    let path =
+        super::audit::resolve_folder_path(&state.db, owner_id, &owner_username, &folder).await;
     state
         .sync_log
         .record(super::audit::folder_event(
             owner_id,
             uncloud_common::SyncOperation::Deleted,
             folder.id,
-            folder.name.clone(),
+            path,
             None,
             Some(affected),
             &meta,
