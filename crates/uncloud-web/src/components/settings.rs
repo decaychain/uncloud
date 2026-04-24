@@ -34,6 +34,9 @@ pub fn SettingsPage(tab: String) -> Element {
             match tab.as_str() {
                 "account" => rsx! {
                     h1 { class: "text-2xl font-bold", "Account" }
+                    if is_desktop {
+                        ConnectionSection {}
+                    }
                     ChangePasswordSection {}
                     TotpSection {}
                     S3AccessKeysSection {}
@@ -41,7 +44,6 @@ pub fn SettingsPage(tab: String) -> Element {
                 "sync" if is_desktop => rsx! {
                     h1 { class: "text-2xl font-bold", "Sync" }
                     SyncSection {}
-                    ConnectionSection {}
                 },
                 "preferences" => rsx! {
                     h1 { class: "text-2xl font-bold", "Preferences" }
@@ -708,21 +710,28 @@ fn SyncSection() -> Element {
                             {
                                 let time = format_local_log_time(&row.timestamp);
                                 let op_badge_class = local_log_badge_class(&row.operation);
+                                let op_label = local_log_op_label(&row.operation);
+                                let row_class = local_log_row_class(&row.operation);
                                 // One merged column: summary note wins for
                                 // SyncEnd markers, `path → new_path` for
                                 // renames/moves, otherwise the path itself.
+                                // For SyncStart (no note), leave details empty
+                                // rather than printing the placeholder "run".
+                                let is_start = row.operation == "SyncStart";
                                 let details = if let Some(note) = row.note.clone() {
                                     note
                                 } else if let Some(new_path) = row.new_path.as_deref() {
                                     format!("{} → {}", row.path, new_path)
+                                } else if is_start {
+                                    String::new()
                                 } else {
                                     row.path.clone()
                                 };
                                 rsx! {
-                                    tr { key: "{row.id}",
+                                    tr { key: "{row.id}", class: "{row_class}",
                                         td { class: "text-base-content/60 whitespace-nowrap", "{time}" }
                                         td {
-                                            span { class: "{op_badge_class}", "{row.operation}" }
+                                            span { class: "{op_badge_class}", "{op_label}" }
                                         }
                                         td { class: "truncate max-w-[40rem]", title: "{details}", "{details}" }
                                     }
@@ -2227,7 +2236,10 @@ fn format_local_log_time(rfc: &str) -> String {
 }
 
 /// DaisyUI badge class for a local sync_log operation. The labels match the
-/// names the engine writes in `uncloud-sync::engine::log_*`.
+/// names the engine writes in `uncloud-sync::engine::log_*`, except that
+/// `SyncStart` / `SyncEnd` also get a row-level highlight via
+/// [`local_log_row_class`] so the bracketing markers stand out from the
+/// per-file ops they enclose.
 fn local_log_badge_class(op: &str) -> &'static str {
     match op {
         "Uploaded"            => "badge badge-success badge-sm",
@@ -2235,8 +2247,25 @@ fn local_log_badge_class(op: &str) -> &'static str {
         "Updated on server"   => "badge badge-info badge-sm",
         "Updated from server" => "badge badge-info badge-sm",
         "Deleted"             => "badge badge-error badge-sm",
-        "SyncStart"           => "badge badge-ghost badge-sm",
-        "SyncEnd"             => "badge badge-ghost badge-sm",
+        "SyncStart"           => "badge badge-primary badge-outline badge-sm font-semibold",
+        "SyncEnd"             => "badge badge-primary badge-sm font-semibold",
         _                     => "badge badge-neutral badge-sm",
+    }
+}
+
+fn local_log_op_label(op: &str) -> &str {
+    match op {
+        "SyncStart" => "Sync started",
+        "SyncEnd"   => "Sync completed",
+        other       => other,
+    }
+}
+
+/// Row-level class that gives `SyncStart` / `SyncEnd` a muted background
+/// tint so the log reads as "runs" rather than a flat stream of events.
+fn local_log_row_class(op: &str) -> &'static str {
+    match op {
+        "SyncStart" | "SyncEnd" => "bg-base-200/60 italic",
+        _                       => "",
     }
 }

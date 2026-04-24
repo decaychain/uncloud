@@ -612,6 +612,19 @@ impl SyncEngine {
         // Pass (b) skips folders whose base_path is already a subtree of the
         // root (those are covered by pass (a)).
 
+        // The `journal_map` captured at the top of this function predates
+        // Phase 5's downloads. If we use it here, freshly-downloaded files
+        // would fail the `already_tracked` check and get re-uploaded on the
+        // first sync — showing up as "Updated on server" events on a
+        // subsequent run once timestamps drift. Re-read the journal so this
+        // pass sees the state Phase 5 left behind.
+        let journal_rows = self.journal.all().await?;
+        let journal_map: HashMap<(String, String), crate::journal::SyncStateRow> =
+            journal_rows
+                .into_iter()
+                .map(|r| ((r.server_id.clone(), r.item_type.clone()), r))
+                .collect();
+
         // Build a descending-length index of (base_path, folder_id, strategy).
         let mut bases: Vec<(String, String, SyncStrategy)> = folder_info
             .iter()
