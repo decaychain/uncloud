@@ -3,7 +3,7 @@ use wasm_bindgen::JsCast;
 use uncloud_common::{AlbumResponse, MusicFolderResponse, PlaylistSummary, TaskProjectResponse};
 use crate::hooks::tauri as tauri_hook;
 use crate::components::icons::{
-    IconCheckSquare, IconFolder, IconHistory, IconImage, IconKey, IconLayoutGrid, IconLink, IconListMusic, IconMusic, IconPalette, IconPencil,
+    IconCheckSquare, IconFolder, IconHistory, IconImage, IconKey, IconLayoutGrid, IconLink, IconListMusic, IconMusic, IconPalette,
     IconRefreshCw, IconSettings, IconShield, IconShoppingCart, IconTrash, IconUser, IconUsers,
 };
 use crate::hooks::{use_apps, use_files, use_music, use_playlists, use_tasks};
@@ -699,14 +699,6 @@ fn MusicSidebarPlaylists() -> Element {
     let mut new_name: Signal<String> = use_signal(|| String::new());
     let mut create_error: Signal<Option<String>> = use_signal(|| None);
 
-    // Rename modal state: Some((id, current_name))
-    let mut rename_target: Signal<Option<(String, String)>> = use_signal(|| None);
-    let mut rename_name: Signal<String> = use_signal(|| String::new());
-    let mut rename_error: Signal<Option<String>> = use_signal(|| None);
-
-    // Delete confirm state: Some((id, name))
-    let mut delete_target: Signal<Option<(String, String)>> = use_signal(|| None);
-
     use_effect(move || {
         let _ = refresh();
         spawn(async move {
@@ -722,43 +714,15 @@ fn MusicSidebarPlaylists() -> Element {
             {
                 let pl_id = pl.id.clone();
                 let pl_name = pl.name.clone();
-                let pl_id_rename = pl.id.clone();
-                let pl_name_rename = pl.name.clone();
-                let pl_id_delete = pl.id.clone();
-                let pl_name_delete = pl.name.clone();
                 let is_active = matches!(&route, Route::MusicPlaylist { id } if *id == pl_id);
                 rsx! {
-                    li { class: "group",
+                    li {
                         Link {
                             to: Route::MusicPlaylist { id: pl.id.clone() },
                             class: if is_active { "active" } else { "" },
                             onclick: move |_| close_drawer(),
                             IconListMusic {}
                             span { class: "flex-1 truncate", "{pl_name}" }
-                            // Rename + delete buttons — inside the <a> so they sit on the same line;
-                            // stop_propagation prevents the link from firing on button click.
-                            div { class: "flex gap-0 opacity-0 group-hover:opacity-100 transition-opacity ml-auto shrink-0",
-                                button {
-                                    class: "btn btn-ghost btn-xs btn-circle",
-                                    title: "Rename",
-                                    onclick: move |evt| {
-                                        evt.stop_propagation();
-                                        rename_name.set(pl_name_rename.clone());
-                                        rename_error.set(None);
-                                        rename_target.set(Some((pl_id_rename.clone(), pl_name_rename.clone())));
-                                    },
-                                    IconPencil { class: "w-3 h-3".to_string() }
-                                }
-                                button {
-                                    class: "btn btn-ghost btn-xs btn-circle text-error",
-                                    title: "Delete",
-                                    onclick: move |evt| {
-                                        evt.stop_propagation();
-                                        delete_target.set(Some((pl_id_delete.clone(), pl_name_delete.clone())));
-                                    },
-                                    IconTrash { class: "w-3 h-3".to_string() }
-                                }
-                            }
                         }
                     }
                 }
@@ -828,105 +792,6 @@ fn MusicSidebarPlaylists() -> Element {
             }
         }
 
-        // Rename modal
-        if let Some((ref target_id, _)) = rename_target() {
-            {
-                let tid = target_id.clone();
-                rsx! {
-                    div { class: "modal modal-open",
-                        div { class: "modal-box",
-                            h3 { class: "font-bold text-lg mb-4", "Rename Playlist" }
-                            if let Some(err) = rename_error() {
-                                div { class: "alert alert-error mb-3 text-sm", "{err}" }
-                            }
-                            input {
-                                class: "input input-bordered w-full",
-                                r#type: "text",
-                                placeholder: "Playlist name",
-                                value: "{rename_name}",
-                                oninput: move |e| rename_name.set(e.value()),
-                            }
-                            div { class: "modal-action",
-                                button {
-                                    class: "btn",
-                                    onclick: move |_| rename_target.set(None),
-                                    "Cancel"
-                                }
-                                button {
-                                    class: "btn btn-primary",
-                                    disabled: rename_name().trim().is_empty(),
-                                    onclick: move |_| {
-                                        let name = rename_name().trim().to_string();
-                                        let id = tid.clone();
-                                        spawn(async move {
-                                            match use_playlists::update_playlist(&id, Some(&name), None).await {
-                                                Ok(_) => {
-                                                    rename_target.set(None);
-                                                    let next = *refresh.peek() + 1;
-                                                    refresh.set(next);
-                                                }
-                                                Err(e) => {
-                                                    if e == "CONFLICT" {
-                                                        rename_error.set(Some(format!("A playlist named \"{}\" already exists", name)));
-                                                    } else {
-                                                        rename_error.set(Some(e));
-                                                    }
-                                                }
-                                            }
-                                        });
-                                    },
-                                    "Rename"
-                                }
-                            }
-                        }
-                        div { class: "modal-backdrop", onclick: move |_| rename_target.set(None) }
-                    }
-                }
-            }
-        }
-
-        // Delete confirm modal
-        if let Some((ref del_id, ref del_name)) = delete_target() {
-            {
-                let did = del_id.clone();
-                let dname = del_name.clone();
-                let viewing_deleted = matches!(&route, Route::MusicPlaylist { id } if id == del_id);
-                rsx! {
-                    div { class: "modal modal-open",
-                        div { class: "modal-box",
-                            h3 { class: "font-bold text-lg mb-2", "Delete Playlist" }
-                            p { class: "text-base-content/70",
-                                "Delete \"{dname}\"? This cannot be undone. Tracks are not deleted."
-                            }
-                            div { class: "modal-action",
-                                button {
-                                    class: "btn",
-                                    onclick: move |_| delete_target.set(None),
-                                    "Cancel"
-                                }
-                                button {
-                                    class: "btn btn-error",
-                                    onclick: move |_| {
-                                        let id = did.clone();
-                                        spawn(async move {
-                                            let _ = use_playlists::delete_playlist(&id).await;
-                                            delete_target.set(None);
-                                            let next = *refresh.peek() + 1;
-                                            refresh.set(next);
-                                            if viewing_deleted {
-                                                nav.push(Route::Music {});
-                                            }
-                                        });
-                                    },
-                                    "Delete"
-                                }
-                            }
-                        }
-                        div { class: "modal-backdrop", onclick: move |_| delete_target.set(None) }
-                    }
-                }
-            }
-        }
     }
 }
 

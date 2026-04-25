@@ -17,7 +17,11 @@ pub fn PlaylistSidePanel() -> Element {
     let sse_event = use_context::<Signal<Option<ServerEvent>>>();
     let dirty = use_context::<Signal<PlaylistDirtyTick>>();
 
-    let pid = match pinned().0 {
+    // Read pinned id reactively — we want the effect below to re-run when
+    // the user pins a different playlist. Layout already guards against
+    // rendering the panel when pinned is None, but we still defensively
+    // handle that case here.
+    let panel_pid = match pinned().0 {
         Some(id) => id,
         None => return rsx! {},
     };
@@ -26,13 +30,38 @@ pub fn PlaylistSidePanel() -> Element {
     let mut name: Signal<String> = use_signal(|| String::new());
     let mut loading = use_signal(|| true);
     let mut error: Signal<Option<String>> = use_signal(|| None);
-    // Bumped on relevant SSE events so the panel reloads when tracks are
-    // added elsewhere (e.g. the user added a track from the album view).
-    let mut refresh = use_signal(|| 0u32);
+    // SSE-driven local refresh — bumped when files are created/updated/deleted
+    // so the panel picks up file-level changes that affect its tracks.
+    let mut sse_refresh = use_signal(|| 0u32);
+    use_effect(move || {
+        if let Some(event) = sse_event() {
+            match event {
+                ServerEvent::FileCreated { .. }
+                | ServerEvent::FileUpdated { .. }
+                | ServerEvent::FileDeleted { .. } => {
+                    let next = *sse_refresh.peek() + 1;
+                    sse_refresh.set(next);
+                }
+                _ => {}
+            }
+        }
+    });
 
-    use_effect(use_reactive!(|(pid)| {
-        let _ = refresh();
+    // Single loader — subscribes to: (a) the pinned id, so switching pins
+    // refetches; (b) the global PlaylistDirtyTick, bumped whenever any
+    // playlist mutation happens elsewhere (track add/remove, etc.); and
+    // (c) SSE-driven sse_refresh for file events. A plain `use_effect`
+    // (not `use_reactive!`) auto-subscribes via signal reads — important
+    // because `dirty` mutations only change the inner value, not the Signal
+    // handle, which `use_reactive!` would have failed to detect.
+    use_effect(move || {
+        let cur_pid = pinned().0.clone();
         let _ = dirty().0;
+        let _ = sse_refresh();
+        let pid = match cur_pid {
+            Some(id) => id,
+            None => return,
+        };
         spawn(async move {
             error.set(None);
             match use_playlists::get_playlist(&pid).await {
@@ -42,7 +71,6 @@ pub fn PlaylistSidePanel() -> Element {
                     loading.set(false);
                 }
                 Err(e) => {
-                    // 404 → the pinned playlist was deleted from elsewhere; clear pin.
                     if e == "Playlist not found" {
                         pinned.set(PinnedPlaylistState(None));
                     } else {
@@ -52,22 +80,6 @@ pub fn PlaylistSidePanel() -> Element {
                 }
             }
         });
-    }));
-
-    // Reload when files are created/updated/deleted — picks up adds/removes
-    // made from the album/artist views without polling.
-    use_effect(move || {
-        if let Some(event) = sse_event() {
-            match event {
-                ServerEvent::FileCreated { .. }
-                | ServerEvent::FileUpdated { .. }
-                | ServerEvent::FileDeleted { .. } => {
-                    let next = *refresh.peek() + 1;
-                    refresh.set(next);
-                }
-                _ => {}
-            }
-        }
     });
 
     let current_playing_id = player().current_track().map(|t| t.file.id.clone());
@@ -75,7 +87,6 @@ pub fn PlaylistSidePanel() -> Element {
     let track_list = tracks();
     let track_count = track_list.len();
     let tracks_for_play_all = track_list.clone();
-    let panel_pid = pid.clone();
 
     rsx! {
         div { class: "card bg-base-100 border border-base-300 sticky top-4",
