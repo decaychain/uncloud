@@ -13,7 +13,7 @@ pub mod supervisor;
 use mongodb::Database;
 
 use config::Config;
-use services::{AuthService, EventService, RescanService, SearchService, StorageService};
+use services::{AuthService, EventService, RescanService, SearchService, StorageService, SyncLog};
 
 pub struct AppState {
     pub config: Config,
@@ -24,5 +24,6 @@ pub struct AppState {
     pub processing: processing::ProcessingService,
     pub search: SearchService,
     pub rescan: RescanService,
+    pub sync_log: SyncLog,
     pub http_client: reqwest::Client,
 }

@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
+// (EventService derives Clone; its inner state is already Arc-wrapped.)
+
 use crate::models::{File, Folder, TaskType, UserRole};
 use crate::services::rescan::{RescanConflict, RescanJob, RescanStatus};
 
@@ -43,6 +45,9 @@ pub enum Event {
         skipped_existing: u64,
         conflicts: Vec<RescanConflictData>,
         error: Option<String>,
+    },
+    SyncEventAppended {
+        event: uncloud_common::SyncEventResponse,
     },
 }
 
@@ -104,6 +109,7 @@ struct Channel {
     sender: broadcast::Sender<Event>,
 }
 
+#[derive(Clone)]
 pub struct EventService {
     // Per-user broadcast channels, tagged with the subscriber's role so we can
     // fan out admin-scoped events without a DB lookup per emit.

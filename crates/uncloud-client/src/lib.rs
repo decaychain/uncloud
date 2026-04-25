@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use reqwest::cookie::Jar;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::json;
 use tracing::instrument;
 use uncloud_common::{
@@ -11,6 +12,26 @@ use uncloud_common::{
 
 mod error;
 pub use error::{ClientError, Result};
+
+/// Caller identity advertised on every request via `X-Uncloud-*` headers so the
+/// server's audit log can attribute writes. The desktop/mobile apps pass one
+/// of these at construction time; the web UI doesn't use this crate at all.
+#[derive(Clone, Debug, Default)]
+pub struct ClientIdentity {
+    pub source: Option<String>,
+    pub client_id: Option<String>,
+    pub os: Option<String>,
+}
+
+impl ClientIdentity {
+    pub fn sync(client_id: impl Into<String>, os: impl Into<String>) -> Self {
+        Self {
+            source: Some("sync".to_owned()),
+            client_id: Some(client_id.into()),
+            os: Some(os.into()),
+        }
+    }
+}
 
 /// Native async HTTP client for the Uncloud server API.
 ///
@@ -23,11 +44,34 @@ pub struct Client {
 
 impl Client {
     pub fn new(base_url: &str) -> Self {
+        Self::with_identity(base_url, ClientIdentity::default())
+    }
+
+    pub fn with_identity(base_url: &str, identity: ClientIdentity) -> Self {
         let jar = Arc::new(Jar::default());
-        let http = reqwest::Client::builder()
-            .cookie_provider(jar)
-            .build()
-            .expect("failed to build reqwest client");
+        let mut builder = reqwest::Client::builder().cookie_provider(jar);
+
+        let mut headers = HeaderMap::new();
+        if let Some(src) = identity.source.as_deref() {
+            if let Ok(v) = HeaderValue::from_str(src) {
+                headers.insert(HeaderName::from_static("x-uncloud-source"), v);
+            }
+        }
+        if let Some(id) = identity.client_id.as_deref() {
+            if let Ok(v) = HeaderValue::from_str(id) {
+                headers.insert(HeaderName::from_static("x-uncloud-client"), v);
+            }
+        }
+        if let Some(os) = identity.os.as_deref() {
+            if let Ok(v) = HeaderValue::from_str(os) {
+                headers.insert(HeaderName::from_static("x-uncloud-os"), v);
+            }
+        }
+        if !headers.is_empty() {
+            builder = builder.default_headers(headers);
+        }
+
+        let http = builder.build().expect("failed to build reqwest client");
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             http,

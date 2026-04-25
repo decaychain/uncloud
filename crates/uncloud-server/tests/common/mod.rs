@@ -125,6 +125,7 @@ impl TestApp {
             apps: AppsConfig::default(),
             features: FeaturesConfig::default(),
             logging: uncloud_server::config::LoggingConfig::default(),
+            sync_audit: uncloud_server::config::SyncAuditConfig::default(),
         };
 
         customize(&mut config);
@@ -148,6 +149,7 @@ impl TestApp {
 
         let db_handle = database.clone();
 
+        let sync_log = uncloud_server::services::SyncLog::new(&database, events.clone(), config.sync_audit.enabled);
         let state = Arc::new(AppState {
             config,
             db: database,
@@ -157,6 +159,7 @@ impl TestApp {
             processing,
             search,
             rescan: RescanService::new(),
+            sync_log,
             http_client: reqwest::Client::new(),
         });
 
@@ -334,6 +337,7 @@ impl BoundTestApp {
             apps: AppsConfig::default(),
             features: FeaturesConfig::default(),
             logging: uncloud_server::config::LoggingConfig::default(),
+            sync_audit: uncloud_server::config::SyncAuditConfig::default(),
         };
 
         let database = db::connect(&config.database)
@@ -353,6 +357,7 @@ impl BoundTestApp {
             .expect("search service");
         let processing = ProcessingService::new(1, 3);
 
+        let sync_log = uncloud_server::services::SyncLog::new(&database, events.clone(), config.sync_audit.enabled);
         let state = Arc::new(AppState {
             config,
             db: database,
@@ -362,6 +367,7 @@ impl BoundTestApp {
             processing,
             search,
             rescan: RescanService::new(),
+            sync_log,
             http_client: reqwest::Client::new(),
         });
 

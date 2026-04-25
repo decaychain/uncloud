@@ -18,3 +18,8 @@ async-trait.workspace = true
 
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono", "migrate"] }
 walkdir = "2"
+
+[dev-dependencies]
+axum = { version = "0.8", features = ["multipart"] }
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use chrono::{NaiveDate, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -9,7 +9,7 @@ use uncloud_client::Client;
 use uncloud_common::SyncStrategy;
 
 use crate::fs::{LocalFs, NativeFs};
-use crate::journal::Journal;
+use crate::journal::{Journal, SyncLogRow};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -46,7 +46,25 @@ struct ResolvedFolder {
     base_path: Option<String>,
 }
 
-// ── Engine ────────────────────────────────────────────────────────────────────
+// ── Hooks ─────────────────────────────────────────────────────────────────────
+
+/// Why a sync run is happening — drives the `reason` field of the bracketing
+/// `SyncStart` / `SyncEnd` meta rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncTrigger {
+    Auto,
+    Manual,
+}
+
+pub type LogAppendedHook = Arc<dyn Fn(&SyncLogRow) + Send + Sync>;
+
+/// Callbacks fired by the engine so embedding apps (Tauri desktop, future
+/// mobile daemon) can push state to their UI without polling. Stored via
+/// interior mutability so hooks can be wired after construction.
+#[derive(Default, Clone)]
+pub struct SyncEngineHooks {
+    pub on_log_appended: Option<LogAppendedHook>,
+}
 
 pub struct SyncEngine {
     journal: Journal,
@@ -55,6 +73,28 @@ pub struct SyncEngine {
     /// Client-wide root path. `None` on mobile where there is no global sync
     /// root — each picked folder carries its own `local_path` instead.
     root_local_path: Option<String>,
+    hooks: RwLock<SyncEngineHooks>,
+    /// Per-run state that lets us defer the `SyncStart` audit row until we
+    /// actually have something to log. Empty runs therefore leave the audit
+    /// log untouched.
+    run_state: RwLock<Option<RunState>>,
+    /// Serializes `run_sync_inner` so concurrent callers (poll loop tick
+    /// firing while a manual sync is mid-flight, mobile resume racing
+    /// against a poll, etc.) queue up rather than racing on the journal,
+    /// the local filesystem, and `touched_paths`. Block-until-done — the
+    /// second caller waits, it is not silently dropped.
+    sync_lock: tokio::sync::Mutex<()>,
+}
+
+#[derive(Debug, Clone)]
+struct RunState {
+    /// Reason tag to use for the `SyncStart` marker — `"Sync"` for auto,
+    /// `"ManualSyncStart"` when the user triggered the run. The matching
+    /// `SyncEnd` reason is derived separately from [`SyncTrigger`] at the
+    /// bottom of `run_sync_inner`.
+    start_reason: String,
+    /// Set to true the first time a real op row is logged in this run.
+    emitted_start: bool,
 }
 
 impl SyncEngine {
@@ -91,7 +131,171 @@ impl SyncEngine {
             client,
             fs,
             root_local_path,
+            hooks: RwLock::new(SyncEngineHooks::default()),
+            run_state: RwLock::new(None),
+            sync_lock: tokio::sync::Mutex::new(()),
         })
+    }
+
+    /// Wire (or replace) the callbacks fired by the engine. The desktop/mobile
+    /// apps point `on_log_appended` at a closure that emits a Tauri event so
+    /// the UI sees new audit rows without polling.
+    pub fn set_hooks(&self, hooks: SyncEngineHooks) {
+        if let Ok(mut guard) = self.hooks.write() {
+            *guard = hooks;
+        }
+    }
+
+    fn fire_log_append(&self, row: &SyncLogRow) {
+        let hook = self
+            .hooks
+            .read()
+            .ok()
+            .and_then(|h| h.on_log_appended.clone());
+        if let Some(cb) = hook {
+            (cb)(row);
+        }
+    }
+
+    /// Insert an audit row, fire the `on_log_appended` hook with the assigned
+    /// id. Errors are warn-logged — a sync_log failure must never break the
+    /// surrounding sync operation.
+    async fn log_row(&self, mut row: SyncLogRow) {
+        match self.journal.insert_sync_log(&row).await {
+            Ok(id) => {
+                row.id = id;
+                self.fire_log_append(&row);
+            }
+            Err(e) => warn!("sync_log insert failed: {}", e),
+        }
+    }
+
+    /// Return the most recent `limit` rows from the local audit log, newest
+    /// first. Used by the desktop `get_local_sync_log` Tauri command.
+    pub async fn recent_sync_log(&self, limit: i64) -> sqlx::Result<Vec<SyncLogRow>> {
+        self.journal.recent_sync_log(limit).await
+    }
+
+    /// Drop rows older than `retention_days` and cap the table at `max_rows`.
+    /// Called once at the end of every successful sync.
+    pub async fn prune_sync_log(
+        &self,
+        retention_days: i64,
+        max_rows: i64,
+    ) -> sqlx::Result<u64> {
+        let cutoff = (Utc::now() - chrono::Duration::days(retention_days)).to_rfc3339();
+        self.journal.prune_sync_log(&cutoff, max_rows).await
+    }
+
+    // ── Per-op instrumentation helpers ────────────────────────────────────
+    //
+    // Each helper writes a row to the local audit log and fires the
+    // on_log_appended hook. They also emit the deferred `SyncStart` marker
+    // on first call so empty runs leave the log untouched. They are
+    // sprinkled next to the existing `report.X.push(...)` calls in
+    // `incremental_sync`.
+
+    /// Strip `root_local_path` from an absolute local path so the log shows
+    /// `photos/vacation/cat.jpg` rather than the full OS path. Falls back to
+    /// the raw path on mobile (where there is no global root) or when the
+    /// path lives outside the configured root.
+    fn relative_display_path(&self, local_path: &str) -> String {
+        if let Some(root) = &self.root_local_path {
+            if let Some(rest) = local_path.strip_prefix(root.as_str()) {
+                let rest = rest.trim_start_matches(['/', '\\']);
+                if !rest.is_empty() {
+                    return rest.to_owned();
+                }
+            }
+        }
+        local_path.to_owned()
+    }
+
+    /// Insert the deferred `SyncStart` marker if a run is active and it
+    /// hasn't been emitted yet. Cheap to call repeatedly — noop once the
+    /// flag is set.
+    async fn ensure_start_emitted(&self) {
+        let reason = {
+            let mut guard = self.run_state.write().unwrap();
+            match guard.as_mut() {
+                Some(state) if !state.emitted_start => {
+                    state.emitted_start = true;
+                    state.start_reason.clone()
+                }
+                _ => return,
+            }
+        };
+        self.log_sync_marker("SyncStart", &reason, None).await;
+    }
+
+    async fn log_download(&self, local_path: &str, is_update: bool) {
+        self.ensure_start_emitted().await;
+        let op = if is_update { "Updated from server" } else { "Downloaded" };
+        self.log_row(SyncLogRow {
+            id: 0,
+            timestamp: Utc::now().to_rfc3339(),
+            operation: op.to_owned(),
+            direction: Some("Down".to_owned()),
+            resource_type: Some("File".to_owned()),
+            path: self.relative_display_path(local_path),
+            new_path: None,
+            reason: "Sync".to_owned(),
+            note: None,
+        })
+        .await;
+    }
+
+    async fn log_upload(&self, local_path: &str, is_update: bool) {
+        self.ensure_start_emitted().await;
+        let op = if is_update { "Updated on server" } else { "Uploaded" };
+        self.log_row(SyncLogRow {
+            id: 0,
+            timestamp: Utc::now().to_rfc3339(),
+            operation: op.to_owned(),
+            direction: Some("Up".to_owned()),
+            resource_type: Some("File".to_owned()),
+            path: self.relative_display_path(local_path),
+            new_path: None,
+            reason: "Sync".to_owned(),
+            note: None,
+        })
+        .await;
+    }
+
+    async fn log_delete_local(&self, local_path: &str) {
+        self.ensure_start_emitted().await;
+        self.log_row(SyncLogRow {
+            id: 0,
+            timestamp: Utc::now().to_rfc3339(),
+            operation: "Deleted".to_owned(),
+            direction: Some("Down".to_owned()),
+            resource_type: Some("File".to_owned()),
+            path: self.relative_display_path(local_path),
+            new_path: None,
+            reason: "Sync".to_owned(),
+            note: None,
+        })
+        .await;
+    }
+
+    async fn log_sync_marker(
+        &self,
+        operation: &str,
+        reason: &str,
+        note: Option<String>,
+    ) {
+        self.log_row(SyncLogRow {
+            id: 0,
+            timestamp: Utc::now().to_rfc3339(),
+            operation: operation.to_owned(),
+            direction: None,
+            resource_type: None,
+            path: "run".to_owned(),
+            new_path: None,
+            reason: reason.to_owned(),
+            note,
+        })
+        .await;
     }
 
     /// Full sync: rebuild journal from server tree + local walk, apply all diffs.
@@ -100,10 +304,54 @@ impl SyncEngine {
         self.incremental_sync().await
     }
 
-    /// Incremental sync: re-fetch server tree, compare with journal and local mtimes.
+    /// Incremental sync triggered automatically (poll timer, tray "Sync Now"
+    /// ends up here too for now — see `run_sync_manual` if we want to
+    /// distinguish). Brackets the run with `SyncStart` / `SyncEnd` meta rows
+    /// in the local audit log.
     pub async fn incremental_sync(&self) -> Result<SyncReport, Box<dyn std::error::Error>> {
+        self.run_sync_inner(SyncTrigger::Auto).await
+    }
+
+    /// Variant used by the tray's "Sync Now" entry — tags the bracketing
+    /// meta rows with `ManualSyncStart` / `ManualSyncEnd` so the activity
+    /// view reads as a human-initiated run.
+    pub async fn run_sync_manual(&self) -> Result<SyncReport, Box<dyn std::error::Error>> {
+        self.run_sync_inner(SyncTrigger::Manual).await
+    }
+
+    async fn run_sync_inner(
+        &self,
+        trigger: SyncTrigger,
+    ) -> Result<SyncReport, Box<dyn std::error::Error>> {
+        // Single-flight: any concurrent caller (poll loop tick + tray "Sync
+        // Now", auto-login + mobile resume, etc.) queues here rather than
+        // racing against another run on the journal, the local filesystem,
+        // and `touched_paths`. Block-until-done — second caller waits and
+        // gets its own SyncReport.
+        let _guard = self.sync_lock.lock().await;
         info!("Starting incremental sync");
+        let (start_reason, end_reason) = match trigger {
+            SyncTrigger::Auto => ("Sync", "Sync"),
+            SyncTrigger::Manual => ("ManualSyncStart", "ManualSyncEnd"),
+        };
+        // Arm the deferred `SyncStart` — it only lands in the log if a real
+        // op fires below. Empty no-op runs produce zero rows.
+        *self.run_state.write().unwrap() = Some(RunState {
+            start_reason: start_reason.to_owned(),
+            emitted_start: false,
+        });
+        let started = std::time::Instant::now();
         let mut report = SyncReport::default();
+        // Set of local paths Phase 5 / Phase 6 has already acted on this
+        // run — written by a download, pushed by an upload, removed by a
+        // server-deletion echo. Phase 7 short-circuits any of these so a
+        // file we just touched cannot loop back through the "new local
+        // file" path. This is independent of the journal: if some future
+        // bug lets the journal upsert lag or store a path string that
+        // doesn't byte-equal what walkdir produces, this set still keeps
+        // us honest.
+        let mut touched_paths: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         // 1. Fetch server tree
         let tree = self.client.sync_tree(None).await?;
@@ -122,6 +370,8 @@ impl SyncEngine {
             .into_iter()
             .map(|r| ((r.server_id.clone(), r.item_type.clone()), r))
             .collect();
+        for (key, j) in &journal_map {
+        }
 
         let today = Utc::now().date_naive();
 
@@ -185,6 +435,20 @@ impl SyncEngine {
             let local_path_str = self.fs.join(&parent_base, server_rel_path);
             let local_path = &local_path_str;
 
+            // Defensive guard against server-side duplicate-name corruption:
+            // if `tree.files` contains two distinct server documents that
+            // resolve to the same `local_path` (a violation of the unique
+            // `(owner_id, parent_id, name)` invariant the server is supposed
+            // to enforce), every iteration after the first sees a freshly-
+            // written file with a `mtime` newer than its own stale journal
+            // row, trips `local_newer`, and uploads. We pick a winner —
+            // whichever iteration touches the path first — and silently
+            // skip the rest. The journal row for the duplicate stays stale
+            // until the server cleans up its data.
+            if touched_paths.contains(&local_path_str) {
+                continue;
+            }
+
             // If the journal thinks this file is synced but it no longer exists
             // at the resolved local path, treat it as new. This catches root-path
             // changes (stale journal rows pointing at an old root) and accidental
@@ -193,6 +457,7 @@ impl SyncEngine {
             let journal_entry = journal_map
                 .get(&key)
                 .filter(|_| local_exists);
+
 
             match journal_entry {
                 None => {
@@ -211,7 +476,9 @@ impl SyncEngine {
                                     Some(file.size_bytes), None,
                                     &file.updated_at, mtime, "synced",
                                 ).await;
+                                touched_paths.insert(local_path_str.clone());
                                 report.downloaded.push(server_rel_path.clone());
+                                self.log_download(local_path, false).await;
                             }
                             Err(e) => report.errors.push(SyncError {
                                 path: server_rel_path.clone(),
@@ -246,7 +513,9 @@ impl SyncEngine {
                                         Some(updated.size_bytes), None,
                                         &updated.updated_at, new_mtime, "synced",
                                     ).await;
+                                    touched_paths.insert(local_path_str.clone());
                                     report.uploaded.push(server_rel_path.clone());
+                                    self.log_upload(local_path, true).await;
                                 }
                                 Err(e) => report.errors.push(SyncError {
                                     path: server_rel_path.clone(),
@@ -260,6 +529,10 @@ impl SyncEngine {
                                 Ok(cur) => {
                                     if let Err(e) = self.fs.write(&conflict_path, &cur).await {
                                         warn!("Could not create conflict copy: {}", e);
+                                    } else {
+                                        // Don't let Phase 7 immediately push
+                                        // the conflict copy back up.
+                                        touched_paths.insert(conflict_path.clone());
                                     }
                                 }
                                 Err(e) => warn!("Could not read local for conflict copy: {}", e),
@@ -273,6 +546,8 @@ impl SyncEngine {
                                         Some(file.size_bytes), None,
                                         &file.updated_at, new_mtime, "synced",
                                     ).await;
+                                    touched_paths.insert(local_path_str.clone());
+                                    self.log_download(local_path, true).await;
                                     report.conflicts.push(SyncConflict {
                                         server_path: server_rel_path.clone(),
                                         local_path: local_path_str.clone(),
@@ -301,7 +576,9 @@ impl SyncEngine {
                                         Some(file.size_bytes), None,
                                         &file.updated_at, new_mtime, "synced",
                                     ).await;
+                                    touched_paths.insert(local_path_str.clone());
                                     report.downloaded.push(server_rel_path.clone());
+                                    self.log_download(local_path, true).await;
                                 }
                                 Err(e) => report.errors.push(SyncError {
                                     path: server_rel_path.clone(),
@@ -329,7 +606,9 @@ impl SyncEngine {
                                         Some(updated.size_bytes), None,
                                         &updated.updated_at, new_mtime, "synced",
                                     ).await;
+                                    touched_paths.insert(local_path_str.clone());
                                     report.uploaded.push(server_rel_path.clone());
+                                    self.log_upload(local_path, true).await;
                                 }
                                 Err(e) => report.errors.push(SyncError {
                                     path: server_rel_path.clone(),
@@ -356,7 +635,11 @@ impl SyncEngine {
                 let strategy = SyncStrategy::TwoWay; // default; ideally look up parent folder
                 if matches!(strategy, SyncStrategy::TwoWay | SyncStrategy::ServerToClient) {
                     match self.fs.remove_file(&j.local_path).await {
-                        Ok(()) => report.deleted_local.push(j.server_path.clone()),
+                        Ok(()) => {
+                            touched_paths.insert(j.local_path.clone());
+                            report.deleted_local.push(j.server_path.clone());
+                            self.log_delete_local(&j.local_path).await;
+                        }
                         Err(e) => report.errors.push(SyncError {
                             path: j.server_path.clone(),
                             reason: e.to_string(),
@@ -379,6 +662,22 @@ impl SyncEngine {
         // Pass (b) skips folders whose base_path is already a subtree of the
         // root (those are covered by pass (a)).
 
+        // The `journal_map` captured at the top of this function predates
+        // Phase 5's downloads. If we use it here, freshly-downloaded files
+        // would fail the `already_tracked` check and get re-uploaded on the
+        // first sync. Re-read the journal so this pass sees the state Phase
+        // 5 left behind. (Independently, `touched_paths` below catches the
+        // same files even if the journal upsert somehow lagged or stored a
+        // string that doesn't match what walkdir produces — a defence in
+        // depth so a future bug in path resolution can't cause a download
+        // to bounce straight back to the server.)
+        let journal_rows = self.journal.all().await?;
+        let journal_map: HashMap<(String, String), crate::journal::SyncStateRow> =
+            journal_rows
+                .into_iter()
+                .map(|r| ((r.server_id.clone(), r.item_type.clone()), r))
+                .collect();
+
         // Build a descending-length index of (base_path, folder_id, strategy).
         let mut bases: Vec<(String, String, SyncStrategy)> = folder_info
             .iter()
@@ -397,6 +696,11 @@ impl SyncEngine {
             for entry in local_entries {
                 let full_path = self.fs.join(root, &entry.rel_path);
                 if !self.fs.is_file(&full_path).await.unwrap_or(false) {
+                    continue;
+                }
+                // We just touched this path in Phase 5/6 — never push it
+                // back up in the same run, regardless of journal state.
+                if touched_paths.contains(&full_path) {
                     continue;
                 }
                 let already_tracked = journal_map
@@ -504,6 +808,9 @@ impl SyncEngine {
                 if !self.fs.is_file(&full_path).await.unwrap_or(false) {
                     continue;
                 }
+                if touched_paths.contains(&full_path) {
+                    continue;
+                }
                 let already_tracked = journal_map
                     .values()
                     .any(|j| j.item_type == "file" && j.local_path == full_path);
@@ -524,14 +831,38 @@ impl SyncEngine {
 
         self.journal.set_config("last_full_sync_at", &Utc::now().to_rfc3339()).await?;
 
-        info!(
-            "Sync complete: {} uploaded, {} downloaded, {} deleted, {} conflicts, {} errors",
+        let elapsed = started.elapsed();
+        let note = format!(
+            "{} up, {} down, {} deleted, {} conflicts, {} errors, {:.1}s",
             report.uploaded.len(),
             report.downloaded.len(),
             report.deleted_local.len(),
             report.conflicts.len(),
             report.errors.len(),
+            elapsed.as_secs_f32(),
         );
+        info!("Sync complete: {}", note);
+        if !report.errors.is_empty() {
+        }
+
+        // Only emit `SyncEnd` when we already emitted `SyncStart` — i.e. when
+        // at least one real op landed. Empty runs leave the log untouched.
+        let end_state = {
+            let mut guard = self.run_state.write().unwrap();
+            guard.take()
+        };
+        if matches!(end_state, Some(s) if s.emitted_start) {
+            self.log_sync_marker("SyncEnd", end_reason, Some(note))
+                .await;
+        }
+
+        // Cap retention so the log doesn't grow without bound. Defaults match
+        // the server (7 days / 10k rows) and are fine without a config knob
+        // yet — if either matters we'll lift them into the desktop config.
+        if let Err(e) = self.prune_sync_log(7, 10_000).await {
+            warn!("sync_log prune failed: {}", e);
+        }
+
         Ok(report)
     }
 
@@ -586,12 +917,15 @@ impl SyncEngine {
                             "synced",
                         )
                         .await;
+                    self.log_upload(full_path, false).await;
                     report.uploaded.push(file_name);
                 }
-                Err(e) => report.errors.push(SyncError {
-                    path: rel_path.to_owned(),
-                    reason: e.to_string(),
-                }),
+                Err(e) => {
+                    report.errors.push(SyncError {
+                        path: rel_path.to_owned(),
+                        reason: e.to_string(),
+                    })
+                }
             },
             Err(e) => report.errors.push(SyncError {
                 path: rel_path.to_owned(),

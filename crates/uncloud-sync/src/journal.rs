@@ -42,6 +42,43 @@ pub struct SyncStateRow {
     pub sync_status: String,
 }
 
+/// A row from the `sync_log` table. Mirrors the schema in
+/// `migrations/003_sync_log.sql`.
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize, serde::Deserialize)]
+pub struct SyncLogRow {
+    pub id: i64,
+    pub timestamp: String,
+    pub operation: String,
+    pub direction: Option<String>,
+    pub resource_type: Option<String>,
+    pub path: String,
+    pub new_path: Option<String>,
+    pub reason: String,
+    pub note: Option<String>,
+}
+
+impl SyncLogRow {
+    /// Build a row with `id=0`; the journal assigns the real id on insert.
+    pub fn new(
+        timestamp: impl Into<String>,
+        operation: impl Into<String>,
+        reason: impl Into<String>,
+        path: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: 0,
+            timestamp: timestamp.into(),
+            operation: operation.into(),
+            direction: None,
+            resource_type: None,
+            path: path.into(),
+            new_path: None,
+            reason: reason.into(),
+            note: None,
+        }
+    }
+}
+
 pub struct Journal {
     pool: SqlitePool,
 }
@@ -247,5 +284,84 @@ impl Journal {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    // ── sync_log ──────────────────────────────────────────────────────────
+
+    /// Insert an audit row. Never bubbles up — callers warn-log on error so
+    /// a log failure cannot break a real sync operation.
+    pub async fn insert_sync_log(&self, row: &SyncLogRow) -> sqlx::Result<i64> {
+        let res = sqlx::query(
+            r#"
+            INSERT INTO sync_log
+                (timestamp, operation, direction, resource_type, path, new_path, reason, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&row.timestamp)
+        .bind(&row.operation)
+        .bind(row.direction.as_deref())
+        .bind(row.resource_type.as_deref())
+        .bind(&row.path)
+        .bind(row.new_path.as_deref())
+        .bind(&row.reason)
+        .bind(row.note.as_deref())
+        .execute(&self.pool)
+        .await?;
+        Ok(res.last_insert_rowid())
+    }
+
+    /// Most recent `limit` rows, newest first.
+    pub async fn recent_sync_log(&self, limit: i64) -> sqlx::Result<Vec<SyncLogRow>> {
+        let rows = sqlx::query_as::<_, SyncLogRow>(
+            r#"
+            SELECT id, timestamp, operation, direction, resource_type, path,
+                   new_path, reason, note
+            FROM sync_log
+            ORDER BY id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Delete rows older than `cutoff_iso` (ISO-8601 string comparison works
+    /// because timestamps are always in UTC `…Z` form). Also caps the table
+    /// at `max_rows` by deleting the oldest excess rows.
+    pub async fn prune_sync_log(
+        &self,
+        cutoff_iso: &str,
+        max_rows: i64,
+    ) -> sqlx::Result<u64> {
+        let mut total = 0u64;
+        let time_deleted = sqlx::query("DELETE FROM sync_log WHERE timestamp < ?")
+            .bind(cutoff_iso)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        total += time_deleted;
+
+        if max_rows > 0 {
+            let excess_deleted = sqlx::query(
+                r#"
+                DELETE FROM sync_log
+                WHERE id IN (
+                    SELECT id FROM sync_log
+                    ORDER BY id DESC
+                    LIMIT -1 OFFSET ?
+                )
+                "#,
+            )
+            .bind(max_rows)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            total += excess_deleted;
+        }
+
+        Ok(total)
     }
 }

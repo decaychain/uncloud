@@ -47,6 +47,21 @@ enum Command {
         #[arg(long)]
         email: Option<String>,
     },
+    /// Find and clean duplicate live file documents.
+    ///
+    /// Pre-2026-04-25 the unique index on `(owner_id, parent_id, name)`
+    /// was missing for live files, so any sync-engine bug that retried an
+    /// upload could leak a second File document with the same logical
+    /// path. Run this once against the affected DB to merge duplicates
+    /// into a single survivor (newest `updated_at`) and re-point the
+    /// duplicates' `file_versions` rows at it. Then start the server —
+    /// `setup_indexes` will install the partial unique index that
+    /// prevents new duplicates from showing up.
+    DedupeFiles {
+        /// Print the plan without executing it.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────
@@ -62,6 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             password,
             email,
         }) => bootstrap_admin(username, password, email).await,
+        Some(Command::DedupeFiles { dry_run }) => dedupe_files(dry_run).await,
     }
 }
 
@@ -131,6 +147,157 @@ async fn bootstrap_admin(
     Ok(())
 }
 
+
+// ── dedupe-files ────────────────────────────────────────────────────────────
+
+async fn dedupe_files(dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use mongodb::bson::oid::ObjectId;
+    use serde::Deserialize;
+
+    let config = Config::load_or_default();
+    // Connect WITHOUT setup_indexes — the partial unique index would fail
+    // to create against a populated collection that still has duplicates.
+    let db = db::connect(&config.database).await?;
+
+    let files = db.collection::<File>("files");
+    let versions = db.collection::<FileVersion>("file_versions");
+
+    // Group every live file by (owner_id, parent_id, name).
+    #[derive(Debug, Deserialize)]
+    struct Group {
+        #[serde(rename = "_id")]
+        key: GroupKey,
+        ids: Vec<ObjectId>,
+        updated_at: Vec<bson::DateTime>,
+        names: Vec<String>,
+        count: i64,
+    }
+    #[derive(Debug, Deserialize)]
+    struct GroupKey {
+        owner_id: ObjectId,
+        parent_id: Option<ObjectId>,
+        name: String,
+    }
+
+    let pipeline = vec![
+        doc! { "$match": { "deleted_at": bson::Bson::Null } },
+        doc! { "$group": {
+            "_id": { "owner_id": "$owner_id", "parent_id": "$parent_id", "name": "$name" },
+            "count": { "$sum": 1 },
+            "ids": { "$push": "$_id" },
+            "updated_at": { "$push": "$updated_at" },
+            "names": { "$push": "$name" },
+        }},
+        doc! { "$match": { "count": { "$gt": 1 } } },
+        doc! { "$sort": { "count": -1 } },
+    ];
+
+    let mut cursor = files.aggregate(pipeline).await?;
+    let mut groups: Vec<Group> = Vec::new();
+    use futures::TryStreamExt;
+    while let Some(doc) = cursor.try_next().await? {
+        groups.push(bson::from_document(doc)?);
+    }
+
+    if groups.is_empty() {
+        println!("No duplicate live files found — nothing to do.");
+        return Ok(());
+    }
+
+    println!("Found {} duplicate group(s):", groups.len());
+    let mut total_excess = 0u64;
+    let mut total_versions_repointed = 0u64;
+    let mut total_files_deleted = 0u64;
+
+    for g in &groups {
+        // Survivor: index of the row with the latest `updated_at`. The
+        // engine's journal most likely already references this one
+        // (it's the row whose `updated_at` was most recently bumped by
+        // a successful upload).
+        let mut survivor_idx = 0usize;
+        for i in 1..g.ids.len() {
+            if g.updated_at[i] > g.updated_at[survivor_idx] {
+                survivor_idx = i;
+            }
+        }
+        let survivor_id = g.ids[survivor_idx];
+        let losers: Vec<ObjectId> = g
+            .ids
+            .iter()
+            .enumerate()
+            .filter_map(|(i, id)| if i == survivor_idx { None } else { Some(*id) })
+            .collect();
+
+        // Count file_versions belonging to the losers — we'll re-point
+        // them at the survivor.
+        let losers_filter = doc! { "file_id": { "$in": losers.iter().copied().collect::<Vec<_>>() } };
+        let version_count = versions.count_documents(losers_filter.clone()).await?;
+
+        let parent_label = g
+            .key
+            .parent_id
+            .map(|p| p.to_hex())
+            .unwrap_or_else(|| "<root>".to_string());
+        println!(
+            "  {} (parent={}, count={}): keep {}, drop {} — {} version(s) to re-point",
+            g.key.name,
+            parent_label,
+            g.count,
+            survivor_id,
+            losers.iter().map(|id| id.to_hex()).collect::<Vec<_>>().join(","),
+            version_count,
+        );
+
+        if !dry_run {
+            // Re-point file_versions of the losers to the survivor so the
+            // version chain stays intact.
+            if version_count > 0 {
+                versions
+                    .update_many(
+                        losers_filter,
+                        doc! { "$set": { "file_id": survivor_id } },
+                    )
+                    .await?;
+            }
+            // Hard-delete the loser File documents. Their on-disk bytes
+            // live at the same `storage_path` as the survivor so the
+            // file is unaffected.
+            files
+                .delete_many(
+                    doc! { "_id": { "$in": losers.iter().copied().collect::<Vec<_>>() } },
+                )
+                .await?;
+        }
+
+        total_excess += losers.len() as u64;
+        total_versions_repointed += version_count;
+        total_files_deleted += losers.len() as u64;
+    }
+
+    println!();
+    if dry_run {
+        println!(
+            "Dry run — would remove {} duplicate row(s) across {} group(s) \
+             and re-point {} version(s).",
+            total_excess,
+            groups.len(),
+            total_versions_repointed,
+        );
+        println!("Re-run without --dry-run to apply.");
+    } else {
+        println!(
+            "Done. Removed {} duplicate row(s) across {} group(s); \
+             re-pointed {} version(s).",
+            total_files_deleted,
+            groups.len(),
+            total_versions_repointed,
+        );
+        println!("Now restart the server — setup_indexes will install the partial unique index.");
+    }
+
+    Ok(())
+}
+
 // ── Server ──────────────────────────────────────────────────────────────────
 
 async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
@@ -152,11 +319,13 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     // Connect to database
     let db = db::connect(&config.database).await?;
     db::setup_indexes(&db).await?;
+    db::setup_sync_audit_indexes(&db, &config.sync_audit).await?;
 
     // Initialize services
     let auth = AuthService::new(&db, config.auth.clone());
     let storage = StorageService::new(&db, &config.storage).await?;
     let events = EventService::new();
+    let sync_log = uncloud_server::services::SyncLog::new(&db, events.clone(), config.sync_audit.enabled);
     let processing = processing::ProcessingService::new(
         config.processing.max_concurrency,
         config.processing.max_attempts,
@@ -194,6 +363,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         processing,
         search,
         rescan: RescanService::new(),
+        sync_log,
         http_client: reqwest::Client::new(),
     });
 

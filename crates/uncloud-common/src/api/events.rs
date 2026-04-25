@@ -1,3 +1,4 @@
+use super::sync_events::SyncEventResponse;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +38,7 @@ pub enum ServerEvent {
         conflicts: Vec<RescanConflictEventData>,
         error: Option<String>,
     },
+    SyncEventAppended { event: SyncEventResponse },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

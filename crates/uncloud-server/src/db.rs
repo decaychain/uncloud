@@ -1,5 +1,5 @@
 use mongodb::{Client, Database, IndexModel, options::IndexOptions};
-use crate::config::DatabaseConfig;
+use crate::config::{DatabaseConfig, SyncAuditConfig};
 use crate::error::{AppError, Result};
 
 pub async fn connect(config: &DatabaseConfig) -> Result<Database> {
@@ -95,6 +95,27 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         .create_index(
             IndexModel::builder()
                 .keys(mongodb::bson::doc! { "storage_id": 1, "storage_path": 1 })
+                .build(),
+        )
+        .await?;
+    // Live-file uniqueness — the on-disk layout (`{username}/{chain}/{name}`)
+    // assumes one document per logical path. A *partial* index restricts
+    // uniqueness to live (non-soft-deleted) rows so trash entries don't
+    // block re-using a name. If creation fails, the most likely cause is
+    // residual duplicates from before this constraint existed — run
+    // `uncloud-server dedupe-files` once before re-starting.
+    files
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "parent_id": 1, "name": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(
+                            mongodb::bson::doc! { "deleted_at": mongodb::bson::Bson::Null },
+                        )
+                        .build(),
+                )
                 .build(),
         )
         .await?;
@@ -456,5 +477,56 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         .await?;
 
     tracing::info!("Database indexes created successfully");
+    Ok(())
+}
+
+/// Creates / refreshes the `sync_events` collection indexes. The TTL expiry
+/// must match `SyncAuditConfig::retention_days`, so this is split out from
+/// `setup_indexes` and called separately after the config is loaded.
+pub async fn setup_sync_audit_indexes(db: &Database, cfg: &SyncAuditConfig) -> Result<()> {
+    let sync_events = db.collection::<mongodb::bson::Document>("sync_events");
+
+    sync_events
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "timestamp": -1 })
+                .build(),
+        )
+        .await?;
+    sync_events
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "path": 1 })
+                .build(),
+        )
+        .await?;
+    sync_events
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "client_id": 1, "timestamp": -1 })
+                .build(),
+        )
+        .await?;
+
+    // TTL index. The retention may change at runtime via config — MongoDB
+    // rejects create_index on an existing TTL with different expireAfterSeconds,
+    // so drop-and-recreate if needed.
+    let ttl_seconds = (cfg.retention_days as u64) * 86_400;
+    let ttl_index_name = "timestamp_ttl";
+    let _ = sync_events.drop_index(ttl_index_name).await;
+    sync_events
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "timestamp": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name(ttl_index_name.to_string())
+                        .expire_after(std::time::Duration::from_secs(ttl_seconds))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     Ok(())
 }

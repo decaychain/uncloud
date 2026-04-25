@@ -2,7 +2,9 @@ use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 
 use crate::components::dashboard::{all_tile_ids, default_tile_ids, tile_label};
-use crate::hooks::tauri::{self, SyncPhase, SyncState};
+use crate::hooks::tauri::{
+    self, SyncLogRow, SyncPhase, SyncState, TauriListener,
+};
 use uncloud_common::{CreateInviteRequest, UpdatePreferencesRequest, UserRole, UserStatus};
 use crate::hooks::use_auth;
 use crate::hooks::use_preferences;
@@ -20,18 +22,28 @@ pub fn SettingsPage(tab: String) -> Element {
     let search_enabled = use_context::<Signal<bool>>();
     let is_admin = auth_state().is_admin();
 
+    // Activity's table + the Sync panel's local-log table both benefit from
+    // more horizontal room than the narrow form-oriented sections.
+    let wrapper_class = match tab.as_str() {
+        "activity" | "sync" => "space-y-6 max-w-6xl",
+        _ => "space-y-6 max-w-2xl",
+    };
+
     rsx! {
-        div { class: "space-y-6 max-w-2xl",
+        div { class: "{wrapper_class}",
             match tab.as_str() {
                 "account" => rsx! {
                     h1 { class: "text-2xl font-bold", "Account" }
                     if is_desktop {
-                        SyncSection {}
                         ConnectionSection {}
                     }
                     ChangePasswordSection {}
                     TotpSection {}
                     S3AccessKeysSection {}
+                },
+                "sync" if is_desktop => rsx! {
+                    h1 { class: "text-2xl font-bold", "Sync" }
+                    SyncSection {}
                 },
                 "preferences" => rsx! {
                     h1 { class: "text-2xl font-bold", "Preferences" }
@@ -39,6 +51,10 @@ pub fn SettingsPage(tab: String) -> Element {
                     DashboardTilesSection {}
                     OptionalFeaturesSection {}
                     MusicSection {}
+                },
+                "activity" => rsx! {
+                    h1 { class: "text-2xl font-bold", "Activity" }
+                    crate::components::activity::ActivitySection {}
                 },
                 "users" if is_admin => rsx! {
                     h1 { class: "text-2xl font-bold", "Users" }
@@ -546,19 +562,48 @@ fn S3AccessKeysSection() -> Element {
 #[component]
 fn SyncSection() -> Element {
     let mut state = use_signal(|| None::<SyncState>);
+    let mut log_rows = use_signal(Vec::<SyncLogRow>::new);
     let mut sync_loading = use_signal(|| false);
     let mut sync_msg = use_signal(|| None::<(bool, String)>); // (ok, message)
 
-    // Poll status every 2s while the component is mounted so the UI stays live
-    // whether sync was triggered manually, by the background loop, or by the
-    // app resuming on mobile.
-    use_future(move || async move {
-        loop {
+    // Listener handles — kept alive for the lifetime of the component so that
+    // the underlying JS closures + Tauri subscriptions aren't dropped.
+    let mut stats_listener = use_signal(|| None::<TauriListener>);
+    let mut log_listener = use_signal(|| None::<TauriListener>);
+
+    // Mount-only effect: fetch current state and the log tail, then subscribe
+    // to the two push channels. No signals are read inside the body so this
+    // does not re-run.
+    use_effect(move || {
+        spawn(async move {
             if let Ok(s) = tauri::get_status().await {
                 state.set(Some(s));
             }
-            gloo_timers::future::TimeoutFuture::new(2000).await;
-        }
+            if let Ok(rows) = tauri::get_local_sync_log(200).await {
+                log_rows.set(rows);
+            }
+
+            if let Some(l) = tauri::listen_sync_stats(move |s| {
+                state.set(Some(s));
+            })
+            .await
+            {
+                stats_listener.set(Some(l));
+            }
+
+            if let Some(l) = tauri::listen_sync_log_appended(move |row| {
+                let mut rows = log_rows();
+                rows.insert(0, row);
+                if rows.len() > 500 {
+                    rows.truncate(500);
+                }
+                log_rows.set(rows);
+            })
+            .await
+            {
+                log_listener.set(Some(l));
+            }
+        });
     });
 
     let on_sync_now = move |_| {
@@ -568,9 +613,6 @@ fn SyncSection() -> Element {
             match tauri::sync_now().await {
                 Ok(()) => {
                     sync_msg.set(Some((true, "Sync complete.".to_string())));
-                    if let Ok(s) = tauri::get_status().await {
-                        state.set(Some(s));
-                    }
                 }
                 Err(e) => sync_msg.set(Some((false, e))),
             }
@@ -581,6 +623,11 @@ fn SyncSection() -> Element {
     let current = state();
     let phase_ref = current.as_ref().map(|s| &s.phase);
     let stats_ref = current.as_ref().map(|s| &s.stats);
+    // Engine-level state — true whenever any sync is in flight, including
+    // ones triggered by the poll loop, the tray, or another window. The
+    // "Sync Now" button respects this so the user can't queue a redundant
+    // run that would just block on the engine mutex.
+    let is_syncing = matches!(phase_ref, Some(SyncPhase::Syncing));
 
     let status_badge = match phase_ref {
         Some(SyncPhase::Idle) => rsx! {
@@ -645,6 +692,63 @@ fn SyncSection() -> Element {
         }
     });
 
+    let rows = log_rows();
+    let log_panel = if rows.is_empty() {
+        rsx! {
+            div { class: "text-xs text-base-content/50 italic text-center py-6",
+                "No sync activity yet."
+            }
+        }
+    } else {
+        rsx! {
+            div { class: "max-h-96 overflow-y-auto border border-base-300 rounded-lg",
+                table { class: "table table-xs",
+                    thead { class: "sticky top-0 bg-base-200 z-10",
+                        tr {
+                            th { "Time" }
+                            th { "Event" }
+                            th { "Details" }
+                        }
+                    }
+                    tbody {
+                        for row in rows.iter() {
+                            {
+                                let time = format_local_log_time(&row.timestamp);
+                                let op_badge_class = local_log_badge_class(&row.operation);
+                                let op_label = local_log_op_label(&row.operation);
+                                let row_class = local_log_row_class(&row.operation);
+                                // One merged column: summary note wins for
+                                // SyncEnd markers, `path → new_path` for
+                                // renames/moves, otherwise the path itself.
+                                // For SyncStart (no note), leave details empty
+                                // rather than printing the placeholder "run".
+                                let is_start = row.operation == "SyncStart";
+                                let details = if let Some(note) = row.note.clone() {
+                                    note
+                                } else if let Some(new_path) = row.new_path.as_deref() {
+                                    format!("{} → {}", row.path, new_path)
+                                } else if is_start {
+                                    String::new()
+                                } else {
+                                    row.path.clone()
+                                };
+                                rsx! {
+                                    tr { key: "{row.id}", class: "{row_class}",
+                                        td { class: "text-base-content/60 whitespace-nowrap", "{time}" }
+                                        td {
+                                            span { class: "{op_badge_class}", "{op_label}" }
+                                        }
+                                        td { class: "truncate max-w-[40rem]", title: "{details}", "{details}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
     rsx! {
         div { class: "card bg-base-100 shadow",
             div { class: "card-body gap-4",
@@ -654,9 +758,14 @@ fn SyncSection() -> Element {
                     div { {status_badge} }
                     button {
                         class: "btn btn-primary btn-sm",
-                        disabled: sync_loading(),
+                        // Block while EITHER our own click is in flight OR
+                        // another sync (poll loop, tray, mobile resume) is
+                        // running. The engine-level mutex would queue us
+                        // anyway; this just makes the wait visible.
+                        disabled: sync_loading() || is_syncing,
+                        title: if is_syncing { "A sync is already in progress." } else { "" },
                         onclick: on_sync_now,
-                        if sync_loading() {
+                        if sync_loading() || is_syncing {
                             span { class: "loading loading-spinner loading-xs" }
                             "Syncing…"
                         } else {
@@ -676,8 +785,11 @@ fn SyncSection() -> Element {
                     {panel}
                 }
 
+                div { class: "divider text-xs text-base-content/50 my-0", "This device — local activity" }
+                {log_panel}
+
                 p { class: "text-xs text-base-content/50",
-                    "Sync runs automatically every 60 seconds in the background."
+                    "Sync runs automatically every 60 seconds in the background. Status and log update live over Tauri events — no polling."
                 }
             }
         }
@@ -2120,5 +2232,50 @@ fn format_last_sync(rfc: &str) -> String {
         format!("{}h ago", secs / 3_600)
     } else {
         format!("{}d ago", secs / 86_400)
+    }
+}
+
+/// Format an ISO-8601 timestamp from the local `sync_log` as `HH:MM:SS` in the
+/// browser's local timezone. Falls back to the raw string if parsing fails.
+fn format_local_log_time(rfc: &str) -> String {
+    use chrono::{DateTime, Local};
+    match DateTime::parse_from_rfc3339(rfc) {
+        Ok(t) => t.with_timezone(&Local).format("%H:%M:%S").to_string(),
+        Err(_) => rfc.to_string(),
+    }
+}
+
+/// DaisyUI badge class for a local sync_log operation. The labels match the
+/// names the engine writes in `uncloud-sync::engine::log_*`, except that
+/// `SyncStart` / `SyncEnd` also get a row-level highlight via
+/// [`local_log_row_class`] so the bracketing markers stand out from the
+/// per-file ops they enclose.
+fn local_log_badge_class(op: &str) -> &'static str {
+    match op {
+        "Uploaded"            => "badge badge-success badge-sm",
+        "Downloaded"          => "badge badge-success badge-sm",
+        "Updated on server"   => "badge badge-info badge-sm",
+        "Updated from server" => "badge badge-info badge-sm",
+        "Deleted"             => "badge badge-error badge-sm",
+        "SyncStart"           => "badge badge-primary badge-outline badge-sm font-semibold",
+        "SyncEnd"             => "badge badge-primary badge-sm font-semibold",
+        _                     => "badge badge-neutral badge-sm",
+    }
+}
+
+fn local_log_op_label(op: &str) -> &str {
+    match op {
+        "SyncStart" => "Sync started",
+        "SyncEnd"   => "Sync completed",
+        other       => other,
+    }
+}
+
+/// Row-level class that gives `SyncStart` / `SyncEnd` a muted background
+/// tint so the log reads as "runs" rather than a flat stream of events.
+fn local_log_row_class(op: &str) -> &'static str {
+    match op {
+        "SyncStart" | "SyncEnd" => "bg-base-200/60 italic",
+        _                       => "",
     }
 }

@@ -102,6 +102,7 @@ pub async fn download_version(
 pub async fn restore_version(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    meta: crate::middleware::RequestMeta,
     Path((file_id_str, version_id_str)): Path<(String, String)>,
 ) -> Result<StatusCode> {
     let file_id = ObjectId::parse_str(&file_id_str)
@@ -171,6 +172,18 @@ pub async fn restore_version(
     }
 
     state.events.emit_file_updated(user.id, &file).await;
+
+    state
+        .sync_log
+        .record(super::audit::file_event(
+            user.id,
+            uncloud_common::SyncOperation::ContentReplaced,
+            file.id,
+            file.storage_path.clone(),
+            None,
+            &meta,
+        ))
+        .await;
 
     Ok(StatusCode::OK)
 }

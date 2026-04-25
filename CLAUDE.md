@@ -222,6 +222,10 @@ This keeps the feedback loop tight locally and avoids long CI queues on every co
 # Backend
 cargo run -p uncloud-server
 
+# Server CLI subcommands (each maps to a one-off task; default is `serve`):
+cargo run -p uncloud-server -- bootstrap-admin --username alice
+cargo run -p uncloud-server -- dedupe-files --dry-run    # see Storage Design → Constraint
+
 # Frontend (Tailwind is rebuilt automatically by build.rs on cargo build,
 # but for watch mode during active UI work run both):
 cd crates/uncloud-web
@@ -305,7 +309,21 @@ Currently only `LocalStorage` (filesystem) is implemented.
 
 ### Constraint
 
-A unique index on `(owner_id, parent_id, name)` where `deleted_at IS NULL` enforces that no two live files share the same path. This is required for the on-disk layout to be unambiguous.
+`(owner_id, parent_id, name)` is the logical identity for a live file — the on-disk layout `{username}/{chain}/{name}` would be ambiguous otherwise. Two layers enforce it:
+
+1. **Handler-level pre-flight check.** `simple_upload`, `complete_upload`, and `copy_file` all call `check_name_conflict` (in `routes/files.rs`) before writing storage / inserting the row, returning **409 Conflict** on collision. The check filters by `deleted_at: null`, so a soft-deleted (trashed) file does not block reusing its name.
+2. **MongoDB partial unique index.** `db::setup_indexes` installs a unique index on `files (owner_id, parent_id, name)` with a partial filter `{ deleted_at: null }`. Defence in depth — even if a future handler skips the explicit check, the DB rejects the insert.
+
+If the unique index ever fails to create at server startup against an existing dataset, the most likely cause is residual duplicates from before this constraint existed. Run the one-off cleanup tool first:
+
+```bash
+uncloud-server dedupe-files --dry-run   # preview
+uncloud-server dedupe-files             # apply
+```
+
+It groups live files by `(owner_id, parent_id, name)`, picks the document with the latest `updated_at` as survivor, re-points all `file_versions` of the losers at the survivor, and hard-deletes the losers. Their on-disk bytes live at the same `storage_path` so no filesystem cleanup is needed.
+
+Coverage: `crates/uncloud-server/tests/files.rs` exercises both handler paths (`simple_upload_rejects_duplicate_name`, `complete_upload_rejects_duplicate_name`) plus the partial-filter behaviour (`upload_after_trash_succeeds_partial_filter`).
 
 ### Consistency note
 

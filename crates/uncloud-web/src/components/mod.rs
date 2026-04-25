@@ -26,3 +26,4 @@ pub mod folder_share_dialog;
 pub mod right_drawer;
 pub mod file_properties;
 pub mod tasks;
+pub mod activity;

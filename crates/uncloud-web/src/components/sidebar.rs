@@ -1,9 +1,10 @@
 use dioxus::prelude::*;
 use wasm_bindgen::JsCast;
 use uncloud_common::{AlbumResponse, MusicFolderResponse, PlaylistSummary, TaskProjectResponse};
+use crate::hooks::tauri as tauri_hook;
 use crate::components::icons::{
-    IconCheckSquare, IconFolder, IconImage, IconKey, IconLayoutGrid, IconLink, IconListMusic, IconMusic, IconPalette, IconPencil,
-    IconSettings, IconShield, IconShoppingCart, IconTrash, IconUser, IconUsers,
+    IconCheckSquare, IconFolder, IconHistory, IconImage, IconKey, IconLayoutGrid, IconLink, IconListMusic, IconMusic, IconPalette, IconPencil,
+    IconRefreshCw, IconSettings, IconShield, IconShoppingCart, IconTrash, IconUser, IconUsers,
 };
 use crate::hooks::{use_apps, use_files, use_music, use_playlists, use_tasks};
 use crate::hooks::use_apps::AppEntry;
@@ -228,6 +229,17 @@ pub fn Sidebar() -> Element {
                                         span { "Account" }
                                     }
                                 }
+                                if tauri_hook::is_tauri() {
+                                    li {
+                                        Link {
+                                            to: Route::SettingsTab { tab: "sync".to_string() },
+                                            class: if active_tab == "sync" { "active" } else { "" },
+                                            onclick: move |_| close_drawer(),
+                                            IconRefreshCw {}
+                                            span { "Sync" }
+                                        }
+                                    }
+                                }
                                 li {
                                     Link {
                                         to: Route::SettingsTab { tab: "preferences".to_string() },
@@ -235,6 +247,15 @@ pub fn Sidebar() -> Element {
                                         onclick: move |_| close_drawer(),
                                         IconPalette {}
                                         span { "Preferences" }
+                                    }
+                                }
+                                li {
+                                    Link {
+                                        to: Route::SettingsTab { tab: "activity".to_string() },
+                                        class: if active_tab == "activity" { "active" } else { "" },
+                                        onclick: move |_| close_drawer(),
+                                        IconHistory {}
+                                        span { "Activity" }
                                     }
                                 }
                                 if is_admin {
