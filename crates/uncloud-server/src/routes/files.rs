@@ -890,6 +890,17 @@ pub async fn simple_upload(
         }
     }
 
+    // Reject duplicate names up-front. The partial unique index on `files`
+    // (owner_id, parent_id, name) where `deleted_at: null` is the
+    // authoritative guard, but checking here lets us return a clean 409
+    // and skip the storage write — no torn files on disk for a request
+    // that was never going to land in the DB anyway.
+    if check_name_conflict(&state.db, effective_owner_id, parent_id, &filename, None, None).await? {
+        return Err(AppError::Conflict(
+            "A file with this name already exists at this location".to_string(),
+        ));
+    }
+
     // Get or create default storage (auto-provisions on first upload)
     let storage = state.storage.get_or_create_default(effective_owner_id).await?;
     let backend = state.storage.get_backend(storage.id).await?;
@@ -1133,6 +1144,25 @@ pub async fn complete_upload(
     } else {
         (user.id, user.username.clone())
     };
+
+    // Reject duplicate names. The partial unique index on `files` is the
+    // authoritative guard; this is the same convenience pre-flight check
+    // that simple_upload + copy_file do so the client gets a clean 409
+    // instead of a generic 500 from a duplicate-key error.
+    if check_name_conflict(
+        &state.db,
+        effective_owner_id,
+        upload.parent_id,
+        &upload.filename,
+        None,
+        None,
+    )
+    .await?
+    {
+        return Err(AppError::Conflict(
+            "A file with this name already exists at this location".to_string(),
+        ));
+    }
 
     let backend = state.storage.get_backend(upload.storage_id).await?;
 

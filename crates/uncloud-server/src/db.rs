@@ -98,6 +98,27 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
                 .build(),
         )
         .await?;
+    // Live-file uniqueness — the on-disk layout (`{username}/{chain}/{name}`)
+    // assumes one document per logical path. A *partial* index restricts
+    // uniqueness to live (non-soft-deleted) rows so trash entries don't
+    // block re-using a name. If creation fails, the most likely cause is
+    // residual duplicates from before this constraint existed — run
+    // `uncloud-server dedupe-files` once before re-starting.
+    files
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "parent_id": 1, "name": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(
+                            mongodb::bson::doc! { "deleted_at": mongodb::bson::Bson::Null },
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     // Folders indexes
     let folders = db.collection::<mongodb::bson::Document>("folders");
