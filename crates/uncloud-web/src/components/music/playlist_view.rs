@@ -4,7 +4,7 @@ use wasm_bindgen::JsCast;
 use crate::components::icons::{IconAlertTriangle, IconGripVertical, IconMoreVertical, IconMusic, IconPause, IconPencil, IconPin, IconPinOff, IconPlay, IconTrash, IconX};
 use crate::hooks::{use_playlists, use_player};
 use crate::router::Route;
-use crate::state::{PinnedPlaylistState, PlayerState};
+use crate::state::{PinnedPlaylistState, PlayerState, PlaylistDirtyTick};
 
 /// Milliseconds the user must hold a touch on a row before it enters drag
 /// mode. Matches Android's typical long-press threshold.
@@ -45,6 +45,7 @@ fn haptic_blip() {
 pub fn PlaylistView(playlist_id: String) -> Element {
     let mut player = use_context::<Signal<PlayerState>>();
     let mut pinned = use_context::<Signal<PinnedPlaylistState>>();
+    let mut playlist_dirty = use_context::<Signal<PlaylistDirtyTick>>();
     let nav = use_navigator();
     let is_pinned = pinned().0.as_deref() == Some(playlist_id.as_str());
     let pid_for_pin = playlist_id.clone();
@@ -509,6 +510,8 @@ pub fn PlaylistView(playlist_id: String) -> Element {
                         playlist_name.set(new_name);
                         playlist_desc.set(new_desc);
                         rename_open.set(false);
+                        let next = playlist_dirty.peek().0.wrapping_add(1);
+                        playlist_dirty.set(PlaylistDirtyTick(next));
                     },
                 }
             }
@@ -523,6 +526,8 @@ pub fn PlaylistView(playlist_id: String) -> Element {
                         if is_pinned {
                             pinned.set(PinnedPlaylistState(None));
                         }
+                        let next = playlist_dirty.peek().0.wrapping_add(1);
+                        playlist_dirty.set(PlaylistDirtyTick(next));
                         let _ = nav.replace(Route::Music {});
                     },
                 }

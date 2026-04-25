@@ -9,7 +9,7 @@ use crate::components::icons::{
 use crate::hooks::{use_apps, use_files, use_music, use_playlists, use_tasks};
 use crate::hooks::use_apps::AppEntry;
 use crate::router::Route;
-use crate::state::AuthState;
+use crate::state::{AuthState, PlaylistDirtyTick};
 
 const LOGO: Asset = asset!("/assets/favicon-32.png");
 
@@ -691,6 +691,7 @@ fn MusicSidebarFolders() -> Element {
 fn MusicSidebarPlaylists() -> Element {
     let mut playlists: Signal<Vec<PlaylistSummary>> = use_signal(Vec::new);
     let mut refresh = use_signal(|| 0u32);
+    let dirty = use_context::<Signal<PlaylistDirtyTick>>();
     let route = use_route::<Route>();
     let nav = use_navigator();
 
@@ -701,6 +702,7 @@ fn MusicSidebarPlaylists() -> Element {
 
     use_effect(move || {
         let _ = refresh();
+        let _ = dirty().0;
         spawn(async move {
             if let Ok(p) = use_playlists::list_playlists().await {
                 playlists.set(p);
