@@ -623,6 +623,11 @@ fn SyncSection() -> Element {
     let current = state();
     let phase_ref = current.as_ref().map(|s| &s.phase);
     let stats_ref = current.as_ref().map(|s| &s.stats);
+    // Engine-level state — true whenever any sync is in flight, including
+    // ones triggered by the poll loop, the tray, or another window. The
+    // "Sync Now" button respects this so the user can't queue a redundant
+    // run that would just block on the engine mutex.
+    let is_syncing = matches!(phase_ref, Some(SyncPhase::Syncing));
 
     let status_badge = match phase_ref {
         Some(SyncPhase::Idle) => rsx! {
@@ -753,9 +758,14 @@ fn SyncSection() -> Element {
                     div { {status_badge} }
                     button {
                         class: "btn btn-primary btn-sm",
-                        disabled: sync_loading(),
+                        // Block while EITHER our own click is in flight OR
+                        // another sync (poll loop, tray, mobile resume) is
+                        // running. The engine-level mutex would queue us
+                        // anyway; this just makes the wait visible.
+                        disabled: sync_loading() || is_syncing,
+                        title: if is_syncing { "A sync is already in progress." } else { "" },
                         onclick: on_sync_now,
-                        if sync_loading() {
+                        if sync_loading() || is_syncing {
                             span { class: "loading loading-spinner loading-xs" }
                             "Syncing…"
                         } else {

@@ -78,6 +78,12 @@ pub struct SyncEngine {
     /// actually have something to log. Empty runs therefore leave the audit
     /// log untouched.
     run_state: RwLock<Option<RunState>>,
+    /// Serializes `run_sync_inner` so concurrent callers (poll loop tick
+    /// firing while a manual sync is mid-flight, mobile resume racing
+    /// against a poll, etc.) queue up rather than racing on the journal,
+    /// the local filesystem, and `touched_paths`. Block-until-done — the
+    /// second caller waits, it is not silently dropped.
+    sync_lock: tokio::sync::Mutex<()>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +133,7 @@ impl SyncEngine {
             root_local_path,
             hooks: RwLock::new(SyncEngineHooks::default()),
             run_state: RwLock::new(None),
+            sync_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -316,6 +323,12 @@ impl SyncEngine {
         &self,
         trigger: SyncTrigger,
     ) -> Result<SyncReport, Box<dyn std::error::Error>> {
+        // Single-flight: any concurrent caller (poll loop tick + tray "Sync
+        // Now", auto-login + mobile resume, etc.) queues here rather than
+        // racing against another run on the journal, the local filesystem,
+        // and `touched_paths`. Block-until-done — second caller waits and
+        // gets its own SyncReport.
+        let _guard = self.sync_lock.lock().await;
         info!("Starting incremental sync");
         let (start_reason, end_reason) = match trigger {
             SyncTrigger::Auto => ("Sync", "Sync"),
@@ -329,6 +342,16 @@ impl SyncEngine {
         });
         let started = std::time::Instant::now();
         let mut report = SyncReport::default();
+        // Set of local paths Phase 5 / Phase 6 has already acted on this
+        // run — written by a download, pushed by an upload, removed by a
+        // server-deletion echo. Phase 7 short-circuits any of these so a
+        // file we just touched cannot loop back through the "new local
+        // file" path. This is independent of the journal: if some future
+        // bug lets the journal upsert lag or store a path string that
+        // doesn't byte-equal what walkdir produces, this set still keeps
+        // us honest.
+        let mut touched_paths: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         // 1. Fetch server tree
         let tree = self.client.sync_tree(None).await?;
@@ -347,6 +370,8 @@ impl SyncEngine {
             .into_iter()
             .map(|r| ((r.server_id.clone(), r.item_type.clone()), r))
             .collect();
+        for (key, j) in &journal_map {
+        }
 
         let today = Utc::now().date_naive();
 
@@ -410,6 +435,20 @@ impl SyncEngine {
             let local_path_str = self.fs.join(&parent_base, server_rel_path);
             let local_path = &local_path_str;
 
+            // Defensive guard against server-side duplicate-name corruption:
+            // if `tree.files` contains two distinct server documents that
+            // resolve to the same `local_path` (a violation of the unique
+            // `(owner_id, parent_id, name)` invariant the server is supposed
+            // to enforce), every iteration after the first sees a freshly-
+            // written file with a `mtime` newer than its own stale journal
+            // row, trips `local_newer`, and uploads. We pick a winner —
+            // whichever iteration touches the path first — and silently
+            // skip the rest. The journal row for the duplicate stays stale
+            // until the server cleans up its data.
+            if touched_paths.contains(&local_path_str) {
+                continue;
+            }
+
             // If the journal thinks this file is synced but it no longer exists
             // at the resolved local path, treat it as new. This catches root-path
             // changes (stale journal rows pointing at an old root) and accidental
@@ -418,6 +457,7 @@ impl SyncEngine {
             let journal_entry = journal_map
                 .get(&key)
                 .filter(|_| local_exists);
+
 
             match journal_entry {
                 None => {
@@ -436,6 +476,7 @@ impl SyncEngine {
                                     Some(file.size_bytes), None,
                                     &file.updated_at, mtime, "synced",
                                 ).await;
+                                touched_paths.insert(local_path_str.clone());
                                 report.downloaded.push(server_rel_path.clone());
                                 self.log_download(local_path, false).await;
                             }
@@ -472,6 +513,7 @@ impl SyncEngine {
                                         Some(updated.size_bytes), None,
                                         &updated.updated_at, new_mtime, "synced",
                                     ).await;
+                                    touched_paths.insert(local_path_str.clone());
                                     report.uploaded.push(server_rel_path.clone());
                                     self.log_upload(local_path, true).await;
                                 }
@@ -487,6 +529,10 @@ impl SyncEngine {
                                 Ok(cur) => {
                                     if let Err(e) = self.fs.write(&conflict_path, &cur).await {
                                         warn!("Could not create conflict copy: {}", e);
+                                    } else {
+                                        // Don't let Phase 7 immediately push
+                                        // the conflict copy back up.
+                                        touched_paths.insert(conflict_path.clone());
                                     }
                                 }
                                 Err(e) => warn!("Could not read local for conflict copy: {}", e),
@@ -500,6 +546,7 @@ impl SyncEngine {
                                         Some(file.size_bytes), None,
                                         &file.updated_at, new_mtime, "synced",
                                     ).await;
+                                    touched_paths.insert(local_path_str.clone());
                                     self.log_download(local_path, true).await;
                                     report.conflicts.push(SyncConflict {
                                         server_path: server_rel_path.clone(),
@@ -529,6 +576,7 @@ impl SyncEngine {
                                         Some(file.size_bytes), None,
                                         &file.updated_at, new_mtime, "synced",
                                     ).await;
+                                    touched_paths.insert(local_path_str.clone());
                                     report.downloaded.push(server_rel_path.clone());
                                     self.log_download(local_path, true).await;
                                 }
@@ -558,6 +606,7 @@ impl SyncEngine {
                                         Some(updated.size_bytes), None,
                                         &updated.updated_at, new_mtime, "synced",
                                     ).await;
+                                    touched_paths.insert(local_path_str.clone());
                                     report.uploaded.push(server_rel_path.clone());
                                     self.log_upload(local_path, true).await;
                                 }
@@ -587,6 +636,7 @@ impl SyncEngine {
                 if matches!(strategy, SyncStrategy::TwoWay | SyncStrategy::ServerToClient) {
                     match self.fs.remove_file(&j.local_path).await {
                         Ok(()) => {
+                            touched_paths.insert(j.local_path.clone());
                             report.deleted_local.push(j.server_path.clone());
                             self.log_delete_local(&j.local_path).await;
                         }
@@ -615,9 +665,12 @@ impl SyncEngine {
         // The `journal_map` captured at the top of this function predates
         // Phase 5's downloads. If we use it here, freshly-downloaded files
         // would fail the `already_tracked` check and get re-uploaded on the
-        // first sync — showing up as "Updated on server" events on a
-        // subsequent run once timestamps drift. Re-read the journal so this
-        // pass sees the state Phase 5 left behind.
+        // first sync. Re-read the journal so this pass sees the state Phase
+        // 5 left behind. (Independently, `touched_paths` below catches the
+        // same files even if the journal upsert somehow lagged or stored a
+        // string that doesn't match what walkdir produces — a defence in
+        // depth so a future bug in path resolution can't cause a download
+        // to bounce straight back to the server.)
         let journal_rows = self.journal.all().await?;
         let journal_map: HashMap<(String, String), crate::journal::SyncStateRow> =
             journal_rows
@@ -643,6 +696,11 @@ impl SyncEngine {
             for entry in local_entries {
                 let full_path = self.fs.join(root, &entry.rel_path);
                 if !self.fs.is_file(&full_path).await.unwrap_or(false) {
+                    continue;
+                }
+                // We just touched this path in Phase 5/6 — never push it
+                // back up in the same run, regardless of journal state.
+                if touched_paths.contains(&full_path) {
                     continue;
                 }
                 let already_tracked = journal_map
@@ -750,6 +808,9 @@ impl SyncEngine {
                 if !self.fs.is_file(&full_path).await.unwrap_or(false) {
                     continue;
                 }
+                if touched_paths.contains(&full_path) {
+                    continue;
+                }
                 let already_tracked = journal_map
                     .values()
                     .any(|j| j.item_type == "file" && j.local_path == full_path);
@@ -781,6 +842,8 @@ impl SyncEngine {
             elapsed.as_secs_f32(),
         );
         info!("Sync complete: {}", note);
+        if !report.errors.is_empty() {
+        }
 
         // Only emit `SyncEnd` when we already emitted `SyncStart` — i.e. when
         // at least one real op landed. Empty runs leave the log untouched.
@@ -857,10 +920,12 @@ impl SyncEngine {
                     self.log_upload(full_path, false).await;
                     report.uploaded.push(file_name);
                 }
-                Err(e) => report.errors.push(SyncError {
-                    path: rel_path.to_owned(),
-                    reason: e.to_string(),
-                }),
+                Err(e) => {
+                    report.errors.push(SyncError {
+                        path: rel_path.to_owned(),
+                        reason: e.to_string(),
+                    })
+                }
             },
             Err(e) => report.errors.push(SyncError {
                 path: rel_path.to_owned(),
