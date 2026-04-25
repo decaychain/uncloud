@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use crate::hooks::{use_auth, use_search, use_storages};
 use crate::router::Route;
-use crate::state::{AuthState, FontScale, HighlightTarget, PlayerState, RescanState, ThemeState, VaultOpenTarget, ViewMode};
+use crate::state::{AuthState, FontScale, HighlightTarget, PinnedPlaylistState, PlayerState, PlaylistDirtyTick, RescanState, ThemeState, VaultOpenTarget, ViewMode};
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
 const FAVICON: Asset = asset!("/assets/favicon.ico");
@@ -71,6 +71,20 @@ pub fn App() -> Element {
     use_context_provider(|| Signal::new(HighlightTarget::default()));
     use_context_provider(|| Signal::new(VaultOpenTarget::default()));
     let mut rescan_state = use_context_provider(|| Signal::new(RescanState::default()));
+
+    let pinned_initial: Option<String> = LocalStorage::get::<String>("uncloud_pinned_playlist").ok();
+    let pinned_state = use_context_provider(|| Signal::new(PinnedPlaylistState(pinned_initial)));
+    use_effect(move || {
+        match pinned_state().0 {
+            Some(id) => {
+                let _ = LocalStorage::set("uncloud_pinned_playlist", id);
+            }
+            None => {
+                LocalStorage::delete("uncloud_pinned_playlist");
+            }
+        }
+    });
+    use_context_provider(|| Signal::new(PlaylistDirtyTick::default()));
 
     // Hydrate the live rescan panel when the logged-in user is an admin.
     // A rescan may already be running (restarted session, different browser,

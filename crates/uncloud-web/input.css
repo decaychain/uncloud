@@ -20,14 +20,16 @@
 
 /* Bottom reservation for scrolling content when the fixed player bar is
    visible. The rem portion covers the player's content height (which scales
-   with the user's font-size preference), and the `env()` portion adds the
-   OS safe-area inset (Android gesture bar). The mobile player is two rows;
-   desktop is one row. */
+   with the user's font-size preference), and the safe-area portion matches
+   the player's own `pb-safe`. The mobile player is two rows (cover + meta +
+   controls, then a second row with shuffle/scrub/repeat); desktop is one row.
+   Values match the measured visual height of the player bar — keep them in
+   sync if the player layout changes. */
 .pb-player {
-  padding-bottom: calc(9rem + env(safe-area-inset-bottom));
+  padding-bottom: calc(5.5rem + max(env(safe-area-inset-bottom), 0.5rem));
 }
 @media (min-width: 640px) {
   .pb-player {
-    padding-bottom: calc(5rem + env(safe-area-inset-bottom));
+    padding-bottom: calc(3.5rem + max(env(safe-area-inset-bottom), 0.5rem));
   }
 }

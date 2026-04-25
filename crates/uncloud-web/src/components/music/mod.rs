@@ -5,6 +5,7 @@ mod artist_view;
 mod album_view;
 mod folder_view;
 mod playlist_list;
+mod playlist_panel;
 pub mod playlist_view;
 
 use dioxus::prelude::*;
@@ -16,6 +17,7 @@ use crate::hooks::{use_music, use_playlists};
 pub use album_view::AlbumView as MusicAlbumView;
 pub use artist_view::ArtistView as MusicArtistView;
 pub use folder_view::FolderView as MusicFolderView;
+pub use playlist_panel::PlaylistSidePanel;
 pub use playlist_view::PlaylistView as MusicPlaylistView;
 
 // ── Navigation state for "By Metadata" tab ─────────────────────────────────

@@ -1,8 +1,10 @@
 use dioxus::prelude::*;
 use uncloud_common::TrackResponse;
-use crate::components::icons::{IconAlertTriangle, IconGripVertical, IconMusic, IconPause, IconPlay, IconX};
+use wasm_bindgen::JsCast;
+use crate::components::icons::{IconAlertTriangle, IconGripVertical, IconMoreVertical, IconMusic, IconPause, IconPencil, IconPin, IconPinOff, IconPlay, IconTrash, IconX};
 use crate::hooks::{use_playlists, use_player};
-use crate::state::PlayerState;
+use crate::router::Route;
+use crate::state::{PinnedPlaylistState, PlayerState, PlaylistDirtyTick};
 
 /// Milliseconds the user must hold a touch on a row before it enters drag
 /// mode. Matches Android's typical long-press threshold.
@@ -42,12 +44,18 @@ fn haptic_blip() {
 #[component]
 pub fn PlaylistView(playlist_id: String) -> Element {
     let mut player = use_context::<Signal<PlayerState>>();
+    let mut pinned = use_context::<Signal<PinnedPlaylistState>>();
+    let mut playlist_dirty = use_context::<Signal<PlaylistDirtyTick>>();
+    let nav = use_navigator();
+    let is_pinned = pinned().0.as_deref() == Some(playlist_id.as_str());
+    let pid_for_pin = playlist_id.clone();
     let mut tracks: Signal<Vec<TrackResponse>> = use_signal(Vec::new);
     let mut playlist_name: Signal<String> = use_signal(|| String::new());
     let mut playlist_desc: Signal<Option<String>> = use_signal(|| None);
     let mut loading = use_signal(|| true);
     let mut error: Signal<Option<String>> = use_signal(|| None);
-    let mut refresh = use_signal(|| 0u32);
+    let mut rename_open: Signal<bool> = use_signal(|| false);
+    let mut delete_open: Signal<bool> = use_signal(|| false);
 
     // Drag state.
     //   drag_idx: index being dragged (source row)
@@ -69,12 +77,11 @@ pub fn PlaylistView(playlist_id: String) -> Element {
 
     let pid_for_remove = playlist_id.clone();
     let pid_for_reorder = playlist_id.clone();
+    let pid_for_rename = playlist_id.clone();
+    let pid_for_delete = playlist_id.clone();
 
-    use_effect(use_reactive!(|(playlist_id, refresh)| {
+    use_effect(use_reactive!(|(playlist_id)| {
         spawn(async move {
-            // Don't flip `loading` on refresh — the router keys this view on
-            // playlist_id, so navigation remounts it and the initial `use_signal(|| true)`
-            // covers that case. Internal refreshes (track removal, reorder) update silently.
             error.set(None);
             match use_playlists::get_playlist(&playlist_id).await {
                 Ok(resp) => {
@@ -172,9 +179,9 @@ pub fn PlaylistView(playlist_id: String) -> Element {
     rsx! {
         div { class: "space-y-4",
             // Header
-            div { class: "flex items-start justify-between",
-                div {
-                    h2 { class: "text-2xl font-bold", "{playlist_name}" }
+            div { class: "flex items-start justify-between gap-2",
+                div { class: "min-w-0",
+                    h2 { class: "text-2xl font-bold truncate", "{playlist_name}" }
                     if let Some(desc) = playlist_desc() {
                         p { class: "text-base-content/60 mt-1", "{desc}" }
                     }
@@ -185,12 +192,83 @@ pub fn PlaylistView(playlist_id: String) -> Element {
                         }
                     }
                 }
-                if !track_list.is_empty() {
+                div { class: "flex items-center gap-2 shrink-0",
+                    if !track_list.is_empty() {
+                        button {
+                            class: "btn btn-primary btn-sm",
+                            onclick: move |_| use_player::play_queue(player, tracks_for_play_all.clone(), 0),
+                            IconPlay { class: "w-4 h-4".to_string() }
+                            "Play All"
+                        }
+                    }
+                    // Pin/unpin to right side panel — visible only on xl+
+                    // viewports where the panel can render.
                     button {
-                        class: "btn btn-primary btn-sm",
-                        onclick: move |_| use_player::play_queue(player, tracks_for_play_all.clone(), 0),
-                        IconPlay { class: "w-4 h-4".to_string() }
-                        "Play All"
+                        class: if is_pinned {
+                            "hidden xl:inline-flex btn btn-sm btn-primary"
+                        } else {
+                            "hidden xl:inline-flex btn btn-sm btn-ghost"
+                        },
+                        title: if is_pinned { "Unpin from side panel" } else { "Pin to side panel" },
+                        onclick: move |_| {
+                            if is_pinned {
+                                pinned.set(PinnedPlaylistState(None));
+                            } else {
+                                pinned.set(PinnedPlaylistState(Some(pid_for_pin.clone())));
+                            }
+                        },
+                        if is_pinned {
+                            IconPinOff { class: "w-4 h-4".to_string() }
+                            "Unpin"
+                        } else {
+                            IconPin { class: "w-4 h-4".to_string() }
+                            "Pin"
+                        }
+                    }
+                    div { class: "dropdown dropdown-end",
+                        div {
+                            tabindex: "0",
+                            role: "button",
+                            class: "btn btn-ghost btn-sm btn-circle",
+                            title: "Playlist actions",
+                            IconMoreVertical { class: "w-4 h-4".to_string() }
+                        }
+                        ul {
+                            tabindex: "0",
+                            class: "menu menu-sm dropdown-content bg-base-100 rounded-box z-50 mt-2 w-44 p-2 shadow border border-base-300",
+                            li {
+                                a {
+                                    onclick: move |_| {
+                                        rename_open.set(true);
+                                        // Drop focus so the dropdown closes.
+                                        if let Some(active) = web_sys::window()
+                                            .and_then(|w| w.document())
+                                            .and_then(|d| d.active_element())
+                                        {
+                                            let _ = active.dyn_ref::<web_sys::HtmlElement>().map(|el| el.blur());
+                                        }
+                                    },
+                                    IconPencil { class: "w-4 h-4".to_string() }
+                                    "Rename"
+                                }
+                            }
+                            li {
+                                a {
+                                    class: "text-error",
+                                    onclick: move |_| {
+                                        delete_open.set(true);
+                                        if let Some(active) = web_sys::window()
+                                            .and_then(|w| w.document())
+                                            .and_then(|d| d.active_element())
+                                        {
+                                            let _ = active.dyn_ref::<web_sys::HtmlElement>().map(|el| el.blur());
+                                        }
+                                    },
+                                    IconTrash { class: "w-4 h-4".to_string() }
+                                    "Delete\u{2026}"
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -403,10 +481,11 @@ pub fn PlaylistView(playlist_id: String) -> Element {
                                                     onclick: move |_| {
                                                         let fid = file_id.clone();
                                                         let pid = pid_rm.clone();
+                                                        // Optimistic update — drop the row from the local
+                                                        // tracks signal so the table re-renders immediately.
+                                                        tracks.write().retain(|t| t.file.id != fid);
                                                         spawn(async move {
                                                             let _ = use_playlists::remove_from_playlist(&pid, &[&fid]).await;
-                                                            let next = *refresh.peek() + 1;
-                                                            refresh.set(next);
                                                         });
                                                     },
                                                     IconX { class: "w-3 h-3".to_string() }
@@ -417,6 +496,211 @@ pub fn PlaylistView(playlist_id: String) -> Element {
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            if rename_open() {
+                RenamePlaylistModal {
+                    playlist_id: pid_for_rename.clone(),
+                    current_name: playlist_name(),
+                    current_description: playlist_desc(),
+                    on_cancel: move |_| rename_open.set(false),
+                    on_renamed: move |(new_name, new_desc): (String, Option<String>)| {
+                        playlist_name.set(new_name);
+                        playlist_desc.set(new_desc);
+                        rename_open.set(false);
+                        let next = playlist_dirty.peek().0.wrapping_add(1);
+                        playlist_dirty.set(PlaylistDirtyTick(next));
+                    },
+                }
+            }
+
+            if delete_open() {
+                DeletePlaylistModal {
+                    playlist_id: pid_for_delete.clone(),
+                    name: playlist_name(),
+                    on_cancel: move |_| delete_open.set(false),
+                    on_deleted: move |_| {
+                        delete_open.set(false);
+                        if is_pinned {
+                            pinned.set(PinnedPlaylistState(None));
+                        }
+                        let next = playlist_dirty.peek().0.wrapping_add(1);
+                        playlist_dirty.set(PlaylistDirtyTick(next));
+                        let _ = nav.replace(Route::Music {});
+                    },
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn RenamePlaylistModal(
+    playlist_id: String,
+    current_name: String,
+    current_description: Option<String>,
+    on_cancel: EventHandler<()>,
+    on_renamed: EventHandler<(String, Option<String>)>,
+) -> Element {
+    let mut name = use_signal(|| current_name.clone());
+    let initial_desc = current_description.clone().unwrap_or_default();
+    let mut desc = use_signal(|| initial_desc.clone());
+    let mut saving = use_signal(|| false);
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+    let cn = current_name.clone();
+    let cd = current_description.clone();
+
+    let on_submit = move |e: Event<FormData>| {
+        e.prevent_default();
+        let new_name = name().trim().to_string();
+        let new_desc_raw = desc().trim().to_string();
+        let new_desc = if new_desc_raw.is_empty() { None } else { Some(new_desc_raw) };
+
+        if new_name.is_empty() {
+            error.set(Some("Name cannot be empty".to_string()));
+            return;
+        }
+        if new_name == cn && new_desc == cd {
+            on_cancel.call(());
+            return;
+        }
+
+        let id = playlist_id.clone();
+        let name_to_send = if new_name == cn { None } else { Some(new_name.clone()) };
+        let desc_to_send = if new_desc == cd { None } else { new_desc.clone() };
+        saving.set(true);
+        error.set(None);
+
+        spawn(async move {
+            // The API treats `Some("")` as "set to empty", which is what we want
+            // when the user clears the field. We pass empty string for None
+            // because the request body uses Option<String> and our hook signature
+            // takes Option<&str>.
+            let desc_param: Option<String> = if desc_to_send.is_none() && new_desc.is_none() {
+                // user wants no description; backend default treats omission as no-change,
+                // so explicitly send empty to clear it.
+                Some(String::new())
+            } else {
+                desc_to_send
+            };
+            let res = use_playlists::update_playlist(
+                &id,
+                name_to_send.as_deref(),
+                desc_param.as_deref(),
+            ).await;
+            match res {
+                Ok(_) => on_renamed.call((new_name.clone(), new_desc.clone())),
+                Err(e) if e == "CONFLICT" => {
+                    error.set(Some("A playlist with this name already exists".to_string()));
+                    saving.set(false);
+                }
+                Err(e) => {
+                    error.set(Some(e));
+                    saving.set(false);
+                }
+            }
+        });
+    };
+
+    rsx! {
+        div { class: "modal modal-open",
+            div { class: "modal-box max-w-sm",
+                h3 { class: "font-bold text-lg mb-4", "Rename playlist" }
+
+                form { onsubmit: on_submit,
+                    div { class: "form-control",
+                        label { class: "label", span { class: "label-text", "Name" } }
+                        input {
+                            class: "input input-bordered w-full",
+                            autofocus: true,
+                            value: "{name}",
+                            oninput: move |e| name.set(e.value()),
+                        }
+                    }
+                    div { class: "form-control mt-2",
+                        label { class: "label", span { class: "label-text", "Description" } }
+                        input {
+                            class: "input input-bordered w-full",
+                            placeholder: "Optional",
+                            value: "{desc}",
+                            oninput: move |e| desc.set(e.value()),
+                        }
+                    }
+
+                    if let Some(err) = error() {
+                        div { class: "alert alert-error mt-3 py-2 text-sm", "{err}" }
+                    }
+
+                    div { class: "modal-action",
+                        button {
+                            class: "btn btn-ghost",
+                            r#type: "button",
+                            disabled: saving(),
+                            onclick: move |_| on_cancel.call(()),
+                            "Cancel"
+                        }
+                        button {
+                            class: "btn btn-primary",
+                            r#type: "submit",
+                            disabled: saving(),
+                            if saving() { span { class: "loading loading-spinner loading-sm" } }
+                            "Save"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn DeletePlaylistModal(
+    playlist_id: String,
+    name: String,
+    on_cancel: EventHandler<()>,
+    on_deleted: EventHandler<()>,
+) -> Element {
+    let mut deleting = use_signal(|| false);
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+
+    rsx! {
+        div { class: "modal modal-open",
+            div { class: "modal-box max-w-sm",
+                h3 { class: "font-bold text-lg mb-2", "Delete \"{name}\"?" }
+                p { class: "text-sm text-base-content/70 mb-4",
+                    "The playlist will be permanently deleted. The tracks themselves are not affected."
+                }
+                if let Some(err) = error() {
+                    div { class: "alert alert-error mb-3 py-2 text-sm", "{err}" }
+                }
+                div { class: "modal-action",
+                    button {
+                        class: "btn btn-ghost",
+                        disabled: deleting(),
+                        onclick: move |_| on_cancel.call(()),
+                        "Cancel"
+                    }
+                    button {
+                        class: "btn btn-error",
+                        disabled: deleting(),
+                        onclick: move |_| {
+                            deleting.set(true);
+                            error.set(None);
+                            let id = playlist_id.clone();
+                            spawn(async move {
+                                match use_playlists::delete_playlist(&id).await {
+                                    Ok(()) => on_deleted.call(()),
+                                    Err(e) => {
+                                        error.set(Some(e));
+                                        deleting.set(false);
+                                    }
+                                }
+                            });
+                        },
+                        if deleting() { span { class: "loading loading-spinner loading-sm" } }
+                        "Delete"
                     }
                 }
             }

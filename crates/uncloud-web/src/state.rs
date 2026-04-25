@@ -156,6 +156,19 @@ pub struct RescanState {
     pub starting: bool,
 }
 
+/// ID of the playlist currently pinned to the right-side panel on Music
+/// routes. `None` means no panel is shown. Persisted to localStorage so the
+/// user's pin survives reloads.
+#[derive(Clone, Default, PartialEq)]
+pub struct PinnedPlaylistState(pub Option<String>);
+
+/// Monotonic counter bumped whenever any playlist is mutated (track added,
+/// removed, reordered). The pinned-playlist side panel listens to this and
+/// re-fetches so the user sees their changes from any view immediately —
+/// the server doesn't currently emit a playlist-specific SSE event.
+#[derive(Clone, Default, PartialEq)]
+pub struct PlaylistDirtyTick(pub u32);
+
 impl PlayerState {
     pub fn current_track(&self) -> Option<&TrackResponse> {
         self.queue.get(self.current_index)
