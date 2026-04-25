@@ -406,3 +406,104 @@ async fn copy_file_does_not_preserve_metadata() {
         meta
     );
 }
+
+// ── Name-uniqueness enforcement ───────────────────────────────────────────────
+//
+// `(owner_id, parent_id, name)` is the logical identity for a live file —
+// the on-disk layout `{username}/{chain}/{name}` would be ambiguous
+// otherwise. Two layers enforce it:
+//   1. Handler-level pre-flight check in `simple_upload` /
+//      `complete_upload` / `copy_file` returns 409 cleanly.
+//   2. The MongoDB partial unique index on `(owner_id, parent_id, name)`
+//      filtered to `deleted_at: null`, set up in `db::setup_indexes`.
+// These tests cover both layers, plus the partial-filter behaviour: a
+// trashed file must not block re-using its name.
+
+#[tokio::test]
+async fn simple_upload_rejects_duplicate_name() {
+    use axum_test::multipart::{MultipartForm, Part};
+
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+
+    // First upload: succeeds normally.
+    app.upload("doc.pdf", b"first", "application/pdf").await;
+
+    // Second upload at the same logical path: 409 Conflict.
+    let form = MultipartForm::new().add_part(
+        "file",
+        Part::bytes(b"second".to_vec())
+            .file_name("doc.pdf")
+            .mime_type("application/pdf"),
+    );
+    let res = app
+        .server
+        .post("/api/uploads/simple")
+        .multipart(form)
+        .await;
+    res.assert_status(StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn complete_upload_rejects_duplicate_name() {
+    use axum_test::multipart::{MultipartForm, Part};
+
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+
+    // Pre-existing live file at the target path.
+    app.upload("big.bin", b"already", "application/octet-stream")
+        .await;
+
+    // Init a chunked upload with the same name. `init_upload` itself
+    // doesn't check (it just allocates an upload session), so we get
+    // through this step and the chunk upload before hitting the gate.
+    let init: serde_json::Value = app
+        .server
+        .post("/api/uploads/init")
+        .json(&serde_json::json!({ "filename": "big.bin", "size": 4 }))
+        .await
+        .json();
+    let upload_id = init["upload_id"].as_str().expect("upload_id");
+
+    // One chunk covers the whole 4-byte payload.
+    app.server
+        .post(&format!("/api/uploads/{}/chunk?index=0", upload_id))
+        .bytes(b"data"[..].into())
+        .await
+        .assert_status_ok();
+
+    // Complete: must hit the duplicate-name guard and return 409, not
+    // silently insert a second File document.
+    let res = app
+        .server
+        .post(&format!("/api/uploads/{}/complete", upload_id))
+        .await;
+    res.assert_status(StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn upload_after_trash_succeeds_partial_filter() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+
+    // Upload a file, then send it to trash (soft-delete, sets `deleted_at`).
+    let first = app.upload("notes.md", b"v1", "text/markdown").await;
+    let first_id = first["id"].as_str().expect("file id");
+    app.server
+        .delete(&format!("/api/files/{}", first_id))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    // Re-uploading the same name must now succeed — the partial unique
+    // index excludes `deleted_at != null` rows, and `check_name_conflict`
+    // mirrors the same filter. If either side gets it wrong, this test
+    // fails with 409.
+    let second = app.upload("notes.md", b"v2", "text/markdown").await;
+    assert_eq!(second["name"], "notes.md");
+    assert_ne!(
+        first_id,
+        second["id"].as_str().expect("second id"),
+        "trashed and live files must be distinct documents"
+    );
+}
