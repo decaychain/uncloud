@@ -13,7 +13,7 @@ fn parse_rescan_status(status: &str) -> RescanStatus {
         _ => RescanStatus::Running,
     }
 }
-use crate::state::{AuthState, PlayerState, RescanState, ThemeState};
+use crate::state::{AuthState, PinnedPlaylistState, PlayerState, RescanState, ThemeState};
 use crate::router::Route;
 
 #[component]
@@ -141,6 +141,20 @@ pub fn Layout() -> Element {
     };
 
     let route = use_route::<Route>();
+
+    // The right-side playlist panel is shown on music browse routes (not on
+    // the dedicated playlist view, which already shows the playlist) when a
+    // playlist is pinned and the viewport is wide enough. The wrapping flex
+    // is kept across pin/unpin transitions so the Outlet doesn't remount and
+    // discard browse state. The panel itself hides on small screens via
+    // `hidden xl:block`.
+    let pinned = use_context::<Signal<PinnedPlaylistState>>();
+    let on_music_route = matches!(
+        route,
+        Route::Music {} | Route::MusicArtist { .. } | Route::MusicAlbum { .. } | Route::MusicFolder { .. }
+    );
+    let show_playlist_panel = on_music_route && pinned().0.is_some();
+
     // NOTE: when adding a new top-level Route, add it here AND in
     // `section_title` below AND in the sidebar section-matcher. Missing one
     // results in the wrong caption/title — a recurring regression.
@@ -166,8 +180,23 @@ pub fn Layout() -> Element {
 
                 div { class: "drawer-content flex flex-col",
                     Navbar {}
-                    main { class: main_class,
-                        Outlet::<Route> {}
+                    if on_music_route {
+                        main { class: "{main_class}",
+                            div { class: "flex gap-4 min-w-0",
+                                div { class: "flex-1 min-w-0",
+                                    Outlet::<Route> {}
+                                }
+                                if show_playlist_panel {
+                                    div { class: "hidden xl:block w-80 shrink-0",
+                                        crate::components::music::PlaylistSidePanel {}
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        main { class: main_class,
+                            Outlet::<Route> {}
+                        }
                     }
                 }
 

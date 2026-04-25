@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use uncloud_common::{PlaylistSummary, TrackResponse};
 use crate::components::icons::{IconListMusic, IconMusic, IconPause, IconPlay};
 use crate::hooks::use_playlists;
-use crate::state::PlayerState;
+use crate::state::{PlayerState, PlaylistDirtyTick};
 
 fn format_duration(secs: f64) -> String {
     let total = secs as u64;
@@ -17,6 +17,7 @@ pub fn TrackList(
     on_play: Option<EventHandler<usize>>,
 ) -> Element {
     let mut player = use_context::<Signal<PlayerState>>();
+    let mut playlist_dirty = use_context::<Signal<PlaylistDirtyTick>>();
 
     // "Add to playlist" modal state
     let mut add_to_playlist_file_id: Signal<Option<String>> = use_signal(|| None);
@@ -186,6 +187,8 @@ pub fn TrackList(
                                                         match use_playlists::add_to_playlist(&pid, &[fid.as_str()]).await {
                                                             Ok(()) => {
                                                                 add_success.set(Some(format!("Added to \"{}\"", pname)));
+                                                                let next = playlist_dirty.peek().0.wrapping_add(1);
+                                                                playlist_dirty.set(PlaylistDirtyTick(next));
                                                             }
                                                             Err(e) => {
                                                                 add_success.set(Some(format!("Error: {}", e)));
@@ -234,6 +237,8 @@ pub fn TrackList(
                                                     let _ = use_playlists::add_to_playlist(&summary.id, &[fid.as_str()]).await;
                                                     add_success.set(Some(format!("Created \"{}\" and added track", name)));
                                                     show_inline_create.set(false);
+                                                    let next = playlist_dirty.peek().0.wrapping_add(1);
+                                                    playlist_dirty.set(PlaylistDirtyTick(next));
                                                     // Refresh playlist list
                                                     if let Ok(pls) = use_playlists::list_playlists().await {
                                                         available_playlists.set(pls);
