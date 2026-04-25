@@ -34,6 +34,12 @@ pub struct DesktopState {
     pub phase: Arc<Mutex<SyncPhase>>,
     pub stats: Arc<Mutex<SyncStats>>,
     pub client: Arc<RwLock<Option<Arc<Client>>>>,
+    /// Desktop-level single-flight for `run_sync_once`. The engine has its
+    /// own mutex around the actual sync work, but the desktop wrapper
+    /// also resets `last_run_*` to 0 at the start and records
+    /// `last_sync_at` at the end. Without this lock, two overlapping
+    /// `run_sync_once` calls would clobber each other's bookkeeping.
+    pub run_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -220,16 +226,66 @@ fn emit_stats(app: &AppHandle, phase: SyncPhase, stats: SyncStats) {
     }
 }
 
-/// Wire the engine's `on_log_appended` hook to emit a Tauri event. Called
-/// each time an engine is freshly constructed (auto-login, manual login,
-/// lazy init).
-fn wire_engine_hooks(engine: &Arc<SyncEngine>, app: AppHandle) {
-    let app_for_hook = app.clone();
+/// Wire the engine's `on_log_appended` hook so each per-op row drives two
+/// pieces of UI:
+///   1. The activity log gets the row verbatim via `sync-log-appended`.
+///   2. The relevant `session_*` / `last_run_*` counter ticks up and a
+///      fresh `sync-stats-changed` event fires so the Sync tab's tiles
+///      animate as the sync progresses, not just at the end.
+///
+/// Called each time an engine is freshly constructed (auto-login,
+/// manual login, lazy init).
+fn wire_engine_hooks(
+    engine: &Arc<SyncEngine>,
+    app: AppHandle,
+    phase: Arc<Mutex<SyncPhase>>,
+    stats: Arc<Mutex<SyncStats>>,
+) {
     let on_log_appended: uncloud_sync::LogAppendedHook =
         Arc::new(move |row: &SyncLogRow| {
-            if let Err(e) = app_for_hook.emit("sync-log-appended", row.clone()) {
+            // Always emit the raw row for the activity log.
+            if let Err(e) = app.emit("sync-log-appended", row.clone()) {
                 error!("emit sync-log-appended: {}", e);
             }
+
+            // Bump the counter that matches this op. Tokio mutexes can't
+            // be locked from a sync `Fn`, so spawn a short task per row;
+            // the `app` / `phase` / `stats` clones are cheap (Arcs).
+            let row = row.clone();
+            let app = app.clone();
+            let phase = phase.clone();
+            let stats = stats.clone();
+            async_runtime::spawn(async move {
+                let updated = {
+                    let mut s = stats.lock().await;
+                    let bumped = match row.operation.as_str() {
+                        "Uploaded" | "Updated on server" => {
+                            s.session_uploaded = s.session_uploaded.saturating_add(1);
+                            s.last_run_uploaded = s.last_run_uploaded.saturating_add(1);
+                            true
+                        }
+                        "Downloaded" | "Updated from server" => {
+                            s.session_downloaded = s.session_downloaded.saturating_add(1);
+                            s.last_run_downloaded = s.last_run_downloaded.saturating_add(1);
+                            true
+                        }
+                        "Deleted" => {
+                            s.session_deleted = s.session_deleted.saturating_add(1);
+                            s.last_run_deleted = s.last_run_deleted.saturating_add(1);
+                            true
+                        }
+                        // SyncStart / SyncEnd are bracketing markers, no
+                        // counter to bump.
+                        _ => false,
+                    };
+                    if !bumped {
+                        return;
+                    }
+                    s.clone()
+                };
+                let phase_snap = phase.lock().await.clone();
+                emit_stats(&app, phase_snap, updated);
+            });
         });
     engine.set_hooks(SyncEngineHooks {
         on_log_appended: Some(on_log_appended),
@@ -297,7 +353,7 @@ async fn ensure_engine(
             msg
         })?;
     let engine = Arc::new(engine);
-    wire_engine_hooks(&engine, app.clone());
+    wire_engine_hooks(&engine, app.clone(), state.phase.clone(), state.stats.clone());
     *state.client.write().await = Some(client);
     *state.engine.write().await = Some(engine.clone());
     *state.phase.lock().await = SyncPhase::Idle;
@@ -313,39 +369,50 @@ async fn get_status(state: State<'_, DesktopState>) -> Result<SyncState, String>
     Ok(SyncState { phase, stats })
 }
 
-/// Run a single incremental sync, updating phase + stats as it progresses
-/// and emitting a `sync-stats-changed` Tauri event at every transition so
-/// the desktop UI can push-refresh without polling.
-/// Shared by `sync_now`, the poll loop, the desktop tray menu, and the mobile
-/// resume handler.
+/// Run a single incremental sync and keep the desktop's `phase` / `stats`
+/// in sync with the engine. Per-op counter increments happen inside the
+/// engine's `on_log_appended` hook (see `wire_engine_hooks`), so this
+/// function only handles the run-boundary bookkeeping:
+///   • reset `last_run_*` to 0 before starting,
+///   • record `last_sync_at` and `last_run_errors` at the end.
+///
+/// Concurrent invocations (poll loop tick + tray "Sync Now" + UI button +
+/// mobile resume) serialize on `state.run_lock` so neither side clobbers
+/// the other's counter resets, and the engine's own mutex serializes the
+/// actual sync work behind that.
 async fn run_sync_once(
     app: AppHandle,
     engine: Arc<SyncEngine>,
     phase: Arc<Mutex<SyncPhase>>,
     stats: Arc<Mutex<SyncStats>>,
+    run_lock: Arc<Mutex<()>>,
 ) -> Result<SyncReport, String> {
+    let _guard = run_lock.lock().await;
+
     let start_phase = SyncPhase::Syncing {
         started_at: Utc::now().to_rfc3339(),
     };
+    let start_snapshot = {
+        let mut s = stats.lock().await;
+        s.last_run_uploaded = 0;
+        s.last_run_downloaded = 0;
+        s.last_run_deleted = 0;
+        s.last_run_errors = 0;
+        s.clone()
+    };
     *phase.lock().await = start_phase.clone();
-    emit_stats(&app, start_phase, stats.lock().await.clone());
+    emit_stats(&app, start_phase, start_snapshot);
 
     let result = engine.incremental_sync().await.map_err(|e| e.to_string());
     match result {
         Ok(report) => {
+            // Hook already bumped uploaded/downloaded/deleted incrementally
+            // — only errors still need to land here, since the engine
+            // doesn't fire a log row for them.
             let stats_snapshot = {
                 let mut s = stats.lock().await;
-                let uploaded = report.uploaded.len() as u32;
-                let downloaded = report.downloaded.len() as u32;
-                let deleted = report.deleted_local.len() as u32;
                 let errors = report.errors.len() as u32;
-                s.session_uploaded = s.session_uploaded.saturating_add(uploaded);
-                s.session_downloaded = s.session_downloaded.saturating_add(downloaded);
-                s.session_deleted = s.session_deleted.saturating_add(deleted);
                 s.session_errors = s.session_errors.saturating_add(errors);
-                s.last_run_uploaded = uploaded;
-                s.last_run_downloaded = downloaded;
-                s.last_run_deleted = deleted;
                 s.last_run_errors = errors;
                 s.last_sync_at = Some(Utc::now().to_rfc3339());
                 s.clone()
@@ -455,7 +522,7 @@ async fn login(
         .map_err(|e| e.to_string())?;
 
     let engine = Arc::new(engine);
-    wire_engine_hooks(&engine, app.clone());
+    wire_engine_hooks(&engine, app.clone(), state.phase.clone(), state.stats.clone());
     *state.client.write().await = Some(client);
     *state.engine.write().await = Some(engine);
     *state.phase.lock().await = SyncPhase::Idle;
@@ -510,6 +577,7 @@ async fn sync_now(app: AppHandle, state: State<'_, DesktopState>) -> Result<Sync
         engine,
         state.phase.clone(),
         state.stats.clone(),
+        state.run_lock.clone(),
     )
     .await?;
     eprintln!(
@@ -627,6 +695,7 @@ fn start_poll_loop(
     engine: Arc<RwLock<Option<Arc<SyncEngine>>>>,
     phase: Arc<Mutex<SyncPhase>>,
     stats: Arc<Mutex<SyncStats>>,
+    run_lock: Arc<Mutex<()>>,
     poll_interval_secs: u64,
 ) {
     async_runtime::spawn(async move {
@@ -640,7 +709,7 @@ fn start_poll_loop(
             let maybe_engine = engine.read().await.as_ref().map(Arc::clone);
             if let Some(eng) = maybe_engine {
                 if let Err(msg) =
-                    run_sync_once(app.clone(), eng, phase.clone(), stats.clone()).await
+                    run_sync_once(app.clone(), eng, phase.clone(), stats.clone(), run_lock.clone()).await
                 {
                     error!("Sync error: {}", msg);
                 }
@@ -656,11 +725,12 @@ fn spawn_sync(
     engine: Arc<RwLock<Option<Arc<SyncEngine>>>>,
     phase: Arc<Mutex<SyncPhase>>,
     stats: Arc<Mutex<SyncStats>>,
+    run_lock: Arc<Mutex<()>>,
 ) {
     async_runtime::spawn(async move {
         let maybe_engine = engine.read().await.as_ref().map(Arc::clone);
         if let Some(eng) = maybe_engine {
-            if let Err(msg) = run_sync_once(app, eng, phase, stats).await {
+            if let Err(msg) = run_sync_once(app, eng, phase, stats, run_lock).await {
                 error!("Sync error: {}", msg);
             }
         }
@@ -696,6 +766,7 @@ pub fn run() {
         phase: Arc::new(Mutex::new(SyncPhase::default())),
         stats: Arc::new(Mutex::new(SyncStats::default())),
         client: Arc::new(RwLock::new(None)),
+        run_lock: Arc::new(Mutex::new(())),
     };
 
     // Cloned handles for the desktop tray menu handler.
@@ -705,6 +776,8 @@ pub fn run() {
     let phase_arc = state.phase.clone();
     #[cfg(desktop)]
     let stats_arc = state.stats.clone();
+    #[cfg(desktop)]
+    let run_lock_arc = state.run_lock.clone();
     // Separate clones owned by the run-event handler (mobile resume).
     #[cfg(mobile)]
     let run_engine = state.engine.clone();
@@ -712,6 +785,8 @@ pub fn run() {
     let run_phase = state.phase.clone();
     #[cfg(mobile)]
     let run_stats = state.stats.clone();
+    #[cfg(mobile)]
+    let run_run_lock = state.run_lock.clone();
 
     let mut builder = tauri::Builder::default();
     #[cfg(desktop)]
@@ -730,6 +805,7 @@ pub fn run() {
                 let ds = app.state::<DesktopState>();
                 let engine_arc = ds.engine.clone();
                 let phase_arc = ds.phase.clone();
+                let stats_arc = ds.stats.clone();
                 let client_arc = ds.client.clone();
                 let app_handle = app.handle().clone();
                 async_runtime::spawn(async move {
@@ -758,7 +834,7 @@ pub fn run() {
                             match engine_result {
                                 Ok(engine) => {
                                     let engine = Arc::new(engine);
-                                    wire_engine_hooks(&engine, app_handle.clone());
+                                    wire_engine_hooks(&engine, app_handle.clone(), phase_arc.clone(), stats_arc.clone());
                                     *client_arc.write().await = Some(client);
                                     *engine_arc.write().await = Some(engine);
                                     *phase_arc.lock().await = SyncPhase::Idle;
@@ -791,6 +867,7 @@ pub fn run() {
                 let tray_engine = engine_arc.clone();
                 let tray_phase = phase_arc.clone();
                 let tray_stats = stats_arc.clone();
+                let tray_run_lock = run_lock_arc.clone();
                 let quit = MenuItemBuilder::new("Quit").id("quit").build(app)?;
                 let open = MenuItemBuilder::new("Open Uncloud").id("open").build(app)?;
                 let sync_now_item = MenuItemBuilder::new("Sync Now").id("sync_now").build(app)?;
@@ -822,6 +899,7 @@ pub fn run() {
                                 tray_engine.clone(),
                                 tray_phase.clone(),
                                 tray_stats.clone(),
+                                tray_run_lock.clone(),
                             );
                         }
                         _ => {}
@@ -835,6 +913,7 @@ pub fn run() {
                 app.state::<DesktopState>().engine.clone(),
                 app.state::<DesktopState>().phase.clone(),
                 app.state::<DesktopState>().stats.clone(),
+                app.state::<DesktopState>().run_lock.clone(),
                 60,
             );
 
@@ -875,6 +954,7 @@ pub fn run() {
                     run_engine.clone(),
                     run_phase.clone(),
                     run_stats.clone(),
+                    run_run_lock.clone(),
                 );
             }
         });
