@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use chrono::{NaiveDate, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use tokio::sync::watch;
 use tracing::{info, warn};
 use uncloud_client::Client;
 use uncloud_common::SyncStrategy;
@@ -58,6 +60,21 @@ pub enum SyncTrigger {
     Manual,
 }
 
+/// Coarse engine state surfaced to embedding apps so they can update tray
+/// icons / status indicators without inspecting every individual op.
+///
+/// * `Idle` — no run in progress.
+/// * `Polling` — a run is in progress but only doing tree fetches /
+///   journal bookkeeping (no actual file bytes moving).
+/// * `Transferring` — at least one upload, download, delete, or remote
+///   folder creation is in flight right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncActivity {
+    Idle,
+    Polling,
+    Transferring,
+}
+
 pub type LogAppendedHook = Arc<dyn Fn(&SyncLogRow) + Send + Sync>;
 
 /// Callbacks fired by the engine so embedding apps (Tauri desktop, future
@@ -86,6 +103,22 @@ pub struct SyncEngine {
     /// the local filesystem, and `touched_paths`. Block-until-done — the
     /// second caller waits, it is not silently dropped.
     sync_lock: tokio::sync::Mutex<()>,
+    /// Coarse activity broadcast: `Idle` between runs, `Polling` during a
+    /// run with no in-flight transfers, `Transferring` whenever
+    /// `inflight_transfers` > 0. Subscribed by the desktop app to drive
+    /// the tray icon.
+    activity_tx: watch::Sender<SyncActivity>,
+    inflight_transfers: AtomicI64,
+}
+
+struct TransferGuard<'a> {
+    engine: &'a SyncEngine,
+}
+
+impl<'a> Drop for TransferGuard<'a> {
+    fn drop(&mut self) {
+        self.engine.leave_transfer();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +161,7 @@ impl SyncEngine {
 
         sqlx::migrate!("./migrations").run(&pool).await?;
 
+        let (activity_tx, _) = watch::channel(SyncActivity::Idle);
         Ok(Self {
             journal: Journal::new(pool),
             client,
@@ -136,7 +170,58 @@ impl SyncEngine {
             hooks: RwLock::new(SyncEngineHooks::default()),
             run_state: RwLock::new(None),
             sync_lock: tokio::sync::Mutex::new(()),
+            activity_tx,
+            inflight_transfers: AtomicI64::new(0),
         })
+    }
+
+    /// Subscribe to coarse activity updates. The receiver fires once with
+    /// the current value on subscription and then on every transition.
+    pub fn activity(&self) -> watch::Receiver<SyncActivity> {
+        self.activity_tx.subscribe()
+    }
+
+    fn set_activity(&self, next: SyncActivity) {
+        // `send_if_modified` skips the notification if the value is
+        // unchanged, so subscribers see one event per real transition.
+        self.activity_tx.send_if_modified(|cur| {
+            if *cur != next {
+                *cur = next;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    fn enter_transfer(&self) {
+        let prev = self.inflight_transfers.fetch_add(1, Ordering::SeqCst);
+        if prev == 0 {
+            self.set_activity(SyncActivity::Transferring);
+        }
+    }
+
+    fn leave_transfer(&self) {
+        let prev = self.inflight_transfers.fetch_sub(1, Ordering::SeqCst);
+        if prev == 1 {
+            // Last in-flight transfer just finished. If a run is still
+            // active, drop back to `Polling`; otherwise `Idle`.
+            let next = if self.run_state.read().map(|g| g.is_some()).unwrap_or(false) {
+                SyncActivity::Polling
+            } else {
+                SyncActivity::Idle
+            };
+            self.set_activity(next);
+        }
+    }
+
+    /// RAII guard around a single transfer (download / upload / remote
+    /// folder create / local delete). Bumps the in-flight counter on
+    /// construction and decrements on drop, flipping the activity
+    /// broadcast at the 0↔1 boundary. Panic-safe via `Drop`.
+    fn transfer_guard(&self) -> TransferGuard<'_> {
+        self.enter_transfer();
+        TransferGuard { engine: self }
     }
 
     /// Wire (or replace) the callbacks fired by the engine. The desktop/mobile
@@ -358,6 +443,10 @@ impl SyncEngine {
             start_reason: start_reason.to_owned(),
             emitted_start: false,
         });
+        // Activity transitions: enter Polling now; transfer call sites flip
+        // to Transferring while in flight; the run cleanup at the bottom
+        // resets back to Idle.
+        self.set_activity(SyncActivity::Polling);
         let started = std::time::Instant::now();
         let mut report = SyncReport::default();
         // Set of local paths Phase 5 / Phase 6 has already acted on this
@@ -767,6 +856,7 @@ impl SyncEngine {
                     continue;
                 }
 
+                let _g = this.transfer_guard();
                 match this.client.create_folder(&name, parent_id.as_deref()).await {
                     Ok(folder) => {
                         let _ = this
@@ -1063,12 +1153,18 @@ impl SyncEngine {
             warn!("sync_log prune failed: {}", e);
         }
 
+        // Run done — drop back to Idle. Any in-flight transfers should
+        // have already finished (Phase 7 awaits each one), so the counter
+        // is expected to be zero here.
+        self.set_activity(SyncActivity::Idle);
+
         Ok(report)
     }
 
     /// Download file `id` from the server and write it to `path` via the
     /// configured [`LocalFs`] backend.
     async fn download_to(&self, id: &str, path: &str) -> Result<(), String> {
+        let _g = self.transfer_guard();
         let bytes = self
             .client
             .download_file_bytes(id)
@@ -1090,6 +1186,7 @@ impl SyncEngine {
         parent_id: Option<&str>,
         report: &mut SyncReport,
     ) {
+        let _g = self.transfer_guard();
         let file_name = rel_path
             .rsplit(['/', '\\'])
             .next()
@@ -1142,6 +1239,7 @@ impl SyncEngine {
         server_rel_path: &str,
         path: &str,
     ) -> Result<uncloud_common::FileResponse, String> {
+        let _g = self.transfer_guard();
         let bytes = self.fs.read(path).await.map_err(|e| e.to_string())?;
         let file_name = server_rel_path
             .rsplit(['/', '\\'])

@@ -35,10 +35,15 @@ aes-gcm = "0.10"
 rand = "0.8"
 base64 = "0.22"
 
-# OS keyring — only on the three desktop platforms. Android has its own
-# keystore APIs and isn't covered by the `keyring` crate.
+# OS keyring + autostart + filesystem watcher — only on the three desktop
+# platforms. Android has its own keystore APIs and a different autostart
+# story; SAF is what surfaces filesystem changes there.
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "vendored"] }
+notify = "6"
+# Register the desktop app to auto-launch at OS login. Default-on on
+# first run; user can toggle via Settings.
+tauri-plugin-autostart = "2"
 
 [[bin]]
 name = "uncloud-desktop"

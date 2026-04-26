@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+#[cfg(desktop)]
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,23 +9,28 @@ use serde::{Deserialize, Serialize};
 #[cfg(desktop)]
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri::async_runtime;
 #[cfg(desktop)]
 use tauri_plugin_dialog::DialogExt;
+#[cfg(desktop)]
+use tauri_plugin_autostart::ManagerExt;
 #[cfg(mobile)]
 use tauri_plugin_android_fs::AndroidFsExt;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uncloud_client::{Client, ClientIdentity};
 use uncloud_sync::{
-    BaseSource, SyncEngine, SyncEngineHooks, SyncLogRow, SyncReport,
+    BaseSource, SyncActivity, SyncEngine, SyncEngineHooks, SyncLogRow, SyncReport,
 };
 
 #[cfg(mobile)]
 mod android_fs;
+
+#[cfg(desktop)]
+mod file_watcher;
 
 mod secret_store;
 
@@ -40,6 +47,16 @@ pub struct DesktopState {
     /// `last_sync_at` at the end. Without this lock, two overlapping
     /// `run_sync_once` calls would clobber each other's bookkeeping.
     pub run_lock: Arc<Mutex<()>>,
+    /// Tray icon handle. Stored so the activity listener can swap the
+    /// idle/syncing icons on `SyncActivity` transitions. Desktop-only.
+    /// `std::sync::Mutex` keeps the call sites lock-free of `.await`.
+    #[cfg(desktop)]
+    pub tray: Arc<std::sync::Mutex<Option<TrayIcon>>>,
+    /// Active filesystem watcher (kept alive for its `Drop` to detach
+    /// inotify hooks on logout). Replaced when the configured root
+    /// changes via login → engine rebuild.
+    #[cfg(desktop)]
+    pub watcher: Arc<std::sync::Mutex<Option<notify::RecommendedWatcher>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -292,6 +309,88 @@ fn wire_engine_hooks(
     });
 }
 
+/// (Re)start the filesystem watcher rooted at `root_path`. The previous
+/// watcher (if any) is dropped, releasing its inotify/kqueue/etc.
+/// handles. Called on every engine-creation path so a logout → login
+/// cycle that targets a different folder reattaches cleanly.
+#[cfg(desktop)]
+fn restart_file_watcher(
+    app: &AppHandle,
+    state: &DesktopState,
+    root_path: &str,
+) {
+    if root_path.is_empty() {
+        // Mobile path-without-root never reaches here (cfg(desktop)),
+        // but be defensive: nothing to watch.
+        return;
+    }
+    let new_watcher = file_watcher::start_or_log(
+        app.clone(),
+        Path::new(root_path),
+        state.engine.clone(),
+        state.phase.clone(),
+        state.stats.clone(),
+        state.run_lock.clone(),
+    );
+    if let Ok(mut g) = state.watcher.lock() {
+        // Drop the old watcher *after* the new one is in place so any
+        // events that arrive in the gap aren't lost — the new watcher
+        // catches them via inotify, the old one's queue drains harmlessly.
+        *g = new_watcher;
+    }
+}
+
+/// Subscribe to the engine's activity broadcast and swap the tray icon
+/// between idle and "syncing" on transitions in/out of
+/// [`SyncActivity::Transferring`]. `Polling` runs (no actual file movement)
+/// keep the idle icon so a scheduled tick doesn't flash the indicator.
+///
+/// Spawned each time a fresh engine is wired so a logout/login cycle ends
+/// up with one listener per live engine. The previous task naturally ends
+/// when the engine it captured is dropped — at which point its
+/// `watch::Receiver` returns `Err` from `changed()` and we break.
+#[cfg(desktop)]
+fn spawn_activity_listener(
+    engine: Arc<SyncEngine>,
+    tray: Arc<std::sync::Mutex<Option<TrayIcon>>>,
+) {
+    let mut rx = engine.activity();
+    async_runtime::spawn(async move {
+        // Set initial state, then react to transitions.
+        let mut last = *rx.borrow();
+        apply_tray_activity(&tray, last);
+        loop {
+            if rx.changed().await.is_err() {
+                // Sender dropped — engine is gone.
+                break;
+            }
+            let next = *rx.borrow();
+            if next != last {
+                apply_tray_activity(&tray, next);
+                last = next;
+            }
+        }
+    });
+}
+
+#[cfg(desktop)]
+fn apply_tray_activity(
+    tray: &Arc<std::sync::Mutex<Option<TrayIcon>>>,
+    activity: SyncActivity,
+) {
+    let image = match activity {
+        SyncActivity::Transferring => tauri::include_image!("icons/tray-syncing.png"),
+        SyncActivity::Idle | SyncActivity::Polling => tauri::include_image!("icons/tray-idle.png"),
+    };
+    if let Ok(g) = tray.lock() {
+        if let Some(t) = g.as_ref() {
+            if let Err(e) = t.set_icon(Some(image)) {
+                error!("set tray icon: {}", e);
+            }
+        }
+    }
+}
+
 /// Build a [`SyncEngine`] with the platform-appropriate [`LocalFs`] backend:
 /// [`uncloud_sync::NativeFs`] on desktop, `AndroidSafFs` on mobile.
 async fn build_engine(
@@ -310,6 +409,83 @@ async fn build_engine(
         let _ = app;
         SyncEngine::new(db_path, client, effective_root).await
     }
+}
+
+// ── Autostart (desktop only) ──────────────────────────────────────────────────
+
+/// Path of the sentinel that marks "we have already made the first-run
+/// autostart decision for this user". Sits next to `desktop.json` so a
+/// fresh data dir produces a clean first-run experience.
+#[cfg(desktop)]
+fn autostart_sentinel_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_config_dir().ok()
+        .or_else(|| dirs::config_dir())
+        .map(|d| d.join(app_namespace()).join("autostart_decided"))
+}
+
+/// Default-on on first run: enable autostart and drop a sentinel so we
+/// never override the user's later choice. Subsequent launches see the
+/// sentinel and respect whatever the OS reports.
+#[cfg(desktop)]
+fn ensure_autostart_first_run(app: &AppHandle) {
+    let Some(sentinel) = autostart_sentinel_path(app) else {
+        warn!("autostart: cannot determine config directory");
+        return;
+    };
+    if sentinel.exists() {
+        return;
+    }
+    match app.autolaunch().enable() {
+        Ok(()) => {
+            if let Some(parent) = sentinel.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&sentinel, b"1");
+            info!("autostart: enabled by default on first run");
+        }
+        Err(e) => warn!("autostart: enable failed: {}", e),
+    }
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn get_autostart(app: AppHandle) -> Result<bool, String> {
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn get_autostart(_app: AppHandle) -> Result<bool, String> {
+    // Android handles autostart via system settings, not from inside the
+    // app — surface "off" so the toggle hides on mobile builds.
+    Ok(false)
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let res = if enabled {
+        app.autolaunch().enable()
+    } else {
+        app.autolaunch().disable()
+    };
+    res.map_err(|e| e.to_string())?;
+    // Mark the first-run decision as made — even if the user toggles
+    // before any sync runs, we record their choice so the default-on
+    // logic doesn't fire on the next launch.
+    if let Some(sentinel) = autostart_sentinel_path(&app) {
+        if let Some(parent) = sentinel.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&sentinel, b"1");
+    }
+    Ok(())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn set_autostart(_app: AppHandle, _enabled: bool) -> Result<(), String> {
+    Err("Autostart on mobile is configured via system settings".to_string())
 }
 
 // ── Tauri commands ────────────────────────────────────────────────────────────
@@ -354,11 +530,28 @@ async fn ensure_engine(
         })?;
     let engine = Arc::new(engine);
     wire_engine_hooks(&engine, app.clone(), state.phase.clone(), state.stats.clone());
+    #[cfg(desktop)]
+    spawn_activity_listener(engine.clone(), state.tray.clone());
     *state.client.write().await = Some(client);
     *state.engine.write().await = Some(engine.clone());
     *state.phase.lock().await = SyncPhase::Idle;
     emit_stats(app, SyncPhase::Idle, state.stats.lock().await.clone());
     eprintln!("[uncloud-desktop] Engine initialized lazily");
+
+    #[cfg(desktop)]
+    if !cfg.root_path.is_empty() {
+        restart_file_watcher(app, &state, &cfg.root_path);
+    }
+
+    // Sync-on-start (lazy-init path: server came back online and a
+    // command triggered re-init).
+    spawn_sync(
+        app.clone(),
+        state.engine.clone(),
+        state.phase.clone(),
+        state.stats.clone(),
+        state.run_lock.clone(),
+    );
     Ok(engine)
 }
 
@@ -523,6 +716,8 @@ async fn login(
 
     let engine = Arc::new(engine);
     wire_engine_hooks(&engine, app.clone(), state.phase.clone(), state.stats.clone());
+    #[cfg(desktop)]
+    spawn_activity_listener(engine.clone(), state.tray.clone());
     *state.client.write().await = Some(client);
     *state.engine.write().await = Some(engine);
     *state.phase.lock().await = SyncPhase::Idle;
@@ -535,8 +730,23 @@ async fn login(
 
     let secrets = secrets_dir(&app).ok_or("Cannot determine data directory")?;
     secret_store::store_password(&secrets, &server, &username, &password)?;
-    save_config(&app, &PersistedConfig { server_url: server, username, root_path });
+    save_config(&app, &PersistedConfig { server_url: server, username, root_path: root_path.clone() });
     info!("Logged in and sync engine initialised");
+
+    #[cfg(desktop)]
+    if !root_path.is_empty() {
+        restart_file_watcher(&app, &state, &root_path);
+    }
+
+    // Sync-on-start: kick off an immediate sync so the user sees the
+    // server state without having to wait for the first poll tick.
+    spawn_sync(
+        app.clone(),
+        state.engine.clone(),
+        state.phase.clone(),
+        state.stats.clone(),
+        state.run_lock.clone(),
+    );
     Ok(())
 }
 
@@ -559,6 +769,10 @@ async fn disconnect(app: AppHandle, state: State<'_, DesktopState>) -> Result<()
     *state.client.write().await = None;
     *state.phase.lock().await = SyncPhase::NotConfigured;
     *state.stats.lock().await = SyncStats::default();
+    #[cfg(desktop)]
+    if let Ok(mut g) = state.watcher.lock() {
+        *g = None;
+    }
     clear_config(&app);
 
     if let (Some(cfg), Some(secrets)) = (prev, secrets_dir(&app)) {
@@ -767,6 +981,10 @@ pub fn run() {
         stats: Arc::new(Mutex::new(SyncStats::default())),
         client: Arc::new(RwLock::new(None)),
         run_lock: Arc::new(Mutex::new(())),
+        #[cfg(desktop)]
+        tray: Arc::new(std::sync::Mutex::new(None)),
+        #[cfg(desktop)]
+        watcher: Arc::new(std::sync::Mutex::new(None)),
     };
 
     // Cloned handles for the desktop tray menu handler.
@@ -790,7 +1008,17 @@ pub fn run() {
 
     let mut builder = tauri::Builder::default();
     #[cfg(desktop)]
-    { builder = builder.plugin(tauri_plugin_dialog::init()); }
+    {
+        builder = builder.plugin(tauri_plugin_dialog::init());
+        // Autostart plugin: registers the binary with the OS launch
+        // mechanism. The plugin is configured here in code so the
+        // first-run "default on" decision lives next to the rest of
+        // the desktop wiring instead of in tauri.conf.json.
+        builder = builder.plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None, // no extra args; the binary handles its own state
+        ));
+    }
     #[cfg(mobile)]
     {
         builder = builder.plugin(tauri_plugin_android_fs::init());
@@ -800,6 +1028,11 @@ pub fn run() {
     builder
         .manage(state)
         .setup(move |app| {
+            // First-run default: enable autostart unless the user has
+            // already made a choice (sentinel present).
+            #[cfg(desktop)]
+            ensure_autostart_first_run(app.handle());
+
             // Auto-login from persisted config + stored credentials if both exist.
             if let Some(cfg) = load_config_from(app.handle()) {
                 let ds = app.state::<DesktopState>();
@@ -807,6 +1040,9 @@ pub fn run() {
                 let phase_arc = ds.phase.clone();
                 let stats_arc = ds.stats.clone();
                 let client_arc = ds.client.clone();
+                let run_lock_arc_auto = ds.run_lock.clone();
+                #[cfg(desktop)]
+                let tray_arc = ds.tray.clone();
                 let app_handle = app.handle().clone();
                 async_runtime::spawn(async move {
                     let Some(secrets) = secrets_dir(&app_handle) else {
@@ -835,6 +1071,8 @@ pub fn run() {
                                 Ok(engine) => {
                                     let engine = Arc::new(engine);
                                     wire_engine_hooks(&engine, app_handle.clone(), phase_arc.clone(), stats_arc.clone());
+                                    #[cfg(desktop)]
+                                    spawn_activity_listener(engine.clone(), tray_arc.clone());
                                     *client_arc.write().await = Some(client);
                                     *engine_arc.write().await = Some(engine);
                                     *phase_arc.lock().await = SyncPhase::Idle;
@@ -846,6 +1084,21 @@ pub fn run() {
                                     emit_stats(&app_handle, SyncPhase::Idle, stats_snapshot);
                                     eprintln!("[uncloud-desktop] Auto-login successful");
                                     info!("Auto-login successful");
+
+                                    #[cfg(desktop)]
+                                    if !cfg.root_path.is_empty() {
+                                        let st = app_handle.state::<DesktopState>();
+                                        restart_file_watcher(&app_handle, &st, &cfg.root_path);
+                                    }
+
+                                    // Sync-on-start (auto-login path).
+                                    spawn_sync(
+                                        app_handle.clone(),
+                                        engine_arc.clone(),
+                                        phase_arc.clone(),
+                                        stats_arc.clone(),
+                                        run_lock_arc_auto.clone(),
+                                    );
                                 }
                                 Err(e) => {
                                     eprintln!("[uncloud-desktop] Auto-login engine init failed: {e}");
@@ -877,7 +1130,7 @@ pub fn run() {
                     .items(&[&open, &sep, &sync_now_item, &sep, &quit])
                     .build()?;
 
-                let _tray = TrayIconBuilder::new()
+                let tray_icon = TrayIconBuilder::new()
                     .icon(tauri::include_image!("icons/tray-idle.png"))
                     .menu(&menu)
                     .on_tray_icon_event(|tray, event| {
@@ -905,6 +1158,16 @@ pub fn run() {
                         _ => {}
                     })
                     .build(app)?;
+
+                // Hand the tray to DesktopState so the activity listener
+                // can swap icons later.
+                let tray_slot: Arc<std::sync::Mutex<Option<TrayIcon>>> = {
+                    let st = app.state::<DesktopState>();
+                    st.tray.clone()
+                };
+                if let Ok(mut g) = tray_slot.lock() {
+                    *g = Some(tray_icon);
+                };
             }
 
             // Poll loop runs on both desktop and mobile.
@@ -931,6 +1194,8 @@ pub fn run() {
             get_folder_effective_config,
             pick_folder,
             default_sync_folder,
+            get_autostart,
+            set_autostart,
         ])
         .build(tauri::generate_context!())
         .expect("error building Tauri application")

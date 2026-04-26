@@ -44,6 +44,7 @@ pub fn SettingsPage(tab: String) -> Element {
                 "sync" if is_desktop => rsx! {
                     h1 { class: "text-2xl font-bold", "Sync" }
                     SyncSection {}
+                    AutostartSection {}
                 },
                 "preferences" => rsx! {
                     h1 { class: "text-2xl font-bold", "Preferences" }
@@ -790,6 +791,63 @@ fn SyncSection() -> Element {
 
                 p { class: "text-xs text-base-content/50",
                     "Sync runs automatically every 60 seconds in the background. Status and log update live over Tauri events — no polling."
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn AutostartSection() -> Element {
+    let mut enabled = use_signal(|| None::<bool>);
+    let mut error = use_signal(|| None::<String>);
+    let mut saving = use_signal(|| false);
+
+    use_effect(move || {
+        spawn(async move {
+            match tauri::get_autostart().await {
+                Ok(v) => enabled.set(Some(v)),
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    });
+
+    let on_toggle = move |_| {
+        let next = !enabled().unwrap_or(false);
+        spawn(async move {
+            saving.set(true);
+            error.set(None);
+            match tauri::set_autostart(next).await {
+                Ok(()) => enabled.set(Some(next)),
+                Err(e) => error.set(Some(e)),
+            }
+            saving.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "card bg-base-100 shadow",
+            div { class: "card-body gap-4",
+                h2 { class: "card-title text-lg", "Launch on login" }
+                p { class: "text-sm text-base-content/70",
+                    "Start Uncloud automatically when you sign in to your computer. Runs in the system tray with sync active in the background."
+                }
+                if let Some(err) = error() {
+                    div { class: "alert alert-error text-sm", span { "{err}" } }
+                }
+                div { class: "form-control",
+                    label { class: "label cursor-pointer justify-start gap-3",
+                        input {
+                            r#type: "checkbox",
+                            class: "toggle toggle-primary",
+                            checked: enabled().unwrap_or(false),
+                            disabled: saving() || enabled().is_none(),
+                            onchange: on_toggle,
+                        }
+                        span { class: "label-text",
+                            if saving() { "Saving…" } else if enabled().is_none() { "Loading…" } else { "Launch Uncloud at login" }
+                        }
+                    }
                 }
             }
         }
