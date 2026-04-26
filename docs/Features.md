@@ -242,10 +242,10 @@ Todoist-style task manager with projects, sections, subtasks, comments, attachme
   - `board_view.rs` — Kanban: sections as columns, drag-drop tasks between columns
   - `list_view.rs` — flat list with grouping
   - `schedule_view.rs` — calendar / agenda view
-  - `task_detail.rs` — drawer with description, comments, subtasks, attachments
-  - `project_settings.rs` — members, sections, labels (server-side only — see [Roadmap](Roadmap.md#tasks-labels-in-ui)), view mode
+  - `task_detail.rs` — drawer with description, comments, subtasks, attachments, labels chip-input + create-inline picker
+  - `project_settings.rs` — members, sections, labels CRUD (8-colour palette, rename/recolour/delete with cascade)
 - **Routes**: `/tasks`, `/tasks/project/:id`
-- **⚠️ Known gap — labels in UI**: server has full label CRUD and `Task.labels: Vec<String>`, but the frontend never renders or edits labels. See [Roadmap](Roadmap.md#tasks-labels-in-ui).
+- **Labels**: project-scoped (`TaskLabel { project_id, name, color }`); tasks store `labels: Vec<String>` of label *names*, with server-side cascade on rename/delete. UI renders Trello-style coloured bars on board cards (compact) and small coloured chips (max 2 + overflow) in the list view; label colours are looked up from the project's catalogue with a stable grey fallback. Filter strip (`LabelFilterBar` in `tasks/mod.rs`) at the top of board/list views narrows visible tasks (OR semantics).
 
 ## Passwords (KeePass Vaults)
 

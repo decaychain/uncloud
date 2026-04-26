@@ -1,13 +1,15 @@
 use dioxus::prelude::*;
 use std::collections::HashSet;
 use uncloud_common::{
-    CreateTaskRequest, TaskPriority, TaskResponse, TaskSectionResponse, TaskStatus,
-    UpdateTaskStatusRequest,
+    CreateTaskRequest, TaskLabelResponse, TaskPriority, TaskResponse, TaskSectionResponse,
+    TaskStatus, UpdateTaskStatusRequest,
 };
 
 use crate::hooks::use_tasks;
 
+use super::label_color_for;
 use super::task_detail::TaskDetail;
+use super::{task_matches_label_filter, LabelFilterBar};
 
 // ── Helpers ──
 
@@ -143,6 +145,12 @@ pub fn ListView(project_id: String) -> Element {
     let mut drag_task_id: Signal<Option<String>> = use_signal(|| None);
     let mut drop_section_id: Signal<Option<String>> = use_signal(|| None);
 
+    // Project's label catalogue (for colour lookup)
+    let mut available_labels: Signal<Vec<TaskLabelResponse>> = use_signal(Vec::new);
+
+    // Label filter (OR semantics — empty = no filter)
+    let label_filter: Signal<HashSet<String>> = use_signal(HashSet::new);
+
     // Section management
     let mut adding_section = use_signal(|| false);
     let mut new_section_name = use_signal(String::new);
@@ -159,9 +167,10 @@ pub fn ListView(project_id: String) -> Element {
             loading.set(true);
             error.set(None);
 
-            let (sec_res, tasks_res) = futures::join!(
+            let (sec_res, tasks_res, labels_res) = futures::join!(
                 use_tasks::list_sections(&pid),
                 use_tasks::list_all_tasks(&pid),
+                use_tasks::list_labels(&pid),
             );
 
             match sec_res {
@@ -175,6 +184,9 @@ pub fn ListView(project_id: String) -> Element {
                         error.set(Some(e));
                     }
                 }
+            }
+            if let Ok(ls) = labels_res {
+                available_labels.set(ls);
             }
 
             loading.set(false);
@@ -209,6 +221,12 @@ pub fn ListView(project_id: String) -> Element {
     let has_unsectioned = top_level.iter().any(|t| t.section_id.is_none());
 
     rsx! {
+        // Label filter strip
+        LabelFilterBar {
+            available_labels: available_labels.read().clone(),
+            selected: label_filter,
+        }
+
         div { class: "space-y-3",
             // Sections
             for section in section_list.iter() {
@@ -219,12 +237,16 @@ pub fn ListView(project_id: String) -> Element {
                     let sec_name = section.name.clone();
                     let is_collapsed = collapsed.read().contains(&sec_id);
 
-                    let section_tasks: Vec<TaskResponse> = top_level
-                        .iter()
-                        .filter(|t| t.section_id.as_ref() == Some(&sec_id))
-                        .cloned()
-                        .cloned()
-                        .collect();
+                    let section_tasks: Vec<TaskResponse> = {
+                        let filter = label_filter.read();
+                        top_level
+                            .iter()
+                            .filter(|t| t.section_id.as_ref() == Some(&sec_id))
+                            .filter(|t| task_matches_label_filter(&t.labels, &filter))
+                            .cloned()
+                            .cloned()
+                            .collect()
+                    };
                     let count = section_tasks.len();
 
                     let is_drop_target = drop_section_id.read().as_ref() == Some(&sec_id);
@@ -395,9 +417,11 @@ pub fn ListView(project_id: String) -> Element {
                                         div { class: "px-2 pb-2",
                                             for task in section_tasks.iter() {
                                                 {
+                                                    let avail_labels = available_labels.read().clone();
                                                     render_task_row(
                                                         task,
                                                         &all_tasks,
+                                                        &avail_labels,
                                                         0,
                                                         tasks,
                                                         detail_task_id,
@@ -483,12 +507,16 @@ pub fn ListView(project_id: String) -> Element {
             if has_unsectioned {
                 {
                     let is_collapsed_unsec = collapsed.read().contains(UNSECTIONED_ID);
-                    let unsectioned_tasks: Vec<TaskResponse> = top_level
-                        .iter()
-                        .filter(|t| t.section_id.is_none())
-                        .cloned()
-                        .cloned()
-                        .collect();
+                    let unsectioned_tasks: Vec<TaskResponse> = {
+                        let filter = label_filter.read();
+                        top_level
+                            .iter()
+                            .filter(|t| t.section_id.is_none())
+                            .filter(|t| task_matches_label_filter(&t.labels, &filter))
+                            .cloned()
+                            .cloned()
+                            .collect()
+                    };
                     let unsec_count = unsectioned_tasks.len();
                     let is_adding_unsec = adding_to_section.read().as_ref().map(|s| s.as_str()) == Some(UNSECTIONED_ID);
 
@@ -531,9 +559,11 @@ pub fn ListView(project_id: String) -> Element {
                                 div { class: "px-2 pb-2",
                                     for task in unsectioned_tasks.iter() {
                                         {
+                                            let avail_labels = available_labels.read().clone();
                                             render_task_row(
                                                 task,
                                                 &all_tasks,
+                                                &avail_labels,
                                                 0,
                                                 tasks,
                                                 detail_task_id,
@@ -686,6 +716,7 @@ pub fn ListView(project_id: String) -> Element {
 fn render_task_row(
     task: &TaskResponse,
     all_tasks: &[TaskResponse],
+    available_labels: &[TaskLabelResponse],
     depth: usize,
     mut tasks: Signal<Vec<TaskResponse>>,
     mut detail_task_id: Signal<Option<String>>,
@@ -861,9 +892,26 @@ fn render_task_row(
                     }
                 }
 
-                // Labels (show first two as tiny chips)
+                // Labels (show first two as tiny coloured chips, "+N" overflow chip beyond)
                 for label in labels.iter().take(2) {
-                    span { class: "badge badge-xs badge-outline hidden sm:inline-flex shrink-0", "{label}" }
+                    {
+                        let color = label_color_for(available_labels, label).to_string();
+                        rsx! {
+                            span {
+                                key: "{label}",
+                                class: "px-1.5 py-0.5 rounded text-[10px] font-medium text-white hidden sm:inline-flex shrink-0",
+                                style: "background: {color};",
+                                "{label}"
+                            }
+                        }
+                    }
+                }
+                if labels.len() > 2 {
+                    span {
+                        class: "text-[10px] text-base-content/50 hidden sm:inline-flex shrink-0",
+                        title: "{labels.iter().skip(2).cloned().collect::<Vec<_>>().join(\", \")}",
+                        "+{labels.len() - 2}"
+                    }
                 }
 
                 // Due date
@@ -929,6 +977,7 @@ fn render_task_row(
                         render_task_row(
                             sub,
                             all_tasks,
+                            available_labels,
                             depth + 1,
                             tasks,
                             detail_task_id,
