@@ -3,7 +3,7 @@ pub mod fs;
 mod journal;
 
 pub use engine::{
-    BaseSource, FolderEffectiveConfig, LogAppendedHook, SyncConflict, SyncEngine,
+    BaseSource, FolderEffectiveConfig, LogAppendedHook, SyncActivity, SyncConflict, SyncEngine,
     SyncEngineHooks, SyncError, SyncReport, SyncTrigger,
 };
 pub use fs::{LocalFs, LocalFsError, NativeFs, WalkEntry};

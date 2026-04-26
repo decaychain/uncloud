@@ -251,6 +251,18 @@ pub async fn sync_now() -> Result<(), String> {
     invoke_raw("sync_now", &args).await.map(|_| ())
 }
 
+pub async fn get_autostart() -> Result<bool, String> {
+    let args = Object::new();
+    let result = invoke_raw("get_autostart", &args).await?;
+    Ok(result.as_bool().unwrap_or(false))
+}
+
+pub async fn set_autostart(enabled: bool) -> Result<(), String> {
+    let args = Object::new();
+    let _ = Reflect::set(&args, &JsValue::from_str("enabled"), &JsValue::from_bool(enabled));
+    invoke_raw("set_autostart", &args).await.map(|_| ())
+}
+
 /// Read the tail of the local sync_log from the desktop SQLite store. Called
 /// once on mount; subsequent updates arrive via `sync-log-appended` events.
 pub async fn get_local_sync_log(limit: i64) -> Result<Vec<SyncLogRow>, String> {

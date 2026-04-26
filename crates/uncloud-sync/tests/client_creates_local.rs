@@ -352,3 +352,57 @@ async fn second_sync_is_a_noop() {
     assert!(report.created_remote_folders.is_empty());
     assert!(report.uploaded.is_empty());
 }
+
+/// The engine's `activity()` watch broadcasts coarse state to embedding
+/// apps so the desktop tray icon can flag "I'm actually transferring
+/// bytes" vs "I'm only checking the tree." This test runs a sync that
+/// uploads one file and asserts the broadcast goes through both
+/// `Polling` (run started, no transfers yet) and `Transferring` (the
+/// upload is in flight) before returning to `Idle`.
+#[tokio::test]
+async fn activity_watch_reports_polling_and_transferring() {
+    use uncloud_sync::SyncActivity;
+
+    let server = FakeServer::default();
+    let rig = new_rig(server).await;
+    std::fs::create_dir(rig.root.join("Folder")).unwrap();
+    std::fs::write(rig.root.join("Folder/data.txt"), b"x").unwrap();
+
+    let engine = build_engine(&rig).await;
+    let mut rx = engine.activity();
+    assert_eq!(*rx.borrow(), SyncActivity::Idle);
+
+    // Collect every transition the engine emits during the sync run.
+    let collector = tokio::spawn(async move {
+        let mut seen = Vec::<SyncActivity>::new();
+        while rx.changed().await.is_ok() {
+            seen.push(*rx.borrow());
+            // Once we are back at Idle the run is over and we can stop.
+            if matches!(seen.last(), Some(SyncActivity::Idle)) {
+                break;
+            }
+        }
+        seen
+    });
+
+    let report = engine.incremental_sync().await.unwrap();
+    assert_eq!(report.uploaded, vec!["data.txt".to_string()]);
+
+    let seen = collector.await.unwrap();
+    assert!(
+        seen.contains(&SyncActivity::Polling),
+        "expected Polling transition, got {:?}",
+        seen
+    );
+    assert!(
+        seen.contains(&SyncActivity::Transferring),
+        "expected Transferring transition, got {:?}",
+        seen
+    );
+    assert_eq!(
+        seen.last().copied(),
+        Some(SyncActivity::Idle),
+        "run must end at Idle, got {:?}",
+        seen
+    );
+}
