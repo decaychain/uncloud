@@ -53,6 +53,11 @@ pub trait LocalFs: Send + Sync {
     /// `(rel_path, mtime)` pair.
     async fn walk(&self, root: &str) -> Result<Vec<WalkEntry>, LocalFsError>;
 
+    /// Recursively walk `root`, yielding every subdirectory as a relative
+    /// path string. Used by the engine to discover client-side folders that
+    /// do not yet exist on the server.
+    async fn walk_dirs(&self, root: &str) -> Result<Vec<String>, LocalFsError>;
+
     /// Ensure the directory at `path` exists, creating parents if needed.
     async fn create_dir_all(&self, path: &str) -> Result<(), LocalFsError>;
 
@@ -132,6 +137,32 @@ impl LocalFs for NativeFs {
         })
         .await
         .map_err(|e| LocalFsError::other(format!("walk task panicked: {e}")))?
+    }
+
+    async fn walk_dirs(&self, root: &str) -> Result<Vec<String>, LocalFsError> {
+        let root = root.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            for entry in walkdir::WalkDir::new(&root)
+                .min_depth(1)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                if !entry.file_type().is_dir() {
+                    continue;
+                }
+                let rel = entry
+                    .path()
+                    .strip_prefix(&root)
+                    .unwrap_or(entry.path())
+                    .to_string_lossy()
+                    .into_owned();
+                out.push(rel);
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| LocalFsError::other(format!("walk_dirs task panicked: {e}")))?
     }
 
     async fn create_dir_all(&self, path: &str) -> Result<(), LocalFsError> {

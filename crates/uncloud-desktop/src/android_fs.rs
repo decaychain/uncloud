@@ -115,6 +115,44 @@ impl LocalFs for AndroidSafFs {
         Ok(out)
     }
 
+    async fn walk_dirs(&self, root: &str) -> Result<Vec<String>, LocalFsError> {
+        let (root_uri, rel_prefix) = Self::split(root);
+        let api = self.app.android_fs_async();
+
+        let start: FileUri = if rel_prefix.is_empty() {
+            Self::tree_uri(&root_uri)
+        } else {
+            api.resolve_dir_uri(&Self::tree_uri(&root_uri), &rel_prefix)
+                .await
+                .map_err(|e| LocalFsError::other(format!("resolve_dir_uri({rel_prefix}): {e}")))?
+        };
+
+        let mut out = Vec::new();
+        let mut stack: Vec<(FileUri, String)> = vec![(start, String::new())];
+
+        while let Some((dir, prefix)) = stack.pop() {
+            let entries = api
+                .read_dir(&dir)
+                .await
+                .map_err(|e| LocalFsError::other(format!("read_dir: {e}")))?;
+
+            for entry in entries {
+                let name = entry.name().to_string();
+                let new_rel = if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{prefix}/{name}")
+                };
+                if let Entry::Dir { uri, .. } = entry {
+                    out.push(new_rel.clone());
+                    stack.push((uri, new_rel));
+                }
+            }
+        }
+
+        Ok(out)
+    }
+
     async fn create_dir_all(&self, path: &str) -> Result<(), LocalFsError> {
         let (root, rel) = Self::split(path);
         if rel.is_empty() {

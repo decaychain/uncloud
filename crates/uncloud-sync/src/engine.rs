@@ -33,6 +33,8 @@ pub struct SyncReport {
     pub deleted_local: Vec<String>,
     pub conflicts: Vec<SyncConflict>,
     pub errors: Vec<SyncError>,
+    /// Local-only folders that were created on the server during this run.
+    pub created_remote_folders: Vec<String>,
 }
 
 // ── Internal resolved per-folder info ─────────────────────────────────────────
@@ -278,6 +280,22 @@ impl SyncEngine {
         .await;
     }
 
+    async fn log_create_remote_folder(&self, local_path: &str) {
+        self.ensure_start_emitted().await;
+        self.log_row(SyncLogRow {
+            id: 0,
+            timestamp: Utc::now().to_rfc3339(),
+            operation: "Created on server".to_owned(),
+            direction: Some("Up".to_owned()),
+            resource_type: Some("Folder".to_owned()),
+            path: self.relative_display_path(local_path),
+            new_path: None,
+            reason: "Sync".to_owned(),
+            note: None,
+        })
+        .await;
+    }
+
     async fn log_sync_marker(
         &self,
         operation: &str,
@@ -362,7 +380,7 @@ impl SyncEngine {
         //    folder's contents live in. Folders with no resolvable base_path
         //    (Android with no root and no ancestor override) are kept in the
         //    map with `base_path = None` so subtree lookups still succeed.
-        let folder_info = self.resolve_folders(&tree.folders).await?;
+        let mut folder_info = self.resolve_folders(&tree.folders).await?;
 
         // 3. Load journal
         let journal_rows = self.journal.all().await?;
@@ -650,6 +668,187 @@ impl SyncEngine {
             }
         }
 
+        // 6.5. Create server folders for local-only directories.
+        //
+        // Phase 4 only mirrors the *server* tree onto the local disk. Any
+        // directory the user creates locally has no counterpart on the server,
+        // so files inside it would be silently skipped by Phase 7 (they fail
+        // the "parent must already be a known folder base" check). Walk the
+        // local tree, find every directory that is not yet a registered base,
+        // and POST `/api/folders` for it. The new folder inherits its
+        // parent's effective strategy — top-level folders default to `TwoWay`
+        // (matching Phase 5's root-file fallback), so a freshly created
+        // local folder syncs out of the box without manual configuration.
+        //
+        // Two passes mirror Phase 7:
+        //  (a) walk `root_local_path` (desktop)
+        //  (b) walk each per-folder override base (Android, or desktop folders
+        //      whose `local_path` was overridden to live outside the root).
+        //
+        // Newly-created folders are inserted into `folder_info` immediately
+        // so subsequent dirs (deeper in the tree) and Phase 7's file walk
+        // both see them as valid parents.
+        async fn create_remote_dirs(
+            this: &SyncEngine,
+            walk_root: &str,
+            attach_under: Option<(&str, &str, SyncStrategy)>,
+            folder_info: &mut HashMap<String, ResolvedFolder>,
+            report: &mut SyncReport,
+        ) {
+            let mut local_dirs = match this.fs.walk_dirs(walk_root).await {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!("walk_dirs({}) failed: {}", walk_root, e);
+                    return;
+                }
+            };
+            // Shallowest first — a child folder cannot be created before its
+            // parent has been registered in `folder_info`.
+            local_dirs.sort_by_key(|d| {
+                d.chars().filter(|&c| c == '/' || c == '\\').count()
+            });
+
+            // Snapshot of currently-known bases as `(base_path, folder_id, strategy)`.
+            // Rebuilt lazily — we push freshly-created folders directly so the
+            // longest-prefix match below picks them up for any deeper dir we
+            // process later in the same pass.
+            let mut bases: Vec<(String, String, SyncStrategy)> = folder_info
+                .iter()
+                .filter_map(|(id, info)| {
+                    info.base_path
+                        .as_ref()
+                        .map(|p| (p.clone(), id.clone(), info.strategy))
+                })
+                .collect();
+            bases.sort_by_key(|(p, _, _)| std::cmp::Reverse(p.len()));
+
+            for rel in local_dirs {
+                let full_path = this.fs.join(walk_root, &rel);
+                // Already a registered base → known server folder, skip.
+                if bases.iter().any(|(p, _, _)| p == &full_path) {
+                    continue;
+                }
+
+                // Determine parent: longest-prefix match against known bases,
+                // falling back to `attach_under` (override-root case) or the
+                // global root (desktop top-level).
+                let parent_full = match rel.rfind(|c| c == '/' || c == '\\') {
+                    Some(idx) => Some(this.fs.join(walk_root, &rel[..idx])),
+                    None => None,
+                };
+
+                let (parent_id, parent_strategy) = match &parent_full {
+                    Some(p) => match bases.iter().find(|(bp, _, _)| bp == p) {
+                        Some((_, fid, s)) => (Some(fid.clone()), *s),
+                        None => continue, // ancestor missing — corruption; skip
+                    },
+                    None => match attach_under {
+                        Some((_, fid, s)) => (Some(fid.to_owned()), s),
+                        None => (None, SyncStrategy::TwoWay),
+                    },
+                };
+
+                let can_upload = matches!(
+                    parent_strategy,
+                    SyncStrategy::TwoWay
+                        | SyncStrategy::ClientToServer
+                        | SyncStrategy::UploadOnly
+                );
+                if !can_upload {
+                    continue;
+                }
+
+                let name = rel
+                    .rsplit(|c| c == '/' || c == '\\')
+                    .next()
+                    .unwrap_or(&rel)
+                    .to_owned();
+                if name.is_empty() {
+                    continue;
+                }
+
+                match this.client.create_folder(&name, parent_id.as_deref()).await {
+                    Ok(folder) => {
+                        let _ = this
+                            .journal
+                            .upsert(
+                                &folder.id,
+                                "folder",
+                                &folder.name,
+                                &full_path,
+                                None,
+                                None,
+                                &folder.updated_at,
+                                None,
+                                "synced",
+                            )
+                            .await;
+                        folder_info.insert(
+                            folder.id.clone(),
+                            ResolvedFolder {
+                                strategy: parent_strategy,
+                                base_path: Some(full_path.clone()),
+                            },
+                        );
+                        bases.push((full_path.clone(), folder.id.clone(), parent_strategy));
+                        bases.sort_by_key(|(p, _, _)| std::cmp::Reverse(p.len()));
+                        this.log_create_remote_folder(&full_path).await;
+                        report.created_remote_folders.push(rel.clone());
+                    }
+                    Err(e) => {
+                        report.errors.push(SyncError {
+                            path: rel.clone(),
+                            reason: format!("create folder: {e}"),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Pass (a): walk the global root.
+        if let Some(root) = self.root_local_path.clone() {
+            create_remote_dirs(self, &root, None, &mut folder_info, &mut report).await;
+        }
+
+        // Pass (b): walk per-folder override bases. Snapshot ids/paths so we
+        // don't hold an immutable borrow on `folder_info` while passing it
+        // mutably into `create_remote_dirs`.
+        let override_walks: Vec<(String, String, SyncStrategy)> = folder_info
+            .iter()
+            .filter_map(|(id, info)| {
+                let base = info.base_path.as_ref()?;
+                if let Some(root) = self.root_local_path.as_ref() {
+                    if base.starts_with(root.as_str()) {
+                        return None;
+                    }
+                }
+                Some((base.clone(), id.clone(), info.strategy))
+            })
+            .collect();
+        for (base, fid, strat) in override_walks {
+            // Only walk folders that have an explicit journal local_path
+            // override — same gate as Phase 7 pass (b).
+            let has_override = self
+                .journal
+                .get_folder_sync_config(&fid)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, p)| p.is_some())
+                .unwrap_or(false);
+            if !has_override && self.root_local_path.is_some() {
+                continue;
+            }
+            create_remote_dirs(
+                self,
+                &base,
+                Some((&base, &fid, strat)),
+                &mut folder_info,
+                &mut report,
+            )
+            .await;
+        }
+
         // 7. Handle new local files not in journal.
         //
         // Two passes:
@@ -833,10 +1032,11 @@ impl SyncEngine {
 
         let elapsed = started.elapsed();
         let note = format!(
-            "{} up, {} down, {} deleted, {} conflicts, {} errors, {:.1}s",
+            "{} up, {} down, {} deleted, {} folders created, {} conflicts, {} errors, {:.1}s",
             report.uploaded.len(),
             report.downloaded.len(),
             report.deleted_local.len(),
+            report.created_remote_folders.len(),
             report.conflicts.len(),
             report.errors.len(),
             elapsed.as_secs_f32(),
