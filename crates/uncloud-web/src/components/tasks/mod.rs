@@ -8,10 +8,11 @@ pub mod schedule_view;
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use std::collections::HashSet;
-use uncloud_common::{ProjectView, TaskLabelResponse};
+use uncloud_common::{ProjectView, ServerEvent, TaskLabelResponse};
 
 pub use schedule_view::ScheduleView;
 
+use crate::hooks::use_events::use_events;
 use crate::hooks::use_tasks;
 use project_settings::ProjectSettings;
 
@@ -245,6 +246,24 @@ pub fn TasksProjectPage(project_id: String) -> Element {
                 available_labels.set(Vec::new());
             }
         });
+    });
+
+    // Live updates: refetch the label catalogue whenever a TaskChanged event
+    // for the current project arrives. Sections / labels / member changes
+    // emit `task_id: None`, so we can't narrow further without losing
+    // events; refetching the small label list on any task change is cheap
+    // and keeps the UI consistent across tabs and devices.
+    use_events(move |evt| {
+        if let ServerEvent::TaskChanged { project_id: ev_pid, .. } = evt {
+            if ev_pid == *pid_sig.peek() {
+                let pid = ev_pid;
+                spawn(async move {
+                    if let Ok(ls) = use_tasks::list_labels(&pid).await {
+                        available_labels.set(ls);
+                    }
+                });
+            }
+        }
     });
 
     rsx! {

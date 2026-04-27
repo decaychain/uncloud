@@ -245,7 +245,8 @@ Todoist-style task manager with projects, sections, subtasks, comments, attachme
   - `task_detail.rs` — drawer with description, comments, subtasks, attachments, labels chip-input + create-inline picker
   - `project_settings.rs` — members, sections, labels CRUD (8-colour palette, rename/recolour/delete with cascade)
 - **Routes**: `/tasks`, `/tasks/project/:id`
-- **Labels**: project-scoped (`TaskLabel { project_id, name, color }`); tasks store `labels: Vec<String>` of label *names*, with server-side cascade on rename/delete. UI renders Trello-style coloured bars on board cards (compact) and small coloured chips (max 2 + overflow) in the list view; label colours are looked up from the project's catalogue with a stable grey fallback. Filter strip (`LabelFilterBar` in `tasks/mod.rs`) at the top of board/list views narrows visible tasks (OR semantics).
+- **Labels**: project-scoped (`TaskLabel { project_id, name, color }`); tasks store `labels: Vec<String>` of label *names*, with server-side cascade on rename/delete. UI renders coloured name chips on both board cards and list rows (max 2 + overflow on list rows); label colours are looked up from the project's catalogue with a stable grey fallback. Filter strip (`LabelFilterBar` in `tasks/mod.rs`) at the top of board/list views narrows visible tasks (OR semantics).
+- **Live updates**: every mutation (task, section, label CRUD + reorders + status changes) emits `ServerEvent::TaskChanged` to the project's owner and members. `BoardView` / `ListView` refetch tasks; `TasksProjectPage` refetches the label catalogue; `ScheduleView` refetches the schedule on any TaskChanged. The open `TaskDetail` re-fetches via `refresh_key` when the changed `task_id` matches.
 
 ## Passwords (KeePass Vaults)
 
@@ -324,8 +325,9 @@ Variants:
 - `ProcessingCompleted { file_id, task_type, success }`
 - `RescanProgress { ... }` / `RescanFinished { ... }`
 - `SyncEventAppended { event }`
+- `TaskChanged { project_id, task_id }` — fans out to project owner + members on any task / section / label CRUD; `task_id` is `Some` for single-task changes, `None` for bulk (reorder, label/section CRUD)
 
-`FileBrowser` and other views refresh on relevant events; thumbnail updates trigger image re-render via a per-file version counter (`thumb_vers: HashMap<String, u32>`).
+`FileBrowser` and other views refresh on relevant events; thumbnail updates trigger image re-render via a per-file version counter (`thumb_vers: HashMap<String, u32>`). `BoardView` / `ListView` / `ScheduleView` / `TasksProjectPage` subscribe to `TaskChanged` and refetch their data (tasks, sections, label catalogue, schedule) live.
 
 ## Shopping Lists
 

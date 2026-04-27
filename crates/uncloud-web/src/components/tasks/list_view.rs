@@ -1,10 +1,11 @@
 use dioxus::prelude::*;
 use std::collections::HashSet;
 use uncloud_common::{
-    CreateTaskRequest, TaskLabelResponse, TaskPriority, TaskResponse, TaskSectionResponse,
-    TaskStatus, UpdateTaskStatusRequest,
+    CreateTaskRequest, ServerEvent, TaskLabelResponse, TaskPriority, TaskResponse,
+    TaskSectionResponse, TaskStatus, UpdateTaskStatusRequest,
 };
 
+use crate::hooks::use_events::use_events;
 use crate::hooks::use_tasks;
 
 use super::label_color_for;
@@ -143,6 +144,7 @@ pub fn ListView(
 
     // Task detail slide-over
     let mut detail_task_id: Signal<Option<String>> = use_signal(|| None);
+    let mut detail_refresh: Signal<u32> = use_signal(|| 0);
 
     // Drag state
     let mut drag_task_id: Signal<Option<String>> = use_signal(|| None);
@@ -163,6 +165,30 @@ pub fn ListView(
     if *pid_sig.peek() != project_id {
         pid_sig.set(project_id.clone());
     }
+
+    // Live updates: refetch on TaskChanged for the current project. Bumps
+    // detail_refresh too when the open task is the one that changed.
+    use_events(move |evt| {
+        if let ServerEvent::TaskChanged { project_id: ev_pid, task_id } = evt {
+            if ev_pid == *pid_sig.peek() {
+                let pid = ev_pid.clone();
+                spawn(async move {
+                    if let Ok(secs) = use_tasks::list_sections(&pid).await {
+                        sections.set(secs);
+                    }
+                    if let Ok(t) = use_tasks::list_all_tasks(&pid).await {
+                        tasks.set(t);
+                    }
+                });
+                if let Some(tid) = task_id {
+                    if detail_task_id.peek().as_ref() == Some(&tid) {
+                        let next = detail_refresh.peek().wrapping_add(1);
+                        detail_refresh.set(next);
+                    }
+                }
+            }
+        }
+    });
 
     // Initial fetch (re-runs when pid_sig changes)
     use_effect(move || {
@@ -693,6 +719,7 @@ pub fn ListView(
         if let Some(tid) = detail_task_id.read().clone() {
             TaskDetail {
                 task_id: tid,
+                refresh_key: *detail_refresh.read(),
                 available_labels,
                 on_close: move |_| { detail_task_id.set(None); },
                 on_updated: move |_| {

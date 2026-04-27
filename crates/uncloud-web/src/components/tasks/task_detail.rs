@@ -129,7 +129,17 @@ pub fn TaskDetail(
         let _key = *refresh_sig.read(); // subscribe to refresh_key changes
         let tid = tid_sig.read().clone();
         spawn(async move {
-            loading.set(true);
+            // Only show the loading spinner for the *initial* fetch (when we
+            // don't have a task yet). Background refreshes triggered by
+            // refresh_key bumps (e.g. SSE TaskChanged from another device or
+            // tab) keep the form mounted so user-edited fields like the
+            // Status / Priority selects don't lose their value to a brief
+            // unmount-remount cycle that resets the select to its first
+            // option.
+            let initial_load = task.peek().is_none();
+            if initial_load {
+                loading.set(true);
+            }
             error.set(None);
 
             let (task_res, comments_res) = futures::join!(
@@ -164,7 +174,9 @@ pub fn TaskDetail(
                 comments.set(c);
             }
 
-            loading.set(false);
+            if initial_load {
+                loading.set(false);
+            }
         });
     });
 
@@ -365,7 +377,6 @@ pub fn TaskDetail(
                         label { class: "label", span { class: "label-text text-xs font-semibold uppercase", "Status" } }
                         select {
                             class: "select select-bordered select-sm w-full",
-                            value: "{current_status_str}",
                             onchange: move |e| {
                                 let val = e.value();
                                 let s = match val.as_str() {
@@ -396,8 +407,13 @@ pub fn TaskDetail(
                                         TaskStatus::Done => "done",
                                         TaskStatus::Cancelled => "cancelled",
                                     };
+                                    let is_selected = val == current_status_str;
                                     rsx! {
-                                        option { value: "{val}", "{slabel}" }
+                                        option {
+                                            value: "{val}",
+                                            selected: is_selected,
+                                            "{slabel}"
+                                        }
                                     }
                                 }
                             }
@@ -408,7 +424,6 @@ pub fn TaskDetail(
                         label { class: "label", span { class: "label-text text-xs font-semibold uppercase", "Priority" } }
                         select {
                             class: "select select-bordered select-sm w-full",
-                            value: "{current_priority_str}",
                             onchange: move |e| {
                                 let val = e.value();
                                 let p = match val.as_str() {
@@ -434,8 +449,13 @@ pub fn TaskDetail(
                                         TaskPriority::Medium => "medium",
                                         TaskPriority::Low => "low",
                                     };
+                                    let is_selected = val == current_priority_str;
                                     rsx! {
-                                        option { value: "{val}", "{plabel}" }
+                                        option {
+                                            value: "{val}",
+                                            selected: is_selected,
+                                            "{plabel}"
+                                        }
                                     }
                                 }
                             }

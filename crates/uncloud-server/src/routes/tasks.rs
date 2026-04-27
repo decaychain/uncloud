@@ -627,6 +627,11 @@ pub async fn create_section(
 
     coll.insert_one(&section).await?;
 
+    state
+        .events
+        .emit_task_changed(&state.db, project_id, None)
+        .await;
+
     Ok((StatusCode::CREATED, Json(section_to_response(&section))))
 }
 
@@ -681,6 +686,11 @@ pub async fn update_section(
         .await?
         .ok_or_else(|| AppError::NotFound("Section".to_string()))?;
 
+    state
+        .events
+        .emit_task_changed(&state.db, updated.project_id, None)
+        .await;
+
     Ok(Json(section_to_response(&updated)))
 }
 
@@ -702,6 +712,8 @@ pub async fn delete_section(
     let (_project, perm) = verify_project_access(&state, section.project_id, user.id).await?;
     require_editor(&perm)?;
 
+    let project_id = section.project_id;
+
     // Null out section_id on tasks in this section
     let tasks_coll = state.db.collection::<Task>("tasks");
     tasks_coll
@@ -712,6 +724,11 @@ pub async fn delete_section(
         .await?;
 
     coll.delete_one(doc! { "_id": section_id }).await?;
+
+    state
+        .events
+        .emit_task_changed(&state.db, project_id, None)
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -741,6 +758,11 @@ pub async fn reorder_sections(
         )
         .await?;
     }
+
+    state
+        .events
+        .emit_task_changed(&state.db, project_id, None)
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -810,6 +832,11 @@ pub async fn create_label(
     };
 
     coll.insert_one(&label).await?;
+
+    state
+        .events
+        .emit_task_changed(&state.db, project_id, None)
+        .await;
 
     Ok((StatusCode::CREATED, Json(label_to_response(&label))))
 }
@@ -893,6 +920,11 @@ pub async fn update_label(
         .await?
         .ok_or_else(|| AppError::NotFound("Label".to_string()))?;
 
+    state
+        .events
+        .emit_task_changed(&state.db, updated.project_id, None)
+        .await;
+
     Ok(Json(label_to_response(&updated)))
 }
 
@@ -914,6 +946,8 @@ pub async fn delete_label(
     let (_project, perm) = verify_project_access(&state, label.project_id, user.id).await?;
     require_editor(&perm)?;
 
+    let project_id = label.project_id;
+
     // Remove label name from all tasks in the project
     let tasks_coll = state.db.collection::<Task>("tasks");
     tasks_coll
@@ -924,6 +958,11 @@ pub async fn delete_label(
         .await?;
 
     coll.delete_one(doc! { "_id": label_id }).await?;
+
+    state
+        .events
+        .emit_task_changed(&state.db, project_id, None)
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }

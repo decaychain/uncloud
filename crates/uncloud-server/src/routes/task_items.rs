@@ -507,6 +507,11 @@ pub async fn create_task(
     let task_coll = state.db.collection::<Task>("tasks");
     task_coll.insert_one(&task).await?;
 
+    state
+        .events
+        .emit_task_changed(&state.db, task.project_id, Some(task.id))
+        .await;
+
     let resp = task_to_response(&task, 0, 0, 0);
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -652,6 +657,11 @@ pub async fn update_task(
         .copied()
         .unwrap_or(0);
 
+    state
+        .events
+        .emit_task_changed(&state.db, updated.project_id, Some(task_id))
+        .await;
+
     Ok(Json(task_to_response(&updated, sc, sdc, cc)))
 }
 
@@ -663,8 +673,9 @@ pub async fn delete_task(
 ) -> Result<StatusCode> {
     let task_id =
         ObjectId::parse_str(&id).map_err(|_| AppError::BadRequest("Invalid ID".into()))?;
-    let (_task, _project, perm) = verify_task_access(&state, task_id, user.id).await?;
+    let (task, _project, perm) = verify_task_access(&state, task_id, user.id).await?;
     require_editor(&perm)?;
+    let project_id = task.project_id;
 
     let task_coll = state.db.collection::<Task>("tasks");
     let comment_coll = state.db.collection::<TaskComment>("task_comments");
@@ -699,6 +710,11 @@ pub async fn delete_task(
 
     // Delete the task itself
     task_coll.delete_one(doc! { "_id": task_id }).await?;
+
+    state
+        .events
+        .emit_task_changed(&state.db, project_id, Some(task_id))
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -785,6 +801,11 @@ pub async fn update_task_status(
         .copied()
         .unwrap_or(0);
 
+    state
+        .events
+        .emit_task_changed(&state.db, updated.project_id, Some(task_id))
+        .await;
+
     Ok(Json(task_to_response(&updated, sc, sdc, cc)))
 }
 
@@ -811,6 +832,11 @@ pub async fn reorder_tasks(
             )
             .await?;
     }
+
+    state
+        .events
+        .emit_task_changed(&state.db, project_oid, None)
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -907,6 +933,11 @@ pub async fn create_subtask(
 
     task_coll.insert_one(&task).await?;
 
+    state
+        .events
+        .emit_task_changed(&state.db, task.project_id, Some(task.id))
+        .await;
+
     Ok((StatusCode::CREATED, Json(task_to_response(&task, 0, 0, 0))))
 }
 
@@ -940,6 +971,11 @@ pub async fn promote_subtask(
         .await?
         .ok_or(AppError::NotFound("Task".into()))?;
 
+    state
+        .events
+        .emit_task_changed(&state.db, updated.project_id, Some(task_id))
+        .await;
+
     Ok(Json(task_to_response(&updated, 0, 0, 0)))
 }
 
@@ -952,8 +988,9 @@ pub async fn attach_files(
 ) -> Result<StatusCode> {
     let task_id =
         ObjectId::parse_str(&id).map_err(|_| AppError::BadRequest("Invalid ID".into()))?;
-    let (_task, _project, perm) = verify_task_access(&state, task_id, user.id).await?;
+    let (task, _project, perm) = verify_task_access(&state, task_id, user.id).await?;
     require_editor(&perm)?;
+    let project_id = task.project_id;
 
     let files_coll = state.db.collection::<File>("files");
     let mut new_ids: Vec<bson::Bson> = Vec::new();
@@ -981,6 +1018,11 @@ pub async fn attach_files(
                 },
             )
             .await?;
+
+        state
+            .events
+            .emit_task_changed(&state.db, project_id, Some(task_id))
+            .await;
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -997,8 +1039,9 @@ pub async fn detach_file(
     let file_oid = ObjectId::parse_str(&file_id)
         .map_err(|_| AppError::BadRequest("Invalid file ID".into()))?;
 
-    let (_task, _project, perm) = verify_task_access(&state, task_id, user.id).await?;
+    let (task, _project, perm) = verify_task_access(&state, task_id, user.id).await?;
     require_editor(&perm)?;
+    let project_id = task.project_id;
 
     let task_coll = state.db.collection::<Task>("tasks");
     task_coll
@@ -1010,6 +1053,11 @@ pub async fn detach_file(
             },
         )
         .await?;
+
+    state
+        .events
+        .emit_task_changed(&state.db, project_id, Some(task_id))
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
