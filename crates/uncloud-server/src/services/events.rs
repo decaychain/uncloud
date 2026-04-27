@@ -1,4 +1,6 @@
+use mongodb::bson::doc;
 use mongodb::bson::oid::ObjectId;
+use mongodb::Database;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -6,7 +8,7 @@ use tokio::sync::{broadcast, RwLock};
 
 // (EventService derives Clone; its inner state is already Arc-wrapped.)
 
-use crate::models::{File, Folder, TaskType, UserRole};
+use crate::models::{File, Folder, TaskProject, TaskType, UserRole};
 use crate::services::rescan::{RescanConflict, RescanJob, RescanStatus};
 
 #[derive(Debug, Clone, Serialize)]
@@ -48,6 +50,14 @@ pub enum Event {
     },
     SyncEventAppended {
         event: uncloud_common::SyncEventResponse,
+    },
+    /// Hint that something changed in a task project. Frontend re-fetches the
+    /// affected views. `task_id` is `Some` when a single task was the target
+    /// (create/update/delete/status); `None` for bulk changes (reorder, or
+    /// section/label CRUD).
+    TaskChanged {
+        project_id: String,
+        task_id: Option<String>,
     },
 }
 
@@ -299,6 +309,37 @@ impl EventService {
             },
         )
         .await;
+    }
+
+    /// Fan out a `TaskChanged` to a project's owner and every member. The
+    /// project doc is loaded fresh so callers don't have to thread it
+    /// through; if the lookup fails we silently drop the event (the worst
+    /// case is a stale UI on another device, which the next manual refresh
+    /// recovers from).
+    pub async fn emit_task_changed(
+        &self,
+        db: &Database,
+        project_id: ObjectId,
+        task_id: Option<ObjectId>,
+    ) {
+        let coll = db.collection::<TaskProject>("task_projects");
+        let project = match coll.find_one(doc! { "_id": project_id }).await {
+            Ok(Some(p)) => p,
+            _ => return,
+        };
+
+        let event = Event::TaskChanged {
+            project_id: project_id.to_hex(),
+            task_id: task_id.map(|id| id.to_hex()),
+        };
+
+        // Owner first, then every distinct member.
+        self.emit(project.owner_id, event.clone()).await;
+        for m in &project.members {
+            if m.user_id != project.owner_id {
+                self.emit(m.user_id, event.clone()).await;
+            }
+        }
     }
 
     pub async fn emit_rescan_progress(&self, job: &RescanJob) {

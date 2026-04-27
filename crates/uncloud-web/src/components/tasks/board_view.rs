@@ -1,10 +1,11 @@
 use dioxus::prelude::*;
 use std::collections::HashSet;
 use uncloud_common::{
-    CreateTaskRequest, TaskLabelResponse, TaskProjectResponse, TaskResponse, TaskStatus,
-    UpdateTaskStatusRequest,
+    CreateTaskRequest, ServerEvent, TaskLabelResponse, TaskProjectResponse, TaskResponse,
+    TaskStatus, UpdateTaskStatusRequest,
 };
 
+use crate::hooks::use_events::use_events;
 use crate::hooks::use_tasks;
 
 use super::board_card::BoardCard;
@@ -92,6 +93,29 @@ pub fn BoardView(
     if *pid_sig.peek() != project_id {
         pid_sig.set(project_id.clone());
     }
+
+    // Live updates: refetch tasks when a TaskChanged event for the current
+    // project arrives (covers both same-tab actions on shared docs and
+    // changes from other devices). Bumps detail_refresh too when the open
+    // task is the one that changed, so the slide-over re-fetches.
+    use_events(move |evt| {
+        if let ServerEvent::TaskChanged { project_id: ev_pid, task_id } = evt {
+            if ev_pid == *pid_sig.peek() {
+                let pid = ev_pid.clone();
+                spawn(async move {
+                    if let Ok(t) = use_tasks::list_tasks(&pid, None, None).await {
+                        tasks.set(t);
+                    }
+                });
+                if let Some(tid) = task_id {
+                    if detail_task_id.peek().as_ref() == Some(&tid) {
+                        let next = detail_refresh.peek().wrapping_add(1);
+                        detail_refresh.set(next);
+                    }
+                }
+            }
+        }
+    });
 
     // Initial fetch (re-runs when pid_sig changes, i.e. user navigated to a different project)
     use_effect(move || {

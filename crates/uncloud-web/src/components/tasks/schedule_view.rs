@@ -1,6 +1,10 @@
 use dioxus::prelude::*;
-use uncloud_common::{TaskLabelResponse, TaskPriority, TaskResponse, TaskScheduleResponse, TaskStatus, UpdateTaskStatusRequest};
+use uncloud_common::{
+    ServerEvent, TaskLabelResponse, TaskPriority, TaskResponse, TaskScheduleResponse, TaskStatus,
+    UpdateTaskStatusRequest,
+};
 
+use crate::hooks::use_events::use_events;
 use crate::hooks::use_tasks;
 
 use super::task_detail::TaskDetail;
@@ -50,6 +54,18 @@ pub fn ScheduleView() -> Element {
             }
             loading.set(false);
         });
+    });
+
+    // Live updates: ScheduleView spans projects, so any TaskChanged is
+    // potentially relevant. Refetch the schedule on every event.
+    use_events(move |evt| {
+        if matches!(evt, ServerEvent::TaskChanged { .. }) {
+            spawn(async move {
+                if let Ok(s) = use_tasks::get_schedule().await {
+                    schedule.set(Some(s));
+                }
+            });
+        }
     });
 
     let refresh = move || {
