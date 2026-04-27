@@ -253,20 +253,16 @@ pub fn TasksProjectPage(project_id: String) -> Element {
     // emit `task_id: None`, so we can't narrow further without losing
     // events; refetching the small label list on any task change is cheap
     // and keeps the UI consistent across tabs and devices.
-    //
-    // All signal work runs inside `spawn` so it executes as an async task
-    // with the Dioxus runtime properly attached, instead of synchronously
-    // inside the JS SSE callback (which would re-enter the runtime).
     use_events(move |evt| {
         if let ServerEvent::TaskChanged { project_id: ev_pid, .. } = evt {
-            spawn(async move {
-                if ev_pid != *pid_sig.peek() {
-                    return;
-                }
-                if let Ok(ls) = use_tasks::list_labels(&ev_pid).await {
-                    available_labels.set(ls);
-                }
-            });
+            if ev_pid == *pid_sig.peek() {
+                let pid = ev_pid;
+                spawn(async move {
+                    if let Ok(ls) = use_tasks::list_labels(&pid).await {
+                        available_labels.set(ls);
+                    }
+                });
+            }
         }
     });
 

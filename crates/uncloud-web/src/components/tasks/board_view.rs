@@ -98,29 +98,22 @@ pub fn BoardView(
     // project arrives (covers both same-tab actions on shared docs and
     // changes from other devices). Bumps detail_refresh too when the open
     // task is the one that changed, so the slide-over re-fetches.
-    //
-    // All signal work runs inside `spawn` so it executes as an async task
-    // with the Dioxus runtime properly attached, instead of synchronously
-    // inside the JS SSE callback (which would re-enter the runtime and
-    // trip its RefCell guard).
     use_events(move |evt| {
         if let ServerEvent::TaskChanged { project_id: ev_pid, task_id } = evt {
-            spawn(async move {
-                if ev_pid != *pid_sig.peek() {
-                    return;
-                }
+            if ev_pid == *pid_sig.peek() {
                 let pid = ev_pid.clone();
-                if let Ok(t) = use_tasks::list_tasks(&pid, None, None).await {
-                    tasks.set(t);
-                }
+                spawn(async move {
+                    if let Ok(t) = use_tasks::list_tasks(&pid, None, None).await {
+                        tasks.set(t);
+                    }
+                });
                 if let Some(tid) = task_id {
-                    let detail_match = detail_task_id.peek().as_ref() == Some(&tid);
-                    if detail_match {
+                    if detail_task_id.peek().as_ref() == Some(&tid) {
                         let next = detail_refresh.peek().wrapping_add(1);
                         detail_refresh.set(next);
                     }
                 }
-            });
+            }
         }
     });
 

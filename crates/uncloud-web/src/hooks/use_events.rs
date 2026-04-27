@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use dioxus::prelude::*;
+use dioxus_core::{current_scope_id, Runtime, RuntimeGuard};
 use uncloud_common::ServerEvent;
 use wasm_bindgen::JsCast;
 
@@ -20,6 +21,14 @@ where
 
     *handler.borrow_mut() = Box::new(on_event);
 
+    // Capture the runtime + scope of the calling component once. The SSE
+    // callback fires from a JS event handler outside any Dioxus scope, so
+    // any Signal access from the user's `on_event` would otherwise panic
+    // ("called Option::unwrap() on a None value" inside `current_scope_id`).
+    // We push a RuntimeGuard + scope context before invoking the handler.
+    let runtime = Runtime::current();
+    let scope = current_scope_id();
+
     // This effect reads no signals, so it runs exactly once after mount.
     // One EventSource -> one SSE connection for the lifetime of the component.
     use_effect(move || {
@@ -36,16 +45,20 @@ where
         };
 
         let handler = handler.clone();
+        let runtime = runtime.clone();
         let on_message = wasm_bindgen::closure::Closure::wrap(Box::new(
             move |evt: web_sys::MessageEvent| {
-                if let Some(data) = evt.data().as_string() {
-                    if let Ok(event) = serde_json::from_str::<ServerEvent>(&data) {
-                        // try_borrow_mut avoids a panic on unexpected re-entrance.
-                        if let Ok(mut guard) = handler.try_borrow_mut() {
-                            guard(event);
-                        }
+                let Some(data) = evt.data().as_string() else { return };
+                let Ok(event) = serde_json::from_str::<ServerEvent>(&data) else { return };
+                // Provide the runtime + scope so Signal::set / read / write
+                // inside the user's handler don't blow up.
+                let _runtime_guard = RuntimeGuard::new(runtime.clone());
+                runtime.in_scope(scope, || {
+                    // try_borrow_mut avoids a panic on unexpected re-entrance.
+                    if let Ok(mut guard) = handler.try_borrow_mut() {
+                        guard(event);
                     }
-                }
+                });
             },
         ) as Box<dyn FnMut(web_sys::MessageEvent)>);
 
