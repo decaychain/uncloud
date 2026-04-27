@@ -1,10 +1,12 @@
 use dioxus::prelude::*;
 use uncloud_common::{
-    CreateTaskRequest, RecurrenceRule, TaskCommentResponse, TaskPriority, TaskResponse,
-    TaskStatus, UpdateTaskRequest, UpdateTaskStatusRequest,
+    CreateTaskLabelRequest, CreateTaskRequest, RecurrenceRule, TaskCommentResponse,
+    TaskLabelResponse, TaskPriority, TaskResponse, TaskStatus, UpdateTaskRequest,
+    UpdateTaskStatusRequest,
 };
 
 use crate::hooks::use_tasks;
+use super::{LABEL_PALETTE, label_color_for};
 
 fn format_recurrence(rule: &RecurrenceRule) -> String {
     match rule {
@@ -66,6 +68,11 @@ fn update_req() -> UpdateTaskRequest {
 pub fn TaskDetail(
     task_id: String,
     #[props(default = 0)] refresh_key: u32,
+    /// Project's label catalogue, lifted from the parent so edits propagate to
+    /// sibling views (board cards, list rows). Parents that don't share a
+    /// catalogue (e.g. ScheduleView) can pass a fresh `use_signal(Vec::new)` —
+    /// TaskDetail populates it on task load.
+    available_labels: Signal<Vec<TaskLabelResponse>>,
     on_close: EventHandler<()>,
     on_updated: EventHandler<()>,
     #[props(default)] on_deleted: EventHandler<String>,
@@ -73,6 +80,10 @@ pub fn TaskDetail(
     let mut task: Signal<Option<TaskResponse>> = use_signal(|| None);
     let mut comments: Signal<Vec<TaskCommentResponse>> = use_signal(Vec::new);
     let mut subtasks: Signal<Vec<TaskResponse>> = use_signal(Vec::new);
+    let mut available_labels = available_labels;
+    let mut label_picker_open = use_signal(|| false);
+    let mut label_picker_filter = use_signal(String::new);
+    let mut label_picker_color = use_signal(|| LABEL_PALETTE[5].to_string());
     let mut loading = use_signal(|| true);
     let mut error: Signal<Option<String>> = use_signal(|| None);
 
@@ -106,11 +117,17 @@ pub fn TaskDetail(
         refresh_sig.set(refresh_key);
     }
 
+    // Sync task_id prop into a signal so the fetch effect re-runs if the parent
+    // swaps tasks without remounting (defensive — most parents do remount).
+    let mut tid_sig = use_signal(|| task_id.clone());
+    if *tid_sig.peek() != task_id {
+        tid_sig.set(task_id.clone());
+    }
+
     // Fetch task + comments
-    let tid = task_id.clone();
     use_effect(move || {
         let _key = *refresh_sig.read(); // subscribe to refresh_key changes
-        let tid = tid.clone();
+        let tid = tid_sig.read().clone();
         spawn(async move {
             loading.set(true);
             error.set(None);
@@ -130,6 +147,14 @@ pub fn TaskDetail(
                         }
                     } else {
                         subtasks.set(Vec::new());
+                    }
+                    // Always fetch the task's project labels so a detail opened
+                    // from ScheduleView (which spans projects) shows the right
+                    // catalogue. When opened from BoardView/ListView the parent
+                    // has populated the same signal already; the re-fetch is
+                    // redundant but harmless.
+                    if let Ok(ls) = use_tasks::list_labels(&t.project_id).await {
+                        available_labels.set(ls);
                     }
                     task.set(Some(t));
                 }
@@ -265,6 +290,8 @@ pub fn TaskDetail(
     let tid_priority = task_id.clone();
     let tid_due = task_id.clone();
     let tid_subtask = task_id.clone();
+    let tid_labels = task_id.clone();
+    let tid_label_create = task_id.clone();
 
     rsx! {
         // Backdrop
@@ -677,13 +704,213 @@ pub fn TaskDetail(
                     }
                 }
 
-                // Labels display
-                if !t.labels.is_empty() {
-                    div {
-                        label { class: "label", span { class: "label-text text-xs font-semibold uppercase", "Labels" } }
-                        div { class: "flex flex-wrap gap-1",
-                            for lbl in t.labels.iter() {
-                                span { class: "badge badge-sm badge-outline", "{lbl}" }
+                // Labels (chip-input + picker)
+                {
+                    let current_labels = t.labels.clone();
+                    let project_id = t.project_id.clone();
+                    let filter = label_picker_filter.read().to_lowercase();
+                    let exact_match_exists = available_labels
+                        .read()
+                        .iter()
+                        .any(|l| l.name.to_lowercase() == filter);
+
+                    rsx! {
+                        div {
+                            label { class: "label", span { class: "label-text text-xs font-semibold uppercase", "Labels" } }
+
+                            // Selected chips + add button
+                            div { class: "flex flex-wrap items-center gap-1",
+                                for lbl in current_labels.iter() {
+                                    {
+                                        let lbl_str = lbl.clone();
+                                        let lbl_for_remove = lbl.clone();
+                                        let color = label_color_for(&available_labels.read(), &lbl_str).to_string();
+                                        let tid = tid_labels.clone();
+                                        let labels_for_remove = current_labels.clone();
+                                        rsx! {
+                                            span {
+                                                key: "{lbl_str}",
+                                                class: "inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium text-white",
+                                                style: "background: {color};",
+                                                "{lbl_str}"
+                                                button {
+                                                    class: "opacity-70 hover:opacity-100 leading-none",
+                                                    title: "Remove",
+                                                    onclick: move |_| {
+                                                        let tid = tid.clone();
+                                                        let new_labels: Vec<String> = labels_for_remove
+                                                            .iter()
+                                                            .filter(|l| **l != lbl_for_remove)
+                                                            .cloned()
+                                                            .collect();
+                                                        spawn(async move {
+                                                            let mut req = update_req();
+                                                            req.labels = Some(new_labels);
+                                                            if let Ok(updated) = use_tasks::update_task(&tid, &req).await {
+                                                                task.set(Some(updated));
+                                                                on_updated.call(());
+                                                            }
+                                                        });
+                                                    },
+                                                    "×"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                button {
+                                    class: "btn btn-ghost btn-xs",
+                                    onclick: move |_| {
+                                        let next = !*label_picker_open.peek();
+                                        label_picker_open.set(next);
+                                        if next {
+                                            label_picker_filter.set(String::new());
+                                        }
+                                    },
+                                    if *label_picker_open.read() { "Close" } else { "+ Add label" }
+                                }
+                            }
+
+                            // Picker dropdown
+                            if *label_picker_open.read() {
+                                div { class: "mt-2 p-2 bg-base-200 rounded-box space-y-2",
+                                    input {
+                                        class: "input input-bordered input-sm w-full",
+                                        r#type: "text",
+                                        placeholder: "Type to filter or create...",
+                                        value: "{label_picker_filter}",
+                                        oninput: move |e| label_picker_filter.set(e.value()),
+                                    }
+
+                                    // Existing labels list (filtered)
+                                    div { class: "max-h-48 overflow-y-auto space-y-1",
+                                        {
+                                            let filter_lower = label_picker_filter.read().to_lowercase();
+                                            let avail_filtered: Vec<TaskLabelResponse> = available_labels
+                                                .read()
+                                                .iter()
+                                                .filter(|l| {
+                                                    filter_lower.is_empty()
+                                                        || l.name.to_lowercase().contains(&filter_lower)
+                                                })
+                                                .cloned()
+                                                .collect();
+
+                                            rsx! {
+                                                for label in avail_filtered.iter() {
+                                                    {
+                                                        let l_name = label.name.clone();
+                                                        let l_color = label.color.clone();
+                                                        let l_id = label.id.clone();
+                                                        let is_selected = current_labels.contains(&l_name);
+                                                        let tid = tid_labels.clone();
+                                                        let labels_for_toggle = current_labels.clone();
+                                                        let l_name_toggle = l_name.clone();
+
+                                                        rsx! {
+                                                            button {
+                                                                key: "{l_id}",
+                                                                class: "w-full flex items-center gap-2 px-2 py-1 rounded hover:bg-base-300 text-left",
+                                                                onclick: move |_| {
+                                                                    let tid = tid.clone();
+                                                                    let mut new_labels: Vec<String> =
+                                                                        labels_for_toggle.iter().cloned().collect();
+                                                                    if is_selected {
+                                                                        new_labels.retain(|l| *l != l_name_toggle);
+                                                                    } else {
+                                                                        new_labels.push(l_name_toggle.clone());
+                                                                    }
+                                                                    spawn(async move {
+                                                                        let mut req = update_req();
+                                                                        req.labels = Some(new_labels);
+                                                                        if let Ok(updated) =
+                                                                            use_tasks::update_task(&tid, &req).await
+                                                                        {
+                                                                            task.set(Some(updated));
+                                                                            on_updated.call(());
+                                                                        }
+                                                                    });
+                                                                },
+                                                                input {
+                                                                    class: "checkbox checkbox-xs pointer-events-none",
+                                                                    r#type: "checkbox",
+                                                                    checked: is_selected,
+                                                                }
+                                                                span {
+                                                                    class: "px-2 py-0.5 rounded text-xs font-medium text-white",
+                                                                    style: "background: {l_color};",
+                                                                    "{l_name}"
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Create new label inline
+                                    if !filter.is_empty() && !exact_match_exists {
+                                        div { class: "border-t border-base-300 pt-2",
+                                            div { class: "flex gap-1 mb-1",
+                                                for color in LABEL_PALETTE.iter() {
+                                                    {
+                                                        let c = color.to_string();
+                                                        let c2 = c.clone();
+                                                        let selected = *label_picker_color.read() == c;
+                                                        rsx! {
+                                                            button {
+                                                                key: "{c}",
+                                                                class: if selected {
+                                                                    "w-4 h-4 rounded-full ring-2 ring-offset-1 ring-base-content"
+                                                                } else {
+                                                                    "w-4 h-4 rounded-full hover:ring-2 hover:ring-offset-1 hover:ring-base-content/40"
+                                                                },
+                                                                style: "background: {c};",
+                                                                onclick: move |_| label_picker_color.set(c2.clone()),
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            button {
+                                                class: "btn btn-primary btn-xs w-full",
+                                                onclick: move |_| {
+                                                    let pid = project_id.clone();
+                                                    let tid = tid_label_create.clone();
+                                                    let name = label_picker_filter.peek().trim().to_string();
+                                                    if name.is_empty() { return; }
+                                                    let color = label_picker_color.peek().clone();
+                                                    let mut existing = current_labels.clone();
+                                                    spawn(async move {
+                                                        let req = CreateTaskLabelRequest {
+                                                            name: name.clone(),
+                                                            color: color.clone(),
+                                                        };
+                                                        match use_tasks::create_label(&pid, &req).await {
+                                                            Ok(label) => {
+                                                                available_labels.write().push(label);
+                                                                existing.push(name);
+                                                                let mut req = update_req();
+                                                                req.labels = Some(existing);
+                                                                if let Ok(updated) =
+                                                                    use_tasks::update_task(&tid, &req).await
+                                                                {
+                                                                    task.set(Some(updated));
+                                                                    on_updated.call(());
+                                                                }
+                                                                label_picker_filter.set(String::new());
+                                                            }
+                                                            Err(_) => {}
+                                                        }
+                                                    });
+                                                },
+                                                {format!("+ Create \"{}\"", filter)}
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

@@ -1,12 +1,15 @@
 use dioxus::prelude::*;
+use std::collections::HashSet;
 use uncloud_common::{
-    CreateTaskRequest, TaskProjectResponse, TaskResponse, TaskStatus, UpdateTaskStatusRequest,
+    CreateTaskRequest, TaskLabelResponse, TaskProjectResponse, TaskResponse, TaskStatus,
+    UpdateTaskStatusRequest,
 };
 
 use crate::hooks::use_tasks;
 
 use super::board_card::BoardCard;
 use super::task_detail::TaskDetail;
+use super::{task_matches_label_filter, LabelFilterBar};
 
 /// Column definition for the Kanban board.
 struct Column {
@@ -59,7 +62,10 @@ fn column_status_at_point(x: f64, y: f64) -> Option<TaskStatus> {
 }
 
 #[component]
-pub fn BoardView(project_id: String) -> Element {
+pub fn BoardView(
+    project_id: String,
+    available_labels: Signal<Vec<TaskLabelResponse>>,
+) -> Element {
     let mut project: Signal<Option<TaskProjectResponse>> = use_signal(|| None);
     let mut tasks: Signal<Vec<TaskResponse>> = use_signal(Vec::new);
     let mut loading = use_signal(|| true);
@@ -77,13 +83,19 @@ pub fn BoardView(project_id: String) -> Element {
     let mut drag_task_id: Signal<Option<String>> = use_signal(|| None);
     let mut drop_column: Signal<Option<TaskStatus>> = use_signal(|| None);
 
-    // Store project_id in a signal so closures can read it without moving a String
-    let pid_sig = use_signal(|| project_id.clone());
+    // Label filter (OR semantics — empty = no filter)
+    let label_filter: Signal<HashSet<String>> = use_signal(HashSet::new);
 
-    // Initial fetch
-    let pid = project_id.clone();
+    // Store project_id in a signal so closures can read it without moving a String,
+    // and so the fetch effect re-runs when the route prop changes.
+    let mut pid_sig = use_signal(|| project_id.clone());
+    if *pid_sig.peek() != project_id {
+        pid_sig.set(project_id.clone());
+    }
+
+    // Initial fetch (re-runs when pid_sig changes, i.e. user navigated to a different project)
     use_effect(move || {
-        let pid = pid.clone();
+        let pid = pid_sig.read().clone();
         spawn(async move {
             loading.set(true);
             error.set(None);
@@ -133,6 +145,12 @@ pub fn BoardView(project_id: String) -> Element {
     };
 
     rsx! {
+        // Label filter strip
+        LabelFilterBar {
+            available_labels: available_labels.read().clone(),
+            selected: label_filter,
+        }
+
         // Board columns
         div {
             class: "{container_class}",
@@ -199,11 +217,15 @@ pub fn BoardView(project_id: String) -> Element {
                     let col_status_attr = status_to_attr(&col.status);
                     let col_label = col.label;
 
-                    let col_tasks: Vec<TaskResponse> = tasks.read()
-                        .iter()
-                        .filter(|t| t.status == col_status)
-                        .cloned()
-                        .collect();
+                    let col_tasks: Vec<TaskResponse> = {
+                        let filter = label_filter.read();
+                        tasks.read()
+                            .iter()
+                            .filter(|t| t.status == col_status)
+                            .filter(|t| task_matches_label_filter(&t.labels, &filter))
+                            .cloned()
+                            .collect()
+                    };
                     let count = col_tasks.len();
 
                     let is_drop_target = drop_column.read().as_ref() == Some(&col_status);
@@ -335,6 +357,7 @@ pub fn BoardView(project_id: String) -> Element {
                                         BoardCard {
                                             key: "{task.id}",
                                             task: task.clone(),
+                                            available_labels: available_labels.read().clone(),
                                             dragging: is_dragging,
                                             on_click: move |_: String| {
                                                 detail_task_id.set(Some(task_id_click.clone()));
@@ -364,6 +387,7 @@ pub fn BoardView(project_id: String) -> Element {
             TaskDetail {
                 task_id: tid,
                 refresh_key: *detail_refresh.read(),
+                available_labels,
                 on_close: move |_| { detail_task_id.set(None); },
                 on_updated: move |_| {
                     let pid = pid_sig.peek().clone();

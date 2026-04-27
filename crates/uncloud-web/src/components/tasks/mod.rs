@@ -7,12 +7,172 @@ pub mod schedule_view;
 
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
-use uncloud_common::ProjectView;
+use std::collections::HashSet;
+use uncloud_common::{ProjectView, TaskLabelResponse};
 
 pub use schedule_view::ScheduleView;
 
 use crate::hooks::use_tasks;
 use project_settings::ProjectSettings;
+
+/// Fixed palette for task labels. New labels are constrained to these so the
+/// visual language stays consistent across the app.
+pub const LABEL_PALETTE: &[&str] = &[
+    "#ef4444", // red
+    "#f97316", // orange
+    "#eab308", // yellow
+    "#22c55e", // green
+    "#14b8a6", // teal
+    "#3b82f6", // blue
+    "#a855f7", // purple
+    "#ec4899", // pink
+];
+
+/// Default fallback colour for labels that no longer have a matching TaskLabel
+/// document (e.g. just-deleted server-side, brief race window).
+pub const LABEL_FALLBACK_COLOR: &str = "#6b7280"; // gray-500
+
+/// Look up the colour for a label name in the project's label catalogue,
+/// returning a stable fallback when the name is not found.
+pub fn label_color_for<'a>(labels: &'a [TaskLabelResponse], name: &str) -> &'a str {
+    labels
+        .iter()
+        .find(|l| l.name == name)
+        .map(|l| l.color.as_str())
+        .unwrap_or(LABEL_FALLBACK_COLOR)
+}
+
+/// Reusable filter strip for narrowing tasks by label.
+/// `selected` holds the set of active label names (OR semantics: a task matches
+/// when at least one of its labels is in `selected`). When empty, nothing is
+/// filtered.
+#[component]
+pub fn LabelFilterBar(
+    available_labels: Vec<TaskLabelResponse>,
+    selected: Signal<HashSet<String>>,
+) -> Element {
+    let mut open = use_signal(|| false);
+    let mut selected = selected;
+
+    if available_labels.is_empty() {
+        return rsx! { div {} };
+    }
+
+    let active_count = selected.read().len();
+    let labels_for_pills = available_labels.clone();
+
+    rsx! {
+        div { class: "flex items-center flex-wrap gap-1.5 mb-3",
+            button {
+                class: if active_count > 0 {
+                    "btn btn-sm btn-primary gap-1"
+                } else {
+                    "btn btn-sm btn-ghost gap-1"
+                },
+                onclick: move |_| {
+                    let next = !*open.peek();
+                    open.set(next);
+                },
+                // Filter icon
+                svg {
+                    class: "w-3.5 h-3.5",
+                    xmlns: "http://www.w3.org/2000/svg",
+                    view_box: "0 0 24 24",
+                    fill: "none",
+                    stroke: "currentColor",
+                    stroke_width: "2",
+                    stroke_linecap: "round",
+                    stroke_linejoin: "round",
+                    polygon { points: "22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" }
+                }
+                "Labels"
+                if active_count > 0 {
+                    span { class: "badge badge-xs badge-neutral", "{active_count}" }
+                }
+            }
+
+            // Active filter pills
+            for name in selected.read().iter().cloned().collect::<Vec<_>>() {
+                {
+                    let color = label_color_for(&labels_for_pills, &name).to_string();
+                    let name_remove = name.clone();
+                    rsx! {
+                        span {
+                            key: "{name}",
+                            class: "inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium text-white",
+                            style: "background: {color};",
+                            "{name}"
+                            button {
+                                class: "opacity-70 hover:opacity-100 leading-none",
+                                title: "Clear",
+                                onclick: move |_| {
+                                    selected.write().remove(&name_remove);
+                                },
+                                "×"
+                            }
+                        }
+                    }
+                }
+            }
+
+            if active_count > 0 {
+                button {
+                    class: "btn btn-ghost btn-xs",
+                    onclick: move |_| selected.write().clear(),
+                    "Clear all"
+                }
+            }
+        }
+
+        // Picker dropdown
+        if *open.read() {
+            div { class: "mb-3 p-2 bg-base-200 rounded-box max-w-md",
+                div { class: "max-h-48 overflow-y-auto space-y-1",
+                    for label in available_labels.iter() {
+                        {
+                            let l_name = label.name.clone();
+                            let l_color = label.color.clone();
+                            let l_id = label.id.clone();
+                            let is_selected = selected.read().contains(&l_name);
+                            let l_name_toggle = l_name.clone();
+
+                            rsx! {
+                                button {
+                                    key: "{l_id}",
+                                    class: "w-full flex items-center gap-2 px-2 py-1 rounded hover:bg-base-300 text-left",
+                                    onclick: move |_| {
+                                        let mut s = selected.write();
+                                        if s.contains(&l_name_toggle) {
+                                            s.remove(&l_name_toggle);
+                                        } else {
+                                            s.insert(l_name_toggle.clone());
+                                        }
+                                    },
+                                    input {
+                                        class: "checkbox checkbox-xs pointer-events-none",
+                                        r#type: "checkbox",
+                                        checked: is_selected,
+                                    }
+                                    span {
+                                        class: "px-2 py-0.5 rounded text-xs font-medium text-white",
+                                        style: "background: {l_color};",
+                                        "{l_name}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// True when the task should be visible given the current label filter.
+/// Empty filter = no narrowing.
+pub fn task_matches_label_filter(task_labels: &[String], filter: &HashSet<String>) -> bool {
+    filter.is_empty() || task_labels.iter().any(|l| filter.contains(l))
+}
 
 const LS_VIEW_MODE: &str = "tasks-view-mode";
 
@@ -54,10 +214,21 @@ pub fn TasksProjectPage(project_id: String) -> Element {
         use_signal(Vec::new);
     let mut show_settings = use_signal(|| false);
 
-    // Fetch project to get name + default_view
-    let pid = project_id.clone();
+    // Project label catalogue, lifted here so BoardView, ListView, ProjectSettings,
+    // and the TaskDetail mounted under board/list views all share one source of
+    // truth — edits in one surface appear immediately in the others.
+    let mut available_labels: Signal<Vec<TaskLabelResponse>> = use_signal(Vec::new);
+
+    // Sync prop into a Signal so use_effect re-runs when the route changes
+    // (clicking a different project in the sidebar swaps the prop in place).
+    let mut pid_sig = use_signal(|| project_id.clone());
+    if *pid_sig.peek() != project_id {
+        pid_sig.set(project_id.clone());
+    }
+
+    // Fetch project to get name + default_view, and the project's label catalogue
     use_effect(move || {
-        let pid = pid.clone();
+        let pid = pid_sig.read().clone();
         spawn(async move {
             if let Ok(p) = use_tasks::get_project(&pid).await {
                 project_name.set(p.name);
@@ -67,6 +238,11 @@ pub fn TasksProjectPage(project_id: String) -> Element {
                 if load_view_mode().is_none() {
                     view_mode.set(p.default_view);
                 }
+            }
+            if let Ok(ls) = use_tasks::list_labels(&pid).await {
+                available_labels.set(ls);
+            } else {
+                available_labels.set(Vec::new());
             }
         });
     });
@@ -157,8 +333,18 @@ pub fn TasksProjectPage(project_id: String) -> Element {
             }
             // Render the appropriate view
             match *view_mode.read() {
-                ProjectView::List => rsx! { list_view::ListView { project_id: project_id.clone() } },
-                _ => rsx! { board_view::BoardView { project_id: project_id.clone() } },
+                ProjectView::List => rsx! {
+                    list_view::ListView {
+                        project_id: project_id.clone(),
+                        available_labels,
+                    }
+                },
+                _ => rsx! {
+                    board_view::BoardView {
+                        project_id: project_id.clone(),
+                        available_labels,
+                    }
+                },
             }
         }
 
@@ -170,6 +356,7 @@ pub fn TasksProjectPage(project_id: String) -> Element {
                 project_color: project_color.read().clone(),
                 owner_id: project_owner_id.read().clone(),
                 members: project_members.read().clone(),
+                available_labels,
                 on_close: move |_| show_settings.set(false),
                 on_updated: move |new_name: String| {
                     project_name.set(new_name);

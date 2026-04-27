@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
-use uncloud_common::{TaskPriority, TaskResponse};
+use uncloud_common::{TaskLabelResponse, TaskPriority, TaskResponse};
 
+use super::label_color_for;
 use crate::components::icons::IconGripVertical;
 
 fn priority_dot_class(priority: &TaskPriority) -> &'static str {
@@ -37,6 +38,7 @@ fn due_date_display(due: &str) -> (&'static str, String) {
 #[component]
 pub fn BoardCard(
     task: TaskResponse,
+    #[props(default)] available_labels: Vec<TaskLabelResponse>,
     on_click: EventHandler<String>,
     on_drag_start: EventHandler<String>,
     dragging: bool,
@@ -93,13 +95,20 @@ pub fn BoardCard(
                     }
                 }
 
-                // Labels as tiny chips
+                // Labels as full coloured chips with the label name.
                 if !task.labels.is_empty() {
                     div { class: "flex flex-wrap gap-1 mt-1",
                         for label in task.labels.iter() {
-                            span {
-                                class: "badge badge-sm badge-outline",
-                                "{label}"
+                            {
+                                let color = label_color_for(&available_labels, label).to_string();
+                                rsx! {
+                                    span {
+                                        key: "{label}",
+                                        class: "px-1.5 py-0.5 rounded text-[10px] font-medium text-white leading-tight",
+                                        style: "background: {color};",
+                                        "{label}"
+                                    }
+                                }
                             }
                         }
                     }

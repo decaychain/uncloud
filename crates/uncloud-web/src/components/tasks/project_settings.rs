@@ -1,9 +1,11 @@
 use dioxus::prelude::*;
 use uncloud_common::{
-    AddProjectMemberRequest, ProjectMemberResponse, ProjectPermission, UpdateTaskProjectRequest,
+    AddProjectMemberRequest, CreateTaskLabelRequest, ProjectMemberResponse, ProjectPermission,
+    TaskLabelResponse, UpdateTaskLabelRequest, UpdateTaskProjectRequest,
 };
 
 use crate::hooks::{use_shopping, use_tasks};
+use super::LABEL_PALETTE;
 
 #[component]
 pub fn ProjectSettings(
@@ -12,6 +14,7 @@ pub fn ProjectSettings(
     project_color: String,
     owner_id: String,
     members: Vec<ProjectMemberResponse>,
+    available_labels: Signal<Vec<TaskLabelResponse>>,
     on_close: EventHandler<()>,
     on_updated: EventHandler<String>,
     on_deleted: EventHandler<()>,
@@ -31,9 +34,20 @@ pub fn ProjectSettings(
         use_signal(|| ProjectPermission::Editor);
     let mut member_error: Signal<Option<String>> = use_signal(|| None);
 
+    // Labels state — `labels` is the shared `available_labels` signal lifted to
+    // TasksProjectPage so edits here propagate immediately to BoardView/ListView.
+    let mut labels = available_labels;
+    let mut new_label_name = use_signal(String::new);
+    let mut new_label_color = use_signal(|| LABEL_PALETTE[5].to_string()); // blue default
+    let mut editing_label_id: Signal<Option<String>> = use_signal(|| None);
+    let mut edit_label_name = use_signal(String::new);
+    let mut edit_label_color = use_signal(String::new);
+    let mut label_error: Signal<Option<String>> = use_signal(|| None);
+
     let pid_save = project_id.clone();
     let pid_del = project_id.clone();
     let pid_member = project_id.clone();
+    let pid_add_label = project_id.clone();
 
     // Fetch available users
     use_effect(move || {
@@ -223,6 +237,215 @@ pub fn ProjectSettings(
                                 }
                             }
                         }
+                    }
+                }
+
+                // Labels section
+                div { class: "divider text-xs uppercase", "Labels" }
+
+                if let Some(err) = label_error.read().as_ref() {
+                    div { class: "text-error text-xs mb-1", "{err}" }
+                }
+
+                // Existing labels list
+                div { class: "space-y-1.5 mb-3",
+                    for label in labels.read().iter() {
+                        {
+                            let label_id = label.id.clone();
+                            let label_name = label.name.clone();
+                            let label_color = label.color.clone();
+                            let is_editing = editing_label_id.read().as_ref() == Some(&label_id);
+                            let label_id_edit = label_id.clone();
+                            let label_id_save = label_id.clone();
+                            let label_id_del = label_id.clone();
+
+                            rsx! {
+                                div {
+                                    key: "{label_id}",
+                                    class: "flex items-center gap-2",
+
+                                    if is_editing {
+                                        // Color swatches
+                                        div { class: "flex gap-1",
+                                            for color in LABEL_PALETTE.iter() {
+                                                {
+                                                    let c = color.to_string();
+                                                    let c2 = c.clone();
+                                                    let selected = *edit_label_color.read() == c;
+                                                    rsx! {
+                                                        button {
+                                                            key: "{c}",
+                                                            class: if selected {
+                                                                "w-5 h-5 rounded-full ring-2 ring-offset-1 ring-base-content"
+                                                            } else {
+                                                                "w-5 h-5 rounded-full hover:ring-2 hover:ring-offset-1 hover:ring-base-content/40"
+                                                            },
+                                                            style: "background: {c};",
+                                                            onclick: move |_| edit_label_color.set(c2.clone()),
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        input {
+                                            class: "input input-bordered input-sm flex-1",
+                                            r#type: "text",
+                                            value: "{edit_label_name}",
+                                            oninput: move |e| edit_label_name.set(e.value()),
+                                        }
+                                        button {
+                                            class: "btn btn-primary btn-sm btn-circle",
+                                            title: "Save",
+                                            onclick: move |_| {
+                                                let id = label_id_save.clone();
+                                                let name = edit_label_name.peek().trim().to_string();
+                                                if name.is_empty() {
+                                                    label_error.set(Some("Name cannot be empty".into()));
+                                                    return;
+                                                }
+                                                let color = edit_label_color.peek().clone();
+                                                label_error.set(None);
+                                                spawn(async move {
+                                                    let req = UpdateTaskLabelRequest {
+                                                        name: Some(name.clone()),
+                                                        color: Some(color.clone()),
+                                                    };
+                                                    match use_tasks::update_label(&id, &req).await {
+                                                        Ok(updated) => {
+                                                            let mut lw = labels.write();
+                                                            if let Some(l) = lw.iter_mut().find(|l| l.id == updated.id) {
+                                                                *l = updated;
+                                                            }
+                                                            editing_label_id.set(None);
+                                                        }
+                                                        Err(e) => {
+                                                            if e == "CONFLICT" {
+                                                                label_error.set(Some("A label with that name already exists".into()));
+                                                            } else {
+                                                                label_error.set(Some(e));
+                                                            }
+                                                        }
+                                                    }
+                                                });
+                                            },
+                                            "✓"
+                                        }
+                                        button {
+                                            class: "btn btn-ghost btn-sm btn-circle",
+                                            title: "Cancel",
+                                            onclick: move |_| {
+                                                editing_label_id.set(None);
+                                                label_error.set(None);
+                                            },
+                                            "×"
+                                        }
+                                    } else {
+                                        span {
+                                            class: "px-2 py-0.5 rounded text-xs font-medium text-white shrink-0",
+                                            style: "background: {label_color};",
+                                            "{label_name}"
+                                        }
+                                        span { class: "flex-1 text-xs text-base-content/50 font-mono", "{label_color}" }
+                                        button {
+                                            class: "btn btn-ghost btn-xs btn-circle opacity-50 hover:opacity-100",
+                                            title: "Edit",
+                                            onclick: move |_| {
+                                                edit_label_name.set(label_name.clone());
+                                                edit_label_color.set(label_color.clone());
+                                                editing_label_id.set(Some(label_id_edit.clone()));
+                                                label_error.set(None);
+                                            },
+                                            // Pencil
+                                            svg {
+                                                class: "w-3 h-3",
+                                                xmlns: "http://www.w3.org/2000/svg",
+                                                view_box: "0 0 24 24",
+                                                fill: "none",
+                                                stroke: "currentColor",
+                                                stroke_width: "2",
+                                                stroke_linecap: "round",
+                                                stroke_linejoin: "round",
+                                                path { d: "M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" }
+                                            }
+                                        }
+                                        button {
+                                            class: "btn btn-ghost btn-xs btn-circle text-error opacity-50 hover:opacity-100",
+                                            title: "Delete",
+                                            onclick: move |_| {
+                                                let id = label_id_del.clone();
+                                                label_error.set(None);
+                                                spawn(async move {
+                                                    if use_tasks::delete_label(&id).await.is_ok() {
+                                                        labels.write().retain(|l| l.id != id);
+                                                    }
+                                                });
+                                            },
+                                            "×"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Add label form
+                div { class: "flex items-center gap-2",
+                    div { class: "flex gap-1",
+                        for color in LABEL_PALETTE.iter() {
+                            {
+                                let c = color.to_string();
+                                let c2 = c.clone();
+                                let selected = *new_label_color.read() == c;
+                                rsx! {
+                                    button {
+                                        key: "{c}",
+                                        class: if selected {
+                                            "w-5 h-5 rounded-full ring-2 ring-offset-1 ring-base-content"
+                                        } else {
+                                            "w-5 h-5 rounded-full hover:ring-2 hover:ring-offset-1 hover:ring-base-content/40"
+                                        },
+                                        style: "background: {c};",
+                                        onclick: move |_| new_label_color.set(c2.clone()),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    input {
+                        class: "input input-bordered input-sm flex-1",
+                        r#type: "text",
+                        placeholder: "New label name",
+                        value: "{new_label_name}",
+                        oninput: move |e| new_label_name.set(e.value()),
+                    }
+                    button {
+                        class: "btn btn-primary btn-sm",
+                        disabled: new_label_name.read().trim().is_empty(),
+                        onclick: move |_| {
+                            let name = new_label_name.peek().trim().to_string();
+                            if name.is_empty() { return; }
+                            let color = new_label_color.peek().clone();
+                            let pid = pid_add_label.clone();
+                            label_error.set(None);
+                            spawn(async move {
+                                let req = CreateTaskLabelRequest { name: name.clone(), color: color.clone() };
+                                match use_tasks::create_label(&pid, &req).await {
+                                    Ok(label) => {
+                                        labels.write().push(label);
+                                        new_label_name.set(String::new());
+                                    }
+                                    Err(e) => {
+                                        if e == "CONFLICT" {
+                                            label_error.set(Some("A label with that name already exists".into()));
+                                        } else {
+                                            label_error.set(Some(e));
+                                        }
+                                    }
+                                }
+                            });
+                        },
+                        "Add"
                     }
                 }
 

@@ -1,13 +1,15 @@
 use dioxus::prelude::*;
 use std::collections::HashSet;
 use uncloud_common::{
-    CreateTaskRequest, TaskPriority, TaskResponse, TaskSectionResponse, TaskStatus,
-    UpdateTaskStatusRequest,
+    CreateTaskRequest, TaskLabelResponse, TaskPriority, TaskResponse, TaskSectionResponse,
+    TaskStatus, UpdateTaskStatusRequest,
 };
 
 use crate::hooks::use_tasks;
 
+use super::label_color_for;
 use super::task_detail::TaskDetail;
+use super::{task_matches_label_filter, LabelFilterBar};
 
 // ── Helpers ──
 
@@ -120,7 +122,10 @@ const UNSECTIONED_ID: &str = "__unsectioned__";
 // ── Main component ──
 
 #[component]
-pub fn ListView(project_id: String) -> Element {
+pub fn ListView(
+    project_id: String,
+    available_labels: Signal<Vec<TaskLabelResponse>>,
+) -> Element {
     let mut sections: Signal<Vec<TaskSectionResponse>> = use_signal(Vec::new);
     let mut tasks: Signal<Vec<TaskResponse>> = use_signal(Vec::new);
     let mut loading = use_signal(|| true);
@@ -143,18 +148,25 @@ pub fn ListView(project_id: String) -> Element {
     let mut drag_task_id: Signal<Option<String>> = use_signal(|| None);
     let mut drop_section_id: Signal<Option<String>> = use_signal(|| None);
 
+    // Label filter (OR semantics — empty = no filter)
+    let label_filter: Signal<HashSet<String>> = use_signal(HashSet::new);
+
     // Section management
     let mut adding_section = use_signal(|| false);
     let mut new_section_name = use_signal(String::new);
     let mut renaming_section_id: Signal<Option<String>> = use_signal(|| None);
     let mut rename_section_draft = use_signal(String::new);
 
-    let pid_sig = use_signal(|| project_id.clone());
+    // Sync prop into a Signal so the fetch effect re-runs when the user
+    // navigates to a different project via the sidebar.
+    let mut pid_sig = use_signal(|| project_id.clone());
+    if *pid_sig.peek() != project_id {
+        pid_sig.set(project_id.clone());
+    }
 
-    // Initial fetch
-    let pid = project_id.clone();
+    // Initial fetch (re-runs when pid_sig changes)
     use_effect(move || {
-        let pid = pid.clone();
+        let pid = pid_sig.read().clone();
         spawn(async move {
             loading.set(true);
             error.set(None);
@@ -209,6 +221,12 @@ pub fn ListView(project_id: String) -> Element {
     let has_unsectioned = top_level.iter().any(|t| t.section_id.is_none());
 
     rsx! {
+        // Label filter strip
+        LabelFilterBar {
+            available_labels: available_labels.read().clone(),
+            selected: label_filter,
+        }
+
         div { class: "space-y-3",
             // Sections
             for section in section_list.iter() {
@@ -219,12 +237,16 @@ pub fn ListView(project_id: String) -> Element {
                     let sec_name = section.name.clone();
                     let is_collapsed = collapsed.read().contains(&sec_id);
 
-                    let section_tasks: Vec<TaskResponse> = top_level
-                        .iter()
-                        .filter(|t| t.section_id.as_ref() == Some(&sec_id))
-                        .cloned()
-                        .cloned()
-                        .collect();
+                    let section_tasks: Vec<TaskResponse> = {
+                        let filter = label_filter.read();
+                        top_level
+                            .iter()
+                            .filter(|t| t.section_id.as_ref() == Some(&sec_id))
+                            .filter(|t| task_matches_label_filter(&t.labels, &filter))
+                            .cloned()
+                            .cloned()
+                            .collect()
+                    };
                     let count = section_tasks.len();
 
                     let is_drop_target = drop_section_id.read().as_ref() == Some(&sec_id);
@@ -395,9 +417,11 @@ pub fn ListView(project_id: String) -> Element {
                                         div { class: "px-2 pb-2",
                                             for task in section_tasks.iter() {
                                                 {
+                                                    let avail_labels = available_labels.read().clone();
                                                     render_task_row(
                                                         task,
                                                         &all_tasks,
+                                                        &avail_labels,
                                                         0,
                                                         tasks,
                                                         detail_task_id,
@@ -483,12 +507,16 @@ pub fn ListView(project_id: String) -> Element {
             if has_unsectioned {
                 {
                     let is_collapsed_unsec = collapsed.read().contains(UNSECTIONED_ID);
-                    let unsectioned_tasks: Vec<TaskResponse> = top_level
-                        .iter()
-                        .filter(|t| t.section_id.is_none())
-                        .cloned()
-                        .cloned()
-                        .collect();
+                    let unsectioned_tasks: Vec<TaskResponse> = {
+                        let filter = label_filter.read();
+                        top_level
+                            .iter()
+                            .filter(|t| t.section_id.is_none())
+                            .filter(|t| task_matches_label_filter(&t.labels, &filter))
+                            .cloned()
+                            .cloned()
+                            .collect()
+                    };
                     let unsec_count = unsectioned_tasks.len();
                     let is_adding_unsec = adding_to_section.read().as_ref().map(|s| s.as_str()) == Some(UNSECTIONED_ID);
 
@@ -531,9 +559,11 @@ pub fn ListView(project_id: String) -> Element {
                                 div { class: "px-2 pb-2",
                                     for task in unsectioned_tasks.iter() {
                                         {
+                                            let avail_labels = available_labels.read().clone();
                                             render_task_row(
                                                 task,
                                                 &all_tasks,
+                                                &avail_labels,
                                                 0,
                                                 tasks,
                                                 detail_task_id,
@@ -663,6 +693,7 @@ pub fn ListView(project_id: String) -> Element {
         if let Some(tid) = detail_task_id.read().clone() {
             TaskDetail {
                 task_id: tid,
+                available_labels,
                 on_close: move |_| { detail_task_id.set(None); },
                 on_updated: move |_| {
                     let pid = pid_sig.peek().clone();
@@ -686,6 +717,7 @@ pub fn ListView(project_id: String) -> Element {
 fn render_task_row(
     task: &TaskResponse,
     all_tasks: &[TaskResponse],
+    available_labels: &[TaskLabelResponse],
     depth: usize,
     mut tasks: Signal<Vec<TaskResponse>>,
     mut detail_task_id: Signal<Option<String>>,
@@ -861,9 +893,26 @@ fn render_task_row(
                     }
                 }
 
-                // Labels (show first two as tiny chips)
+                // Labels (show first two as tiny coloured chips, "+N" overflow chip beyond)
                 for label in labels.iter().take(2) {
-                    span { class: "badge badge-xs badge-outline hidden sm:inline-flex shrink-0", "{label}" }
+                    {
+                        let color = label_color_for(available_labels, label).to_string();
+                        rsx! {
+                            span {
+                                key: "{label}",
+                                class: "px-1.5 py-0.5 rounded text-[10px] font-medium text-white hidden sm:inline-flex shrink-0",
+                                style: "background: {color};",
+                                "{label}"
+                            }
+                        }
+                    }
+                }
+                if labels.len() > 2 {
+                    span {
+                        class: "text-[10px] text-base-content/50 hidden sm:inline-flex shrink-0",
+                        title: "{labels.iter().skip(2).cloned().collect::<Vec<_>>().join(\", \")}",
+                        "+{labels.len() - 2}"
+                    }
                 }
 
                 // Due date
@@ -929,6 +978,7 @@ fn render_task_row(
                         render_task_row(
                             sub,
                             all_tasks,
+                            available_labels,
                             depth + 1,
                             tasks,
                             detail_task_id,
