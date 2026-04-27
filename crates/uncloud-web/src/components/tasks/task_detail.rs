@@ -129,7 +129,17 @@ pub fn TaskDetail(
         let _key = *refresh_sig.read(); // subscribe to refresh_key changes
         let tid = tid_sig.read().clone();
         spawn(async move {
-            loading.set(true);
+            // Only show the loading spinner for the *initial* fetch (when we
+            // don't have a task yet). Background refreshes triggered by
+            // refresh_key bumps (e.g. SSE TaskChanged from another device or
+            // tab) keep the form mounted so user-edited fields like the
+            // Status / Priority selects don't lose their value to a brief
+            // unmount-remount cycle that resets the select to its first
+            // option.
+            let initial_load = task.peek().is_none();
+            if initial_load {
+                loading.set(true);
+            }
             error.set(None);
 
             let (task_res, comments_res) = futures::join!(
@@ -164,7 +174,9 @@ pub fn TaskDetail(
                 comments.set(c);
             }
 
-            loading.set(false);
+            if initial_load {
+                loading.set(false);
+            }
         });
     });
 
