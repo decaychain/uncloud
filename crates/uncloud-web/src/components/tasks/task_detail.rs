@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 use uncloud_common::{
-    CreateTaskLabelRequest, CreateTaskRequest, RecurrenceRule, TaskCommentResponse,
+    CreateTaskLabelRequest, CreateTaskRequest, NthWeek, RecurrenceRule, TaskCommentResponse,
     TaskLabelResponse, TaskPriority, TaskResponse, TaskStatus, UpdateTaskRequest,
     UpdateTaskStatusRequest,
 };
@@ -23,6 +23,18 @@ fn format_recurrence(rule: &RecurrenceRule) -> String {
             }
         }
         RecurrenceRule::Monthly { day_of_month } => format!("Monthly on the {}{}", day_of_month, ordinal_suffix(*day_of_month)),
+        RecurrenceRule::MonthlyByWeekday { nth, weekday } => {
+            let day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+            let nth_label = match nth {
+                NthWeek::First => "first",
+                NthWeek::Second => "second",
+                NthWeek::Third => "third",
+                NthWeek::Fourth => "fourth",
+                NthWeek::Last => "last",
+            };
+            let day = day_names.get(*weekday as usize).copied().unwrap_or("???");
+            format!("Monthly on the {} {}", nth_label, day)
+        }
         RecurrenceRule::Yearly { month, day } => {
             let month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
             let m = month_names.get((*month as usize).saturating_sub(1)).unwrap_or(&"???");
@@ -101,6 +113,8 @@ pub fn TaskDetail(
     let mut rec_type = use_signal(|| "none".to_string());
     let mut rec_weekly_days: Signal<Vec<u8>> = use_signal(Vec::new);
     let mut rec_monthly_day = use_signal(|| 1u8);
+    let mut rec_monthly_nth = use_signal(|| NthWeek::First);
+    let mut rec_monthly_weekday = use_signal(|| 5u8); // Saturday
     let mut rec_yearly_month = use_signal(|| 1u8);
     let mut rec_yearly_day = use_signal(|| 1u8);
     let mut rec_custom_days = use_signal(|| 7u32);
@@ -532,7 +546,8 @@ pub fn TaskDetail(
                                         option { value: "none", "None" }
                                         option { value: "daily", "Daily" }
                                         option { value: "weekly", "Weekly" }
-                                        option { value: "monthly", "Monthly" }
+                                        option { value: "monthly", "Monthly (by date)" }
+                                        option { value: "monthly_by_weekday", "Monthly (by weekday)" }
                                         option { value: "yearly", "Yearly" }
                                         option { value: "custom", "Custom interval" }
                                     }
@@ -580,6 +595,58 @@ pub fn TaskDetail(
                                                     }
                                                 },
                                             }
+                                        }
+                                    }
+
+                                    // Monthly by-weekday picker (e.g. "first Saturday")
+                                    if rec_type() == "monthly_by_weekday" {
+                                        div { class: "flex items-center gap-2 flex-wrap",
+                                            span { class: "text-sm", "Every" }
+                                            select {
+                                                class: "select select-bordered select-sm",
+                                                onchange: move |e| {
+                                                    let v = match e.value().as_str() {
+                                                        "first" => NthWeek::First,
+                                                        "second" => NthWeek::Second,
+                                                        "third" => NthWeek::Third,
+                                                        "fourth" => NthWeek::Fourth,
+                                                        "last" => NthWeek::Last,
+                                                        _ => NthWeek::First,
+                                                    };
+                                                    rec_monthly_nth.set(v);
+                                                },
+                                                {
+                                                    let cur = *rec_monthly_nth.read();
+                                                    rsx! {
+                                                        option { value: "first",  selected: matches!(cur, NthWeek::First),  "first" }
+                                                        option { value: "second", selected: matches!(cur, NthWeek::Second), "second" }
+                                                        option { value: "third",  selected: matches!(cur, NthWeek::Third),  "third" }
+                                                        option { value: "fourth", selected: matches!(cur, NthWeek::Fourth), "fourth" }
+                                                        option { value: "last",   selected: matches!(cur, NthWeek::Last),   "last" }
+                                                    }
+                                                }
+                                            }
+                                            select {
+                                                class: "select select-bordered select-sm",
+                                                onchange: move |e| {
+                                                    if let Ok(v) = e.value().parse::<u8>() {
+                                                        rec_monthly_weekday.set(v.min(6));
+                                                    }
+                                                },
+                                                {
+                                                    let cur = *rec_monthly_weekday.read();
+                                                    rsx! {
+                                                        option { value: "0", selected: cur == 0, "Monday" }
+                                                        option { value: "1", selected: cur == 1, "Tuesday" }
+                                                        option { value: "2", selected: cur == 2, "Wednesday" }
+                                                        option { value: "3", selected: cur == 3, "Thursday" }
+                                                        option { value: "4", selected: cur == 4, "Friday" }
+                                                        option { value: "5", selected: cur == 5, "Saturday" }
+                                                        option { value: "6", selected: cur == 6, "Sunday" }
+                                                    }
+                                                }
+                                            }
+                                            span { class: "text-sm", "of the month" }
                                         }
                                     }
 
@@ -653,6 +720,10 @@ pub fn TaskDetail(
                                                         else { Some(RecurrenceRule::Weekly { days }) }
                                                     }
                                                     "monthly" => Some(RecurrenceRule::Monthly { day_of_month: rec_monthly_day() }),
+                                                    "monthly_by_weekday" => Some(RecurrenceRule::MonthlyByWeekday {
+                                                        nth: rec_monthly_nth(),
+                                                        weekday: rec_monthly_weekday(),
+                                                    }),
                                                     "yearly" => Some(RecurrenceRule::Yearly { month: rec_yearly_month(), day: rec_yearly_day() }),
                                                     "custom" => Some(RecurrenceRule::Custom { interval_days: rec_custom_days() }),
                                                     _ => None,
@@ -698,6 +769,11 @@ pub fn TaskDetail(
                                                 Some(RecurrenceRule::Monthly { day_of_month }) => {
                                                     rec_type.set("monthly".to_string());
                                                     rec_monthly_day.set(*day_of_month);
+                                                }
+                                                Some(RecurrenceRule::MonthlyByWeekday { nth, weekday }) => {
+                                                    rec_type.set("monthly_by_weekday".to_string());
+                                                    rec_monthly_nth.set(*nth);
+                                                    rec_monthly_weekday.set(*weekday);
                                                 }
                                                 Some(RecurrenceRule::Yearly { month, day }) => {
                                                     rec_type.set("yearly".to_string());
