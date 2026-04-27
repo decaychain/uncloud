@@ -14,6 +14,7 @@ pub fn ProjectSettings(
     project_color: String,
     owner_id: String,
     members: Vec<ProjectMemberResponse>,
+    available_labels: Signal<Vec<TaskLabelResponse>>,
     on_close: EventHandler<()>,
     on_updated: EventHandler<String>,
     on_deleted: EventHandler<()>,
@@ -33,8 +34,9 @@ pub fn ProjectSettings(
         use_signal(|| ProjectPermission::Editor);
     let mut member_error: Signal<Option<String>> = use_signal(|| None);
 
-    // Labels state
-    let mut labels: Signal<Vec<TaskLabelResponse>> = use_signal(Vec::new);
+    // Labels state — `labels` is the shared `available_labels` signal lifted to
+    // TasksProjectPage so edits here propagate immediately to BoardView/ListView.
+    let mut labels = available_labels;
     let mut new_label_name = use_signal(String::new);
     let mut new_label_color = use_signal(|| LABEL_PALETTE[5].to_string()); // blue default
     let mut editing_label_id: Signal<Option<String>> = use_signal(|| None);
@@ -45,7 +47,6 @@ pub fn ProjectSettings(
     let pid_save = project_id.clone();
     let pid_del = project_id.clone();
     let pid_member = project_id.clone();
-    let pid_labels = project_id.clone();
     let pid_add_label = project_id.clone();
 
     // Fetch available users
@@ -53,16 +54,6 @@ pub fn ProjectSettings(
         spawn(async move {
             if let Ok(entries) = use_shopping::list_user_entries().await {
                 available_users.set(entries);
-            }
-        });
-    });
-
-    // Fetch labels for this project
-    use_effect(move || {
-        let pid = pid_labels.clone();
-        spawn(async move {
-            if let Ok(ls) = use_tasks::list_labels(&pid).await {
-                labels.set(ls);
             }
         });
     });

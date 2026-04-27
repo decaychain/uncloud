@@ -68,6 +68,11 @@ fn update_req() -> UpdateTaskRequest {
 pub fn TaskDetail(
     task_id: String,
     #[props(default = 0)] refresh_key: u32,
+    /// Project's label catalogue, lifted from the parent so edits propagate to
+    /// sibling views (board cards, list rows). Parents that don't share a
+    /// catalogue (e.g. ScheduleView) can pass a fresh `use_signal(Vec::new)` —
+    /// TaskDetail populates it on task load.
+    available_labels: Signal<Vec<TaskLabelResponse>>,
     on_close: EventHandler<()>,
     on_updated: EventHandler<()>,
     #[props(default)] on_deleted: EventHandler<String>,
@@ -75,7 +80,7 @@ pub fn TaskDetail(
     let mut task: Signal<Option<TaskResponse>> = use_signal(|| None);
     let mut comments: Signal<Vec<TaskCommentResponse>> = use_signal(Vec::new);
     let mut subtasks: Signal<Vec<TaskResponse>> = use_signal(Vec::new);
-    let mut available_labels: Signal<Vec<TaskLabelResponse>> = use_signal(Vec::new);
+    let mut available_labels = available_labels;
     let mut label_picker_open = use_signal(|| false);
     let mut label_picker_filter = use_signal(String::new);
     let mut label_picker_color = use_signal(|| LABEL_PALETTE[5].to_string());
@@ -112,11 +117,17 @@ pub fn TaskDetail(
         refresh_sig.set(refresh_key);
     }
 
+    // Sync task_id prop into a signal so the fetch effect re-runs if the parent
+    // swaps tasks without remounting (defensive — most parents do remount).
+    let mut tid_sig = use_signal(|| task_id.clone());
+    if *tid_sig.peek() != task_id {
+        tid_sig.set(task_id.clone());
+    }
+
     // Fetch task + comments
-    let tid = task_id.clone();
     use_effect(move || {
         let _key = *refresh_sig.read(); // subscribe to refresh_key changes
-        let tid = tid.clone();
+        let tid = tid_sig.read().clone();
         spawn(async move {
             loading.set(true);
             error.set(None);
@@ -137,6 +148,11 @@ pub fn TaskDetail(
                     } else {
                         subtasks.set(Vec::new());
                     }
+                    // Always fetch the task's project labels so a detail opened
+                    // from ScheduleView (which spans projects) shows the right
+                    // catalogue. When opened from BoardView/ListView the parent
+                    // has populated the same signal already; the re-fetch is
+                    // redundant but harmless.
                     if let Ok(ls) = use_tasks::list_labels(&t.project_id).await {
                         available_labels.set(ls);
                     }
@@ -817,10 +833,9 @@ pub fn TaskDetail(
                                                                     });
                                                                 },
                                                                 input {
-                                                                    class: "checkbox checkbox-xs",
+                                                                    class: "checkbox checkbox-xs pointer-events-none",
                                                                     r#type: "checkbox",
                                                                     checked: is_selected,
-                                                                    onclick: move |e| e.stop_propagation(),
                                                                 }
                                                                 span {
                                                                     class: "px-2 py-0.5 rounded text-xs font-medium text-white",

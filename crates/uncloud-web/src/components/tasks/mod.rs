@@ -149,10 +149,9 @@ pub fn LabelFilterBar(
                                         }
                                     },
                                     input {
-                                        class: "checkbox checkbox-xs",
+                                        class: "checkbox checkbox-xs pointer-events-none",
                                         r#type: "checkbox",
                                         checked: is_selected,
-                                        onclick: move |e| e.stop_propagation(),
                                     }
                                     span {
                                         class: "px-2 py-0.5 rounded text-xs font-medium text-white",
@@ -215,10 +214,21 @@ pub fn TasksProjectPage(project_id: String) -> Element {
         use_signal(Vec::new);
     let mut show_settings = use_signal(|| false);
 
-    // Fetch project to get name + default_view
-    let pid = project_id.clone();
+    // Project label catalogue, lifted here so BoardView, ListView, ProjectSettings,
+    // and the TaskDetail mounted under board/list views all share one source of
+    // truth — edits in one surface appear immediately in the others.
+    let mut available_labels: Signal<Vec<TaskLabelResponse>> = use_signal(Vec::new);
+
+    // Sync prop into a Signal so use_effect re-runs when the route changes
+    // (clicking a different project in the sidebar swaps the prop in place).
+    let mut pid_sig = use_signal(|| project_id.clone());
+    if *pid_sig.peek() != project_id {
+        pid_sig.set(project_id.clone());
+    }
+
+    // Fetch project to get name + default_view, and the project's label catalogue
     use_effect(move || {
-        let pid = pid.clone();
+        let pid = pid_sig.read().clone();
         spawn(async move {
             if let Ok(p) = use_tasks::get_project(&pid).await {
                 project_name.set(p.name);
@@ -228,6 +238,11 @@ pub fn TasksProjectPage(project_id: String) -> Element {
                 if load_view_mode().is_none() {
                     view_mode.set(p.default_view);
                 }
+            }
+            if let Ok(ls) = use_tasks::list_labels(&pid).await {
+                available_labels.set(ls);
+            } else {
+                available_labels.set(Vec::new());
             }
         });
     });
@@ -318,8 +333,18 @@ pub fn TasksProjectPage(project_id: String) -> Element {
             }
             // Render the appropriate view
             match *view_mode.read() {
-                ProjectView::List => rsx! { list_view::ListView { project_id: project_id.clone() } },
-                _ => rsx! { board_view::BoardView { project_id: project_id.clone() } },
+                ProjectView::List => rsx! {
+                    list_view::ListView {
+                        project_id: project_id.clone(),
+                        available_labels,
+                    }
+                },
+                _ => rsx! {
+                    board_view::BoardView {
+                        project_id: project_id.clone(),
+                        available_labels,
+                    }
+                },
             }
         }
 
@@ -331,6 +356,7 @@ pub fn TasksProjectPage(project_id: String) -> Element {
                 project_color: project_color.read().clone(),
                 owner_id: project_owner_id.read().clone(),
                 members: project_members.read().clone(),
+                available_labels,
                 on_close: move |_| show_settings.set(false),
                 on_updated: move |new_name: String| {
                     project_name.set(new_name);

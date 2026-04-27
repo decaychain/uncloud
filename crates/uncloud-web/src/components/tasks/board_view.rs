@@ -62,7 +62,10 @@ fn column_status_at_point(x: f64, y: f64) -> Option<TaskStatus> {
 }
 
 #[component]
-pub fn BoardView(project_id: String) -> Element {
+pub fn BoardView(
+    project_id: String,
+    available_labels: Signal<Vec<TaskLabelResponse>>,
+) -> Element {
     let mut project: Signal<Option<TaskProjectResponse>> = use_signal(|| None);
     let mut tasks: Signal<Vec<TaskResponse>> = use_signal(Vec::new);
     let mut loading = use_signal(|| true);
@@ -80,27 +83,26 @@ pub fn BoardView(project_id: String) -> Element {
     let mut drag_task_id: Signal<Option<String>> = use_signal(|| None);
     let mut drop_column: Signal<Option<TaskStatus>> = use_signal(|| None);
 
-    // Project's label catalogue (for colour lookup)
-    let mut available_labels: Signal<Vec<TaskLabelResponse>> = use_signal(Vec::new);
-
     // Label filter (OR semantics — empty = no filter)
     let label_filter: Signal<HashSet<String>> = use_signal(HashSet::new);
 
-    // Store project_id in a signal so closures can read it without moving a String
-    let pid_sig = use_signal(|| project_id.clone());
+    // Store project_id in a signal so closures can read it without moving a String,
+    // and so the fetch effect re-runs when the route prop changes.
+    let mut pid_sig = use_signal(|| project_id.clone());
+    if *pid_sig.peek() != project_id {
+        pid_sig.set(project_id.clone());
+    }
 
-    // Initial fetch
-    let pid = project_id.clone();
+    // Initial fetch (re-runs when pid_sig changes, i.e. user navigated to a different project)
     use_effect(move || {
-        let pid = pid.clone();
+        let pid = pid_sig.read().clone();
         spawn(async move {
             loading.set(true);
             error.set(None);
 
-            let (proj_res, tasks_res, labels_res) = futures::join!(
+            let (proj_res, tasks_res) = futures::join!(
                 use_tasks::get_project(&pid),
                 use_tasks::list_tasks(&pid, None, None),
-                use_tasks::list_labels(&pid),
             );
 
             match proj_res {
@@ -114,9 +116,6 @@ pub fn BoardView(project_id: String) -> Element {
                         error.set(Some(e));
                     }
                 }
-            }
-            if let Ok(ls) = labels_res {
-                available_labels.set(ls);
             }
 
             loading.set(false);
@@ -388,6 +387,7 @@ pub fn BoardView(project_id: String) -> Element {
             TaskDetail {
                 task_id: tid,
                 refresh_key: *detail_refresh.read(),
+                available_labels,
                 on_close: move |_| { detail_task_id.set(None); },
                 on_updated: move |_| {
                     let pid = pid_sig.peek().clone();

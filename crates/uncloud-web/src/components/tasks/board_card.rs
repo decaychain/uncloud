@@ -95,8 +95,7 @@ pub fn BoardCard(
                     }
                 }
 
-                // Labels as Trello-style coloured bars (compact for the Kanban board).
-                // Each bar is 6px tall + 14px wide; the label name is in the title for hover.
+                // Labels as full coloured chips with the label name.
                 if !task.labels.is_empty() {
                     div { class: "flex flex-wrap gap-1 mt-1",
                         for label in task.labels.iter() {
@@ -105,9 +104,9 @@ pub fn BoardCard(
                                 rsx! {
                                     span {
                                         key: "{label}",
-                                        class: "h-1.5 w-3.5 rounded-sm",
+                                        class: "px-1.5 py-0.5 rounded text-[10px] font-medium text-white leading-tight",
                                         style: "background: {color};",
-                                        title: "{label}",
+                                        "{label}"
                                     }
                                 }
                             }

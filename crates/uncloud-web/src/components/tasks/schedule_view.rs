@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use uncloud_common::{TaskPriority, TaskResponse, TaskScheduleResponse, TaskStatus, UpdateTaskStatusRequest};
+use uncloud_common::{TaskLabelResponse, TaskPriority, TaskResponse, TaskScheduleResponse, TaskStatus, UpdateTaskStatusRequest};
 
 use crate::hooks::use_tasks;
 
@@ -32,6 +32,9 @@ pub fn ScheduleView() -> Element {
     let mut loading = use_signal(|| true);
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut detail_task_id: Signal<Option<String>> = use_signal(|| None);
+    // Per-task local label catalogue. ScheduleView spans projects, so we don't
+    // pre-populate this — TaskDetail's effect fetches based on the opened task.
+    let detail_labels: Signal<Vec<TaskLabelResponse>> = use_signal(Vec::new);
 
     // Collapsed state per group index
     let mut collapsed: Signal<[bool; 5]> = use_signal(|| [false; 5]);
@@ -227,6 +230,7 @@ pub fn ScheduleView() -> Element {
         if let Some(tid) = detail_task_id.read().clone() {
             TaskDetail {
                 task_id: tid,
+                available_labels: detail_labels,
                 on_close: move |_| { detail_task_id.set(None); },
                 on_updated: move |_| { refresh(); },
             }
