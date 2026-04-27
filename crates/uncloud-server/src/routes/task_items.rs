@@ -11,7 +11,8 @@ use serde::Deserialize;
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
 use crate::models::{
-    File, ProjectPermission, RecurrenceRule, Task, TaskComment, TaskProject, TaskStatus, User,
+    File, NthWeek, ProjectPermission, RecurrenceRule, Task, TaskComment, TaskProject, TaskStatus,
+    User,
 };
 use crate::AppState;
 use uncloud_common::{
@@ -96,6 +97,26 @@ fn priority_to_api(p: &Option<crate::models::TaskPriority>) -> ApiTaskPriority {
     }
 }
 
+fn nth_to_api(n: NthWeek) -> uncloud_common::NthWeek {
+    match n {
+        NthWeek::First => uncloud_common::NthWeek::First,
+        NthWeek::Second => uncloud_common::NthWeek::Second,
+        NthWeek::Third => uncloud_common::NthWeek::Third,
+        NthWeek::Fourth => uncloud_common::NthWeek::Fourth,
+        NthWeek::Last => uncloud_common::NthWeek::Last,
+    }
+}
+
+fn nth_from_api(n: uncloud_common::NthWeek) -> NthWeek {
+    match n {
+        uncloud_common::NthWeek::First => NthWeek::First,
+        uncloud_common::NthWeek::Second => NthWeek::Second,
+        uncloud_common::NthWeek::Third => NthWeek::Third,
+        uncloud_common::NthWeek::Fourth => NthWeek::Fourth,
+        uncloud_common::NthWeek::Last => NthWeek::Last,
+    }
+}
+
 fn recurrence_to_api(
     r: &Option<RecurrenceRule>,
 ) -> Option<uncloud_common::RecurrenceRule> {
@@ -107,6 +128,12 @@ fn recurrence_to_api(
         RecurrenceRule::Monthly { day_of_month } => uncloud_common::RecurrenceRule::Monthly {
             day_of_month: *day_of_month,
         },
+        RecurrenceRule::MonthlyByWeekday { nth, weekday } => {
+            uncloud_common::RecurrenceRule::MonthlyByWeekday {
+                nth: nth_to_api(*nth),
+                weekday: *weekday,
+            }
+        }
         RecurrenceRule::Yearly { month, day } => uncloud_common::RecurrenceRule::Yearly {
             month: *month,
             day: *day,
@@ -128,6 +155,12 @@ fn recurrence_from_api(
         uncloud_common::RecurrenceRule::Monthly { day_of_month } => RecurrenceRule::Monthly {
             day_of_month: *day_of_month,
         },
+        uncloud_common::RecurrenceRule::MonthlyByWeekday { nth, weekday } => {
+            RecurrenceRule::MonthlyByWeekday {
+                nth: nth_from_api(*nth),
+                weekday: *weekday,
+            }
+        }
         uncloud_common::RecurrenceRule::Yearly { month, day } => RecurrenceRule::Yearly {
             month: *month,
             day: *day,
@@ -222,6 +255,17 @@ fn compute_next_due_date(rule: &RecurrenceRule, current: NaiveDate) -> NaiveDate
             let day = target_day.min(last_day);
             NaiveDate::from_ymd_opt(year, month, day).unwrap_or(current + chrono::Duration::days(30))
         }
+        RecurrenceRule::MonthlyByWeekday { nth, weekday } => {
+            let (mut year, mut month) = (current.year(), current.month());
+            if month == 12 {
+                year += 1;
+                month = 1;
+            } else {
+                month += 1;
+            }
+            nth_weekday_of_month(year, month, nth, *weekday)
+                .unwrap_or(current + chrono::Duration::days(30))
+        }
         RecurrenceRule::Yearly { month, day } => {
             let target = NaiveDate::from_ymd_opt(current.year(), *month as u32, *day as u32);
             match target {
@@ -247,6 +291,57 @@ fn last_day_of_month(year: i32, month: u32) -> u32 {
     }
     .map(|d| d.pred_opt().unwrap().day())
     .unwrap_or(28)
+}
+
+/// Map our 0=Mon..6=Sun encoding to chrono's `Weekday`.
+fn weekday_from_index(i: u8) -> Option<chrono::Weekday> {
+    use chrono::Weekday::*;
+    match i {
+        0 => Some(Mon),
+        1 => Some(Tue),
+        2 => Some(Wed),
+        3 => Some(Thu),
+        4 => Some(Fri),
+        5 => Some(Sat),
+        6 => Some(Sun),
+        _ => None,
+    }
+}
+
+/// Resolve "1st/2nd/.../last <weekday> of <year>-<month>" to a concrete date.
+/// Every month has at least four of every weekday (28 days = 4*7), so
+/// First/Second/Third/Fourth always succeed; Last walks back from month-end.
+fn nth_weekday_of_month(
+    year: i32,
+    month: u32,
+    nth: &NthWeek,
+    weekday: u8,
+) -> Option<NaiveDate> {
+    let target = weekday_from_index(weekday)?;
+    match nth {
+        NthWeek::Last => {
+            let last = last_day_of_month(year, month);
+            let last_date = NaiveDate::from_ymd_opt(year, month, last)?;
+            let offset = (last_date.weekday().num_days_from_monday() as i32
+                - target.num_days_from_monday() as i32)
+                .rem_euclid(7) as u32;
+            NaiveDate::from_ymd_opt(year, month, last - offset)
+        }
+        _ => {
+            let n: u32 = match nth {
+                NthWeek::First => 0,
+                NthWeek::Second => 1,
+                NthWeek::Third => 2,
+                NthWeek::Fourth => 3,
+                NthWeek::Last => unreachable!(),
+            };
+            let first = NaiveDate::from_ymd_opt(year, month, 1)?;
+            let offset = (target.num_days_from_monday() as i32
+                - first.weekday().num_days_from_monday() as i32)
+                .rem_euclid(7) as u32;
+            NaiveDate::from_ymd_opt(year, month, 1 + offset + n * 7)
+        }
+    }
 }
 
 /// Count subtasks and done-subtasks for a set of parent task IDs.

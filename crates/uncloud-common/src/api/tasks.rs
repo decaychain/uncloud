@@ -35,6 +35,16 @@ pub enum ProjectView {
     List,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NthWeek {
+    First,
+    Second,
+    Third,
+    Fourth,
+    Last,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type")]
@@ -42,6 +52,8 @@ pub enum RecurrenceRule {
     Daily,
     Weekly { days: Vec<u8> },
     Monthly { day_of_month: u8 },
+    /// `weekday` uses the same 0=Mon..6=Sun encoding as `Weekly { days }`.
+    MonthlyByWeekday { nth: NthWeek, weekday: u8 },
     Yearly { month: u8, day: u8 },
     Custom { interval_days: u32 },
 }
