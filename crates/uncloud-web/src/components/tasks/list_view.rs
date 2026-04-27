@@ -168,25 +168,29 @@ pub fn ListView(
 
     // Live updates: refetch on TaskChanged for the current project. Bumps
     // detail_refresh too when the open task is the one that changed.
+    // All signal work runs inside `spawn` to avoid re-entering the Dioxus
+    // runtime synchronously from the SSE callback.
     use_events(move |evt| {
         if let ServerEvent::TaskChanged { project_id: ev_pid, task_id } = evt {
-            if ev_pid == *pid_sig.peek() {
+            spawn(async move {
+                if ev_pid != *pid_sig.peek() {
+                    return;
+                }
                 let pid = ev_pid.clone();
-                spawn(async move {
-                    if let Ok(secs) = use_tasks::list_sections(&pid).await {
-                        sections.set(secs);
-                    }
-                    if let Ok(t) = use_tasks::list_all_tasks(&pid).await {
-                        tasks.set(t);
-                    }
-                });
+                if let Ok(secs) = use_tasks::list_sections(&pid).await {
+                    sections.set(secs);
+                }
+                if let Ok(t) = use_tasks::list_all_tasks(&pid).await {
+                    tasks.set(t);
+                }
                 if let Some(tid) = task_id {
-                    if detail_task_id.peek().as_ref() == Some(&tid) {
+                    let detail_match = detail_task_id.peek().as_ref() == Some(&tid);
+                    if detail_match {
                         let next = detail_refresh.peek().wrapping_add(1);
                         detail_refresh.set(next);
                     }
                 }
-            }
+            });
         }
     });
 
