@@ -125,6 +125,11 @@ pub struct FolderResponse {
 pub struct CreateFolderRequest {
     pub name: String,
     pub parent_id: Option<String>,
+    /// Pin this folder to a specific storage by ID. `None` inherits from the
+    /// closest ancestor that pins one (root falls back to the default).
+    /// Only honoured at creation time — `UpdateFolderRequest` ignores it.
+    #[serde(default)]
+    pub storage_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

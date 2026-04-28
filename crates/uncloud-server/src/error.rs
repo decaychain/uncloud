@@ -37,6 +37,9 @@ pub enum AppError {
 
     #[error("Range not satisfiable")]
     RangeNotSatisfiable(i64),
+
+    #[error("{0}")]
+    MethodNotAllowed(String),
 }
 
 impl IntoResponse for AppError {
@@ -66,6 +69,7 @@ impl IntoResponse for AppError {
                 tracing::error!("Storage error: {}", msg);
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("Storage error: {msg}"))
             }
+            AppError::MethodNotAllowed(_) => (StatusCode::METHOD_NOT_ALLOWED, self.to_string()),
             AppError::RangeNotSatisfiable(total) => {
                 let body = Json(json!({ "error": "Range not satisfiable" }));
                 return (

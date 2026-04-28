@@ -98,6 +98,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Folders
         .route("/folders", get(folders::list_folders))
         .route("/folders", post(folders::create_folder))
+        .route("/storages", get(storages::list_storages_public))
         .route("/folders/{id}", get(folders::get_folder))
         .route("/folders/{id}", put(folders::update_folder))
         .route("/folders/{id}", delete(folders::delete_folder))

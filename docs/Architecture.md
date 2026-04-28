@@ -75,7 +75,7 @@ Uncloud/
         services/
           auth.rs              ← AuthService (sessions, password hashing, TOTP, invites,
                                  demo accounts, user bytes)
-          storage.rs           ← StorageService (backend registry, get_or_create_default)
+          storage.rs           ← StorageService (config-driven backend registry, parent-chain resolution)
           events.rs            ← EventService (per-user SSE broadcast channels)
           search.rs            ← SearchService (Meilisearch SDK wrapper)
           sharing.rs           ← FolderShare resolution (effective permission for a path)
@@ -236,7 +236,7 @@ Uncloud/
 - **Admin routes**: guarded by `admin_middleware` (`user.role == Admin`). Mounted under `/api/admin/*` and `/api/v1/admin/*`.
 - **App reverse proxy**: requests to `/apps/{name}/*` are authenticated via cookies and proxied to the registered app's `base_url`. This gives sidecar apps single-origin auth for free.
 - **S3-compatible API**: `/s3` and `/s3/{*rest}` are auth'd by `sigv4_middleware` (NOT cookies/Bearer); the middleware extracts an `S3User` analogous to `AuthUser`. Mounted in parallel with `/api`.
-- **Storage**: `StorageService` holds an in-memory map of `ObjectId -> Arc<dyn StorageBackend>`. Default storage is auto-provisioned on first upload via `get_or_create_default(user_id)`.
+- **Storage**: `StorageService` holds an in-memory map of `ObjectId -> Arc<dyn StorageBackend>`, populated at startup by upserting the storages declared in `config.yaml`. The configured `default` storage receives uploads at root; folders may pin themselves to a different storage via `Folder.storage_id`, and `StorageService::resolve_storage_for_parent` walks the parent chain at upload time to find the closest pinned ancestor (falling back to the default). The admin REST endpoints under `/api/admin/storages` are read-only — `POST`/`PUT`/`DELETE` return 405 with a "configure via config.yaml" message. Removing a storage from config that still has files referencing it is rejected at startup.
 - **Events**: SSE stream at `/api/events` for real-time updates. `EventService` broadcasts to per-user channels. Frontend subscribes via `use_events` hook (accepts `FnMut`, uses `Rc<RefCell<F>>`). The `ServerEvent` enum covers file/folder CRUD, processing, folder-share lifecycle, rescan progress, sync-audit appends, and task-project changes (`TaskChanged` fans out to project owner + members).
 - **Audit log**: change-inducing handlers call `audit::file_event` / `audit::folder_event` to append a `SyncEvent` row (capped + TTL-purged); the row is also broadcast as `ServerEvent::SyncEventAppended` so other devices for the same user see it live.
 - **Assets**: Dioxus requires `asset!()` macro for any file to appear in the build output. CSS is loaded via `document::Stylesheet { href: TAILWIND }` in `app.rs`.
@@ -506,7 +506,21 @@ database:
   name: "uncloud"
 
 storage:
-  default_path: "/data/uncloud"
+  default: main                    # name of the default storage
+  storages:
+    - name: main
+      type: local
+      path: /data/uncloud
+    # - name: cold
+    #   type: s3
+    #   endpoint: https://s3.us-west-002.backblazeb2.com
+    #   bucket: my-uncloud-cold
+    #   access_key: ${B2_KEY_ID}    # ${VAR} expanded from env
+    #   secret_key: ${B2_APP_KEY}
+    #   region: us-west-002
+  # Legacy fallback: when `storages` is empty, a single "local" entry is
+  # synthesised from this path. Old configs keep working unchanged.
+  # default_path: "/data/uncloud"
 
 auth:
   session_duration_hours: 168      # 7 days

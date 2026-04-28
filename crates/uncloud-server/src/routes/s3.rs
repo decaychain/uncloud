@@ -678,7 +678,7 @@ async fn put_object(
     };
 
     // Get or create storage
-    let storage = match state.storage.get_or_create_default(user.id).await {
+    let storage = match state.storage.get_default_storage().await {
         Ok(s) => s,
         Err(e) => {
             return s3_error_response(
@@ -1092,7 +1092,7 @@ async fn create_multipart_upload(
     }
 
     // Get or create storage
-    let storage = match state.storage.get_or_create_default(user.id).await {
+    let storage = match state.storage.get_default_storage().await {
         Ok(s) => s,
         Err(e) => {
             return s3_error_response(
@@ -1434,7 +1434,7 @@ async fn complete_multipart_upload(
         .first_or_octet_stream()
         .to_string();
 
-    let storage = match state.storage.get_or_create_default(user.id).await {
+    let storage = match state.storage.get_default_storage().await {
         Ok(s) => s,
         Err(e) => {
             return s3_error_response(

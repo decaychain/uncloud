@@ -73,10 +73,15 @@ pub async fn list_folders(parent_id: Option<&str>) -> Result<Vec<FolderResponse>
     }
 }
 
-pub async fn create_folder(name: &str, parent_id: Option<&str>) -> Result<FolderResponse, String> {
+pub async fn create_folder(
+    name: &str,
+    parent_id: Option<&str>,
+    storage_id: Option<&str>,
+) -> Result<FolderResponse, String> {
     let req = CreateFolderRequest {
         name: name.to_string(),
         parent_id: parent_id.map(|s| s.to_string()),
+        storage_id: storage_id.map(|s| s.to_string()),
     };
 
     let response = api::post("/folders")

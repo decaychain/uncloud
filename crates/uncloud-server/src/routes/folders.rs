@@ -38,6 +38,8 @@ pub struct ListFoldersQuery {
 pub struct CreateFolderRequest {
     pub name: String,
     pub parent_id: Option<String>,
+    #[serde(default)]
+    pub storage_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -374,7 +376,18 @@ pub async fn create_folder(
         user.id
     };
 
-    let folder = Folder::new(effective_owner_id, parent_id, req.name);
+    let storage_id = match req.storage_id.as_deref() {
+        Some(s) if !s.is_empty() => {
+            let id = ObjectId::parse_str(s)
+                .map_err(|_| AppError::BadRequest("Invalid storage_id".into()))?;
+            // Validate the storage exists.
+            state.storage.get_storage(id).await?;
+            Some(id)
+        }
+        _ => None,
+    };
+
+    let folder = Folder::new_with_storage(effective_owner_id, parent_id, req.name, storage_id);
 
     let collection = state.db.collection::<Folder>("folders");
 

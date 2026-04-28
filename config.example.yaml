@@ -7,8 +7,29 @@ database:
   name: "uncloud"
 
 storage:
-  # Default storage created on first run
-  default_path: "/data/uncloud"
+  # Configured storages. Each entry has a unique `name` referenced from the DB
+  # and used in the folder-create dropdown. `default` picks which one receives
+  # uploads when no folder-level override applies. At least one must exist.
+  #
+  # Removing an entry that still has files referencing it is rejected at
+  # startup — restore the entry or move/delete the files first.
+  default: main
+  storages:
+    - name: main
+      type: local
+      path: /data/uncloud
+    # Example: an S3-compatible secondary. ${VAR} expands from env at startup.
+    # - name: cold
+    #   type: s3
+    #   endpoint: https://s3.us-west-002.backblazeb2.com
+    #   bucket: my-uncloud-cold
+    #   access_key: ${B2_KEY_ID}
+    #   secret_key: ${B2_APP_KEY}
+    #   region: us-west-002
+
+  # Legacy single-storage shortcut. When `storages` is empty above, a storage
+  # named "local" is synthesised from this path. Kept for backward compat.
+  # default_path: "/data/uncloud"
 
 auth:
   # Session duration in hours

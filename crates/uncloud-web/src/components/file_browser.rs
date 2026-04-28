@@ -935,6 +935,17 @@ fn NewFolderModal(
     let mut name = use_signal(String::new);
     let mut creating = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
+    // Empty string == "inherit from parent / use default at root".
+    let mut storage_choice = use_signal(String::new);
+    let mut storages = use_signal(Vec::<crate::hooks::use_storages::StorageSummary>::new);
+
+    use_effect(move || {
+        spawn(async move {
+            if let Ok(list) = crate::hooks::use_storages::list_storages_for_user().await {
+                storages.set(list);
+            }
+        });
+    });
 
     let on_submit = move |e: Event<FormData>| {
         e.prevent_default();
@@ -943,10 +954,12 @@ fn NewFolderModal(
             return;
         }
         let parent = parent_id.clone();
+        let chosen = storage_choice();
+        let storage = if chosen.is_empty() { None } else { Some(chosen) };
         creating.set(true);
         error.set(None);
         spawn(async move {
-            match use_files::create_folder(&n, parent.as_deref()).await {
+            match use_files::create_folder(&n, parent.as_deref(), storage.as_deref()).await {
                 Ok(_) => on_created.call(()),
                 Err(e) => {
                     error.set(Some(e));
@@ -969,6 +982,26 @@ fn NewFolderModal(
                             autofocus: true,
                             value: "{name}",
                             oninput: move |e| name.set(e.value()),
+                        }
+                    }
+
+                    if storages().len() > 1 {
+                        div { class: "form-control mt-3",
+                            label { class: "label py-1",
+                                span { class: "label-text text-sm", "Storage" }
+                            }
+                            select {
+                                class: "select select-bordered select-sm w-full",
+                                value: "{storage_choice}",
+                                oninput: move |e| storage_choice.set(e.value()),
+                                option { value: "", "Inherit from parent" }
+                                for s in storages() {
+                                    option {
+                                        value: "{s.id}",
+                                        if s.is_default { "{s.name} (default)" } else { "{s.name}" }
+                                    }
+                                }
+                            }
                         }
                     }
 
