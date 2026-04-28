@@ -41,7 +41,99 @@ pub struct DatabaseConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StorageConfig {
-    pub default_path: PathBuf,
+    /// Legacy single-storage shortcut. When `storages` is empty, a storage
+    /// named `"local"` is synthesised from this path. Kept for backward
+    /// compatibility with pre-1.x configs.
+    #[serde(default)]
+    pub default_path: Option<PathBuf>,
+    /// Configured storage backends. Each entry has a unique `name` referenced
+    /// from MongoDB. At least one must exist (either here or via the legacy
+    /// `default_path` shortcut).
+    #[serde(default)]
+    pub storages: Vec<ConfiguredStorage>,
+    /// Name of the storage that receives uploads when no folder-level override
+    /// applies. Required when `storages` is non-empty.
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfiguredStorage {
+    pub name: String,
+    #[serde(flatten)]
+    pub backend: ConfiguredStorageBackend,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ConfiguredStorageBackend {
+    Local {
+        path: PathBuf,
+    },
+    S3 {
+        endpoint: String,
+        bucket: String,
+        access_key: String,
+        secret_key: String,
+        #[serde(default)]
+        region: Option<String>,
+    },
+}
+
+impl StorageConfig {
+    /// Returns the list of `(name, backend)` pairs the server should serve,
+    /// along with the resolved default name. Synthesises a single `"local"`
+    /// entry from `default_path` when `storages` is empty, so old configs
+    /// keep working.
+    pub fn resolve(&self) -> Result<ResolvedStorages, String> {
+        if self.storages.is_empty() {
+            let path = self
+                .default_path
+                .as_ref()
+                .ok_or_else(|| {
+                    "storage: configure at least one entry under `storages` or set `default_path`"
+                        .to_string()
+                })?
+                .clone();
+            return Ok(ResolvedStorages {
+                default: "local".to_string(),
+                entries: vec![ConfiguredStorage {
+                    name: "local".to_string(),
+                    backend: ConfiguredStorageBackend::Local { path },
+                }],
+            });
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for s in &self.storages {
+            if s.name.trim().is_empty() {
+                return Err("storage: every entry needs a non-empty `name`".to_string());
+            }
+            if !seen.insert(&s.name) {
+                return Err(format!("storage: duplicate name `{}`", s.name));
+            }
+        }
+
+        let default = self.default.clone().ok_or_else(|| {
+            "storage: set `default: <name>` when `storages` is non-empty".to_string()
+        })?;
+        if !self.storages.iter().any(|s| s.name == default) {
+            return Err(format!(
+                "storage: `default: {}` does not match any configured storage name",
+                default
+            ));
+        }
+        Ok(ResolvedStorages {
+            default,
+            entries: self.storages.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedStorages {
+    pub default: String,
+    pub entries: Vec<ConfiguredStorage>,
 }
 
 #[derive(Debug, Clone)]
@@ -330,7 +422,8 @@ impl Default for ProcessingConfig {
 impl Config {
     pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let contents = std::fs::read_to_string(path)?;
-        let config: Config = serde_yaml::from_str(&contents)?;
+        let expanded = expand_env_vars(&contents);
+        let config: Config = serde_yaml::from_str(&expanded)?;
         Ok(config)
     }
 
@@ -346,6 +439,31 @@ impl Config {
     }
 }
 
+/// Replaces `${VAR}` occurrences in a config body with the value of `VAR`
+/// from the process environment. Unknown vars expand to empty so the YAML
+/// deserialiser fails on missing required fields rather than silently
+/// keeping the literal `${VAR}` text.
+fn expand_env_vars(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'$' && bytes[i + 1] == b'{' {
+            if let Some(end) = input[i + 2..].find('}') {
+                let var = &input[i + 2..i + 2 + end];
+                if !var.is_empty() && var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    out.push_str(&std::env::var(var).unwrap_or_default());
+                    i += 2 + end + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -358,7 +476,9 @@ impl Default for Config {
                 name: "uncloud".to_string(),
             },
             storage: StorageConfig {
-                default_path: PathBuf::from("/data/uncloud"),
+                default_path: Some(PathBuf::from("/data/uncloud")),
+                storages: Vec::new(),
+                default: None,
             },
             auth: AuthConfig {
                 session_duration_hours: 168,
@@ -379,5 +499,112 @@ impl Default for Config {
             logging: LoggingConfig::default(),
             sync_audit: SyncAuditConfig::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_env_vars_substitutes_set_vars() {
+        std::env::set_var("UC_TEST_FOO", "abc123");
+        let out = expand_env_vars("key: ${UC_TEST_FOO}");
+        assert_eq!(out, "key: abc123");
+        std::env::remove_var("UC_TEST_FOO");
+    }
+
+    #[test]
+    fn expand_env_vars_drops_unset_vars() {
+        std::env::remove_var("UC_TEST_NOT_SET");
+        let out = expand_env_vars("key: ${UC_TEST_NOT_SET}");
+        assert_eq!(out, "key: ");
+    }
+
+    #[test]
+    fn expand_env_vars_leaves_invalid_syntax_alone() {
+        // Unclosed `${`, characters outside [A-Za-z0-9_], etc.
+        assert_eq!(expand_env_vars("$ {VAR}"), "$ {VAR}");
+        assert_eq!(expand_env_vars("${VAR-with-dash}"), "${VAR-with-dash}");
+        assert_eq!(expand_env_vars("${"), "${");
+    }
+
+    #[test]
+    fn resolve_synthesises_local_from_default_path() {
+        let cfg = StorageConfig {
+            default_path: Some(PathBuf::from("/data")),
+            storages: vec![],
+            default: None,
+        };
+        let r = cfg.resolve().unwrap();
+        assert_eq!(r.default, "local");
+        assert_eq!(r.entries.len(), 1);
+        assert_eq!(r.entries[0].name, "local");
+    }
+
+    #[test]
+    fn resolve_requires_default_when_storages_set() {
+        let cfg = StorageConfig {
+            default_path: None,
+            storages: vec![ConfiguredStorage {
+                name: "main".into(),
+                backend: ConfiguredStorageBackend::Local {
+                    path: PathBuf::from("/data"),
+                },
+            }],
+            default: None,
+        };
+        let err = cfg.resolve().unwrap_err();
+        assert!(err.contains("default"), "{err}");
+    }
+
+    #[test]
+    fn resolve_rejects_default_pointing_to_unknown_name() {
+        let cfg = StorageConfig {
+            default_path: None,
+            storages: vec![ConfiguredStorage {
+                name: "main".into(),
+                backend: ConfiguredStorageBackend::Local {
+                    path: PathBuf::from("/data"),
+                },
+            }],
+            default: Some("nope".into()),
+        };
+        let err = cfg.resolve().unwrap_err();
+        assert!(err.contains("does not match"), "{err}");
+    }
+
+    #[test]
+    fn resolve_rejects_duplicate_names() {
+        let cfg = StorageConfig {
+            default_path: None,
+            storages: vec![
+                ConfiguredStorage {
+                    name: "main".into(),
+                    backend: ConfiguredStorageBackend::Local {
+                        path: PathBuf::from("/data"),
+                    },
+                },
+                ConfiguredStorage {
+                    name: "main".into(),
+                    backend: ConfiguredStorageBackend::Local {
+                        path: PathBuf::from("/data2"),
+                    },
+                },
+            ],
+            default: Some("main".into()),
+        };
+        let err = cfg.resolve().unwrap_err();
+        assert!(err.contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn resolve_errors_on_empty_input() {
+        let cfg = StorageConfig {
+            default_path: None,
+            storages: vec![],
+            default: None,
+        };
+        assert!(cfg.resolve().is_err());
     }
 }

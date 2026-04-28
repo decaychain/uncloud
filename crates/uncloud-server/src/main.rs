@@ -344,16 +344,6 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("Failed to initialise SearchService");
 
-    // Ensure default storage exists
-    let users_collection = db.collection::<models::User>("users");
-    let mut cursor = users_collection
-        .find(mongodb::bson::doc! { "role": "admin" })
-        .await?;
-    if cursor.advance().await? {
-        let admin: models::User = cursor.deserialize_current()?;
-        let _ = storage.get_or_create_default(admin.id).await;
-    }
-
     let state = Arc::new(AppState {
         config: config.clone(),
         db,

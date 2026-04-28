@@ -50,6 +50,19 @@ pub async fn list_storages() -> Result<Vec<StorageSummary>, String> {
     response.json().await.map_err(|e| e.to_string())
 }
 
+/// Non-admin: GET /api/storages — used by the folder-create dropdown so any
+/// signed-in user can pick which storage a new folder lives on.
+pub async fn list_storages_for_user() -> Result<Vec<StorageSummary>, String> {
+    let response = api::get("/storages")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if response.status() != 200 {
+        return Err(format!("Failed to list storages ({})", response.status()));
+    }
+    response.json().await.map_err(|e| e.to_string())
+}
+
 /// Admin-only: POST /api/admin/storages/{id}/rescan — kicks off a background
 /// rescan and returns the initial job state (status=Running, counters=0).
 pub async fn start_rescan(storage_id: &str) -> Result<RescanJob, String> {

@@ -901,8 +901,8 @@ pub async fn simple_upload(
         ));
     }
 
-    // Get or create default storage (auto-provisions on first upload)
-    let storage = state.storage.get_or_create_default(effective_owner_id).await?;
+    let storage_id = state.storage.resolve_storage_for_parent(parent_id).await?;
+    let storage = state.storage.get_storage(storage_id).await?;
     let backend = state.storage.get_backend(storage.id).await?;
 
     // Build logical storage path: username/folder/chain/filename
@@ -1028,8 +1028,8 @@ pub async fn init_upload(
 
     let chunk_size = req.chunk_size.unwrap_or(state.config.uploads.max_chunk_size as i64);
 
-    // Get or create default storage for the effective owner
-    let storage = state.storage.get_or_create_default(effective_owner_id).await?;
+    let storage_id = state.storage.resolve_storage_for_parent(parent_id).await?;
+    let storage = state.storage.get_storage(storage_id).await?;
     let backend = state.storage.get_backend(storage.id).await?;
 
     // Create temp file
