@@ -5,6 +5,7 @@ use uncloud_common::{
     TaskSectionResponse, TaskStatus, UpdateTaskStatusRequest,
 };
 
+use crate::hooks::use_drag_cleanup::use_drag_cleanup;
 use crate::hooks::use_events::use_events;
 use crate::hooks::use_tasks;
 
@@ -149,6 +150,17 @@ pub fn ListView(
     // Drag state
     let mut drag_task_id: Signal<Option<String>> = use_signal(|| None);
     let mut drop_section_id: Signal<Option<String>> = use_signal(|| None);
+
+    // Document-level safety net for drags ending outside a section's hit
+    // box. Window listeners fire after local handlers have bubbled, so a
+    // drop committed by the section's onpointerup still wins; this only
+    // clears state if it's still dirty afterwards.
+    use_drag_cleanup(move || {
+        if drag_task_id.peek().is_some() {
+            drag_task_id.set(None);
+            drop_section_id.set(None);
+        }
+    });
 
     // Label filter (OR semantics — empty = no filter)
     let label_filter: Signal<HashSet<String>> = use_signal(HashSet::new);

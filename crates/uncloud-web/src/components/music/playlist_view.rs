@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use uncloud_common::TrackResponse;
 use wasm_bindgen::JsCast;
 use crate::components::icons::{IconAlertTriangle, IconGripVertical, IconMoreVertical, IconMusic, IconPause, IconPencil, IconPin, IconPinOff, IconPlay, IconTrash, IconX};
-use crate::hooks::{use_playlists, use_player};
+use crate::hooks::{use_drag_cleanup::use_drag_cleanup, use_playlists, use_player};
 use crate::router::Route;
 use crate::state::{PinnedPlaylistState, PlayerState, PlaylistDirtyTick};
 
@@ -74,6 +74,23 @@ pub fn PlaylistView(playlist_id: String) -> Element {
     let mut dragging: Signal<bool> = use_signal(|| false);
     let mut press_seq: Signal<u32> = use_signal(|| 0);
     let mut press_origin: Signal<Option<(f64, f64)>> = use_signal(|| None);
+
+    // Document-level safety net. Local pointerup on the table container
+    // commits the drop; this fires after it (window listeners come last in
+    // bubble order) and only acts if state is still dirty — i.e. when the
+    // local handler didn't fire because the pointer ended outside the
+    // container, or a long-press timer raced with cleanup.
+    use_drag_cleanup(move || {
+        if drag_idx.peek().is_some() || *dragging.peek() {
+            drag_idx.set(None);
+            drop_idx.set(None);
+            dragging.set(false);
+        }
+        if press_origin.peek().is_some() {
+            press_origin.set(None);
+            press_seq += 1;
+        }
+    });
 
     let pid_for_remove = playlist_id.clone();
     let pid_for_reorder = playlist_id.clone();
@@ -164,16 +181,14 @@ pub fn PlaylistView(playlist_id: String) -> Element {
 
     // Container classes — when dragging, disable text selection and (importantly
     // for Android) touch-action: none so the browser won't intercept the drag
-    // as a scroll.
+    // as a scroll. Use a class toggle rather than inline style so Dioxus's
+    // attribute diff cleanly removes the rule when dragging ends; a previous
+    // inline-style approach left scrolling broken on mobile after drop until
+    // the component re-mounted.
     let container_class = if is_dragging {
-        "overflow-hidden rounded-box border border-base-300 select-none"
+        "overflow-hidden rounded-box border border-base-300 select-none touch-none"
     } else {
         "overflow-hidden rounded-box border border-base-300"
-    };
-    let container_style = if is_dragging {
-        "touch-action: none;"
-    } else {
-        ""
     };
 
     rsx! {
@@ -281,7 +296,6 @@ pub fn PlaylistView(playlist_id: String) -> Element {
             } else {
                 div {
                     class: "{container_class}",
-                    style: "{container_style}",
                     // Commit the drop on release anywhere inside the table.
                     onpointerup: move |_| {
                         cancel_pending_press();
