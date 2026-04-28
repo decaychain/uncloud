@@ -58,6 +58,9 @@ urlencoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
 clap = { version = "4", features = ["derive"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
+aws-credential-types = "1"
+aws-smithy-types = { version = "1", features = ["rt-tokio"] }
 
 [dev-dependencies]
 testcontainers = "0.23"
