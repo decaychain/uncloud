@@ -80,6 +80,7 @@ impl StorageService {
                         backend_type: match &backend_config {
                             StorageBackendConfig::Local { .. } => StorageBackendType::Local,
                             StorageBackendConfig::S3 { .. } => StorageBackendType::S3,
+                            StorageBackendConfig::Sftp { .. } => StorageBackendType::Sftp,
                         },
                         config: backend_config.clone(),
                         is_default,
@@ -98,6 +99,7 @@ impl StorageService {
                         backend_type: match &backend_config {
                             StorageBackendConfig::Local { .. } => StorageBackendType::Local,
                             StorageBackendConfig::S3 { .. } => StorageBackendType::S3,
+                            StorageBackendConfig::Sftp { .. } => StorageBackendType::Sftp,
                         },
                         config: backend_config.clone(),
                         is_default,
@@ -109,7 +111,7 @@ impl StorageService {
                 }
             };
 
-            let backend = create_backend(&backend_config).await?;
+            let backend = create_backend(&backend_config, db, storage.id).await?;
             backends.insert(storage.id, backend);
             by_name.insert(storage.name.clone(), storage.id);
             if is_default {
@@ -211,11 +213,36 @@ impl From<ConfiguredStorageBackend> for StorageBackendConfig {
                 secret_key,
                 region,
             },
+            ConfiguredStorageBackend::Sftp {
+                host,
+                port,
+                username,
+                password,
+                private_key,
+                private_key_passphrase,
+                base_path,
+                host_key,
+                host_key_check,
+            } => StorageBackendConfig::Sftp {
+                host,
+                port,
+                username,
+                password,
+                private_key,
+                private_key_passphrase,
+                base_path,
+                host_key,
+                host_key_check,
+            },
         }
     }
 }
 
-async fn create_backend(config: &StorageBackendConfig) -> Result<Arc<dyn StorageBackend>> {
+async fn create_backend(
+    config: &StorageBackendConfig,
+    db: &Database,
+    storage_id: ObjectId,
+) -> Result<Arc<dyn StorageBackend>> {
     match config {
         StorageBackendConfig::Local { path } => {
             let storage = LocalStorage::new(path).await?;
@@ -236,6 +263,11 @@ async fn create_backend(config: &StorageBackendConfig) -> Result<Arc<dyn Storage
                 region.as_deref(),
             )
             .await?;
+            Ok(Arc::new(storage))
+        }
+        StorageBackendConfig::Sftp { .. } => {
+            let storage =
+                crate::storage::SftpStorage::new(config, db.clone(), storage_id).await?;
             Ok(Arc::new(storage))
         }
     }

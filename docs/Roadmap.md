@@ -6,8 +6,7 @@ Both major items from the original roadmap (App Platform, S3-Compatible API) hav
 
 ## More storage backends
 
-- `LocalStorage` (filesystem) and `S3Storage` (any S3-compatible service) ship today. Admins can configure multiple storages and route different folders/files to different backends.
-- A second non-S3 backend would be SFTP — works against any VPS / NAS, supports random reads, no SaaS lock-in. SCP is a strict subset (no listing, no random reads) and not viable.
+- `LocalStorage` (filesystem), `S3Storage` (any S3-compatible service), and `SftpStorage` (any SSH-accessible host) ship today. Admins configure multiple storages in `config.yaml` and route different folders/files to different backends.
 - WebDAV and SMB are not planned: WebDAV is glitchy in practice and SMB is better mounted at the OS level than implemented as a backend.
 - A `MirrorBackend` wrapping a primary plus N read-only secondaries (for off-site backup) is a possible future addition, but currently each file lives on exactly one backend.
 

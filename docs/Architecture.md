@@ -85,6 +85,7 @@ Uncloud/
           mod.rs               ← StorageBackend trait
           local.rs             ← LocalStorage impl (filesystem)
           s3.rs                ← S3Storage impl (AWS S3 / R2 / B2 / MinIO)
+          sftp.rs              ← SftpStorage impl (russh; password or key auth; TOFU host-key pin in MongoDB)
         models/
           user.rs              ← User, UserRole, totp_enabled, disabled_features, status
           session.rs           ← Session
@@ -302,12 +303,13 @@ pub trait StorageBackend: Send + Sync {
 }
 ```
 
-Two backends ship today:
+Three backends ship today:
 
 - `LocalStorage` (filesystem) — files live under `data/<username>/<folder-chain>/<name>`.
 - `S3Storage` (any S3-compatible service: AWS S3, Cloudflare R2, Backblaze B2, MinIO, Wasabi) — files live as objects keyed by their relative path under a single bucket. Built on `aws-sdk-s3` with `force_path_style(true)` for self-hosted compat. Multipart uploads are not used; chunked uploads buffer to a local staging file then `PutObject` on finalize, so the per-file ceiling is the S3 single-object limit (5 GB on AWS).
+- `SftpStorage` (any SSH-accessible host: VPS, NAS, dedicated SFTP service) — files live under a configured `base_path` on the remote host. Built on `russh` + `russh-sftp` with a single long-lived SSH session that is recreated on demand. Supports both password and PEM-encoded private-key authentication (passphrase optional). Host-key verification defaults to **TOFU**: the server's public key is recorded in MongoDB `sftp_host_keys` (keyed by `storage_id`) on first connect and verified on every subsequent connect. Pin explicitly with `host_key:` for strict mode, or set `host_key_check: skip` to disable on trusted networks.
 
-Multiple `Storage` records can coexist (each file's `storage_id` decides where its blob lives); admin endpoints under `/api/admin/storages` add/remove/configure them.
+Multiple `Storage` records can coexist (each file's `storage_id` decides where its blob lives). The lineup is configured in `config.yaml`; admin REST endpoints under `/api/admin/storages` are read-only.
 
 ### Constraint
 

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub enum StorageBackendType {
     Local,
     S3,
+    Sftp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +21,22 @@ pub enum StorageBackendConfig {
         access_key: String,
         secret_key: String,
         region: Option<String>,
+    },
+    Sftp {
+        host: String,
+        port: u16,
+        username: String,
+        #[serde(default)]
+        password: Option<String>,
+        #[serde(default)]
+        private_key: Option<String>,
+        #[serde(default)]
+        private_key_passphrase: Option<String>,
+        base_path: String,
+        #[serde(default)]
+        host_key: Option<String>,
+        #[serde(default)]
+        host_key_check: Option<String>,
     },
 }
 

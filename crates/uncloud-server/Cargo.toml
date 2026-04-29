@@ -61,6 +61,8 @@ clap = { version = "4", features = ["derive"] }
 aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
 aws-credential-types = "1"
 aws-smithy-types = { version = "1", features = ["rt-tokio"] }
+russh = "0.60"
+russh-sftp = "2"
 
 [dev-dependencies]
 testcontainers = "0.23"
