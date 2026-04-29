@@ -84,6 +84,7 @@ Uncloud/
         storage/
           mod.rs               ← StorageBackend trait
           local.rs             ← LocalStorage impl (filesystem)
+          s3.rs                ← S3Storage impl (AWS S3 / R2 / B2 / MinIO)
         models/
           user.rs              ← User, UserRole, totp_enabled, disabled_features, status
           session.rs           ← Session
@@ -301,7 +302,12 @@ pub trait StorageBackend: Send + Sync {
 }
 ```
 
-Currently only `LocalStorage` (filesystem) is implemented.
+Two backends ship today:
+
+- `LocalStorage` (filesystem) — files live under `data/<username>/<folder-chain>/<name>`.
+- `S3Storage` (any S3-compatible service: AWS S3, Cloudflare R2, Backblaze B2, MinIO, Wasabi) — files live as objects keyed by their relative path under a single bucket. Built on `aws-sdk-s3` with `force_path_style(true)` for self-hosted compat. Multipart uploads are not used; chunked uploads buffer to a local staging file then `PutObject` on finalize, so the per-file ceiling is the S3 single-object limit (5 GB on AWS).
+
+Multiple `Storage` records can coexist (each file's `storage_id` decides where its blob lives); admin endpoints under `/api/admin/storages` add/remove/configure them.
 
 ### Constraint
 

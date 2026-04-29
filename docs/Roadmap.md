@@ -4,11 +4,12 @@ Outstanding work and planned features.
 
 Both major items from the original roadmap (App Platform, S3-Compatible API) have shipped — see [Features.md](Features.md). Remaining gaps:
 
-## Multi-storage backends
+## More storage backends
 
-- `LocalStorage` (filesystem) is the only `StorageBackend` implementation.
-- The next concrete backend to add is an S3 client (Backblaze B2 / Cloudflare R2 / AWS S3) for cheap off-site mirroring; WebDAV and SMB are also plausible.
-- Note: this is the **outbound** S3 client, distinct from the inbound S3-compatible API that's already implemented.
+- `LocalStorage` (filesystem) and `S3Storage` (any S3-compatible service) ship today. Admins can configure multiple storages and route different folders/files to different backends.
+- A second non-S3 backend would be SFTP — works against any VPS / NAS, supports random reads, no SaaS lock-in. SCP is a strict subset (no listing, no random reads) and not viable.
+- WebDAV and SMB are not planned: WebDAV is glitchy in practice and SMB is better mounted at the OS level than implemented as a backend.
+- A `MirrorBackend` wrapping a primary plus N read-only secondaries (for off-site backup) is a possible future addition, but currently each file lives on exactly one backend.
 
 ## At-rest encryption
 

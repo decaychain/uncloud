@@ -6,7 +6,7 @@ use tokio::sync::RwLock;
 use crate::config::StorageConfig;
 use crate::error::{AppError, Result};
 use crate::models::{Storage, StorageBackendConfig};
-use crate::storage::{LocalStorage, StorageBackend};
+use crate::storage::{LocalStorage, S3Storage, StorageBackend};
 
 pub struct StorageService {
     db: Database,
@@ -53,8 +53,22 @@ impl StorageService {
                 let storage = LocalStorage::new(path).await?;
                 Ok(Arc::new(storage))
             }
-            StorageBackendConfig::S3 { .. } => {
-                Err(AppError::Internal("S3 storage not yet implemented".to_string()))
+            StorageBackendConfig::S3 {
+                endpoint,
+                bucket,
+                access_key,
+                secret_key,
+                region,
+            } => {
+                let storage = S3Storage::new(
+                    endpoint,
+                    bucket,
+                    access_key,
+                    secret_key,
+                    region.as_deref(),
+                )
+                .await?;
+                Ok(Arc::new(storage))
             }
         }
     }

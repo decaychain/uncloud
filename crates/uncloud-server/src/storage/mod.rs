@@ -1,4 +1,5 @@
 pub mod local;
+pub mod s3;
 
 use async_trait::async_trait;
 use std::pin::Pin;
@@ -74,3 +75,4 @@ pub trait StorageBackend: Send + Sync {
 }
 
 pub use local::LocalStorage;
+pub use s3::S3Storage;
