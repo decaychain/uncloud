@@ -94,81 +94,58 @@ pub async fn list_storages(
     Ok(Json(storages.iter().map(StorageResponse::from).collect()))
 }
 
-pub async fn create_storage(
+#[derive(Debug, Serialize)]
+pub struct PublicStorage {
+    pub id: String,
+    pub name: String,
+    pub backend_type: StorageBackendType,
+    pub is_default: bool,
+}
+
+/// Non-admin endpoint that returns the storage names for the folder-create
+/// dropdown. Crucially does NOT leak credentials or endpoints.
+pub async fn list_storages_public(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
-    Json(req): Json<CreateStorageRequest>,
+    _user: AuthUser,
+) -> Result<Json<Vec<PublicStorage>>> {
+    let storages = state.storage.list_storages().await?;
+    Ok(Json(
+        storages
+            .iter()
+            .map(|s| PublicStorage {
+                id: s.id.to_hex(),
+                name: s.name.clone(),
+                backend_type: s.backend_type,
+                is_default: s.is_default,
+            })
+            .collect(),
+    ))
+}
+
+const READ_ONLY_MSG: &str =
+    "Storages are configured via config.yaml; the API is read-only. Edit the file and restart the server.";
+
+pub async fn create_storage(
+    State(_state): State<Arc<AppState>>,
+    _user: AuthUser,
+    Json(_req): Json<CreateStorageRequest>,
 ) -> Result<(StatusCode, Json<StorageResponse>)> {
-    if req.name.is_empty() || req.name.len() > 100 {
-        return Err(AppError::Validation(
-            "Storage name must be between 1 and 100 characters".to_string(),
-        ));
-    }
-
-    let storage = state
-        .storage
-        .create_storage(
-            req.name,
-            req.config.into(),
-            req.is_default.unwrap_or(false),
-            user.id,
-        )
-        .await?;
-
-    Ok((StatusCode::CREATED, Json(StorageResponse::from(&storage))))
+    Err(AppError::MethodNotAllowed(READ_ONLY_MSG.to_string()))
 }
 
 pub async fn update_storage(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Json(req): Json<UpdateStorageRequest>,
+    State(_state): State<Arc<AppState>>,
+    Path(_id): Path<String>,
+    Json(_req): Json<UpdateStorageRequest>,
 ) -> Result<Json<StorageResponse>> {
-    let storage_id = ObjectId::parse_str(&id)
-        .map_err(|_| AppError::BadRequest("Invalid storage ID".to_string()))?;
-
-    let mut storage = state.storage.get_storage(storage_id).await?;
-
-    if let Some(name) = req.name {
-        if name.is_empty() || name.len() > 100 {
-            return Err(AppError::Validation(
-                "Storage name must be between 1 and 100 characters".to_string(),
-            ));
-        }
-        storage.name = name;
-    }
-
-    if let Some(is_default) = req.is_default {
-        if is_default {
-            // Unset other defaults
-            let storages_collection = state.db.collection::<Storage>("storages");
-            storages_collection
-                .update_many(
-                    mongodb::bson::doc! {},
-                    mongodb::bson::doc! { "$set": { "is_default": false } },
-                )
-                .await?;
-        }
-        storage.is_default = is_default;
-    }
-
-    let storages_collection = state.db.collection::<Storage>("storages");
-    storages_collection
-        .replace_one(mongodb::bson::doc! { "_id": storage_id }, &storage)
-        .await?;
-
-    Ok(Json(StorageResponse::from(&storage)))
+    Err(AppError::MethodNotAllowed(READ_ONLY_MSG.to_string()))
 }
 
 pub async fn delete_storage(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    State(_state): State<Arc<AppState>>,
+    Path(_id): Path<String>,
 ) -> Result<StatusCode> {
-    let storage_id = ObjectId::parse_str(&id)
-        .map_err(|_| AppError::BadRequest("Invalid storage ID".to_string()))?;
-
-    state.storage.delete_storage(storage_id).await?;
-
-    Ok(StatusCode::NO_CONTENT)
+    Err(AppError::MethodNotAllowed(READ_ONLY_MSG.to_string()))
 }
 
 // ── Rescan ──────────────────────────────────────────────────────────────────

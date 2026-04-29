@@ -106,7 +106,7 @@ impl TestApp {
                 name: db_name,
             },
             storage: StorageConfig {
-                default_path: storage_dir.path().to_path_buf(),
+                default_path: Some(storage_dir.path().to_path_buf()), storages: Vec::new(), default: None,
             },
             auth: AuthConfig {
                 session_duration_hours: 1,
@@ -318,7 +318,7 @@ impl BoundTestApp {
                 name: db_name,
             },
             storage: StorageConfig {
-                default_path: storage_dir.path().to_path_buf(),
+                default_path: Some(storage_dir.path().to_path_buf()), storages: Vec::new(), default: None,
             },
             auth: AuthConfig {
                 session_duration_hours: 1,

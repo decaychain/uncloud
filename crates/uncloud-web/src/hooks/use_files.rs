@@ -1,5 +1,5 @@
 use uncloud_common::{
-    AlbumResponse, CopyFileRequest, CopyFolderRequest, CreateFolderRequest, EffectiveStrategyResponse,
+    AlbumResponse, CopyFileRequest, CopyFolderRequest, CreateFolderRequest, EffectiveStorageResponse, EffectiveStrategyResponse,
     FileResponse, FileVersionResponse, FolderResponse, GalleryInclude, GalleryResponse, MusicInclude,
     SyncStrategy, TrashItemResponse, UpdateFileRequest, UpdateFolderRequest,
 };
@@ -73,10 +73,15 @@ pub async fn list_folders(parent_id: Option<&str>) -> Result<Vec<FolderResponse>
     }
 }
 
-pub async fn create_folder(name: &str, parent_id: Option<&str>) -> Result<FolderResponse, String> {
+pub async fn create_folder(
+    name: &str,
+    parent_id: Option<&str>,
+    storage_id: Option<&str>,
+) -> Result<FolderResponse, String> {
     let req = CreateFolderRequest {
         name: name.to_string(),
         parent_id: parent_id.map(|s| s.to_string()),
+        storage_id: storage_id.map(|s| s.to_string()),
     };
 
     let response = api::post("/folders")
@@ -265,6 +270,21 @@ pub async fn get_effective_strategy(id: &str) -> Result<EffectiveStrategyRespons
             .map_err(|e| e.to_string())
     } else {
         Err("Failed to get effective strategy".to_string())
+    }
+}
+
+pub async fn get_effective_storage(id: &str) -> Result<EffectiveStorageResponse, String> {
+    let response = api::get(&format!("/folders/{}/effective-storage", id))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if response.ok() {
+        response
+            .json::<EffectiveStorageResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err("Failed to get effective storage".to_string())
     }
 }
 

@@ -293,6 +293,7 @@ impl Client {
         let body = CreateFolderRequest {
             name: name.to_owned(),
             parent_id: parent_id.map(|s| s.to_owned()),
+            storage_id: None,
         };
         let resp = self
             .http

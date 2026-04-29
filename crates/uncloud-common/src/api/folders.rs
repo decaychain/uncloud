@@ -125,6 +125,11 @@ pub struct FolderResponse {
 pub struct CreateFolderRequest {
     pub name: String,
     pub parent_id: Option<String>,
+    /// Pin this folder to a specific storage by ID. `None` inherits from the
+    /// closest ancestor that pins one (root falls back to the default).
+    /// Only honoured at creation time — `UpdateFolderRequest` ignores it.
+    #[serde(default)]
+    pub storage_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +154,20 @@ pub struct CopyFolderRequest {
 pub struct EffectiveStrategyResponse {
     pub strategy: SyncStrategy,
     /// ID of the folder where the strategy is explicitly set; `None` = system default.
+    pub source_folder_id: Option<String>,
+}
+
+/// Response for `GET /api/folders/{id}/effective-storage`. Tells the UI which
+/// storage backend a folder's contents live on and where the binding came from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectiveStorageResponse {
+    pub storage_id: String,
+    pub storage_name: String,
+    /// `true` when this folder pins the storage explicitly; `false` when it's
+    /// inherited from an ancestor or falls back to the configured default.
+    pub pinned_here: bool,
+    /// Set when the storage is inherited — the folder that originally pinned it.
+    /// `None` when `pinned_here` is true or when falling back to the default.
     pub source_folder_id: Option<String>,
 }
 
