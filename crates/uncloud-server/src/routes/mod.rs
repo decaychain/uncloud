@@ -105,6 +105,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/folders/{id}/copy", post(folders::copy_folder))
         .route("/folders/{id}/breadcrumb", get(folders::get_folder_breadcrumb))
         .route("/folders/{id}/effective-strategy", get(folders::get_effective_strategy))
+        .route("/folders/{id}/effective-storage", get(folders::get_effective_storage))
         .route("/sync/tree", get(folders::sync_tree))
         // Gallery
         .route("/gallery", get(files::list_gallery))
