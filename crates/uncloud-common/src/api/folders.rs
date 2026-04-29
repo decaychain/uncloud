@@ -157,6 +157,20 @@ pub struct EffectiveStrategyResponse {
     pub source_folder_id: Option<String>,
 }
 
+/// Response for `GET /api/folders/{id}/effective-storage`. Tells the UI which
+/// storage backend a folder's contents live on and where the binding came from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectiveStorageResponse {
+    pub storage_id: String,
+    pub storage_name: String,
+    /// `true` when this folder pins the storage explicitly; `false` when it's
+    /// inherited from an ancestor or falls back to the configured default.
+    pub pinned_here: bool,
+    /// Set when the storage is inherited — the folder that originally pinned it.
+    /// `None` when `pinned_here` is true or when falling back to the default.
+    pub source_folder_id: Option<String>,
+}
+
 /// Flat tree of all files and folders under a root, used by the sync engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncTreeResponse {

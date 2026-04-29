@@ -1489,6 +1489,7 @@ fn FolderSettingsDrawer(
     let mut music_selected: Signal<MusicInclude> = use_signal(|| music_include);
     let is_tauri = crate::hooks::tauri::is_tauri();
     let mut effective_info: Signal<Option<EffectiveStrategyResponse>> = use_signal(|| None);
+    let mut storage_info: Signal<Option<uncloud_common::EffectiveStorageResponse>> = use_signal(|| None);
     let mut loading = use_signal(|| true);
     let mut saving_server = use_signal(|| false);
     let mut saving_local = use_signal(|| false);
@@ -1506,6 +1507,10 @@ fn FolderSettingsDrawer(
         spawn(async move {
             match use_files::get_effective_strategy(&id).await {
                 Ok(resp) => effective_info.set(Some(resp)),
+                Err(_) => {}
+            }
+            match use_files::get_effective_storage(&id).await {
+                Ok(resp) => storage_info.set(Some(resp)),
                 Err(_) => {}
             }
             if is_tauri {
@@ -1547,6 +1552,21 @@ fn FolderSettingsDrawer(
 
                 // ── Sharing tab ─────────────────────────────────────────
                 if tab() == "sharing" {
+                    if let Some(s) = storage_info() {
+                        div { class: "text-xs text-base-content/60 mb-3 flex items-center gap-1",
+                            span { "Storage:" }
+                            span { class: "badge badge-ghost badge-sm font-mono", "{s.storage_name}" }
+                            span {
+                                {if s.pinned_here {
+                                    "(pinned to this folder)"
+                                } else if s.source_folder_id.is_some() {
+                                    "(inherited from a parent folder)"
+                                } else {
+                                    "(default)"
+                                }}
+                            }
+                        }
+                    }
                     crate::components::folder_share_dialog::FolderSharePanel {
                         folder_id: folder_id_for_sharing.clone(),
                         on_changed: move |_| {

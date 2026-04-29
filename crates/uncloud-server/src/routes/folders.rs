@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
-use uncloud_common::{EffectiveStrategyResponse, GalleryInclude, InheritableSetting, MusicInclude, SyncStrategy};
+use uncloud_common::{EffectiveStorageResponse, EffectiveStrategyResponse, GalleryInclude, InheritableSetting, MusicInclude, SyncStrategy};
 
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
@@ -716,6 +716,58 @@ pub async fn get_effective_strategy(
     Ok(Json(EffectiveStrategyResponse {
         strategy,
         source_folder_id: source_id.map(|id| id.to_hex()),
+    }))
+}
+
+/// GET /api/folders/{id}/effective-storage — resolves which storage a folder's
+/// contents live on, walking the parent chain. Used by the folder-properties UI.
+pub async fn get_effective_storage(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<EffectiveStorageResponse>> {
+    let folder_id = ObjectId::parse_str(&id)
+        .map_err(|_| AppError::BadRequest("Invalid folder ID".to_string()))?;
+
+    let collection = state.db.collection::<Folder>("folders");
+    let folder = collection
+        .find_one(doc! { "_id": folder_id, "owner_id": user.id, "deleted_at": bson::Bson::Null })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Folder not found".to_string()))?;
+
+    // Walk: this folder, then ancestors, looking for the first non-None storage_id.
+    let (resolved_storage_id, pinned_here, source_folder_id) =
+        if let Some(sid) = folder.storage_id {
+            (sid, true, None)
+        } else {
+            let mut current = folder.parent_id;
+            let mut found: Option<(ObjectId, ObjectId)> = None; // (storage_id, source_folder)
+            for _ in 0..256 {
+                let Some(pid) = current else { break };
+                let Some(parent) = collection
+                    .find_one(doc! { "_id": pid, "owner_id": folder.owner_id })
+                    .await?
+                else {
+                    break;
+                };
+                if let Some(sid) = parent.storage_id {
+                    found = Some((sid, parent.id));
+                    break;
+                }
+                current = parent.parent_id;
+            }
+            match found {
+                Some((sid, src)) => (sid, false, Some(src)),
+                None => (state.storage.default_storage_id(), false, None),
+            }
+        };
+
+    let storage = state.storage.get_storage(resolved_storage_id).await?;
+    Ok(Json(EffectiveStorageResponse {
+        storage_id: storage.id.to_hex(),
+        storage_name: storage.name,
+        pinned_here,
+        source_folder_id: source_folder_id.map(|id| id.to_hex()),
     }))
 }
 
