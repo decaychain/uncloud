@@ -219,6 +219,17 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         )
         .await?;
 
+    // SFTP host-key TOFU pin (one row per storage_id).
+    let sftp_keys = db.collection::<mongodb::bson::Document>("sftp_host_keys");
+    sftp_keys
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "storage_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
     // Apps indexes
     let apps = db.collection::<mongodb::bson::Document>("apps");
     apps.create_index(

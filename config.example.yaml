@@ -26,6 +26,24 @@ storage:
     #   access_key: ${B2_KEY_ID}
     #   secret_key: ${B2_APP_KEY}
     #   region: us-west-002
+    #
+    # Example: an SFTP backend. Either `password` or `private_key` (PEM-
+    # encoded OpenSSH or PKCS#8) is required, not both. Host-key verification
+    # defaults to TOFU — the server's key is recorded in MongoDB
+    # `sftp_host_keys` on first connect and verified on every subsequent one.
+    # Set `host_key:` to a `ssh-ed25519 AAAA...` line (or `SHA256:...`
+    # fingerprint) for strict mode, or `host_key_check: skip` to disable
+    # checking entirely on a trusted network.
+    # - name: backup
+    #   type: sftp
+    #   host: backup.example.com
+    #   port: 22
+    #   username: uncloud
+    #   private_key: ${SFTP_PRIVATE_KEY}    # paste PEM body via env
+    #   private_key_passphrase: ${SFTP_PASSPHRASE}
+    #   base_path: /home/uncloud/data
+    #   # host_key: "ssh-ed25519 AAAA..."   # optional strict pin
+    #   # host_key_check: tofu              # tofu (default) | strict | skip
 
   # Legacy single-storage shortcut. When `storages` is empty above, a storage
   # named "local" is synthesised from this path. Kept for backward compat.

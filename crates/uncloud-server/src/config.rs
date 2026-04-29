@@ -78,6 +78,36 @@ pub enum ConfiguredStorageBackend {
         #[serde(default)]
         region: Option<String>,
     },
+    Sftp {
+        host: String,
+        #[serde(default = "default_ssh_port")]
+        port: u16,
+        username: String,
+        /// Password auth. Either `password` or `private_key` must be set.
+        #[serde(default)]
+        password: Option<String>,
+        /// PEM-encoded private key (OpenSSH or PKCS#8). Mutually exclusive
+        /// with `password`.
+        #[serde(default)]
+        private_key: Option<String>,
+        /// Optional passphrase for `private_key`.
+        #[serde(default)]
+        private_key_passphrase: Option<String>,
+        /// All SFTP paths are resolved relative to this directory on the host.
+        base_path: String,
+        /// Optional pinned host public key (e.g. "ssh-ed25519 AAAA..."). When
+        /// present, takes precedence over the TOFU store — strict mode.
+        #[serde(default)]
+        host_key: Option<String>,
+        /// `tofu` (default), `skip`, or `strict` (implied when `host_key` set).
+        /// `skip` logs a warning at startup; use only on trusted networks.
+        #[serde(default)]
+        host_key_check: Option<String>,
+    },
+}
+
+fn default_ssh_port() -> u16 {
+    22
 }
 
 impl StorageConfig {
