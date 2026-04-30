@@ -62,6 +62,32 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Move every blob owned by one storage backend to another, atomically
+    /// flipping `File.storage_id` for each file. The server must be stopped
+    /// while this runs — it sets a database lock that the server checks on
+    /// startup. See `docs/storage-migration.md` for the full design.
+    Migrate {
+        /// Source storage — ObjectId or `Storage.name`.
+        #[arg(long)]
+        from: String,
+        /// Destination storage — ObjectId or `Storage.name`.
+        #[arg(long)]
+        to: String,
+        /// Restrict migration to descendants of this folder ObjectId.
+        #[arg(long)]
+        folder: Option<String>,
+        /// Print the planned work and exit without copying anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Verification mode: `none`, `size` (default — cheap), or `hash`
+        /// (re-reads the dest blob and compares SHA-256 to the value stored
+        /// on the File document).
+        #[arg(long, default_value = "size")]
+        verify: String,
+        /// Clear a stale lock left by a previously crashed migration.
+        #[arg(long)]
+        force_unlock: bool,
+    },
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────
@@ -78,6 +104,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             email,
         }) => bootstrap_admin(username, password, email).await,
         Some(Command::DedupeFiles { dry_run }) => dedupe_files(dry_run).await,
+        Some(Command::Migrate {
+            from,
+            to,
+            folder,
+            dry_run,
+            verify,
+            force_unlock,
+        }) => {
+            let verify = verify.parse::<uncloud_server::migrate::VerifyMode>()?;
+            uncloud_server::migrate::run(uncloud_server::migrate::MigrateArgs {
+                from,
+                to,
+                folder,
+                dry_run,
+                verify,
+                force_unlock,
+            })
+            .await
+        }
     }
 }
 
@@ -320,6 +365,12 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let db = db::connect(&config.database).await?;
     db::setup_indexes(&db).await?;
     db::setup_sync_audit_indexes(&db, &config.sync_audit).await?;
+
+    // Refuse to start if a migration is in progress. A stale lock blocks too —
+    // user must run `uncloud-server migrate --force-unlock` to clear it.
+    if let Err(msg) = uncloud_server::migrate::check_no_active_migration(&db).await {
+        return Err(format!("Refusing to start: {msg}").into());
+    }
 
     // Initialize services
     let auth = AuthService::new(&db, config.auth.clone());

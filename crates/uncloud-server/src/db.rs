@@ -230,6 +230,18 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         )
         .await?;
 
+    // Migration locks — singleton-by-scope guards against concurrent migrations
+    // and against the server starting up while one is in progress.
+    let migration_locks = db.collection::<mongodb::bson::Document>("migration_locks");
+    migration_locks
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "scope": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
     // Apps indexes
     let apps = db.collection::<mongodb::bson::Document>("apps");
     apps.create_index(

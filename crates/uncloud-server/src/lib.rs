@@ -9,6 +9,7 @@ pub mod routes;
 pub mod services;
 pub mod storage;
 pub mod supervisor;
+pub mod migrate;
 
 use mongodb::Database;
 

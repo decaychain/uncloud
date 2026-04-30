@@ -10,6 +10,11 @@ Both major items from the original roadmap (App Platform, S3-Compatible API) hav
 - WebDAV and SMB are not planned: WebDAV is glitchy in practice and SMB is better mounted at the OS level than implemented as a backend.
 - A `MirrorBackend` wrapping a primary plus N read-only secondaries (for off-site backup) is a possible future addition, but currently each file lives on exactly one backend.
 
+## Offline storage migration
+
+- Per-folder storage pinning routes new uploads, but existing files stay on whatever backend they were uploaded to. There is no way today to move a folder's history to a different backend.
+- Planned as an offline `uncloud-server migrate --from <id> --to <id>` subcommand: server stopped, per-file copy + atomic pointer flip, idempotent and resumable. Design: [storage-migration.md](storage-migration.md).
+
 ## At-rest encryption
 
 - Storage is currently plaintext on disk.
