@@ -3,8 +3,8 @@ pub mod fs;
 mod journal;
 
 pub use engine::{
-    BaseSource, FolderEffectiveConfig, LogAppendedHook, SyncActivity, SyncConflict, SyncEngine,
-    SyncEngineHooks, SyncError, SyncReport, SyncTrigger,
+    BaseSource, FolderEffectiveConfig, LogAppendedHook, SyncConflict, SyncEngine,
+    SyncEngineHooks, SyncError, SyncReport, SyncState, SyncTrigger,
 };
 pub use fs::{LocalFs, LocalFsError, NativeFs, WalkEntry};
 pub use journal::{SyncLogRow, SyncStateRow, SyncStatus};

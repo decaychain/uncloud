@@ -60,19 +60,28 @@ pub enum SyncTrigger {
     Manual,
 }
 
-/// Coarse engine state surfaced to embedding apps so they can update tray
-/// icons / status indicators without inspecting every individual op.
+/// Connection / activity state published by the engine and consumed by the
+/// desktop tray. Single source of truth — the tray maps each variant to one
+/// icon.
 ///
-/// * `Idle` — no run in progress.
-/// * `Polling` — a run is in progress but only doing tree fetches /
-///   journal bookkeeping (no actual file bytes moving).
-/// * `Transferring` — at least one upload, download, delete, or remote
-///   folder creation is in flight right now.
+/// * `NotConnected` — no successful run yet, or the most recent run failed
+///   for transport reasons (network down, server unreachable, auth lost).
+/// * `Connected` — last run succeeded and we are ready to react to changes.
+///   Includes the brief "checking for updates" interlude (what was
+///   previously broadcast as `Polling`) — from the user's vantage that's
+///   the same as "everything is fine, nothing to do".
+/// * `Transferring` — at least one transfer has fired in the current run.
+///   Sticky for the duration of the run: we enter this state on the first
+///   transfer and stay there until the run ends, instead of flickering back
+///   to `Connected` between sequential file ops.
+/// * `Error` — most recent run failed for a non-transport reason (server
+///   5xx, journal/data error). Cleared on the next successful run-start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SyncActivity {
-    Idle,
-    Polling,
+pub enum SyncState {
+    NotConnected,
+    Connected,
     Transferring,
+    Error,
 }
 
 pub type LogAppendedHook = Arc<dyn Fn(&SyncLogRow) + Send + Sync>;
@@ -103,11 +112,12 @@ pub struct SyncEngine {
     /// the local filesystem, and `touched_paths`. Block-until-done — the
     /// second caller waits, it is not silently dropped.
     sync_lock: tokio::sync::Mutex<()>,
-    /// Coarse activity broadcast: `Idle` between runs, `Polling` during a
-    /// run with no in-flight transfers, `Transferring` whenever
-    /// `inflight_transfers` > 0. Subscribed by the desktop app to drive
-    /// the tray icon.
-    activity_tx: watch::Sender<SyncActivity>,
+    /// State broadcast: `NotConnected` until the first successful run,
+    /// `Connected` between successful runs, `Transferring` once any
+    /// transfer fires in the current run (sticky until run end), `Error`
+    /// after a non-transport failure. Subscribed by the desktop app to
+    /// drive the tray icon.
+    state_tx: watch::Sender<SyncState>,
     inflight_transfers: AtomicI64,
 }
 
@@ -130,6 +140,10 @@ struct RunState {
     start_reason: String,
     /// Set to true the first time a real op row is logged in this run.
     emitted_start: bool,
+    /// Sticky flag: once a transfer has fired in this run we stay in the
+    /// `Transferring` state until the run ends, instead of flickering back
+    /// to `Connected` between sequential file ops.
+    any_transfer_seen: bool,
 }
 
 impl SyncEngine {
@@ -161,7 +175,7 @@ impl SyncEngine {
 
         sqlx::migrate!("./migrations").run(&pool).await?;
 
-        let (activity_tx, _) = watch::channel(SyncActivity::Idle);
+        let (state_tx, _) = watch::channel(SyncState::NotConnected);
         Ok(Self {
             journal: Journal::new(pool),
             client,
@@ -170,21 +184,21 @@ impl SyncEngine {
             hooks: RwLock::new(SyncEngineHooks::default()),
             run_state: RwLock::new(None),
             sync_lock: tokio::sync::Mutex::new(()),
-            activity_tx,
+            state_tx,
             inflight_transfers: AtomicI64::new(0),
         })
     }
 
-    /// Subscribe to coarse activity updates. The receiver fires once with
-    /// the current value on subscription and then on every transition.
-    pub fn activity(&self) -> watch::Receiver<SyncActivity> {
-        self.activity_tx.subscribe()
+    /// Subscribe to engine state updates. The receiver fires once with the
+    /// current value on subscription and then on every transition.
+    pub fn state(&self) -> watch::Receiver<SyncState> {
+        self.state_tx.subscribe()
     }
 
-    fn set_activity(&self, next: SyncActivity) {
+    fn set_state(&self, next: SyncState) {
         // `send_if_modified` skips the notification if the value is
         // unchanged, so subscribers see one event per real transition.
-        self.activity_tx.send_if_modified(|cur| {
+        self.state_tx.send_if_modified(|cur| {
             if *cur != next {
                 *cur = next;
                 true
@@ -195,33 +209,64 @@ impl SyncEngine {
     }
 
     fn enter_transfer(&self) {
-        let prev = self.inflight_transfers.fetch_add(1, Ordering::SeqCst);
-        if prev == 0 {
-            self.set_activity(SyncActivity::Transferring);
+        self.inflight_transfers.fetch_add(1, Ordering::SeqCst);
+        // Mark the run sticky-Transferring on the first transfer. Subsequent
+        // transfers in the same run are no-ops here; we only ever transition
+        // out of `Transferring` at run end.
+        let mut should_publish = false;
+        if let Ok(mut g) = self.run_state.write() {
+            if let Some(rs) = g.as_mut() {
+                if !rs.any_transfer_seen {
+                    rs.any_transfer_seen = true;
+                    should_publish = true;
+                }
+            }
+        }
+        if should_publish {
+            self.set_state(SyncState::Transferring);
         }
     }
 
     fn leave_transfer(&self) {
-        let prev = self.inflight_transfers.fetch_sub(1, Ordering::SeqCst);
-        if prev == 1 {
-            // Last in-flight transfer just finished. If a run is still
-            // active, drop back to `Polling`; otherwise `Idle`.
-            let next = if self.run_state.read().map(|g| g.is_some()).unwrap_or(false) {
-                SyncActivity::Polling
-            } else {
-                SyncActivity::Idle
-            };
-            self.set_activity(next);
-        }
+        // Counter bookkeeping only — the activity state is sticky for the
+        // run and only flips back to `Connected` / `NotConnected` / `Error`
+        // at run end (see `run_sync_inner`).
+        self.inflight_transfers.fetch_sub(1, Ordering::SeqCst);
     }
 
     /// RAII guard around a single transfer (download / upload / remote
     /// folder create / local delete). Bumps the in-flight counter on
-    /// construction and decrements on drop, flipping the activity
-    /// broadcast at the 0↔1 boundary. Panic-safe via `Drop`.
+    /// construction and decrements on drop. The first transfer in a run
+    /// publishes `SyncState::Transferring`; subsequent transfers leave the
+    /// state alone. Panic-safe via `Drop`.
     fn transfer_guard(&self) -> TransferGuard<'_> {
         self.enter_transfer();
         TransferGuard { engine: self }
+    }
+
+    /// Walk an error chain from `run_sync_inner` and decide whether it is a
+    /// transport-class failure (server unreachable / auth lost / network
+    /// down) or a logical one. Drives the post-run state transition.
+    fn classify_run_error(err: &(dyn std::error::Error + 'static)) -> SyncState {
+        use uncloud_client::ClientError;
+        let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+        while let Some(e) = current {
+            if let Some(ce) = e.downcast_ref::<ClientError>() {
+                return match ce {
+                    ClientError::Network(_) | ClientError::Unauthenticated => {
+                        SyncState::NotConnected
+                    }
+                    ClientError::Api { status, .. }
+                        if *status == 401 || *status == 403 =>
+                    {
+                        SyncState::NotConnected
+                    }
+                    _ => SyncState::Error,
+                };
+            }
+            current = e.source();
+        }
+        SyncState::Error
     }
 
     /// Wire (or replace) the callbacks fired by the engine. The desktop/mobile
@@ -442,12 +487,19 @@ impl SyncEngine {
         *self.run_state.write().unwrap() = Some(RunState {
             start_reason: start_reason.to_owned(),
             emitted_start: false,
+            any_transfer_seen: false,
         });
-        // Activity transitions: enter Polling now; transfer call sites flip
-        // to Transferring while in flight; the run cleanup at the bottom
-        // resets back to Idle.
-        self.set_activity(SyncActivity::Polling);
+        // No state transition here — the previous outcome (`Connected` /
+        // `NotConnected` / `Error`) holds while we check for updates. The
+        // first transfer (if any) sticky-flips us to `Transferring`; the
+        // post-run classifier below publishes the final state.
         let started = std::time::Instant::now();
+
+        // Body runs inside an async block so a `?`-driven early return
+        // from any phase still reaches the post-run state classifier
+        // below. The block keeps the existing indentation — Rust doesn't
+        // care, and reindenting hundreds of lines would obscure the diff.
+        let result: Result<SyncReport, Box<dyn std::error::Error>> = async {
         let mut report = SyncReport::default();
         // Set of local paths Phase 5 / Phase 6 has already acted on this
         // run — written by a download, pushed by an upload, removed by a
@@ -1137,11 +1189,16 @@ impl SyncEngine {
 
         // Only emit `SyncEnd` when we already emitted `SyncStart` — i.e. when
         // at least one real op landed. Empty runs leave the log untouched.
-        let end_state = {
-            let mut guard = self.run_state.write().unwrap();
-            guard.take()
-        };
-        if matches!(end_state, Some(s) if s.emitted_start) {
+        // Read-only here; the outer scope owns the slot lifecycle so the
+        // post-run classifier sees the same RunState on the error path too.
+        let emitted_start = self
+            .run_state
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.emitted_start)
+            .unwrap_or(false);
+        if emitted_start {
             self.log_sync_marker("SyncEnd", end_reason, Some(note))
                 .await;
         }
@@ -1153,12 +1210,26 @@ impl SyncEngine {
             warn!("sync_log prune failed: {}", e);
         }
 
-        // Run done — drop back to Idle. Any in-flight transfers should
-        // have already finished (Phase 7 awaits each one), so the counter
-        // is expected to be zero here.
-        self.set_activity(SyncActivity::Idle);
-
         Ok(report)
+        }
+        .await;
+
+        // Always clear the run-state slot. The body may have early-returned
+        // via `?` from a phase failure, in which case the on-success take
+        // never ran.
+        let _ = self.run_state.write().unwrap().take();
+
+        // Publish the final SyncState. `set_state` only emits on real
+        // transition, so a successful run always lands on `Connected`
+        // (clearing any prior `Error` / `NotConnected`); a failed run
+        // classifies the error chain into transport vs logical.
+        let final_state = match &result {
+            Ok(_) => SyncState::Connected,
+            Err(e) => Self::classify_run_error(e.as_ref()),
+        };
+        self.set_state(final_state);
+
+        result
     }
 
     /// Download file `id` from the server and write it to `path` via the
