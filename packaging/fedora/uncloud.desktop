@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Uncloud
+GenericName=Personal Cloud Storage
+Comment=Self-hosted personal cloud storage sync client
+Exec=uncloud
+Icon=uncloud
+Terminal=false
+Categories=Utility;Network;FileTransfer;
+StartupNotify=true
+StartupWMClass=de.lunarstream.uncloud

@@ -13,7 +13,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis", "deb", "rpm"],
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/icon.ico",
       "icons/icon.png"
@@ -30,9 +31,18 @@
       }
     },
     "windows": {
-      "wix": {
-        "language": "en-US"
+      "nsis": {
+        "displayLanguageSelector": false,
+        "installMode": "perMachine"
       }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/decaychain/uncloud/releases/latest/download/latest.json"
+      ],
+      "pubkey": "REPLACE_WITH_MINISIGN_PUBLIC_KEY"
     }
   }
 }

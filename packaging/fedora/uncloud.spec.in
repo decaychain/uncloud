@@ -1,0 +1,78 @@
+Name:           uncloud
+Version:        @@VERSION@@
+Release:        1%{?dist}
+Summary:        Self-hosted personal cloud storage desktop client
+
+License:        AGPL-3.0-or-later
+URL:            https://github.com/decaychain/uncloud
+Source0:        %{name}-%{version}.tar.gz
+
+# COPR mock chroots get network access enabled in the project settings.
+# Without it cargo and npm cannot fetch dependencies inside the build.
+BuildRequires:  rust
+BuildRequires:  cargo
+BuildRequires:  gcc
+BuildRequires:  gcc-c++
+BuildRequires:  pkgconfig
+BuildRequires:  pkgconfig(webkit2gtk-4.1)
+BuildRequires:  pkgconfig(gtk+-3.0)
+BuildRequires:  pkgconfig(libsoup-3.0)
+BuildRequires:  pkgconfig(ayatana-appindicator3-0.1)
+BuildRequires:  patchelf
+BuildRequires:  rsvg-pixbuf-loader
+BuildRequires:  nodejs
+BuildRequires:  npm
+
+Requires:       webkit2gtk4.1
+Requires:       gtk3
+Requires:       libappindicator-gtk3
+
+%description
+Uncloud is a self-hosted personal cloud storage system with file sync,
+sharing, and in-browser playback for music and photos. This package
+installs the desktop sync client (a Tauri-based GUI that syncs a chosen
+local folder against an Uncloud server).
+
+%prep
+%setup -q
+
+%build
+# dioxus-cli is not packaged for Fedora, so we cargo-install it into a
+# build-local prefix. Network access is required (and enabled on the
+# COPR project).
+cargo install dioxus-cli --root %{_builddir}/%{name}-%{version}/cargo-tools
+export PATH="%{_builddir}/%{name}-%{version}/cargo-tools/bin:$PATH"
+
+# Build the web frontend bundle that the desktop binary serves locally.
+pushd crates/uncloud-web
+npm ci --no-audit --no-fund
+dx build --release
+popd
+
+# Copy the bundle into the location the desktop binary embeds.
+rm -rf crates/uncloud-desktop/src-frontend/assets/
+cp -r target/dx/uncloud-web/release/web/public/* \
+  crates/uncloud-desktop/src-frontend/
+
+# Build the desktop binary itself. We deliberately invoke `cargo build`
+# directly rather than `cargo tauri build`: Tauri's bundler exists to
+# produce native packages, which is exactly what this RPM already is.
+cargo build --release --bin uncloud-desktop
+
+%install
+install -Dm755 target/release/uncloud-desktop \
+  %{buildroot}%{_bindir}/%{name}
+install -Dm644 packaging/fedora/uncloud.desktop \
+  %{buildroot}%{_datadir}/applications/de.lunarstream.uncloud.desktop
+install -Dm644 crates/uncloud-desktop/icons/icon.png \
+  %{buildroot}%{_datadir}/icons/hicolor/512x512/apps/%{name}.png
+
+%files
+%license LICENSE
+%{_bindir}/%{name}
+%{_datadir}/applications/de.lunarstream.uncloud.desktop
+%{_datadir}/icons/hicolor/512x512/apps/%{name}.png
+
+%changelog
+* Fri May 02 2026 Decay Chain <noreply@github.com> - @@VERSION@@-1
+- Automated COPR build for v@@VERSION@@
