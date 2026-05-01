@@ -4,6 +4,7 @@
 //! via `rustic_core`. See `docs/backup.md` for the design.
 
 pub mod config;
+pub mod dump;
 pub mod lock;
 
 /// `backup create` arguments. Built by the clap layer in `main.rs` and
