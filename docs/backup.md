@@ -237,8 +237,11 @@ file is, but `--folder` scoping or per-user filters could land later):
    `/files/<owner_username>/<full virtual path>`.
 4. If `include_versions`, also stream each entry from
    `file_versions` at `/versions/<file_id>/<version_id>`.
-5. Read errors are logged, the file is skipped, and the snapshot is tagged
-   `partial` if any errors occurred.
+5. Read errors are logged, the file is skipped, and the run prints a
+   final WARNING summary listing the failure count. (Tagging the snapshot
+   itself with `partial` is a follow-up — rustic's snapshot mutation API
+   can grow it later. For now the surface is "snapshot exists; run output
+   tells you how complete it is.")
 
 Streaming relies on a small patch to `rustic_core` we maintain on a
 [fork](https://github.com/decaychain/rustic_core/tree/uncloud/backup-with-source):
@@ -478,7 +481,7 @@ not a rewrite.
 | Scenario                          | Behaviour                                              |
 |-----------------------------------|--------------------------------------------------------|
 | Repo unreachable mid-run          | rustic chunks commit atomically; snapshot is finalised only at the end. Failed run leaves no snapshot in `list`. Re-run resumes via dedup — only changed chunks re-uploaded. |
-| Single file unreadable            | Log file id, skip, continue. Snapshot tagged `partial`. |
+| Single file unreadable            | Log file id, skip, continue. Run prints a final WARNING summary with the failure count; snapshot exists but is partial. |
 | Mongo cursor failure mid-dump     | Abort whole run, release lock, no snapshot finalised.   |
 | Crash mid-run                     | Lock heartbeat goes stale → next run sees stale lock → user `--force-unlock`s and re-runs. No partial snapshots to clean up (they were never finalised). |
 | Out-of-disk on `staging_dir`      | DB dump and per-blob temp files stream through staging; rustic chunks them as they arrive. Document the few-MB ceiling — peak usage is roughly one in-flight blob plus the DB dump. |

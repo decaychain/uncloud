@@ -202,7 +202,9 @@ async fn run_one_inner(
     let handle = tokio::runtime::Handle::current();
     let mut all_files = files;
     all_files.extend(versions);
+    let total_blobs = all_files.len();
     let source = UncloudSource::new(handle, statics, all_files);
+    let failure_counter = source.failures();
 
     let host = std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
@@ -229,6 +231,7 @@ async fn run_one_inner(
     .await?
     .map_err(|e| format!("rustic backup failed: {e}"))?;
 
+    let failures = failure_counter.load(std::sync::atomic::Ordering::Relaxed);
     println!(
         "Snapshot {} written: {} files, {} bytes",
         snap.id,
@@ -241,6 +244,20 @@ async fn run_one_inner(
             .map(|s| s.total_bytes_processed)
             .unwrap_or(0)
     );
+    if failures > 0 {
+        println!();
+        println!(
+            "WARNING: {failures} of {total_blobs} blob(s) failed to read from their \
+             storage backend. Their content is NOT in this snapshot — the snapshot is \
+             partial. Most common cause: file_versions documents whose archive blob is \
+             no longer on the matching storage (e.g. left over from a previous \
+             migration that didn't copy version blobs)."
+        );
+        println!(
+            "Per-blob errors are logged at WARN level above; grep the run output for \
+             `Failed to open backup blob`."
+        );
+    }
 
     Ok(())
 }

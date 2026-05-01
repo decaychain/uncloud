@@ -21,6 +21,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use rustic_core::{
@@ -63,11 +64,18 @@ impl std::fmt::Debug for FileEntry {
 
 /// All entries to back up, plus the runtime handle the async-to-sync bridge
 /// uses to drive backend reads from rustic's worker threads.
+///
+/// `failures` counts entries whose `open()` errored out — typically a
+/// FileVersion whose archive blob is no longer on the storage backend
+/// (left over from a partial migration, a deleted-source workflow, or a
+/// decommissioned backend). Read after the rustic backup returns to
+/// surface the snapshot as partial.
 #[derive(Clone)]
 pub struct UncloudSource {
     handle: Handle,
     entries: Arc<Vec<SourceEntry>>,
     total_bytes: u64,
+    failures: Arc<AtomicUsize>,
 }
 
 #[derive(Clone, Debug)]
@@ -110,7 +118,14 @@ impl UncloudSource {
             handle,
             entries: Arc::new(entries),
             total_bytes,
+            failures: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Cheap clone of the failure counter — caller reads it after the
+    /// rustic backup returns to detect partial snapshots.
+    pub fn failures(&self) -> Arc<AtomicUsize> {
+        self.failures.clone()
     }
 }
 
@@ -126,6 +141,7 @@ impl ReadSource for UncloudSource {
         UncloudIter {
             handle: self.handle.clone(),
             inner: self.entries.clone(),
+            failures: self.failures.clone(),
             idx: 0,
         }
     }
@@ -134,6 +150,7 @@ impl ReadSource for UncloudSource {
 pub struct UncloudIter {
     handle: Handle,
     inner: Arc<Vec<SourceEntry>>,
+    failures: Arc<AtomicUsize>,
     idx: usize,
 }
 
@@ -143,12 +160,13 @@ impl Iterator for UncloudIter {
     fn next(&mut self) -> Option<Self::Item> {
         let entry = self.inner.get(self.idx)?;
         self.idx += 1;
-        Some(make_entry(&self.handle, entry.clone()))
+        Some(make_entry(&self.handle, &self.failures, entry.clone()))
     }
 }
 
 fn make_entry(
     handle: &Handle,
+    failures: &Arc<AtomicUsize>,
     entry: SourceEntry,
 ) -> RusticResult<ReadSourceEntry<UncloudOpen>> {
     let path = match &entry {
@@ -170,10 +188,12 @@ fn make_entry(
     let open = match entry {
         SourceEntry::Static(s) => UncloudOpen {
             handle: handle.clone(),
+            failures: failures.clone(),
             kind: OpenKind::Local(s.local_path),
         },
         SourceEntry::File(f) => UncloudOpen {
             handle: handle.clone(),
+            failures: failures.clone(),
             kind: OpenKind::Backend {
                 backend: f.backend,
                 storage_path: f.storage_path,
@@ -189,6 +209,7 @@ fn make_entry(
 
 pub struct UncloudOpen {
     handle: Handle,
+    failures: Arc<AtomicUsize>,
     kind: OpenKind,
 }
 
@@ -207,6 +228,7 @@ impl ReadSourceOpen for UncloudOpen {
         match self.kind {
             OpenKind::Local(p) => {
                 let f = std::fs::File::open(&p).map_err(|e| {
+                    self.failures.fetch_add(1, Ordering::Relaxed);
                     RusticError::with_source(
                         ErrorKind::Backend,
                         "Failed to open backup staging file `{path}`",
@@ -229,6 +251,7 @@ impl ReadSourceOpen for UncloudOpen {
                             .map_err(|e| std::io::Error::other(format!("{e}")))
                     })
                     .map_err(|e| {
+                        self.failures.fetch_add(1, Ordering::Relaxed);
                         RusticError::with_source(
                             ErrorKind::Backend,
                             "Failed to open backup blob `{path}`",
