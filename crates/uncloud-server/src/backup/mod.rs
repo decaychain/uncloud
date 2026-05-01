@@ -9,6 +9,7 @@ pub mod dump;
 pub mod lock;
 pub mod manage;
 pub mod repo;
+pub mod restore;
 pub mod source;
 
 /// `backup create` arguments. Built by the clap layer in `main.rs` and
@@ -112,8 +113,7 @@ pub async fn run_prune(
 }
 
 pub async fn run_restore(args: RestoreArgs) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("backup restore {args:?}: not yet implemented");
-    Ok(())
+    restore::run(args).await
 }
 
 fn init_logging() {
