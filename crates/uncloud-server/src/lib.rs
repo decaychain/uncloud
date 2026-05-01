@@ -10,6 +10,7 @@ pub mod services;
 pub mod storage;
 pub mod supervisor;
 pub mod migrate;
+pub mod backup;
 
 use mongodb::Database;
 

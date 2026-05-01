@@ -126,6 +126,7 @@ impl TestApp {
             features: FeaturesConfig::default(),
             logging: uncloud_server::config::LoggingConfig::default(),
             sync_audit: uncloud_server::config::SyncAuditConfig::default(),
+            backup: uncloud_server::backup::config::BackupConfig::default(),
         };
 
         customize(&mut config);
@@ -338,6 +339,7 @@ impl BoundTestApp {
             features: FeaturesConfig::default(),
             logging: uncloud_server::config::LoggingConfig::default(),
             sync_audit: uncloud_server::config::SyncAuditConfig::default(),
+            backup: uncloud_server::backup::config::BackupConfig::default(),
         };
 
         let database = db::connect(&config.database)

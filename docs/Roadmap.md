@@ -15,6 +15,11 @@ Both major items from the original roadmap (App Platform, S3-Compatible API) hav
 - Per-folder storage pinning routes new uploads, but existing files stay on whatever backend they were uploaded to. There is no way today to move a folder's history to a different backend.
 - Planned as an offline `uncloud-server migrate --from <id> --to <id>` subcommand: server stopped, per-file copy + atomic pointer flip, idempotent and resumable. Design: [storage-migration.md](storage-migration.md).
 
+## Backup to remote repos
+
+- File contents and database state have no unified backup story today — native per-backend backups miss the database, and `mongodump` alone is a list of dangling pointers.
+- Planned as an `uncloud-server backup create --target <name>` subcommand that writes a single deduplicated, encrypted snapshot to a Restic-format repository (via `rustic_core`). Snapshot contains a semantic NDJSON dump of the database (engine-neutral) plus all file blobs organised by logical path. In-place `backup restore` matches storages by name (with default-storage fallback) so DR works whether you're rolling back an existing install or rebuilding on fresh hardware. Multiple targets configurable in `config.yaml`; supports SFTP, S3, B2, Azure, GCS, REST, and local repos. Design: [backup.md](backup.md).
+
 ## At-rest encryption
 
 - Storage is currently plaintext on disk.

@@ -1,6 +1,11 @@
 # Rust
 /target/
 
+# Local working copy of the rustic_core fork. Cargo fetches via the git URL
+# pinned in the workspace manifest; this directory is just for iterating on
+# patches before pushing.
+/vendor/rustic_core/
+
 # IDE
 .idea/
 .vscode/

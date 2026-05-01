@@ -8,6 +8,14 @@ members = [
     "crates/uncloud-sync",
     "crates/uncloud-desktop",
 ]
+# Override the published rustic_core / rustic_backend with the decaychain
+# fork. It adds `Repository::backup_with_source` so Uncloud can stream blobs
+# from each storage backend straight into a snapshot without staging every
+# byte to local disk first. Pinned to a specific rev to keep builds
+# reproducible; bump deliberately when the fork moves.
+[patch.crates-io]
+rustic_core = { git = "https://github.com/decaychain/rustic_core", rev = "a52ac513a98c37f39bf16fa0e471ab33762bab8a" }
+rustic_backend = { git = "https://github.com/decaychain/rustic_core", rev = "a52ac513a98c37f39bf16fa0e471ab33762bab8a" }
 
 [workspace.package]
 version = "0.1.0"

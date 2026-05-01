@@ -25,6 +25,8 @@ pub struct Config {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub sync_audit: SyncAuditConfig,
+    #[serde(default)]
+    pub backup: crate::backup::config::BackupConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -528,6 +530,7 @@ impl Default for Config {
             features: FeaturesConfig::default(),
             logging: LoggingConfig::default(),
             sync_audit: SyncAuditConfig::default(),
+            backup: crate::backup::config::BackupConfig::default(),
         }
     }
 }
