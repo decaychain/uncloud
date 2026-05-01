@@ -7,6 +7,7 @@ pub mod config;
 pub mod create;
 pub mod dump;
 pub mod lock;
+pub mod manage;
 pub mod repo;
 pub mod source;
 
@@ -93,24 +94,21 @@ pub async fn run_create(args: CreateArgs) -> Result<(), Box<dyn std::error::Erro
 }
 
 pub async fn run_list(target: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("backup list --target {target:?}: not yet implemented");
-    Ok(())
+    manage::run_list(target).await
 }
 
 pub async fn run_check(
     target: Option<String>,
     read_data: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("backup check --target {target:?} --read-data={read_data}: not yet implemented");
-    Ok(())
+    manage::run_check(target, read_data).await
 }
 
 pub async fn run_prune(
     target: Option<String>,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("backup prune --target {target:?} --dry-run={dry_run}: not yet implemented");
-    Ok(())
+    manage::run_prune(target, dry_run).await
 }
 
 pub async fn run_restore(args: RestoreArgs) -> Result<(), Box<dyn std::error::Error>> {

@@ -66,6 +66,9 @@ russh-sftp = "2"
 rustic_core = "0.11"
 rustic_backend = "0.6"
 tempfile = "3"
+# Used only by `backup prune` to pass `jiff::Zoned::now()` through rustic's
+# `KeepOptions::apply`. Pinned to whatever rustic_core depends on transitively.
+jiff = "0.2"
 
 [dev-dependencies]
 testcontainers = "0.23"
