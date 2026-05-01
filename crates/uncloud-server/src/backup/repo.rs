@@ -22,11 +22,17 @@ pub type RepoHandle = Repository<OpenStatus>;
 /// Resolve a `BackupTarget` to a `RepositoryBackends`, expanding password and
 /// credentials sources at run time. Used by both `open` and `init`.
 fn build_backends(target: &BackupTarget) -> Result<rustic_core::RepositoryBackends> {
-    let credentials = target.credentials.resolve().map_err(AppError::Internal)?;
+    let user_credentials = target.credentials.resolve().map_err(AppError::Internal)?;
+    let expanded = crate::backup::uri::expand(&target.repo);
+
+    // User-supplied `credentials:` always wins over synthesised values
+    // (matching shorthand → opendal expansion).
+    let mut options = expanded.options;
+    options.extend(user_credentials);
 
     let mut be_opts = BackendOptions::default();
-    be_opts.repository = Some(target.repo.clone());
-    be_opts.options = credentials.into_iter().collect();
+    be_opts.repository = Some(expanded.uri);
+    be_opts.options = options;
 
     be_opts.to_backends().map_err(|e| {
         AppError::Storage(format!(

@@ -11,6 +11,7 @@ pub mod manage;
 pub mod repo;
 pub mod restore;
 pub mod source;
+pub mod uri;
 
 /// `backup create` arguments. Built by the clap layer in `main.rs` and
 /// passed to `run_create`.
