@@ -62,6 +62,59 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Move every blob owned by one storage backend to another, atomically
+    /// flipping `File.storage_id` for each file. The server must be stopped
+    /// while this runs — it sets a database lock that the server checks on
+    /// startup. See `docs/storage-migration.md` for the full design.
+    Migrate {
+        /// Source storage — ObjectId or `Storage.name`.
+        #[arg(long)]
+        from: String,
+        /// Destination storage — ObjectId or `Storage.name`.
+        #[arg(long)]
+        to: String,
+        /// Restrict migration to descendants of this folder ObjectId.
+        #[arg(long)]
+        folder: Option<String>,
+        /// Print the planned work and exit without copying anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Verification mode: `none`, `size` (default — cheap), or `hash`
+        /// (re-reads the dest blob and compares SHA-256 to the value stored
+        /// on the File document).
+        #[arg(long, default_value = "size")]
+        verify: String,
+        /// Clear a stale lock left by a previously crashed migration.
+        #[arg(long)]
+        force_unlock: bool,
+        /// Delete each source blob immediately after its pointer is flipped.
+        /// Off by default — pair with `migrate-cleanup` for a "verify, then
+        /// sweep" workflow that lets you roll back if something looks wrong
+        /// before the source data is gone.
+        #[arg(long)]
+        delete_source: bool,
+    },
+    /// Sweep a storage backend for orphan blobs — anything whose owning File
+    /// document either doesn't exist or no longer points at this storage.
+    /// Acquires the same migration lock as `migrate`, so the server must be
+    /// stopped while it runs. Run this after a migration once you're happy
+    /// the data is reachable on the destination.
+    MigrateCleanup {
+        /// Storage to sweep — ObjectId or `Storage.name`.
+        #[arg(long)]
+        storage: String,
+        /// Print the planned deletions without removing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Clear a stale lock left by a previously crashed migration/cleanup.
+        #[arg(long)]
+        force_unlock: bool,
+        /// Also delete File documents (and their `file_versions` rows) whose
+        /// blob is missing on this storage. Cleans up dangling DB records
+        /// left behind by failed uploads or interrupted migrations.
+        #[arg(long)]
+        prune_broken: bool,
+    },
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────
@@ -78,6 +131,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             email,
         }) => bootstrap_admin(username, password, email).await,
         Some(Command::DedupeFiles { dry_run }) => dedupe_files(dry_run).await,
+        Some(Command::Migrate {
+            from,
+            to,
+            folder,
+            dry_run,
+            verify,
+            force_unlock,
+            delete_source,
+        }) => {
+            let verify = verify.parse::<uncloud_server::migrate::VerifyMode>()?;
+            uncloud_server::migrate::run(uncloud_server::migrate::MigrateArgs {
+                from,
+                to,
+                folder,
+                dry_run,
+                verify,
+                force_unlock,
+                delete_source,
+            })
+            .await
+        }
+        Some(Command::MigrateCleanup {
+            storage,
+            dry_run,
+            force_unlock,
+            prune_broken,
+        }) => {
+            uncloud_server::migrate::run_cleanup(uncloud_server::migrate::CleanupArgs {
+                storage,
+                dry_run,
+                force_unlock,
+                prune_broken,
+            })
+            .await
+        }
     }
 }
 
@@ -320,6 +408,12 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let db = db::connect(&config.database).await?;
     db::setup_indexes(&db).await?;
     db::setup_sync_audit_indexes(&db, &config.sync_audit).await?;
+
+    // Refuse to start if a migration is in progress. A stale lock blocks too —
+    // user must run `uncloud-server migrate --force-unlock` to clear it.
+    if let Err(msg) = uncloud_server::migrate::check_no_active_migration(&db).await {
+        return Err(format!("Refusing to start: {msg}").into());
+    }
 
     // Initialize services
     let auth = AuthService::new(&db, config.auth.clone());
