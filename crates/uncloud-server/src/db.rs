@@ -242,6 +242,19 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         )
         .await?;
 
+    // Backup locks — same singleton-by-scope shape; mutually exclusive with
+    // migration_locks. Server refuses to start if either is held; backup and
+    // migrate refuse to start if the other is held.
+    let backup_locks = db.collection::<mongodb::bson::Document>("backup_locks");
+    backup_locks
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "scope": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
     // Apps indexes
     let apps = db.collection::<mongodb::bson::Document>("apps");
     apps.create_index(

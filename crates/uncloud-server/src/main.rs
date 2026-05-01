@@ -414,6 +414,10 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(msg) = uncloud_server::migrate::check_no_active_migration(&db).await {
         return Err(format!("Refusing to start: {msg}").into());
     }
+    // Same for an active backup — `uncloud-server backup ... --force-unlock` to clear.
+    if let Err(msg) = uncloud_server::backup::lock::check_no_active_backup(&db).await {
+        return Err(format!("Refusing to start: {msg}").into());
+    }
 
     // Initialize services
     let auth = AuthService::new(&db, config.auth.clone());

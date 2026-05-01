@@ -145,6 +145,14 @@ pub async fn run(args: MigrateArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Refuse to run if a backup operation holds the cross-feature lock.
+    // Mirrors the symmetric check in `backup::run` and the server's startup
+    // interlock; --force-unlock on the *backup* side clears that one if it is
+    // genuinely stale.
+    if let Err(msg) = crate::backup::lock::check_no_active_backup(&db).await {
+        return Err(msg.into());
+    }
+
     let storage_service = StorageService::new(&db, &config.storage).await?;
     let from_id = resolve_storage_id(&storage_service, &db, &args.from).await?;
     let to_id = resolve_storage_id(&storage_service, &db, &args.to).await?;
@@ -580,6 +588,11 @@ pub async fn run_cleanup(args: CleanupArgs) -> Result<(), Box<dyn std::error::Er
         } else {
             println!("No lock to clear.");
         }
+    }
+
+    // Refuse if a backup is in progress.
+    if let Err(msg) = crate::backup::lock::check_no_active_backup(&db).await {
+        return Err(msg.into());
     }
 
     let storage_service = StorageService::new(&db, &config.storage).await?;
