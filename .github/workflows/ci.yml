@@ -180,12 +180,17 @@ jobs:
       - name: Build desktop bundles
         env:
           UNCLOUD_DESKTOP_FALLBACK_KEY: ${{ secrets.UNCLOUD_DESKTOP_FALLBACK_KEY }}
+          # CI builds without a real signing key — the dev key produces
+          # bundles that won't pass updater verification, but we just want
+          # to know the build itself is healthy.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           cd crates/uncloud-desktop
-          cargo tauri build --bundles msi
+          cargo tauri build --bundles nsis
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: desktop-windows
-          path: target/release/bundle/msi/*.msi
+          path: target/release/bundle/nsis/*.exe

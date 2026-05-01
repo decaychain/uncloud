@@ -14,9 +14,11 @@ use tauri::{
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri::async_runtime;
 #[cfg(desktop)]
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 #[cfg(desktop)]
 use tauri_plugin_autostart::ManagerExt;
+#[cfg(desktop)]
+use tauri_plugin_updater::UpdaterExt;
 #[cfg(mobile)]
 use tauri_plugin_android_fs::AndroidFsExt;
 use tokio::sync::{Mutex, RwLock};
@@ -388,6 +390,73 @@ fn apply_tray_state(tray: &Arc<std::sync::Mutex<Option<TrayIcon>>>, state: Engin
             }
         }
     }
+}
+
+/// Background self-update check. Fires once on app start, after a short
+/// delay so it doesn't compete with the auto-login network burst, then
+/// asks the user whether to install if the manifest advertises a newer
+/// version. Errors are warn-logged and silenced — a missing manifest, a
+/// flaky network, or no Tauri-updater entry for the current platform
+/// (Linux RPM users update via `dnf upgrade`) all collapse to "no
+/// update", same as the user being already on the latest.
+#[cfg(desktop)]
+fn spawn_update_check(handle: AppHandle) {
+    async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(20)).await;
+
+        let updater = match handle.updater() {
+            Ok(u) => u,
+            Err(e) => {
+                warn!("updater unavailable: {}", e);
+                return;
+            }
+        };
+
+        let update = match updater.check().await {
+            Ok(Some(u)) => u,
+            Ok(None) => return,
+            Err(e) => {
+                warn!("update check failed: {}", e);
+                return;
+            }
+        };
+
+        info!(
+            "update available: {} (current {})",
+            update.version, update.current_version
+        );
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+        handle
+            .dialog()
+            .message(format!(
+                "Uncloud {} is available (you have {}). Install now?",
+                update.version, update.current_version,
+            ))
+            .title("Update available")
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Install".into(),
+                "Later".into(),
+            ))
+            .show(move |yes| {
+                let _ = tx.send(yes);
+            });
+
+        if !rx.await.unwrap_or(false) {
+            return;
+        }
+
+        if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
+            error!("update install failed: {}", e);
+            return;
+        }
+
+        // Installer ran successfully (Windows NSIS exits the running app
+        // before swapping the binary). Restart so the new version comes up
+        // in place of the old.
+        handle.restart();
+    });
 }
 
 /// Build a [`SyncEngine`] with the platform-appropriate [`LocalFs`] backend:
@@ -1017,6 +1086,13 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None, // no extra args; the binary handles its own state
         ));
+        // Self-update plugin: checks the GitHub Releases manifest, downloads
+        // the signed bundle, runs the platform installer in-place. The
+        // startup check fires from `setup` after a short delay (see
+        // `spawn_update_check`). Linux RPM installs become no-ops because
+        // the manifest only carries a Windows entry — Fedora users update
+        // through their COPR repo via `dnf upgrade`.
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     }
     #[cfg(mobile)]
     {
@@ -1031,6 +1107,11 @@ pub fn run() {
             // already made a choice (sentinel present).
             #[cfg(desktop)]
             ensure_autostart_first_run(app.handle());
+
+            // Background self-update check (Windows NSIS in practice; no-op
+            // on Linux since the manifest only carries Windows entries).
+            #[cfg(desktop)]
+            spawn_update_check(app.handle().clone());
 
             // Auto-login from persisted config + stored credentials if both exist.
             if let Some(cfg) = load_config_from(app.handle()) {

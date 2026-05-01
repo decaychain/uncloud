@@ -44,6 +44,12 @@ notify = "6"
 # Register the desktop app to auto-launch at OS login. Default-on on
 # first run; user can toggle via Settings.
 tauri-plugin-autostart = "2"
+# Self-update: checks the GitHub Releases manifest, downloads the signed
+# bundle, runs the platform installer in-place. Windows uses the bundled
+# NSIS .exe; Linux users on Fedora install via COPR (`dnf upgrade`) so
+# the updater is intentionally a no-op for them — the plugin still
+# returns "no update" rather than failing, which is the right UX.
+tauri-plugin-updater = "2"
 
 [[bin]]
 name = "uncloud-desktop"
