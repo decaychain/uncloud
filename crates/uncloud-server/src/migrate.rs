@@ -31,7 +31,7 @@ use tokio::task::JoinHandle;
 
 use crate::config::Config;
 use crate::db;
-use crate::models::{File, Folder, MigrationLock, Storage};
+use crate::models::{File, FileVersion, Folder, MigrationLock, Storage};
 use crate::services::StorageService;
 use crate::storage::StorageBackend;
 
@@ -79,6 +79,11 @@ pub struct CleanupArgs {
     pub storage: String,
     pub dry_run: bool,
     pub force_unlock: bool,
+    /// Also delete File documents (and their `file_versions` rows) whose blob
+    /// is missing on this storage. Off by default — when set, fixes the
+    /// inverse problem of orphan blobs: dangling DB records left over from a
+    /// failed upload or a previous migration that didn't reach the blob.
+    pub prune_broken: bool,
 }
 
 /// Check on server startup whether a migration is in progress. Returns an
@@ -595,7 +600,8 @@ pub async fn run_cleanup(args: CleanupArgs) -> Result<(), Box<dyn std::error::Er
         Some(spawn_heartbeat(db.clone(), lock_id, stop_heartbeat.clone()))
     };
 
-    let result = run_cleanup_inner(&db, &backend, storage_id, args.dry_run).await;
+    let result =
+        run_cleanup_inner(&db, &backend, storage_id, args.dry_run, args.prune_broken).await;
 
     stop_heartbeat.notify_waiters();
     if let Some(h) = heartbeat_handle {
@@ -613,17 +619,39 @@ pub async fn run_cleanup_inner(
     backend: &Arc<dyn StorageBackend>,
     storage_id: ObjectId,
     dry_run: bool,
+    prune_broken: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Build the keep-set: every blob path that's reachable from a live File
-    // document on this storage. We hit Mongo once and hold the strings in
-    // memory; the alternative (one DB query per scan entry) is unworkable.
+    // Scan once and use it as the authoritative on-disk set. Used both to
+    // identify orphan blobs (paths not in the keep-set) and — when
+    // `prune_broken` is on — to identify dangling File documents
+    // (storage_path / trash_path that doesn't actually exist on the backend).
+    let entries = backend.scan("").await?;
+    let on_disk: HashSet<String> = entries
+        .iter()
+        .filter(|e| !e.is_dir)
+        .map(|e| e.path.clone())
+        .collect();
+
     let files_coll = db.collection::<File>("files");
     let mut keep_blobs: HashSet<String> = HashSet::new();
     let mut keep_thumbs_for: HashSet<ObjectId> = HashSet::new();
+    let mut broken: Vec<(ObjectId, String, String)> = Vec::new();
+
     let mut cursor = files_coll
         .find(doc! { "storage_id": storage_id })
         .await?;
     while let Some(f) = cursor.try_next().await? {
+        let path = f
+            .trash_path
+            .clone()
+            .unwrap_or_else(|| f.storage_path.clone());
+        if !on_disk.contains(&path) {
+            broken.push((f.id, f.name.clone(), path.clone()));
+            if prune_broken {
+                // Don't add to keep-set — the File doc is going away.
+                continue;
+            }
+        }
         keep_blobs.insert(f.storage_path.clone());
         if let Some(tp) = &f.trash_path {
             keep_blobs.insert(tp.clone());
@@ -631,17 +659,20 @@ pub async fn run_cleanup_inner(
         keep_thumbs_for.insert(f.id);
     }
 
-    let entries = backend.scan("").await?;
+    if !broken.is_empty() && !prune_broken {
+        println!(
+            "Note: {} File document(s) on this storage point at a missing blob. \
+             Re-run with --prune-broken to delete them.",
+            broken.len(),
+        );
+    }
+
     let mut would_delete: Vec<(String, u64)> = Vec::new();
     let mut kept_count = 0u64;
-
     for entry in entries {
         if entry.is_dir {
             continue;
         }
-        // Skip in-flight upload artefacts unconditionally. Even with the
-        // server stopped, these may be left over from a previous crash and
-        // are correctly cleaned up by the upload paths, not by us.
         if entry.path.starts_with(".tmp/") || entry.path.starts_with(".tmp-") {
             continue;
         }
@@ -659,34 +690,71 @@ pub async fn run_cleanup_inner(
 
     let total_orphan_bytes: u64 = would_delete.iter().map(|(_, n)| *n).sum();
     println!(
-        "Cleanup of {storage_id}: {} live blob(s), {} orphan(s) ({}).",
+        "Cleanup of {storage_id}: {} live blob(s), {} orphan(s) ({}){}.",
         kept_count,
         would_delete.len(),
         humanize_bytes(total_orphan_bytes),
+        if prune_broken {
+            format!(", {} broken record(s)", broken.len())
+        } else {
+            String::new()
+        },
     );
 
     if dry_run {
         for (path, size) in would_delete.iter().take(50) {
-            println!("  would delete: {path} ({})", humanize_bytes(*size));
+            println!("  would delete blob: {path} ({})", humanize_bytes(*size));
         }
         if would_delete.len() > 50 {
-            println!("  ... and {} more", would_delete.len() - 50);
+            println!("  ... and {} more orphan blob(s)", would_delete.len() - 50);
+        }
+        if prune_broken {
+            for (id, name, path) in broken.iter().take(50) {
+                println!("  would delete record: {id} {name:?} (missing blob: {path})");
+            }
+            if broken.len() > 50 {
+                println!("  ... and {} more broken record(s)", broken.len() - 50);
+            }
         }
         println!("Dry run — re-run without --dry-run to delete.");
         return Ok(());
     }
 
-    let mut deleted = 0u64;
+    let mut deleted_blobs = 0u64;
     let mut delete_failures: Vec<(String, String)> = Vec::new();
     for (path, _) in &would_delete {
         match backend.delete(path).await {
-            Ok(()) => deleted += 1,
+            Ok(()) => deleted_blobs += 1,
             Err(e) => delete_failures.push((path.clone(), e.to_string())),
         }
     }
+
+    let mut deleted_records = 0u64;
+    if prune_broken && !broken.is_empty() {
+        let ids: Vec<ObjectId> = broken.iter().map(|(id, _, _)| *id).collect();
+        let res = files_coll
+            .delete_many(doc! { "_id": { "$in": ids.clone() } })
+            .await?;
+        deleted_records = res.deleted_count;
+        // Cascade to file_versions so we don't leave dangling refs. The
+        // FileVersion blobs themselves (if any exist on this storage) will be
+        // picked up as orphans on the next cleanup run.
+        let v = db
+            .collection::<FileVersion>("file_versions")
+            .delete_many(doc! { "file_id": { "$in": ids } })
+            .await?;
+        if v.deleted_count > 0 {
+            println!("Cascaded delete to {} file_version row(s).", v.deleted_count);
+        }
+    }
+
     println!(
-        "Deleted {} orphan blob(s); {} failure(s).",
-        deleted,
+        "Deleted {deleted_blobs} orphan blob(s){}; {} failure(s).",
+        if prune_broken {
+            format!(" and {deleted_records} broken File record(s)")
+        } else {
+            String::new()
+        },
         delete_failures.len()
     );
     if !delete_failures.is_empty() {

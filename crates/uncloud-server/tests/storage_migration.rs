@@ -482,7 +482,7 @@ async fn cleanup_deletes_orphans_keeps_live() {
         .await
         .unwrap();
 
-    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, false)
+    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, false, false)
         .await
         .expect("cleanup");
 
@@ -512,9 +512,83 @@ async fn cleanup_dry_run_deletes_nothing() {
     let fx = make_fixture("uncloud_migrate_test_9").await;
     fx.src.write("orphan.bin", b"orphaned").await.unwrap();
 
-    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, true)
+    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, true, false)
         .await
         .expect("cleanup dry-run");
 
     assert!(fx.src.exists("orphan.bin").await.unwrap(), "dry-run keeps blob");
+}
+
+
+#[tokio::test]
+#[ignore]
+async fn cleanup_prune_broken_deletes_dangling_records() {
+    use uncloud_server::models::FileVersion;
+    let fx = make_fixture("uncloud_migrate_test_10").await;
+
+    // Live file: blob present, doc present.
+    let live = insert_file(&fx, "live.bin", b"alive").await;
+    // Broken file: doc inserted but the source blob never made it to disk
+    // (simulates a previously failed upload).
+    let broken = insert_file(&fx, "broken.bin", b"never written").await;
+    fx.src.delete("broken.bin").await.unwrap();
+    // Add a file_versions row pointing at the broken file — it should
+    // cascade-delete with its parent.
+    let now = chrono::Utc::now();
+    fx.db
+        .collection::<FileVersion>("file_versions")
+        .insert_one(&FileVersion {
+            id: ObjectId::new(),
+            file_id: broken.id,
+            version: 1,
+            storage_path: "broken.v1.bin".into(),
+            size_bytes: 0,
+            checksum_sha256: "x".into(),
+            created_at: now,
+        })
+        .await
+        .unwrap();
+
+    // Without --prune-broken, the broken record stays.
+    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, false, false)
+        .await
+        .expect("cleanup without prune");
+    let still_there = fx
+        .db
+        .collection::<File>("files")
+        .find_one(doc! { "_id": broken.id })
+        .await
+        .unwrap();
+    assert!(still_there.is_some(), "broken record should survive without flag");
+
+    // With --prune-broken, it goes — and so does the file_versions row.
+    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, false, true)
+        .await
+        .expect("cleanup with prune");
+    let gone = fx
+        .db
+        .collection::<File>("files")
+        .find_one(doc! { "_id": broken.id })
+        .await
+        .unwrap();
+    assert!(gone.is_none(), "broken record should be deleted");
+
+    let v_count = fx
+        .db
+        .collection::<FileVersion>("file_versions")
+        .count_documents(doc! { "file_id": broken.id })
+        .await
+        .unwrap();
+    assert_eq!(v_count, 0, "file_versions cascade-deleted");
+
+    // Live file untouched throughout.
+    let live_after: File = fx
+        .db
+        .collection::<File>("files")
+        .find_one(doc! { "_id": live.id })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(live_after.id, live.id);
+    assert!(fx.src.exists("live.bin").await.unwrap());
 }

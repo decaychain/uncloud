@@ -109,6 +109,11 @@ enum Command {
         /// Clear a stale lock left by a previously crashed migration/cleanup.
         #[arg(long)]
         force_unlock: bool,
+        /// Also delete File documents (and their `file_versions` rows) whose
+        /// blob is missing on this storage. Cleans up dangling DB records
+        /// left behind by failed uploads or interrupted migrations.
+        #[arg(long)]
+        prune_broken: bool,
     },
 }
 
@@ -151,11 +156,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             storage,
             dry_run,
             force_unlock,
+            prune_broken,
         }) => {
             uncloud_server::migrate::run_cleanup(uncloud_server::migrate::CleanupArgs {
                 storage,
                 dry_run,
                 force_unlock,
+                prune_broken,
             })
             .await
         }

@@ -31,7 +31,7 @@ uncloud-server migrate \
 
 uncloud-server migrate-cleanup \
     --storage <storage-id-or-name> \
-    [--dry-run] [--force-unlock]
+    [--dry-run] [--force-unlock] [--prune-broken]
 ```
 
 Non-goals:
@@ -203,6 +203,13 @@ those files), and deletes everything else. `.tmp/` is skipped
 unconditionally. Acquires the same `migration_locks` row as `migrate` so
 the server can't run during a sweep and migrations can't run
 concurrently. `--dry-run` lists the planned deletions without acting.
+
+`--prune-broken` extends cleanup to the *symmetric* case: File documents
+whose blob is missing on this storage (left over from previously failed
+uploads or interrupted migrations). Without the flag, cleanup notes them
+and continues; with it, the File documents are deleted and their
+`file_versions` rows cascade. Off by default — pruning DB records
+deserves an explicit opt-in.
 
 Cleanup is conceptually independent of migration — it's a garbage
 collector for any orphan, not just migration-leftover ones — which is why
