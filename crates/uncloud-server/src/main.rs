@@ -114,6 +114,11 @@ enum Command {
         /// left behind by failed uploads or interrupted migrations.
         #[arg(long)]
         prune_broken: bool,
+        /// Also delete `file_versions` documents whose archive blob is
+        /// missing on this storage. Symmetric to `--prune-broken` but for
+        /// the version side; doesn't touch the parent File row.
+        #[arg(long)]
+        prune_orphan_versions: bool,
     },
     /// Backup operations against Restic-format repositories. See
     /// `docs/backup.md` for the design and `config.yaml`'s `backup:` section
@@ -236,12 +241,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             dry_run,
             force_unlock,
             prune_broken,
+            prune_orphan_versions,
         }) => {
             uncloud_server::migrate::run_cleanup(uncloud_server::migrate::CleanupArgs {
                 storage,
                 dry_run,
                 force_unlock,
                 prune_broken,
+                prune_orphan_versions,
             })
             .await
         }
