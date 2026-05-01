@@ -6,6 +6,7 @@
 pub mod config;
 pub mod dump;
 pub mod lock;
+pub mod repo;
 
 /// `backup create` arguments. Built by the clap layer in `main.rs` and
 /// passed to `run_create`.
@@ -62,8 +63,26 @@ impl std::str::FromStr for ConflictPolicy {
 // implementation. Implementations land in subsequent commits; for now the
 // wrappers report "not yet implemented" so the CLI surface is reachable.
 
-pub async fn run_init(target: String) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("backup init --target {target}: not yet implemented");
+pub async fn run_init(target_name: String) -> Result<(), Box<dyn std::error::Error>> {
+    init_logging();
+    let config = crate::config::Config::load_or_default();
+    let target = config
+        .backup
+        .target(&target_name)
+        .ok_or_else(|| format!("backup target {target_name:?} is not configured"))?;
+    let password = target.password.resolve()?;
+    if target.password.is_inline() {
+        tracing::warn!(
+            "target {:?}: password is inline in config.yaml — prefer password_file / password_env / password_command",
+            target.name
+        );
+    }
+
+    println!("Initialising repository for target {:?} at {}", target.name, target.repo);
+    let target = target.clone();
+    let _repo = tokio::task::spawn_blocking(move || repo::init(&target, &password)).await??;
+    println!("Repository initialised successfully.");
+    println!("Save the password somewhere safe — losing it makes the repository permanently unrecoverable.");
     Ok(())
 }
 
@@ -96,4 +115,14 @@ pub async fn run_prune(
 pub async fn run_restore(args: RestoreArgs) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("backup restore {args:?}: not yet implemented");
     Ok(())
+}
+
+fn init_logging() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into()),
+        )
+        .try_init()
+        .ok();
 }
