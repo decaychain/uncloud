@@ -223,20 +223,33 @@ here.
 
 ## File blob walk
 
+The blob walker streams each `File`'s bytes straight from its storage
+backend into rustic — no full-dataset local staging, regardless of where the
+data lives.
+
 For each `File` document on the include list (i.e. not skipped — currently no
 file is, but `--folder` scoping or per-user filters could land later):
 
 1. Resolve to its storage backend via `file.storage_id`.
 2. Open `backend.read(file.storage_path)` (or `file.trash_path` for soft-deleted
    files when `include_trash`).
-3. Stream the bytes into Restic at logical path
+3. Stream the bytes into rustic at logical path
    `/files/<owner_username>/<full virtual path>`.
 4. If `include_versions`, also stream each entry from
    `file_versions` at `/versions/<file_id>/<version_id>`.
 5. Read errors are logged, the file is skipped, and the snapshot is tagged
    `partial` if any errors occurred.
 
-Restic chunks and dedups as bytes flow in, so re-running a backup against the
+Streaming relies on a small patch to `rustic_core` we maintain on a
+[fork](https://github.com/decaychain/rustic_core/tree/uncloud/backup-with-source):
+a single new `Repository::backup_with_source` method that takes any
+`&impl ReadSource` and bypasses the stock `LocalSource` walk over filesystem
+paths. Without that, the public `Repository::backup` API forces every
+backed-up byte through a local path, which doesn't fit the multi-backend
+model. The patch is small and self-contained; we'll upstream it once the
+shape stabilises.
+
+Rustic chunks and dedups as bytes flow in, so re-running a backup against the
 same target is incremental even though our walker re-streams every byte every
 time. The wire cost is the chunks that *changed*, not the full corpus.
 
@@ -468,7 +481,7 @@ not a rewrite.
 | Single file unreadable            | Log file id, skip, continue. Snapshot tagged `partial`. |
 | Mongo cursor failure mid-dump     | Abort whole run, release lock, no snapshot finalised.   |
 | Crash mid-run                     | Lock heartbeat goes stale → next run sees stale lock → user `--force-unlock`s and re-runs. No partial snapshots to clean up (they were never finalised). |
-| Out-of-disk on `staging_dir`      | The DB dump streams directly into rustic; staging is only used for atomic multi-file uploads inside backends that need it. Document the few-MB ceiling. |
+| Out-of-disk on `staging_dir`      | DB dump and per-blob temp files stream through staging; rustic chunks them as they arrive. Document the few-MB ceiling — peak usage is roughly one in-flight blob plus the DB dump. |
 | Concurrent migration              | Refuses with clear error. Same the other way round. |
 | Repo password wrong               | Refuses with clear error before any work happens. |
 | Restore: snapshot schema newer than binary | Refuses up front with clear error.            |
