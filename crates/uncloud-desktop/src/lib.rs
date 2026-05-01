@@ -23,7 +23,8 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
 use uncloud_client::{Client, ClientIdentity};
 use uncloud_sync::{
-    BaseSource, SyncActivity, SyncEngine, SyncEngineHooks, SyncLogRow, SyncReport,
+    BaseSource, SyncEngine, SyncEngineHooks, SyncLogRow, SyncReport,
+    SyncState as EngineState,
 };
 
 #[cfg(mobile)]
@@ -48,7 +49,7 @@ pub struct DesktopState {
     /// `run_sync_once` calls would clobber each other's bookkeeping.
     pub run_lock: Arc<Mutex<()>>,
     /// Tray icon handle. Stored so the activity listener can swap the
-    /// idle/syncing icons on `SyncActivity` transitions. Desktop-only.
+    /// per-state icons on [`EngineState`] transitions. Desktop-only.
     /// `std::sync::Mutex` keeps the call sites lock-free of `.await`.
     #[cfg(desktop)]
     pub tray: Arc<std::sync::Mutex<Option<TrayIcon>>>,
@@ -340,10 +341,10 @@ fn restart_file_watcher(
     }
 }
 
-/// Subscribe to the engine's activity broadcast and swap the tray icon
-/// between idle and "syncing" on transitions in/out of
-/// [`SyncActivity::Transferring`]. `Polling` runs (no actual file movement)
-/// keep the idle icon so a scheduled tick doesn't flash the indicator.
+/// Subscribe to the engine's [`EngineState`] broadcast and swap the tray
+/// icon on every transition. One icon per state — `Transferring` is sticky
+/// for the run, so a sync session shows the syncing icon for its whole
+/// duration instead of flickering between transfers.
 ///
 /// Spawned each time a fresh engine is wired so a logout/login cycle ends
 /// up with one listener per live engine. The previous task naturally ends
@@ -354,11 +355,10 @@ fn spawn_activity_listener(
     engine: Arc<SyncEngine>,
     tray: Arc<std::sync::Mutex<Option<TrayIcon>>>,
 ) {
-    let mut rx = engine.activity();
+    let mut rx = engine.state();
     async_runtime::spawn(async move {
-        // Set initial state, then react to transitions.
         let mut last = *rx.borrow();
-        apply_tray_activity(&tray, last);
+        apply_tray_state(&tray, last);
         loop {
             if rx.changed().await.is_err() {
                 // Sender dropped — engine is gone.
@@ -366,7 +366,7 @@ fn spawn_activity_listener(
             }
             let next = *rx.borrow();
             if next != last {
-                apply_tray_activity(&tray, next);
+                apply_tray_state(&tray, next);
                 last = next;
             }
         }
@@ -374,13 +374,12 @@ fn spawn_activity_listener(
 }
 
 #[cfg(desktop)]
-fn apply_tray_activity(
-    tray: &Arc<std::sync::Mutex<Option<TrayIcon>>>,
-    activity: SyncActivity,
-) {
-    let image = match activity {
-        SyncActivity::Transferring => tauri::include_image!("icons/tray-syncing.png"),
-        SyncActivity::Idle | SyncActivity::Polling => tauri::include_image!("icons/tray-idle.png"),
+fn apply_tray_state(tray: &Arc<std::sync::Mutex<Option<TrayIcon>>>, state: EngineState) {
+    let image = match state {
+        EngineState::Transferring => tauri::include_image!("icons/tray-syncing.png"),
+        EngineState::Connected => tauri::include_image!("icons/tray-idle.png"),
+        EngineState::NotConnected => tauri::include_image!("icons/tray-disconnected.png"),
+        EngineState::Error => tauri::include_image!("icons/tray-error.png"),
     };
     if let Ok(g) = tray.lock() {
         if let Some(t) = g.as_ref() {

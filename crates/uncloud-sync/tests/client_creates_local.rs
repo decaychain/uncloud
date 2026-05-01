@@ -353,32 +353,33 @@ async fn second_sync_is_a_noop() {
     assert!(report.uploaded.is_empty());
 }
 
-/// The engine's `activity()` watch broadcasts coarse state to embedding
-/// apps so the desktop tray icon can flag "I'm actually transferring
-/// bytes" vs "I'm only checking the tree." This test runs a sync that
-/// uploads one file and asserts the broadcast goes through both
-/// `Polling` (run started, no transfers yet) and `Transferring` (the
-/// upload is in flight) before returning to `Idle`.
+/// The engine's `state()` watch broadcasts the connection/activity state
+/// to embedding apps so the desktop tray maps one icon per real state.
+/// The state starts at `NotConnected`, becomes `Transferring` once on the
+/// first transfer of a run (sticky: subsequent transfers in the same run
+/// emit no events), and settles at `Connected` when the run completes
+/// successfully.
 #[tokio::test]
-async fn activity_watch_reports_polling_and_transferring() {
-    use uncloud_sync::SyncActivity;
+async fn state_watch_is_sticky_transferring_and_settles_at_connected() {
+    use uncloud_sync::SyncState;
 
     let server = FakeServer::default();
     let rig = new_rig(server).await;
     std::fs::create_dir(rig.root.join("Folder")).unwrap();
-    std::fs::write(rig.root.join("Folder/data.txt"), b"x").unwrap();
+    // Two files so we can verify Transferring isn't re-emitted between
+    // sequential ops.
+    std::fs::write(rig.root.join("Folder/a.txt"), b"x").unwrap();
+    std::fs::write(rig.root.join("Folder/b.txt"), b"y").unwrap();
 
     let engine = build_engine(&rig).await;
-    let mut rx = engine.activity();
-    assert_eq!(*rx.borrow(), SyncActivity::Idle);
+    let mut rx = engine.state();
+    assert_eq!(*rx.borrow(), SyncState::NotConnected);
 
-    // Collect every transition the engine emits during the sync run.
     let collector = tokio::spawn(async move {
-        let mut seen = Vec::<SyncActivity>::new();
+        let mut seen = Vec::<SyncState>::new();
         while rx.changed().await.is_ok() {
             seen.push(*rx.borrow());
-            // Once we are back at Idle the run is over and we can stop.
-            if matches!(seen.last(), Some(SyncActivity::Idle)) {
+            if matches!(seen.last(), Some(SyncState::Connected)) {
                 break;
             }
         }
@@ -386,23 +387,22 @@ async fn activity_watch_reports_polling_and_transferring() {
     });
 
     let report = engine.incremental_sync().await.unwrap();
-    assert_eq!(report.uploaded, vec!["data.txt".to_string()]);
+    assert_eq!(report.uploaded.len(), 2);
 
     let seen = collector.await.unwrap();
-    assert!(
-        seen.contains(&SyncActivity::Polling),
-        "expected Polling transition, got {:?}",
-        seen
-    );
-    assert!(
-        seen.contains(&SyncActivity::Transferring),
-        "expected Transferring transition, got {:?}",
+    let transferring_count = seen
+        .iter()
+        .filter(|s| **s == SyncState::Transferring)
+        .count();
+    assert_eq!(
+        transferring_count, 1,
+        "expected exactly one Transferring transition for two transfers (sticky), got {:?}",
         seen
     );
     assert_eq!(
         seen.last().copied(),
-        Some(SyncActivity::Idle),
-        "run must end at Idle, got {:?}",
+        Some(SyncState::Connected),
+        "run must end at Connected, got {:?}",
         seen
     );
 }
