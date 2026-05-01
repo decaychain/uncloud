@@ -192,8 +192,15 @@ async fn run_one_inner(
     // back up, not what was actually committed (we won't know until rustic
     // finishes), but the schema_version + paths are stable and that's the
     // load-bearing part.
-    write_run_manifest(staging.path(), target, &collection_counts, files.len(), versions.len())
-        .await?;
+    write_run_manifest(
+        staging.path(),
+        target,
+        &config.backup.options,
+        &collection_counts,
+        files.len(),
+        versions.len(),
+    )
+    .await?;
 
     // Step 4 — gather all on-disk static entries (DB jsonls, manifests).
     let statics = enumerate_static_entries(staging.path()).await?;
@@ -411,6 +418,7 @@ async fn build_staging(
 async fn write_run_manifest(
     staging: &std::path::Path,
     target: &BackupTarget,
+    options: &crate::backup::config::BackupOptions,
     counts: &[(String, usize)],
     files: usize,
     versions: usize,
@@ -419,11 +427,20 @@ async fn write_run_manifest(
         .iter()
         .map(|(name, rows)| serde_json::json!({ "name": name, "rows": rows }))
         .collect();
+    // `options` is the load-bearing field for restore: it tells the restore
+    // engine which subset of File / FileVersion documents to expect blobs
+    // for, so it doesn't warn about "missing" blobs that were intentionally
+    // excluded at create time.
     let body = serde_json::json!({
         "schema_version": dump::SCHEMA_VERSION,
         "uncloud_version": env!("CARGO_PKG_VERSION"),
         "target": target.name,
         "started_at": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "options": {
+            "include_versions": options.include_versions,
+            "include_trash": options.include_trash,
+            "include_thumbnails": options.include_thumbnails,
+        },
         "stats": {
             "files": files,
             "versions": versions,

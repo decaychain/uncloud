@@ -148,6 +148,11 @@ async fn run_inner(
     // Read the snapshot's `storages.jsonl` (used only for matching) and the
     // destination's storages collection. Build remap.
     let snap_tree = snap.tree;
+    let snap_options = read_snapshot_options(&indexed_repo, snap_tree).await?;
+    println!(
+        "Snapshot was created with: include_versions={}, include_trash={}, include_thumbnails={}",
+        snap_options.include_versions, snap_options.include_trash, snap_options.include_thumbnails
+    );
     let snap_storages = read_collection_jsonl(&indexed_repo, snap_tree, "storages").await?;
     println!("Snapshot contains {} storage definition(s).", snap_storages.len());
 
@@ -189,7 +194,15 @@ async fn run_inner(
     // restored so newly-inserted Files resolve to the correct backends.
     let storage_service = Arc::new(StorageService::new(db, &config.storage).await?);
 
-    let blob_count = restore_all_blobs(db, &indexed_repo, snap_tree, &storage_service, &remap).await?;
+    let blob_count = restore_all_blobs(
+        db,
+        &indexed_repo,
+        snap_tree,
+        &storage_service,
+        &remap,
+        &snap_options,
+    )
+    .await?;
     println!("Blob restore: {blob_count} blob(s) written");
 
     println!("Restore complete. Re-applied indexes will run on next `serve` startup.");
@@ -403,12 +416,22 @@ async fn restore_all_blobs(
     snap_tree: TreeId,
     storage_service: &Arc<StorageService>,
     _remap: &std::collections::HashMap<ObjectId, ObjectId>,
+    snap_options: &SnapshotOptionsManifest,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     use crate::models::{File, FileVersion};
     let mut count = 0usize;
 
-    // Live files first.
-    let mut cur = db.collection::<File>("files").find(doc! {}).await?;
+    // Match the inclusion filter the snapshot was created with: if the
+    // snapshot didn't include trashed files, don't try to restore blobs
+    // for them — those blobs are intentionally not in the snapshot, and
+    // the file's metadata alone is enough to round-trip the soft-deleted
+    // state.
+    let files_filter = if snap_options.include_trash {
+        doc! {}
+    } else {
+        doc! { "deleted_at": mongodb::bson::Bson::Null }
+    };
+    let mut cur = db.collection::<File>("files").find(files_filter).await?;
     while let Some(f) = cur.try_next().await? {
         let backend = match storage_service.get_backend(f.storage_id).await {
             Ok(b) => b,
@@ -425,30 +448,91 @@ async fn restore_all_blobs(
         if restore_blob(repo, snap_tree, &snap_path, &backend, &target_path).await? {
             count += 1;
         } else {
+            // Inside the inclusion filter, a missing blob is a real
+            // anomaly — surface it. Outside the filter (trashed-and-
+            // skipped), we wouldn't even iterate.
             tracing::warn!("snapshot has no blob for file {} — skipped", f.id);
         }
     }
 
-    // Versions.
-    let files_coll = db.collection::<File>("files");
-    let mut cur = db.collection::<FileVersion>("file_versions").find(doc! {}).await?;
-    while let Some(v) = cur.try_next().await? {
-        let Some(parent) = files_coll.find_one(doc! { "_id": v.file_id }).await? else { continue };
-        let backend = match storage_service.get_backend(parent.storage_id).await {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        let snap_path = PathBuf::from(format!(
-            "/uncloud/versions/{}/{}",
-            v.file_id.to_hex(),
-            v.id.to_hex()
-        ));
-        if restore_blob(repo, snap_tree, &snap_path, &backend, &v.storage_path).await? {
-            count += 1;
+    if snap_options.include_versions {
+        let files_coll = db.collection::<File>("files");
+        let mut cur = db
+            .collection::<FileVersion>("file_versions")
+            .find(doc! {})
+            .await?;
+        while let Some(v) = cur.try_next().await? {
+            let Some(parent) = files_coll.find_one(doc! { "_id": v.file_id }).await? else {
+                continue;
+            };
+            let backend = match storage_service.get_backend(parent.storage_id).await {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let snap_path = PathBuf::from(format!(
+                "/uncloud/versions/{}/{}",
+                v.file_id.to_hex(),
+                v.id.to_hex()
+            ));
+            if restore_blob(repo, snap_tree, &snap_path, &backend, &v.storage_path).await? {
+                count += 1;
+            }
         }
     }
 
     Ok(count)
+}
+
+/// Manifest options the restore engine cares about. Anything else in
+/// `manifest.json` is for diagnostics, not control flow.
+#[derive(Debug, Clone, Default)]
+pub struct SnapshotOptionsManifest {
+    pub include_versions: bool,
+    pub include_trash: bool,
+    pub include_thumbnails: bool,
+}
+
+/// Read `/uncloud/manifest.json` from the snapshot. Falls back to defaults
+/// if the manifest is missing or doesn't have an `options` block (older
+/// snapshots from before the manifest carried these fields).
+async fn read_snapshot_options(
+    repo: &Arc<Repository<IndexedFullStatus>>,
+    snap_tree: TreeId,
+) -> Result<SnapshotOptionsManifest, Box<dyn std::error::Error>> {
+    let path = PathBuf::from("/uncloud/manifest.json");
+    let bytes = match read_snapshot_file_bytes(repo, snap_tree, &path).await? {
+        Some(b) => b,
+        None => return Ok(default_pre_options_manifest()),
+    };
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let opts = value.get("options").cloned().unwrap_or(serde_json::Value::Null);
+    if opts.is_null() {
+        return Ok(default_pre_options_manifest());
+    }
+    Ok(SnapshotOptionsManifest {
+        include_versions: opts
+            .get("include_versions")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        include_trash: opts
+            .get("include_trash")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        include_thumbnails: opts
+            .get("include_thumbnails")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    })
+}
+
+/// Defaults that mirror `BackupOptions::default()` — used when a snapshot
+/// pre-dates the manifest carrying its `options` field.
+fn default_pre_options_manifest() -> SnapshotOptionsManifest {
+    SnapshotOptionsManifest {
+        include_versions: true,
+        include_trash: false,
+        include_thumbnails: false,
+    }
 }
 
 /// Stream a single blob from the snapshot into the destination backend.
