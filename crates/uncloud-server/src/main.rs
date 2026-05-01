@@ -87,6 +87,28 @@ enum Command {
         /// Clear a stale lock left by a previously crashed migration.
         #[arg(long)]
         force_unlock: bool,
+        /// Delete each source blob immediately after its pointer is flipped.
+        /// Off by default — pair with `migrate-cleanup` for a "verify, then
+        /// sweep" workflow that lets you roll back if something looks wrong
+        /// before the source data is gone.
+        #[arg(long)]
+        delete_source: bool,
+    },
+    /// Sweep a storage backend for orphan blobs — anything whose owning File
+    /// document either doesn't exist or no longer points at this storage.
+    /// Acquires the same migration lock as `migrate`, so the server must be
+    /// stopped while it runs. Run this after a migration once you're happy
+    /// the data is reachable on the destination.
+    MigrateCleanup {
+        /// Storage to sweep — ObjectId or `Storage.name`.
+        #[arg(long)]
+        storage: String,
+        /// Print the planned deletions without removing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Clear a stale lock left by a previously crashed migration/cleanup.
+        #[arg(long)]
+        force_unlock: bool,
     },
 }
 
@@ -111,6 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             dry_run,
             verify,
             force_unlock,
+            delete_source,
         }) => {
             let verify = verify.parse::<uncloud_server::migrate::VerifyMode>()?;
             uncloud_server::migrate::run(uncloud_server::migrate::MigrateArgs {
@@ -119,6 +142,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 folder,
                 dry_run,
                 verify,
+                force_unlock,
+                delete_source,
+            })
+            .await
+        }
+        Some(Command::MigrateCleanup {
+            storage,
+            dry_run,
+            force_unlock,
+        }) => {
+            uncloud_server::migrate::run_cleanup(uncloud_server::migrate::CleanupArgs {
+                storage,
+                dry_run,
                 force_unlock,
             })
             .await

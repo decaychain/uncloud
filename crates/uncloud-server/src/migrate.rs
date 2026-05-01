@@ -68,6 +68,17 @@ pub struct MigrateArgs {
     pub dry_run: bool,
     pub verify: VerifyMode,
     pub force_unlock: bool,
+    /// Delete the source blob (and thumbnail sidecar) immediately after each
+    /// successful pointer flip. Off by default — pair with `migrate-cleanup`
+    /// for a more cautious "verify then sweep" workflow.
+    pub delete_source: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CleanupArgs {
+    pub storage: String,
+    pub dry_run: bool,
+    pub force_unlock: bool,
 }
 
 /// Check on server startup whether a migration is in progress. Returns an
@@ -187,8 +198,23 @@ pub async fn run(args: MigrateArgs) -> Result<(), Box<dyn std::error::Error>> {
         to_id,
         &candidates,
         args.verify,
+        args.delete_source,
     )
     .await;
+
+    // Re-pin folders that were pointing at the source storage so future
+    // uploads land on the destination. Conceptually part of "migrating a
+    // folder" — without this the user has to remember to re-pin manually,
+    // and any later upload trickles back onto the old storage. Done only
+    // when the migration succeeded; on failure we leave folder pins alone
+    // so the half-migrated state stays consistent.
+    if result.is_ok() {
+        match repin_folders(&db, from_id, to_id, folder_filter.as_ref()).await {
+            Ok(0) => {}
+            Ok(n) => println!("Re-pinned {n} folder(s) to the destination storage."),
+            Err(e) => eprintln!("Warning: failed to re-pin folders: {e}"),
+        }
+    }
 
     stop_heartbeat.notify_waiters();
     let _ = heartbeat_handle.await;
@@ -207,6 +233,7 @@ pub async fn run_migration(
     to_id: ObjectId,
     files: &[File],
     verify: VerifyMode,
+    delete_source: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let files_coll = db.collection::<File>("files");
 
@@ -246,6 +273,23 @@ pub async fn run_migration(
                 file.id
             );
             continue;
+        }
+
+        if delete_source {
+            // Best-effort. The pointer is already flipped, so a left-behind
+            // blob is just wasted space — `migrate-cleanup` will catch it on
+            // the next sweep. Don't fail the file for cleanup errors.
+            let src_path = file
+                .trash_path
+                .clone()
+                .unwrap_or_else(|| file.storage_path.clone());
+            if let Err(e) = from.delete(&src_path).await {
+                tracing::warn!("delete-source: {} ({}): {e}", file.id, src_path);
+            }
+            let thumb = format!(".thumbs/{}.jpg", file.id);
+            if from.exists(&thumb).await.unwrap_or(false) {
+                let _ = from.delete(&thumb).await;
+            }
         }
 
         copied_files += 1;
@@ -478,6 +522,187 @@ async fn enumerate_candidates(
         out.push(f);
     }
     Ok(out)
+}
+
+
+/// Re-pin folders that were pinning `from_id` so future uploads land on
+/// `to_id`. Scoped to the descendant set when migration was restricted by
+/// `--folder`, otherwise applied to every folder in the system. Exposed for
+/// integration tests.
+pub async fn repin_folders(
+    db: &Database,
+    from_id: ObjectId,
+    to_id: ObjectId,
+    folder_filter: Option<&HashSet<ObjectId>>,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let folders = db.collection::<Folder>("folders");
+    let mut filter = doc! { "storage_id": from_id };
+    if let Some(ids) = folder_filter {
+        let arr: Vec<ObjectId> = ids.iter().copied().collect();
+        filter.insert("_id", doc! { "$in": arr });
+    }
+    let res = folders
+        .update_many(filter, doc! { "$set": { "storage_id": to_id } })
+        .await?;
+    Ok(res.modified_count)
+}
+
+/// Sweep a storage backend for blobs whose owning `File` document either
+/// doesn't exist or no longer points at this storage, and delete them.
+/// Acquires the same `migration_locks` row as `migrate` so the two operations
+/// are mutually exclusive and the server can't start during a sweep. Exposed
+/// for integration tests.
+pub async fn run_cleanup(args: CleanupArgs) -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into()),
+        )
+        .try_init()
+        .ok();
+
+    let config = Config::load_or_default();
+    let db = db::connect(&config.database).await?;
+    db::setup_indexes(&db).await?;
+
+    if args.force_unlock {
+        let res = db
+            .collection::<MigrationLock>("migration_locks")
+            .delete_one(doc! { "scope": MigrationLock::SCOPE })
+            .await?;
+        if res.deleted_count > 0 {
+            println!("Cleared {} stale lock row(s).", res.deleted_count);
+        } else {
+            println!("No lock to clear.");
+        }
+    }
+
+    let storage_service = StorageService::new(&db, &config.storage).await?;
+    let storage_id = resolve_storage_id(&storage_service, &db, &args.storage).await?;
+    let backend = storage_service.get_backend(storage_id).await?;
+
+    // The lock encodes both endpoints; for cleanup we record the same id on
+    // both sides — semantically "this storage is being modified".
+    let lock_id = if args.dry_run {
+        ObjectId::new() // dry-run skips the lock; only writes happen on real runs
+    } else {
+        acquire_lock(&db, storage_id, storage_id).await?
+    };
+    let stop_heartbeat = Arc::new(Notify::new());
+    let heartbeat_handle = if args.dry_run {
+        None
+    } else {
+        Some(spawn_heartbeat(db.clone(), lock_id, stop_heartbeat.clone()))
+    };
+
+    let result = run_cleanup_inner(&db, &backend, storage_id, args.dry_run).await;
+
+    stop_heartbeat.notify_waiters();
+    if let Some(h) = heartbeat_handle {
+        let _ = h.await;
+    }
+    if !args.dry_run {
+        release_lock(&db, lock_id).await?;
+    }
+    result
+}
+
+/// Core cleanup loop — exposed for tests.
+pub async fn run_cleanup_inner(
+    db: &Database,
+    backend: &Arc<dyn StorageBackend>,
+    storage_id: ObjectId,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Build the keep-set: every blob path that's reachable from a live File
+    // document on this storage. We hit Mongo once and hold the strings in
+    // memory; the alternative (one DB query per scan entry) is unworkable.
+    let files_coll = db.collection::<File>("files");
+    let mut keep_blobs: HashSet<String> = HashSet::new();
+    let mut keep_thumbs_for: HashSet<ObjectId> = HashSet::new();
+    let mut cursor = files_coll
+        .find(doc! { "storage_id": storage_id })
+        .await?;
+    while let Some(f) = cursor.try_next().await? {
+        keep_blobs.insert(f.storage_path.clone());
+        if let Some(tp) = &f.trash_path {
+            keep_blobs.insert(tp.clone());
+        }
+        keep_thumbs_for.insert(f.id);
+    }
+
+    let entries = backend.scan("").await?;
+    let mut would_delete: Vec<(String, u64)> = Vec::new();
+    let mut kept_count = 0u64;
+
+    for entry in entries {
+        if entry.is_dir {
+            continue;
+        }
+        // Skip in-flight upload artefacts unconditionally. Even with the
+        // server stopped, these may be left over from a previous crash and
+        // are correctly cleaned up by the upload paths, not by us.
+        if entry.path.starts_with(".tmp/") || entry.path.starts_with(".tmp-") {
+            continue;
+        }
+        let keep = if let Some(file_id) = thumbnail_file_id(&entry.path) {
+            keep_thumbs_for.contains(&file_id)
+        } else {
+            keep_blobs.contains(&entry.path)
+        };
+        if keep {
+            kept_count += 1;
+        } else {
+            would_delete.push((entry.path, entry.size_bytes));
+        }
+    }
+
+    let total_orphan_bytes: u64 = would_delete.iter().map(|(_, n)| *n).sum();
+    println!(
+        "Cleanup of {storage_id}: {} live blob(s), {} orphan(s) ({}).",
+        kept_count,
+        would_delete.len(),
+        humanize_bytes(total_orphan_bytes),
+    );
+
+    if dry_run {
+        for (path, size) in would_delete.iter().take(50) {
+            println!("  would delete: {path} ({})", humanize_bytes(*size));
+        }
+        if would_delete.len() > 50 {
+            println!("  ... and {} more", would_delete.len() - 50);
+        }
+        println!("Dry run — re-run without --dry-run to delete.");
+        return Ok(());
+    }
+
+    let mut deleted = 0u64;
+    let mut delete_failures: Vec<(String, String)> = Vec::new();
+    for (path, _) in &would_delete {
+        match backend.delete(path).await {
+            Ok(()) => deleted += 1,
+            Err(e) => delete_failures.push((path.clone(), e.to_string())),
+        }
+    }
+    println!(
+        "Deleted {} orphan blob(s); {} failure(s).",
+        deleted,
+        delete_failures.len()
+    );
+    if !delete_failures.is_empty() {
+        eprintln!("Failures:");
+        for (p, e) in &delete_failures {
+            eprintln!("  {p}: {e}");
+        }
+    }
+    Ok(())
+}
+
+/// Returns `Some(file_id)` if `path` matches `.thumbs/{ObjectId}.jpg`.
+fn thumbnail_file_id(path: &str) -> Option<ObjectId> {
+    let rest = path.strip_prefix(".thumbs/")?;
+    let stem = rest.strip_suffix(".jpg")?;
+    ObjectId::parse_str(stem).ok()
 }
 
 async fn acquire_lock(

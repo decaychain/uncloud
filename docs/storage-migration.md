@@ -26,7 +26,12 @@ uncloud-server migrate \
     [--folder <folder-id>]    \
     [--dry-run]               \
     [--verify size|hash|none] \
-    [--delete-source]
+    [--delete-source]         \
+    [--force-unlock]
+
+uncloud-server migrate-cleanup \
+    --storage <storage-id-or-name> \
+    [--dry-run] [--force-unlock]
 ```
 
 Non-goals:
@@ -168,28 +173,40 @@ on first access matters more than the migration time.
 
 ### 6. Folder pin update
 
-`Folder.storage_id` only governs *new* uploads. Migration does not need to touch
-folder pins — but it's a natural follow-up. Add a `--repin-folders` flag that,
-after a successful migration, sets `Folder.storage_id = <to>` on every folder
-that previously pinned `<from>` (and was within the `--folder` scope, if any).
-This keeps future uploads on the new storage instead of trickling back to the
-old one.
+`Folder.storage_id` governs where *new* uploads land. After a successful
+migration, every folder that pinned the source storage is automatically
+re-pinned to the destination — without this, the user has to remember to
+re-pin manually and any later upload trickles back onto the old storage.
+Conceptually this is part of "migrating a folder," so it's the default
+rather than a flag.
+
+When the migration was scoped via `--folder`, only descendant folders
+within that scope are re-pinned. Folders pinning some *other* storage are
+left alone. Repin failures are non-fatal warnings — the migration itself
+already succeeded by that point.
 
 ### 7. Source cleanup
 
-`--delete-source` deletes the source blob (and thumb / versions) immediately
-after each successful pointer flip. Off by default. Three reasons:
+Two complementary tools:
 
-- If post-migration smoke tests fail, you want the source intact so you can
-  flip pointers back.
-- Disk-space reclamation is rarely the urgent thing — usually you migrate
-  *to* a new backend, not because you're out of space on the old one.
-- The default-safe path is "two copies briefly, then explicit cleanup."
+**`--delete-source` flag on `migrate`** deletes each source blob (and its
+thumbnail sidecar) immediately after the corresponding pointer flip. Off
+by default. Useful when you trust the migration and want peak storage to
+stay close to 1×; the safer workflow is to leave it off and run
+`migrate-cleanup` afterwards once you've verified the destination is
+working.
 
-For the explicit cleanup, ship a separate `uncloud-server migrate-cleanup
---storage <id>` that walks `<storage>` and deletes any blob whose owning
-`File.storage_id` no longer points to it. This is conceptually a different
-operation (verify + sweep) and is cleaner as a separate subcommand.
+**`uncloud-server migrate-cleanup --storage <id>`** walks a storage
+backend, builds a keep-set from `(storage_path, trash_path)` of every
+File document still pointing at it (plus `.thumbs/{file_id}.jpg` for
+those files), and deletes everything else. `.tmp/` is skipped
+unconditionally. Acquires the same `migration_locks` row as `migrate` so
+the server can't run during a sweep and migrations can't run
+concurrently. `--dry-run` lists the planned deletions without acting.
+
+Cleanup is conceptually independent of migration — it's a garbage
+collector for any orphan, not just migration-leftover ones — which is why
+it's a separate subcommand rather than a `migrate` flag.
 
 ### 8. Server startup interlock
 

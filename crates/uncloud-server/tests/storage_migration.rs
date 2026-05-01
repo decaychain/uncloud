@@ -143,6 +143,7 @@ async fn migrates_single_file_local_to_local() {
         fx.dst_id,
         &files,
         VerifyMode::Hash,
+        false,
     )
     .await
     .expect("migration");
@@ -203,6 +204,7 @@ async fn migration_is_idempotent_after_partial_run() {
         fx.dst_id,
         &files,
         VerifyMode::Size,
+        false,
     )
     .await
     .expect("migration");
@@ -239,6 +241,7 @@ async fn migrates_thumbnail_sidecar() {
         fx.dst_id,
         &[file.clone()],
         VerifyMode::Size,
+        false,
     )
     .await
     .expect("migration");
@@ -356,6 +359,7 @@ async fn migration_fails_on_corrupt_dest_when_hash_verify_enabled() {
         fx.dst_id,
         &[file.clone()],
         VerifyMode::Size,
+        false,
     )
     .await;
     assert!(result.is_err(), "expected size verification to fail");
@@ -369,4 +373,148 @@ async fn migration_fails_on_corrupt_dest_when_hash_verify_enabled() {
         .unwrap()
         .unwrap();
     assert_eq!(after.storage_id, fx.src_id);
+}
+
+
+#[tokio::test]
+#[ignore]
+async fn delete_source_removes_blob_and_thumb_after_flip() {
+    let fx = make_fixture("uncloud_migrate_test_6").await;
+    let file = insert_file(&fx, "doc.bin", b"sample bytes").await;
+    let thumb = format!(".thumbs/{}.jpg", file.id);
+    fx.src.write(&thumb, b"thumb-bytes").await.unwrap();
+
+    migrate::run_migration(
+        &fx.db,
+        fx.src.clone(),
+        fx.dst.clone(),
+        fx.src_id,
+        fx.dst_id,
+        &[file.clone()],
+        VerifyMode::Size,
+        true, // delete_source
+    )
+    .await
+    .expect("migration");
+
+    assert!(!fx.src.exists("doc.bin").await.unwrap(), "source blob should be gone");
+    assert!(!fx.src.exists(&thumb).await.unwrap(), "source thumb should be gone");
+    assert_eq!(read_all(&fx.dst, "doc.bin").await, b"sample bytes");
+    assert_eq!(read_all(&fx.dst, &thumb).await, b"thumb-bytes");
+}
+
+#[tokio::test]
+#[ignore]
+async fn repin_folders_updates_pinned_folders() {
+    use uncloud_server::models::Folder;
+    let fx = make_fixture("uncloud_migrate_test_7").await;
+
+    let folders = fx.db.collection::<Folder>("folders");
+    let now = chrono::Utc::now();
+    let pinned_to_src = Folder {
+        id: ObjectId::new(),
+        owner_id: ObjectId::new(),
+        parent_id: None,
+        name: "PinnedSrc".into(),
+        storage_id: Some(fx.src_id),
+        sync_strategy: Default::default(),
+        gallery_include: Default::default(),
+        music_include: Default::default(),
+        created_at: now,
+        updated_at: now,
+        deleted_at: None,
+        batch_delete_id: None,
+    };
+    let other_storage = ObjectId::new();
+    let pinned_elsewhere = Folder {
+        id: ObjectId::new(),
+        owner_id: ObjectId::new(),
+        parent_id: None,
+        name: "PinnedOther".into(),
+        storage_id: Some(other_storage),
+        sync_strategy: Default::default(),
+        gallery_include: Default::default(),
+        music_include: Default::default(),
+        created_at: now,
+        updated_at: now,
+        deleted_at: None,
+        batch_delete_id: None,
+    };
+    folders.insert_one(&pinned_to_src).await.unwrap();
+    folders.insert_one(&pinned_elsewhere).await.unwrap();
+
+    let modified = migrate::repin_folders(&fx.db, fx.src_id, fx.dst_id, None)
+        .await
+        .expect("repin");
+    assert_eq!(modified, 1);
+
+    let after_src: Folder = folders
+        .find_one(doc! { "_id": pinned_to_src.id })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_src.storage_id, Some(fx.dst_id));
+
+    let after_other: Folder = folders
+        .find_one(doc! { "_id": pinned_elsewhere.id })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_other.storage_id, Some(other_storage), "untouched");
+}
+
+#[tokio::test]
+#[ignore]
+async fn cleanup_deletes_orphans_keeps_live() {
+    let fx = make_fixture("uncloud_migrate_test_8").await;
+    let live = insert_file(&fx, "live.bin", b"alive").await;
+    let live_thumb = format!(".thumbs/{}.jpg", live.id);
+    fx.src.write(&live_thumb, b"keep-thumb").await.unwrap();
+
+    // Orphan blob — no File document points at it.
+    fx.src.write("orphan.bin", b"orphaned").await.unwrap();
+    // Orphan thumbnail — file_id is fabricated; no matching File doc.
+    let orphan_thumb = format!(".thumbs/{}.jpg", ObjectId::new());
+    fx.src.write(&orphan_thumb, b"stale-thumb").await.unwrap();
+    // In-flight upload artefact — must NOT be deleted by cleanup.
+    fx.src
+        .write(".tmp/in-flight.bin", b"do not touch")
+        .await
+        .unwrap();
+
+    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, false)
+        .await
+        .expect("cleanup");
+
+    assert!(fx.src.exists("live.bin").await.unwrap(), "live blob preserved");
+    assert!(fx.src.exists(&live_thumb).await.unwrap(), "live thumb preserved");
+    assert!(
+        fx.src.exists(".tmp/in-flight.bin").await.unwrap(),
+        ".tmp must be left alone"
+    );
+    assert!(
+        !fx.src.exists("orphan.bin").await.unwrap(),
+        "orphan blob should be deleted"
+    );
+    assert!(
+        !fx.src.exists(&orphan_thumb).await.unwrap(),
+        "orphan thumb should be deleted"
+    );
+
+    // Touch `live` to satisfy "field not used" — silences potential dead-code
+    // warnings in tests that don't reference it after the setup phase.
+    let _ = live.id;
+}
+
+#[tokio::test]
+#[ignore]
+async fn cleanup_dry_run_deletes_nothing() {
+    let fx = make_fixture("uncloud_migrate_test_9").await;
+    fx.src.write("orphan.bin", b"orphaned").await.unwrap();
+
+    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, true)
+        .await
+        .expect("cleanup dry-run");
+
+    assert!(fx.src.exists("orphan.bin").await.unwrap(), "dry-run keeps blob");
 }
