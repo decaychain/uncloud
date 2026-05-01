@@ -4,9 +4,11 @@
 //! via `rustic_core`. See `docs/backup.md` for the design.
 
 pub mod config;
+pub mod create;
 pub mod dump;
 pub mod lock;
 pub mod repo;
+pub mod source;
 
 /// `backup create` arguments. Built by the clap layer in `main.rs` and
 /// passed to `run_create`.
@@ -87,8 +89,7 @@ pub async fn run_init(target_name: String) -> Result<(), Box<dyn std::error::Err
 }
 
 pub async fn run_create(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("backup create {args:?}: not yet implemented");
-    Ok(())
+    create::run(args).await
 }
 
 pub async fn run_list(target: Option<String>) -> Result<(), Box<dyn std::error::Error>> {

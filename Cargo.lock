@@ -8355,7 +8355,7 @@ dependencies = [
 [[package]]
 name = "rustic_backend"
 version = "0.6.1"
-source = "git+https://github.com/decaychain/rustic_core?rev=ec3a389fe97c128779dea0205b2ee5f3d5e7b5f9#ec3a389fe97c128779dea0205b2ee5f3d5e7b5f9"
+source = "git+https://github.com/decaychain/rustic_core?rev=a52ac513a98c37f39bf16fa0e471ab33762bab8a#a52ac513a98c37f39bf16fa0e471ab33762bab8a"
 dependencies = [
  "aho-corasick",
  "backon",
@@ -8390,7 +8390,7 @@ checksum = "fbcebf2228827bc4b61cb54dfd84cf43aacf06ca2dfe4c014b136a0e32b876e2"
 [[package]]
 name = "rustic_core"
 version = "0.11.0"
-source = "git+https://github.com/decaychain/rustic_core?rev=ec3a389fe97c128779dea0205b2ee5f3d5e7b5f9#ec3a389fe97c128779dea0205b2ee5f3d5e7b5f9"
+source = "git+https://github.com/decaychain/rustic_core?rev=a52ac513a98c37f39bf16fa0e471ab33762bab8a#a52ac513a98c37f39bf16fa0e471ab33762bab8a"
 dependencies = [
  "aes256ctr_poly1305aes",
  "backon",

@@ -14,8 +14,8 @@ members = [
 # byte to local disk first. Pinned to a specific rev to keep builds
 # reproducible; bump deliberately when the fork moves.
 [patch.crates-io]
-rustic_core = { git = "https://github.com/decaychain/rustic_core", rev = "ec3a389fe97c128779dea0205b2ee5f3d5e7b5f9" }
-rustic_backend = { git = "https://github.com/decaychain/rustic_core", rev = "ec3a389fe97c128779dea0205b2ee5f3d5e7b5f9" }
+rustic_core = { git = "https://github.com/decaychain/rustic_core", rev = "a52ac513a98c37f39bf16fa0e471ab33762bab8a" }
+rustic_backend = { git = "https://github.com/decaychain/rustic_core", rev = "a52ac513a98c37f39bf16fa0e471ab33762bab8a" }
 
 [workspace.package]
 version = "0.1.0"
