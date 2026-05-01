@@ -31,7 +31,7 @@ uncloud-server migrate \
 
 uncloud-server migrate-cleanup \
     --storage <storage-id-or-name> \
-    [--dry-run] [--force-unlock] [--prune-broken]
+    [--dry-run] [--force-unlock] [--prune-broken] [--prune-orphan-versions]
 ```
 
 Non-goals:
@@ -158,10 +158,14 @@ list and exit non-zero. The user re-runs to retry.
 
 - **Active blob** at `file.path` — handled above.
 - **Thumbnail** at `.thumbs/{file_id}.jpg` if it exists on source.
-- **Versions.** When version history lands (planned), older versions are stored
-  at a deterministic archive path. The migration walks `file.versions[]` (or
-  whatever the eventual schema looks like) and copies each archived blob.
-  *Designed in now so we don't have to retrofit later.*
+- **Versions.** Each `file_versions` document carries its own
+  `storage_path`, pointing at an archive blob on the same storage as the
+  parent File. The migration queries `file_versions` for each File being
+  migrated, copies every archive blob to the destination, verifies it per
+  the configured `--verify` mode, and (with `--delete-source`) drops the
+  source-side archive after the parent's pointer flip succeeds. Without
+  this step, FileVersion rows survive the migration but their archive
+  blobs go missing.
 - **Trash entries.** Files where `deleted_at` is set live at `trash_path` instead
   of `path`. Use `trash_path` as the source/dest key.
 
@@ -199,10 +203,11 @@ working.
 **`uncloud-server migrate-cleanup --storage <id>`** walks a storage
 backend, builds a keep-set from `(storage_path, trash_path)` of every
 File document still pointing at it (plus `.thumbs/{file_id}.jpg` for
-those files), and deletes everything else. `.tmp/` is skipped
-unconditionally. Acquires the same `migration_locks` row as `migrate` so
-the server can't run during a sweep and migrations can't run
-concurrently. `--dry-run` lists the planned deletions without acting.
+those files, plus every `file_versions.storage_path` for archive blobs),
+and deletes everything else. `.tmp/` is skipped unconditionally. Acquires
+the same `migration_locks` row as `migrate` so the server can't run
+during a sweep and migrations can't run concurrently. `--dry-run` lists
+the planned deletions without acting.
 
 `--prune-broken` extends cleanup to the *symmetric* case: File documents
 whose blob is missing on this storage (left over from previously failed
@@ -210,6 +215,12 @@ uploads or interrupted migrations). Without the flag, cleanup notes them
 and continues; with it, the File documents are deleted and their
 `file_versions` rows cascade. Off by default — pruning DB records
 deserves an explicit opt-in.
+
+`--prune-orphan-versions` is the same idea on the version side: detects
+`file_versions` rows whose archive blob is missing on this storage
+(typically left behind by an older migration that didn't copy version
+blobs) and deletes those rows. The parent File is untouched. Useful for
+cleaning up after the pre-fix migration left dangling references.
 
 Cleanup is conceptually independent of migration — it's a garbage
 collector for any orphan, not just migration-leftover ones — which is why

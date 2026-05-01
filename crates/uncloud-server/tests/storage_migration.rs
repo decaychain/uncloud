@@ -482,7 +482,7 @@ async fn cleanup_deletes_orphans_keeps_live() {
         .await
         .unwrap();
 
-    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, false, false)
+    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, false, false, false)
         .await
         .expect("cleanup");
 
@@ -512,7 +512,7 @@ async fn cleanup_dry_run_deletes_nothing() {
     let fx = make_fixture("uncloud_migrate_test_9").await;
     fx.src.write("orphan.bin", b"orphaned").await.unwrap();
 
-    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, true, false)
+    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, true, false, false)
         .await
         .expect("cleanup dry-run");
 
@@ -550,7 +550,7 @@ async fn cleanup_prune_broken_deletes_dangling_records() {
         .unwrap();
 
     // Without --prune-broken, the broken record stays.
-    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, false, false)
+    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, false, false, false)
         .await
         .expect("cleanup without prune");
     let still_there = fx
@@ -562,7 +562,7 @@ async fn cleanup_prune_broken_deletes_dangling_records() {
     assert!(still_there.is_some(), "broken record should survive without flag");
 
     // With --prune-broken, it goes — and so does the file_versions row.
-    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, false, true)
+    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, false, true, false)
         .await
         .expect("cleanup with prune");
     let gone = fx
@@ -591,4 +591,219 @@ async fn cleanup_prune_broken_deletes_dangling_records() {
         .unwrap();
     assert_eq!(live_after.id, live.id);
     assert!(fx.src.exists("live.bin").await.unwrap());
+}
+
+#[tokio::test]
+#[ignore]
+async fn migrates_version_archive_blobs_alongside_file() {
+    use uncloud_server::models::FileVersion;
+    let fx = make_fixture("uncloud_migrate_test_versions_copy").await;
+
+    let file = insert_file(&fx, "doc.txt", b"latest revision").await;
+
+    // Two prior versions, each with their own blob on the source.
+    let v1_path = "doc.txt.v1";
+    let v2_path = "doc.txt.v2";
+    let v1_bytes = b"first revision";
+    let v2_bytes = b"second revision";
+    fx.src.write(v1_path, v1_bytes).await.unwrap();
+    fx.src.write(v2_path, v2_bytes).await.unwrap();
+    let now = chrono::Utc::now();
+    let v1 = FileVersion {
+        id: ObjectId::new(),
+        file_id: file.id,
+        version: 1,
+        storage_path: v1_path.into(),
+        size_bytes: v1_bytes.len() as i64,
+        checksum_sha256: sha256_hex(v1_bytes),
+        created_at: now,
+    };
+    let v2 = FileVersion {
+        id: ObjectId::new(),
+        file_id: file.id,
+        version: 2,
+        storage_path: v2_path.into(),
+        size_bytes: v2_bytes.len() as i64,
+        checksum_sha256: sha256_hex(v2_bytes),
+        created_at: now,
+    };
+    fx.db
+        .collection::<FileVersion>("file_versions")
+        .insert_many([&v1, &v2])
+        .await
+        .unwrap();
+
+    migrate::run_migration(
+        &fx.db,
+        fx.src.clone(),
+        fx.dst.clone(),
+        fx.src_id,
+        fx.dst_id,
+        std::slice::from_ref(&file),
+        VerifyMode::Hash,
+        false,
+    )
+    .await
+    .expect("migration should succeed");
+
+    // Live blob copied.
+    assert_eq!(read_all(&fx.dst, "doc.txt").await, b"latest revision");
+    // Both version archives copied with content intact.
+    assert_eq!(read_all(&fx.dst, v1_path).await, v1_bytes);
+    assert_eq!(read_all(&fx.dst, v2_path).await, v2_bytes);
+}
+
+#[tokio::test]
+#[ignore]
+async fn delete_source_removes_version_blobs() {
+    use uncloud_server::models::FileVersion;
+    let fx = make_fixture("uncloud_migrate_test_versions_delete_source").await;
+
+    let file = insert_file(&fx, "doc.txt", b"current").await;
+    fx.src.write("doc.txt.v1", b"old").await.unwrap();
+    let now = chrono::Utc::now();
+    fx.db
+        .collection::<FileVersion>("file_versions")
+        .insert_one(&FileVersion {
+            id: ObjectId::new(),
+            file_id: file.id,
+            version: 1,
+            storage_path: "doc.txt.v1".into(),
+            size_bytes: 3,
+            checksum_sha256: sha256_hex(b"old"),
+            created_at: now,
+        })
+        .await
+        .unwrap();
+
+    migrate::run_migration(
+        &fx.db,
+        fx.src.clone(),
+        fx.dst.clone(),
+        fx.src_id,
+        fx.dst_id,
+        std::slice::from_ref(&file),
+        VerifyMode::Size,
+        true, // delete_source
+    )
+    .await
+    .expect("migration should succeed");
+
+    // Source no longer has live blob OR version blob.
+    assert!(!fx.src.exists("doc.txt").await.unwrap());
+    assert!(!fx.src.exists("doc.txt.v1").await.unwrap());
+    // Destination has both.
+    assert!(fx.dst.exists("doc.txt").await.unwrap());
+    assert_eq!(read_all(&fx.dst, "doc.txt.v1").await, b"old");
+}
+
+#[tokio::test]
+#[ignore]
+async fn cleanup_keeps_version_archive_blobs() {
+    use uncloud_server::models::FileVersion;
+    let fx = make_fixture("uncloud_migrate_test_versions_cleanup_keeps").await;
+
+    let file = insert_file(&fx, "doc.txt", b"current").await;
+    fx.src.write("doc.txt.v1", b"old").await.unwrap();
+    let now = chrono::Utc::now();
+    fx.db
+        .collection::<FileVersion>("file_versions")
+        .insert_one(&FileVersion {
+            id: ObjectId::new(),
+            file_id: file.id,
+            version: 1,
+            storage_path: "doc.txt.v1".into(),
+            size_bytes: 3,
+            checksum_sha256: sha256_hex(b"old"),
+            created_at: now,
+        })
+        .await
+        .unwrap();
+
+    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, false, false, false)
+        .await
+        .expect("cleanup");
+
+    // Both should still be there — the version blob is part of the keep-set.
+    assert!(fx.src.exists("doc.txt").await.unwrap());
+    assert!(
+        fx.src.exists("doc.txt.v1").await.unwrap(),
+        "cleanup must not delete version archive blobs"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn cleanup_prune_orphan_versions_deletes_dangling_records() {
+    use uncloud_server::models::FileVersion;
+    let fx = make_fixture("uncloud_migrate_test_versions_prune_orphan").await;
+
+    let file = insert_file(&fx, "doc.txt", b"current").await;
+    let now = chrono::Utc::now();
+    let dangling = FileVersion {
+        id: ObjectId::new(),
+        file_id: file.id,
+        version: 1,
+        // Blob path that does NOT exist on the storage.
+        storage_path: "doc.txt.v1.missing".into(),
+        size_bytes: 3,
+        checksum_sha256: sha256_hex(b"old"),
+        created_at: now,
+    };
+    let healthy_path = "doc.txt.v2";
+    fx.src.write(healthy_path, b"present").await.unwrap();
+    let healthy = FileVersion {
+        id: ObjectId::new(),
+        file_id: file.id,
+        version: 2,
+        storage_path: healthy_path.into(),
+        size_bytes: 7,
+        checksum_sha256: sha256_hex(b"present"),
+        created_at: now,
+    };
+    fx.db
+        .collection::<FileVersion>("file_versions")
+        .insert_many([&dangling, &healthy])
+        .await
+        .unwrap();
+
+    // Without flag, the dangling row stays.
+    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, false, false, false)
+        .await
+        .expect("cleanup without flag");
+    assert!(fx
+        .db
+        .collection::<FileVersion>("file_versions")
+        .find_one(doc! { "_id": dangling.id })
+        .await
+        .unwrap()
+        .is_some());
+
+    // With flag, the dangling row is deleted; the healthy one survives.
+    migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, false, false, true)
+        .await
+        .expect("cleanup with prune-orphan-versions");
+    assert!(fx
+        .db
+        .collection::<FileVersion>("file_versions")
+        .find_one(doc! { "_id": dangling.id })
+        .await
+        .unwrap()
+        .is_none());
+    assert!(fx
+        .db
+        .collection::<FileVersion>("file_versions")
+        .find_one(doc! { "_id": healthy.id })
+        .await
+        .unwrap()
+        .is_some());
+    // The parent File row is untouched — orphan-versions only nukes the
+    // version metadata, not the file.
+    assert!(fx
+        .db
+        .collection::<File>("files")
+        .find_one(doc! { "_id": file.id })
+        .await
+        .unwrap()
+        .is_some());
 }

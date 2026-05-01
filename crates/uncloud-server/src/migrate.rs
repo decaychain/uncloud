@@ -84,6 +84,10 @@ pub struct CleanupArgs {
     /// inverse problem of orphan blobs: dangling DB records left over from a
     /// failed upload or a previous migration that didn't reach the blob.
     pub prune_broken: bool,
+    /// Also delete FileVersion documents whose archive blob is missing on
+    /// this storage. Symmetric to `prune_broken` but for the version side.
+    /// Doesn't touch the parent File row — only the version metadata.
+    pub prune_orphan_versions: bool,
 }
 
 /// Check on server startup whether a migration is in progress. Returns an
@@ -256,6 +260,8 @@ pub async fn run_migration(
     let mut failed: Vec<(ObjectId, String)> = Vec::new();
     let started = std::time::Instant::now();
 
+    let versions_coll = db.collection::<FileVersion>("file_versions");
+
     for (idx, file) in files.iter().enumerate() {
         let progress_prefix = format!("[{}/{}]", idx + 1, files.len());
         if file.storage_id == to_id {
@@ -263,7 +269,17 @@ pub async fn run_migration(
             continue;
         }
 
-        match migrate_one(&from, &to, file, verify).await {
+        // Pull the file's versions up front so migrate_one can copy them
+        // alongside the active blob. Empty for files without history.
+        let mut versions_cursor = versions_coll
+            .find(doc! { "file_id": file.id })
+            .await?;
+        let mut file_versions = Vec::new();
+        while let Some(v) = versions_cursor.try_next().await? {
+            file_versions.push(v);
+        }
+
+        match migrate_one(&from, &to, file, &file_versions, verify).await {
             Ok(()) => {}
             Err(e) => {
                 eprintln!("{progress_prefix} FAILED {} ({}): {}", file.id, file.name, e);
@@ -303,10 +319,24 @@ pub async fn run_migration(
             if from.exists(&thumb).await.unwrap_or(false) {
                 let _ = from.delete(&thumb).await;
             }
+            // And the version archives.
+            for v in &file_versions {
+                if let Err(e) = from.delete(&v.storage_path).await {
+                    tracing::warn!(
+                        "delete-source version {} of {}: {e}",
+                        v.id,
+                        file.id
+                    );
+                }
+            }
         }
 
         copied_files += 1;
         copied_bytes += file.size_bytes.max(0) as u64;
+        copied_bytes += file_versions
+            .iter()
+            .map(|v| v.size_bytes.max(0) as u64)
+            .sum::<u64>();
         if idx % 10 == 0 || idx + 1 == files.len() {
             let elapsed = started.elapsed().as_secs_f64().max(0.001);
             println!(
@@ -340,6 +370,7 @@ async fn migrate_one(
     from: &Arc<dyn StorageBackend>,
     to: &Arc<dyn StorageBackend>,
     file: &File,
+    versions: &[FileVersion],
     verify: VerifyMode,
 ) -> std::result::Result<(), String> {
     let path = if let Some(trash) = &file.trash_path {
@@ -373,6 +404,33 @@ async fn migrate_one(
                 file.id,
                 e
             );
+        }
+    }
+
+    // Copy version archive blobs. Each FileVersion document references a
+    // blob on the same storage as the parent File. Without copying them
+    // here the FileVersion rows survive the pointer flip but their
+    // archive blobs go missing, leaving dangling references the rest of
+    // the system (backup, history viewer, restore) can't resolve.
+    for v in versions {
+        copy_blob(from, to, &v.storage_path, v.size_bytes.max(0) as u64)
+            .await
+            .map_err(|e| format!("version {}: {e}", v.id))?;
+        match verify {
+            VerifyMode::None => {}
+            VerifyMode::Size => {
+                verify_size(to, &v.storage_path, v.size_bytes.max(0) as u64)
+                    .await
+                    .map_err(|e| format!("version {}: {e}", v.id))?;
+            }
+            VerifyMode::Hash => {
+                verify_size(to, &v.storage_path, v.size_bytes.max(0) as u64)
+                    .await
+                    .map_err(|e| format!("version {}: {e}", v.id))?;
+                verify_hash(to, &v.storage_path, &v.checksum_sha256)
+                    .await
+                    .map_err(|e| format!("version {}: {e}", v.id))?;
+            }
         }
     }
 
@@ -614,7 +672,15 @@ pub async fn run_cleanup(args: CleanupArgs) -> Result<(), Box<dyn std::error::Er
     };
 
     let result =
-        run_cleanup_inner(&db, &backend, storage_id, args.dry_run, args.prune_broken).await;
+        run_cleanup_inner(
+        &db,
+        &backend,
+        storage_id,
+        args.dry_run,
+        args.prune_broken,
+        args.prune_orphan_versions,
+    )
+    .await;
 
     stop_heartbeat.notify_waiters();
     if let Some(h) = heartbeat_handle {
@@ -633,6 +699,7 @@ pub async fn run_cleanup_inner(
     storage_id: ObjectId,
     dry_run: bool,
     prune_broken: bool,
+    prune_orphan_versions: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Scan once and use it as the authoritative on-disk set. Used both to
     // identify orphan blobs (paths not in the keep-set) and — when
@@ -677,6 +744,52 @@ pub async fn run_cleanup_inner(
             "Note: {} File document(s) on this storage point at a missing blob. \
              Re-run with --prune-broken to delete them.",
             broken.len(),
+        );
+    }
+
+    // Build the version side of the keep-set in a single pass: every
+    // FileVersion belonging to a file on this storage. Without this, the
+    // version archive blobs look like orphans and would get nuked.
+    //
+    // While we're scanning, also flag versions whose blob is missing on
+    // this storage. Same idea as `broken` but for FileVersion.
+    let mut orphan_versions: Vec<(ObjectId, String)> = Vec::new();
+    // `find().projection()` with our typed File deserialiser would barf on
+    // the missing required fields the projection strips, so go through a
+    // plain Document.
+    let mut id_cursor = db
+        .collection::<bson::Document>("files")
+        .find(doc! { "storage_id": storage_id })
+        .projection(doc! { "_id": 1 })
+        .await?;
+    let mut live_file_ids: Vec<ObjectId> = Vec::new();
+    while let Some(doc) = id_cursor.try_next().await? {
+        if let Ok(id) = doc.get_object_id("_id") {
+            live_file_ids.push(id);
+        }
+    }
+    if !live_file_ids.is_empty() {
+        let mut vcursor = db
+            .collection::<FileVersion>("file_versions")
+            .find(doc! { "file_id": { "$in": &live_file_ids } })
+            .await?;
+        while let Some(v) = vcursor.try_next().await? {
+            // Always include the version blob in the keep-set, even if it
+            // turns out to be missing — we'd rather not auto-delete on the
+            // off-chance the path happens to be present (we wouldn't want
+            // to remove evidence of partial migration).
+            keep_blobs.insert(v.storage_path.clone());
+            if !on_disk.contains(&v.storage_path) {
+                orphan_versions.push((v.id, v.storage_path.clone()));
+            }
+        }
+    }
+
+    if !orphan_versions.is_empty() && !prune_orphan_versions {
+        println!(
+            "Note: {} file_version document(s) on this storage point at a missing blob. \
+             Re-run with --prune-orphan-versions to delete them.",
+            orphan_versions.len(),
         );
     }
 
@@ -729,6 +842,17 @@ pub async fn run_cleanup_inner(
                 println!("  ... and {} more broken record(s)", broken.len() - 50);
             }
         }
+        if prune_orphan_versions {
+            for (id, path) in orphan_versions.iter().take(50) {
+                println!("  would delete version: {id} (missing blob: {path})");
+            }
+            if orphan_versions.len() > 50 {
+                println!(
+                    "  ... and {} more orphan version(s)",
+                    orphan_versions.len() - 50
+                );
+            }
+        }
         println!("Dry run — re-run without --dry-run to delete.");
         return Ok(());
     }
@@ -761,10 +885,25 @@ pub async fn run_cleanup_inner(
         }
     }
 
+    let mut deleted_versions = 0u64;
+    if prune_orphan_versions && !orphan_versions.is_empty() {
+        let ids: Vec<ObjectId> = orphan_versions.iter().map(|(id, _)| *id).collect();
+        let res = db
+            .collection::<FileVersion>("file_versions")
+            .delete_many(doc! { "_id": { "$in": ids } })
+            .await?;
+        deleted_versions = res.deleted_count;
+    }
+
     println!(
-        "Deleted {deleted_blobs} orphan blob(s){}; {} failure(s).",
+        "Deleted {deleted_blobs} orphan blob(s){}{}; {} failure(s).",
         if prune_broken {
             format!(" and {deleted_records} broken File record(s)")
+        } else {
+            String::new()
+        },
+        if prune_orphan_versions {
+            format!(" and {deleted_versions} orphan FileVersion record(s)")
         } else {
             String::new()
         },
