@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
+use aws_sdk_s3::config::{
+    BehaviorVersion, Credentials, Region, RequestChecksumCalculation, ResponseChecksumValidation,
+};
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::head_object::HeadObjectError;
 use aws_sdk_s3::primitives::ByteStream;
@@ -29,11 +31,22 @@ impl S3Storage {
         let region = Region::new(region.unwrap_or("us-east-1").to_string());
         let creds = Credentials::new(access_key, secret_key, None, None, "uncloud-config");
 
+        // `WhenSupported` (the SDK default since v1.81) attaches an
+        // `x-amz-checksum-crc32` trailer to every PUT and switches the body
+        // to `aws-chunked` transfer encoding. MinIO supports the protocol but
+        // has a known buffering bug that adds ~30 s of latency per request,
+        // collapsing throughput from MB/s to KB/s. `WhenRequired` only sends
+        // the trailer when the operation explicitly demands it (none of ours
+        // do), restoring boto3-equivalent performance against MinIO. AWS S3
+        // is unaffected because this just opts back into the pre-1.81 wire
+        // format. See https://github.com/minio/minio/issues/19528.
         let mut conf = aws_sdk_s3::config::Builder::new()
             .behavior_version(BehaviorVersion::latest())
             .region(region)
             .credentials_provider(creds)
-            .force_path_style(true);
+            .force_path_style(true)
+            .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
+            .response_checksum_validation(ResponseChecksumValidation::WhenRequired);
 
         if !endpoint.is_empty() {
             conf = conf.endpoint_url(endpoint);
