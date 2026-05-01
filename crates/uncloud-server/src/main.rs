@@ -115,6 +115,85 @@ enum Command {
         #[arg(long)]
         prune_broken: bool,
     },
+    /// Backup operations against Restic-format repositories. See
+    /// `docs/backup.md` for the design and `config.yaml`'s `backup:` section
+    /// for target configuration.
+    Backup {
+        #[command(subcommand)]
+        cmd: BackupCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum BackupCmd {
+    /// Initialise a new repository for the given target.
+    Init {
+        #[arg(long)]
+        target: String,
+    },
+    /// Create a snapshot. Without `--target`, runs sequentially against every
+    /// configured target.
+    Create {
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        /// Extra snapshot tag (in addition to `host:`, `app:`, `uncloud:`).
+        #[arg(long)]
+        tag: Option<String>,
+        /// Clear a stale backup lock left by a crashed run.
+        #[arg(long)]
+        force_unlock: bool,
+    },
+    /// List snapshots in the given target (or all configured targets).
+    List {
+        #[arg(long)]
+        target: Option<String>,
+    },
+    /// Verify repository integrity.
+    Check {
+        #[arg(long)]
+        target: Option<String>,
+        /// Re-read every chunk to detect bitrot. Slow but thorough.
+        #[arg(long)]
+        read_data: bool,
+    },
+    /// Apply the configured retention policy to the repository.
+    Prune {
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Restore a snapshot in place. Server must be stopped.
+    Restore {
+        #[arg(long)]
+        target: String,
+        /// Snapshot id (or `latest`).
+        #[arg(long, default_value = "latest")]
+        snapshot: String,
+        /// Override the destination's default storage for unmatched
+        /// snapshot storages.
+        #[arg(long)]
+        default_storage: Option<String>,
+        /// Conflict policy: `abort` (refuse if anything would collide) or
+        /// `overwrite` (clobber existing data; pair with
+        /// `--yes-i-know-this-is-destructive`).
+        #[arg(long, default_value = "abort")]
+        conflict_policy: String,
+        /// Required when `--conflict-policy=overwrite`.
+        #[arg(long)]
+        yes_i_know_this_is_destructive: bool,
+        /// Plan only — print the storage remap and counts and exit.
+        #[arg(long)]
+        dry_run: bool,
+        /// Acknowledge the printed storage-remap plan and proceed.
+        #[arg(long)]
+        yes: bool,
+        /// Clear a stale backup lock.
+        #[arg(long)]
+        force_unlock: bool,
+    },
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────
@@ -163,6 +242,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 dry_run,
                 force_unlock,
                 prune_broken,
+            })
+            .await
+        }
+        Some(Command::Backup { cmd }) => dispatch_backup(cmd).await,
+    }
+}
+
+async fn dispatch_backup(cmd: BackupCmd) -> Result<(), Box<dyn std::error::Error>> {
+    use uncloud_server::backup;
+    match cmd {
+        BackupCmd::Init { target } => backup::run_init(target).await,
+        BackupCmd::Create {
+            target,
+            dry_run,
+            tag,
+            force_unlock,
+        } => {
+            backup::run_create(backup::CreateArgs {
+                target,
+                dry_run,
+                tag,
+                force_unlock,
+            })
+            .await
+        }
+        BackupCmd::List { target } => backup::run_list(target).await,
+        BackupCmd::Check { target, read_data } => backup::run_check(target, read_data).await,
+        BackupCmd::Prune { target, dry_run } => backup::run_prune(target, dry_run).await,
+        BackupCmd::Restore {
+            target,
+            snapshot,
+            default_storage,
+            conflict_policy,
+            yes_i_know_this_is_destructive,
+            dry_run,
+            yes,
+            force_unlock,
+        } => {
+            let conflict_policy = conflict_policy.parse::<backup::ConflictPolicy>()?;
+            backup::run_restore(backup::RestoreArgs {
+                target,
+                snapshot,
+                default_storage,
+                conflict_policy,
+                yes_i_know_this_is_destructive,
+                dry_run,
+                yes,
+                force_unlock,
             })
             .await
         }
