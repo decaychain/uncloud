@@ -183,6 +183,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/tasks/labels/{id}", put(tasks::update_label).delete(tasks::delete_label))
         .route("/tasks/{id}", get(task_items::get_task).put(task_items::update_task).delete(task_items::delete_task))
         .route("/tasks/{id}/status", put(task_items::update_task_status))
+        .route("/tasks/{id}/completion-history", delete(task_items::clear_completion_history))
         .route("/tasks/{id}/subtasks", post(task_items::create_subtask))
         .route("/tasks/{id}/promote", post(task_items::promote_subtask))
         .route("/tasks/{id}/attachments", post(task_items::attach_files))

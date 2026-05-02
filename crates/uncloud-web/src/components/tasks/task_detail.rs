@@ -1154,6 +1154,51 @@ pub fn TaskDetail(
                     }
                 }
 
+                // Completion history (recurring tasks only — empty Vec
+                // for non-recurring, in which case we render nothing).
+                if !t.completion_history.is_empty() {
+                    {
+                        let history = t.completion_history.clone();
+                        let task_id_for_clear = t.id.clone();
+                        rsx! {
+                            div { class: "divider my-0" }
+                            div {
+                                div { class: "flex items-center justify-between",
+                                    label { class: "label",
+                                        span { class: "label-text text-xs font-semibold uppercase",
+                                            "Completion history"
+                                        }
+                                    }
+                                    button {
+                                        class: "btn btn-ghost btn-xs text-error/60 hover:text-error",
+                                        title: "Clear all recorded completions",
+                                        onclick: move |_| {
+                                            let tid = task_id_for_clear.clone();
+                                            spawn(async move {
+                                                if use_tasks::clear_completion_history(&tid).await.is_ok() {
+                                                    if let Some(t) = task.write().as_mut() {
+                                                        t.completion_history.clear();
+                                                    }
+                                                    on_updated.call(());
+                                                }
+                                            });
+                                        },
+                                        "Clear"
+                                    }
+                                }
+                                ul { class: "text-sm text-base-content/70 list-disc pl-5",
+                                    // Newest first — server pushes newest to the end.
+                                    for ts in history.iter().rev() {
+                                        li { class: "py-0.5",
+                                            {ts.get(..10).unwrap_or(ts.as_str())}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 div { class: "divider my-0" }
 
                 // Comments

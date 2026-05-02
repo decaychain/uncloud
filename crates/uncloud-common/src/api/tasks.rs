@@ -118,6 +118,12 @@ pub struct TaskResponse {
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
+    /// Per-task completion log surfaced for recurring tasks. Each entry is
+    /// the timestamp of one completion before the date flipped forward.
+    /// Empty for non-recurring tasks. RFC3339-encoded; newest entries
+    /// are pushed to the end.
+    #[serde(default)]
+    pub completion_history: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -161,6 +161,14 @@ pub struct Task {
     pub updated_at: DateTime<Utc>,
     #[serde(default, with = "crate::models::opt_dt")]
     pub completed_at: Option<DateTime<Utc>>,
+    /// Per-task log of completion timestamps. Populated only by recurring
+    /// tasks: each time the user marks one Done, the timestamp is appended
+    /// here, the due date advances, and the status flips back to Todo —
+    /// preserving subtasks and history without spawning a duplicate doc.
+    /// Cleared by the user via `DELETE /api/tasks/{id}/completion-history`.
+    /// Empty for non-recurring tasks (whose `completed_at` is sufficient).
+    #[serde(default, with = "crate::models::dt_vec")]
+    pub completion_history: Vec<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
