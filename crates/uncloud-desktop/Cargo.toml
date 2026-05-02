@@ -51,6 +51,12 @@ tauri-plugin-autostart = "2"
 # returns "no update" rather than failing, which is the right UX.
 tauri-plugin-updater = "2"
 
+# Linux: dlopen libdbus-1.so.3 at startup to call
+# dbus_threads_init_default() before GTK/EGL spawn threads. Tiny
+# crate, no real cost.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [[bin]]
 name = "uncloud-desktop"
 path = "src/main.rs"
