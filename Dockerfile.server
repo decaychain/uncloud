@@ -7,7 +7,9 @@ RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN rustup target add wasm32-unknown-unknown
-RUN cargo install dioxus-cli --locked
+# dx 0.7.7 (current latest on crates.io) refuses to build a project pinned
+# to dioxus 0.7.5 — pin the CLI to match the workspace's dioxus version.
+RUN cargo install dioxus-cli --version 0.7.5 --locked
 
 WORKDIR /app
 
@@ -39,7 +41,7 @@ COPY crates/uncloud-common/ crates/uncloud-common/
 RUN cd crates/uncloud-web && dx build --release
 
 # Stage 2: Build the server with embedded frontend
-FROM rust:1.88-bookworm AS builder
+FROM rust:1.91-bookworm AS builder
 
 RUN rustup target add x86_64-unknown-linux-musl && \
     apt-get update && apt-get install -y musl-tools && rm -rf /var/lib/apt/lists/*

@@ -209,26 +209,37 @@ jobs:
           sed -i "0,/^version = .*/s//version = \"$VERSION\"/" Cargo.toml
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
-      # Build the source tarball that the .spec consumes. Includes the
-      # entire repo (the .spec drives `dx build` and `cargo tauri build`
-      # itself, so all source must be present). `git archive` would skip
-      # the vendored tauri-plugin-native-audio submodule contents, so we
-      # use a plain tar instead.
+      # Build the source tarball that the .spec consumes.
+      #
+      # `git ls-files` enumerates tracked files (skipping .git, target,
+      # node_modules, vendor/rustic_core via .gitignore for-free). Tar
+      # reads the actual file contents from the working tree, so the
+      # version-bumped Cargo.toml from the previous step ends up in the
+      # tarball — `git archive` would have used the committed version
+      # instead.
+      #
+      # `--transform` rewrites every entry path to live under a
+      # version-prefixed directory, matching what `%setup -q` expects
+      # the tarball's top-level dir to be.
       - name: Create source tarball
         run: |
           rpmdev-setuptree
-          mkdir -p "uncloud-${VERSION}"
-          # Copy everything except the .git dir into a versioned subdir,
-          # then tarball it. Mirrors what COPR would receive from a
-          # %{name}-%{version}.tar.gz Source0.
-          rsync -a --exclude='.git' --exclude='target' --exclude='node_modules' \
-            --exclude='uncloud-${VERSION}' ./ "uncloud-${VERSION}/"
-          tar czf "$HOME/rpmbuild/SOURCES/uncloud-${VERSION}.tar.gz" "uncloud-${VERSION}"
-          rm -rf "uncloud-${VERSION}"
+          # RPM Version doesn't allow `-` (it's the NVR separator), so
+          # pre-release tags like `v0.1.0-alpha.22` map to RPM's tilde
+          # convention: `0.1.0~alpha.22`. Tilde sorts lower than the
+          # unsuffixed release — the correct ordering for a pre-release.
+          VERSION_RPM="${VERSION//-/~}"
+          echo "VERSION_RPM=$VERSION_RPM" >> "$GITHUB_ENV"
+          # The fedora:latest container's git treats the GH workspace as
+          # untrusted by default — relax that for `git ls-files`.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git ls-files | tar -czf "$HOME/rpmbuild/SOURCES/uncloud-${VERSION_RPM}.tar.gz" \
+            --transform "s,^,uncloud-${VERSION_RPM}/," \
+            -T -
 
       - name: Render .spec with version
         run: |
-          sed "s/@@VERSION@@/${VERSION}/g" packaging/fedora/uncloud.spec.in \
+          sed "s/@@VERSION@@/${VERSION_RPM}/g" packaging/fedora/uncloud.spec.in \
             > "$HOME/rpmbuild/SPECS/uncloud.spec"
 
       - name: Build SRPM
