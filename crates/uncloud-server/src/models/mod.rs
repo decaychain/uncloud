@@ -67,3 +67,31 @@ pub(crate) mod opt_dt {
         Ok(opt.map(|dt| dt.to_chrono()))
     }
 }
+
+/// Serde module for `Vec<chrono::DateTime<Utc>>` ↔ BSON array of Dates.
+/// `chrono_datetime_as_bson_datetime` is element-only; this module loops it
+/// over the vec so each entry is stored as a real BSON Date (queryable,
+/// sortable, no string parsing on read).
+///
+/// Usage: `#[serde(default, with = "crate::models::dt_vec")]`
+pub(crate) mod dt_vec {
+    use chrono::{DateTime, Utc};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(val: &[DateTime<Utc>], s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let bson_dts: Vec<bson::DateTime> =
+            val.iter().map(|dt| bson::DateTime::from_chrono(*dt)).collect();
+        bson_dts.serialize(s)
+    }
+
+    pub fn deserialize<'de, D>(d: D) -> Result<Vec<DateTime<Utc>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let vec: Vec<bson::DateTime> = Vec::deserialize(d)?;
+        Ok(vec.into_iter().map(|dt| dt.to_chrono()).collect())
+    }
+}

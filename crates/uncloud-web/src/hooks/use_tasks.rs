@@ -403,6 +403,20 @@ pub async fn delete_task(id: &str) -> Result<(), String> {
     }
 }
 
+
+pub async fn clear_completion_history(id: &str) -> Result<(), String> {
+    let response = api::delete(&format!("/tasks/{}/completion-history", id))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if response.ok() || response.status() == 204 {
+        Ok(())
+    } else {
+        Err("Failed to clear completion history".to_string())
+    }
+}
+
 pub async fn update_task_status(
     id: &str,
     req: &UpdateTaskStatusRequest,

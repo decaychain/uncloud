@@ -258,11 +258,40 @@ pub fn ListView(
 
     let has_unsectioned = top_level.iter().any(|t| t.section_id.is_none());
 
+    // IDs of Done tasks across the whole project — drives the global
+    // "Clear completed" button (mirror of the per-column Clear in the
+    // board view).
+    let done_task_ids: Vec<String> = all_tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Done)
+        .map(|t| t.id.clone())
+        .collect();
+    let done_count = done_task_ids.len();
+
     rsx! {
         // Label filter strip
         LabelFilterBar {
             available_labels: available_labels.read().clone(),
             selected: label_filter,
+        }
+
+        if done_count > 0 {
+            div { class: "flex items-center justify-end mb-1",
+                button {
+                    class: "btn btn-ghost btn-xs text-error/60 hover:text-error",
+                    title: "Delete every Done task in this project",
+                    onclick: move |_| {
+                        let ids = done_task_ids.clone();
+                        spawn(async move {
+                            for id in &ids {
+                                let _ = use_tasks::delete_task(id).await;
+                            }
+                            tasks.write().retain(|t| !ids.contains(&t.id));
+                        });
+                    },
+                    "Clear completed ({done_count})"
+                }
+            }
         }
 
         div { class: "space-y-3",

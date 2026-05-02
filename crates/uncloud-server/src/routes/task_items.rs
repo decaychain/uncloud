@@ -201,6 +201,11 @@ fn task_to_response(
         created_at: task.created_at.to_rfc3339(),
         updated_at: task.updated_at.to_rfc3339(),
         completed_at: task.completed_at.map(|dt| dt.to_rfc3339()),
+        completion_history: task
+            .completion_history
+            .iter()
+            .map(|dt| dt.to_rfc3339())
+            .collect(),
     }
 }
 
@@ -597,6 +602,7 @@ pub async fn create_task(
         created_at: now,
         updated_at: now,
         completed_at: None,
+        completion_history: Vec::new(),
     };
 
     let task_coll = state.db.collection::<Task>("tasks");
@@ -828,55 +834,56 @@ pub async fn update_task_status(
 
     let new_status = status_to_model(&body.status);
     let now = Utc::now();
-
-    let mut update_doc = doc! {
-        "status": bson::to_bson(&new_status).unwrap(),
-        "updated_at": bson::DateTime::from_chrono(now),
-    };
-
-    if let Some(ref note) = body.status_note {
-        update_doc.insert("status_note", note);
-    }
-
-    if new_status == TaskStatus::Done && task.status != TaskStatus::Done {
-        update_doc.insert("completed_at", bson::DateTime::from_chrono(now));
-    } else if new_status != TaskStatus::Done && task.status == TaskStatus::Done {
-        update_doc.insert("completed_at", bson::Bson::Null);
-    }
-
     let task_coll = state.db.collection::<Task>("tasks");
-    task_coll
-        .update_one(doc! { "_id": task_id }, doc! { "$set": &update_doc })
-        .await?;
 
-    // Recurring task: if completing and has recurrence_rule, spawn next instance
-    if new_status == TaskStatus::Done {
-        if let Some(ref rule) = task.recurrence_rule {
-            let current_due = task.due_date.unwrap_or_else(|| Utc::now().date_naive());
-            let next_due = compute_next_due_date(rule, current_due);
-            let next_task = Task {
-                id: ObjectId::new(),
-                project_id: task.project_id,
-                section_id: task.section_id,
-                parent_task_id: None,
-                title: task.title.clone(),
-                description: task.description.clone(),
-                status: TaskStatus::Todo,
-                status_note: None,
-                priority: task.priority.clone(),
-                assignee_id: task.assignee_id,
-                labels: task.labels.clone(),
-                due_date: Some(next_due),
-                recurrence_rule: task.recurrence_rule.clone(),
-                position: task.position,
-                attachments: Vec::new(),
-                created_by: user.id,
-                created_at: now,
-                updated_at: now,
-                completed_at: None,
-            };
-            task_coll.insert_one(&next_task).await?;
+    // A "Done" tick on a recurring task is treated as a completion *event*,
+    // not a state change: we log the completion timestamp, advance the due
+    // date by one period, and leave the task back at Todo. Subtasks,
+    // comments, attachments stay attached to the same doc, and toggling
+    // back from Done can't produce a duplicate because no new doc was
+    // ever spawned.
+    if new_status == TaskStatus::Done && task.recurrence_rule.is_some() {
+        let rule = task.recurrence_rule.as_ref().unwrap();
+        let current_due = task.due_date.unwrap_or_else(|| now.date_naive());
+        let next_due = compute_next_due_date(rule, current_due);
+
+        let mut set_doc = doc! {
+            "status": bson::to_bson(&TaskStatus::Todo).unwrap(),
+            "due_date": next_due.format("%Y-%m-%d").to_string(),
+            "updated_at": bson::DateTime::from_chrono(now),
+            "completed_at": bson::Bson::Null,
+        };
+        if let Some(ref note) = body.status_note {
+            set_doc.insert("status_note", note);
         }
+        task_coll
+            .update_one(
+                doc! { "_id": task_id },
+                doc! {
+                    "$set": set_doc,
+                    "$push": { "completion_history": bson::DateTime::from_chrono(now) },
+                },
+            )
+            .await?;
+    } else {
+        let mut update_doc = doc! {
+            "status": bson::to_bson(&new_status).unwrap(),
+            "updated_at": bson::DateTime::from_chrono(now),
+        };
+
+        if let Some(ref note) = body.status_note {
+            update_doc.insert("status_note", note);
+        }
+
+        if new_status == TaskStatus::Done && task.status != TaskStatus::Done {
+            update_doc.insert("completed_at", bson::DateTime::from_chrono(now));
+        } else if new_status != TaskStatus::Done && task.status == TaskStatus::Done {
+            update_doc.insert("completed_at", bson::Bson::Null);
+        }
+
+        task_coll
+            .update_one(doc! { "_id": task_id }, doc! { "$set": &update_doc })
+            .await?;
     }
 
     // Re-fetch
@@ -902,6 +909,44 @@ pub async fn update_task_status(
         .await;
 
     Ok(Json(task_to_response(&updated, sc, sdc, cc)))
+}
+
+/// `DELETE /tasks/{id}/completion-history`
+///
+/// Drops the per-task completion log on a recurring task. Used by the
+/// "Clear" button next to the history list in the task details panel.
+/// Doesn't touch status, due_date, or any other field — purely deletes
+/// the recorded timestamps.
+pub async fn clear_completion_history(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    let task_id =
+        ObjectId::parse_str(&id).map_err(|_| AppError::BadRequest("Invalid ID".into()))?;
+    let (task, _project, perm) = verify_task_access(&state, task_id, user.id).await?;
+    require_editor(&perm)?;
+
+    let task_coll = state.db.collection::<Task>("tasks");
+    let empty: bson::Array = bson::Array::new();
+    task_coll
+        .update_one(
+            doc! { "_id": task_id },
+            doc! {
+                "$set": {
+                    "completion_history": empty,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }
+            },
+        )
+        .await?;
+
+    state
+        .events
+        .emit_task_changed(&state.db, task.project_id, Some(task_id))
+        .await;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `PUT /projects/{id}/tasks/reorder`
@@ -1024,6 +1069,7 @@ pub async fn create_subtask(
         created_at: now,
         updated_at: now,
         completed_at: None,
+        completion_history: Vec::new(),
     };
 
     task_coll.insert_one(&task).await?;
