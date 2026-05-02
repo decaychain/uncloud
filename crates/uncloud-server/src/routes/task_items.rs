@@ -865,6 +865,24 @@ pub async fn update_task_status(
                 },
             )
             .await?;
+
+        // Also reset every subtask of this recurring task back to Todo.
+        // Conceptually this is a fresh occurrence of the parent — keeping
+        // the subtasks marked Done from the previous round would defeat
+        // the point. We $set across the whole subtree in one update_many
+        // to avoid N round-trips.
+        task_coll
+            .update_many(
+                doc! { "parent_task_id": task_id },
+                doc! {
+                    "$set": {
+                        "status": bson::to_bson(&TaskStatus::Todo).unwrap(),
+                        "completed_at": bson::Bson::Null,
+                        "updated_at": bson::DateTime::from_chrono(now),
+                    }
+                },
+            )
+            .await?;
     } else {
         let mut update_doc = doc! {
             "status": bson::to_bson(&new_status).unwrap(),

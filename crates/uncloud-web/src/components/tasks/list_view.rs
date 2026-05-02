@@ -919,10 +919,18 @@ fn render_task_row(
                                 status: new_status,
                                 status_note: None,
                             };
+                            // Recurring completion can rewrite *several* docs
+                            // server-side (the task itself flips date, every
+                            // subtask resets to Todo). Patching the row
+                            // locally would only catch the parent — refetch
+                            // the whole list so the subtree updates with it.
+                            // The SSE TaskChanged refetch normally covers
+                            // this, but the explicit fetch removes any race.
                             if let Ok(updated) = use_tasks::update_task_status(&tid, &req).await {
-                                let mut tw = tasks.write();
-                                if let Some(t) = tw.iter_mut().find(|t| t.id == updated.id) {
-                                    *t = updated;
+                                if let Ok(all) =
+                                    use_tasks::list_all_tasks(&updated.project_id).await
+                                {
+                                    tasks.set(all);
                                 }
                             }
                             // Re-fetch parent to update subtask counters
