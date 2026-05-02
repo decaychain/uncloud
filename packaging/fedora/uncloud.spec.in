@@ -51,9 +51,19 @@ cargo install dioxus-cli --version 0.7.5 --root %{_builddir}/%{name}-%{version}/
 export PATH="%{_builddir}/%{name}-%{version}/cargo-tools/bin:$PATH"
 
 # Build the web frontend bundle that the desktop binary serves locally.
+#
+# Fedora's RPM build environment poisons RUSTFLAGS with
+# `-Clink-arg=-specs=/usr/lib/rpm/redhat/redhat-package-notes`, which is
+# fine for the native GCC linker but lld (used for wasm32) chokes on
+# it: `lld: error: unknown argument: -specs=`. A subshell `unset`
+# strips those flags only for the wasm build — the subsequent native
+# `cargo build` of uncloud-desktop still gets them.
 pushd crates/uncloud-web
 npm ci --no-audit --no-fund
-dx build --release
+(
+    unset RUSTFLAGS CARGO_BUILD_RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+    dx build --release
+)
 popd
 
 # Copy the bundle into the location the desktop binary embeds.
