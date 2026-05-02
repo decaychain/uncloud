@@ -151,6 +151,12 @@ pub fn ListView(
     let mut drag_task_id: Signal<Option<String>> = use_signal(|| None);
     let mut drop_section_id: Signal<Option<String>> = use_signal(|| None);
 
+    // Task IDs whose due-date label should briefly highlight after the
+    // server confirms a status update — the visible signal that
+    // "completing" a recurring task did something useful (it advanced the
+    // due date). Entries are removed ~1s after insertion.
+    let flashing_dates: Signal<HashSet<String>> = use_signal(HashSet::new);
+
     // Document-level safety net for drags ending outside a section's hit
     // box. Window listeners fire after local handlers have bubbled, so a
     // drop committed by the section's onpointerup still wins; this only
@@ -494,6 +500,7 @@ pub fn ListView(
                                                         detail_task_id,
                                                         drag_task_id,
                                                         expanded_parents,
+                                                        flashing_dates,
                                                     )
                                                 }
                                             }
@@ -636,6 +643,7 @@ pub fn ListView(
                                                 detail_task_id,
                                                 drag_task_id,
                                                 expanded_parents,
+                                                        flashing_dates,
                                             )
                                         }
                                     }
@@ -791,6 +799,7 @@ fn render_task_row(
     mut detail_task_id: Signal<Option<String>>,
     mut drag_task_id: Signal<Option<String>>,
     mut expanded_parents: Signal<HashSet<String>>,
+    mut flashing_dates: Signal<HashSet<String>>,
 ) -> Element {
     let task_id = task.id.clone();
     let task_id_check = task.id.clone();
@@ -902,15 +911,21 @@ fn render_task_row(
                     div { class: "w-5 shrink-0" }
                 }
 
-                // Checkbox
+                // Checkbox. Driven entirely from the `checked` prop — we
+                // `prevent_default()` in onclick so the browser doesn't
+                // optimistically toggle the visual state. Otherwise a
+                // recurring completion (which flips the task back to Todo
+                // server-side) would leave the checkbox stuck checked
+                // because the post-update prop value (`is_done = false`)
+                // matches the pre-update value, so Dioxus has no DOM diff
+                // to apply and the browser-toggled state lingers.
                 input {
                     class: "checkbox checkbox-sm",
                     r#type: "checkbox",
                     checked: is_done,
                     onclick: move |e| {
                         e.stop_propagation();
-                    },
-                    onchange: move |_| {
+                        e.prevent_default();
                         let tid = task_id_check.clone();
                         let pid = parent_id_check.clone();
                         let new_status = if is_done { TaskStatus::Todo } else { TaskStatus::Done };
@@ -927,11 +942,21 @@ fn render_task_row(
                             // The SSE TaskChanged refetch normally covers
                             // this, but the explicit fetch removes any race.
                             if let Ok(updated) = use_tasks::update_task_status(&tid, &req).await {
+                                let updated_id = updated.id.clone();
                                 if let Ok(all) =
                                     use_tasks::list_all_tasks(&updated.project_id).await
                                 {
                                     tasks.set(all);
                                 }
+                                // Briefly highlight the updated task's date
+                                // label so a recurring completion (whose
+                                // only visible change is `due_date`) is
+                                // unmissable.
+                                flashing_dates.write().insert(updated_id.clone());
+                                spawn(async move {
+                                    gloo_timers::future::TimeoutFuture::new(1200).await;
+                                    flashing_dates.write().remove(&updated_id);
+                                });
                             }
                             // Re-fetch parent to update subtask counters
                             if let Some(parent_id) = pid {
@@ -991,12 +1016,20 @@ fn render_task_row(
                     }
                 }
 
-                // Due date
+                // Due date. Briefly highlights when this task's status was
+                // just toggled — without it a recurring completion looks
+                // like a no-op (status unchanged, only `due_date` moved).
                 if let Some(ref due) = due_date {
                     {
                         let (label, class) = due_date_display(due);
+                        let is_flashing = flashing_dates.read().contains(&task_id);
+                        let span_class = if is_flashing {
+                            format!("{class} shrink-0 hidden sm:inline bg-success/30 rounded px-1 transition-colors duration-700")
+                        } else {
+                            format!("{class} shrink-0 hidden sm:inline transition-colors duration-700")
+                        };
                         rsx! {
-                            span { class: "{class} shrink-0 hidden sm:inline", "{label}" }
+                            span { class: "{span_class}", "{label}" }
                         }
                     }
                 }
@@ -1060,6 +1093,7 @@ fn render_task_row(
                             detail_task_id,
                             drag_task_id,
                             expanded_parents,
+                                                        flashing_dates,
                         )
                     }
                 }
