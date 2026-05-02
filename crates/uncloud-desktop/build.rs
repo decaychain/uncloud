@@ -8,31 +8,46 @@ fn main() {
 }
 
 /// Emit a `fallback_key.rs` to `OUT_DIR` containing a 32-byte AES-256 key
-/// constant. The key comes from the `UNCLOUD_DESKTOP_FALLBACK_KEY` env var
-/// (hex-encoded, 64 chars) at build time. Release builds without it fail to
-/// compile; debug builds fall back to a well-known dev key (which only ever
+/// constant plus a `FALLBACK_KEY_PROVIDED` bool flag. The key comes from
+/// the `UNCLOUD_DESKTOP_FALLBACK_KEY` env var (hex-encoded, 64 chars).
+///
+/// When the env var is set (GitHub release builds with the repo secret),
+/// the key is embedded and `FALLBACK_KEY_PROVIDED = true`. The runtime
+/// uses it as the seed for the per-installation key file on first run
+/// — this keeps existing installs decryptable across upgrades.
+///
+/// When the env var is not set (COPR mock builds, anyone building from
+/// source), a sentinel of all-zeros is embedded and `FALLBACK_KEY_PROVIDED
+/// = false`. The runtime ignores the sentinel and generates a fresh
+/// random per-install key on first need, persisted to disk so subsequent
+/// upgrades reuse the same key (no re-auth on every release).
+///
+/// Debug builds with no env var get a well-known dev key (only ever
 /// touches the `uncloud-dev` config namespace).
 fn embed_fallback_key() {
     println!("cargo:rerun-if-env-changed=UNCLOUD_DESKTOP_FALLBACK_KEY");
 
-    let key = match env::var("UNCLOUD_DESKTOP_FALLBACK_KEY") {
-        Ok(hex) => parse_hex_key(&hex)
-            .unwrap_or_else(|e| panic!("UNCLOUD_DESKTOP_FALLBACK_KEY: {e}")),
+    let (key, provided) = match env::var("UNCLOUD_DESKTOP_FALLBACK_KEY") {
+        Ok(hex) => (
+            parse_hex_key(&hex).unwrap_or_else(|e| panic!("UNCLOUD_DESKTOP_FALLBACK_KEY: {e}")),
+            true,
+        ),
         Err(_) => {
             let profile = env::var("PROFILE").unwrap_or_default();
             if profile == "release" {
-                panic!(
-                    "UNCLOUD_DESKTOP_FALLBACK_KEY must be set for release builds \
-                     (hex-encoded 32 bytes / 64 chars). It is the encryption key \
-                     used to fall back to disk storage when the OS keyring is \
-                     unavailable."
-                );
+                ([0u8; 32], false)
+            } else {
+                (*b"uncloud-desktop-dev-fallback-key", true)
             }
-            *b"uncloud-desktop-dev-fallback-key"
         }
     };
 
-    let mut src = String::from("pub const FALLBACK_KEY: [u8; 32] = [");
+    let mut src = String::new();
+    src.push_str(&format!(
+        "pub const FALLBACK_KEY_PROVIDED: bool = {};\n",
+        provided
+    ));
+    src.push_str("pub const FALLBACK_KEY: [u8; 32] = [");
     for b in key.iter() {
         src.push_str(&format!("{}u8,", b));
     }

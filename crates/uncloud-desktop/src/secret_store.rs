@@ -118,6 +118,61 @@ fn keyring_delete(_account: &str) -> Result<(), String> {
 
 // ── Encrypted file fallback ──────────────────────────────────────────────────
 
+/// Filename for the per-installation AES-256 key. Sits alongside the
+/// encrypted credential blobs in the same secrets dir.
+const FALLBACK_KEY_FILE: &str = "fallback.key";
+
+/// Resolve the AES-256 key the encrypted-fallback files are written
+/// with. Per-installation, persisted on first need, stable across
+/// upgrades — without that, every release would invalidate user
+/// credentials and force re-auth.
+///
+/// Resolution order:
+///   1. If `<secrets_dir>/fallback.key` exists, read it. (Steady state.)
+///   2. Else if a build-time key was embedded (`FALLBACK_KEY_PROVIDED`),
+///      seed the file with that. This keeps existing GitHub-RPM installs
+///      decryptable on upgrade — they have credentials encrypted with
+///      the embedded key, so the file is initialized to that same value
+///      and decryption keeps working.
+///   3. Else (e.g. COPR build with no embedded key), generate fresh
+///      32 random bytes and persist them.
+///
+/// On Unix the file is mode 0600; the encrypted blobs sit in the same
+/// directory anyway, so an attacker with read access to one already has
+/// the other — the key file's protection is the user's home perms, not
+/// the file mode itself.
+fn resolve_fallback_key(dir: &Path) -> Result<[u8; 32], String> {
+    let path = dir.join(FALLBACK_KEY_FILE);
+
+    if let Ok(bytes) = std::fs::read(&path) {
+        if bytes.len() == 32 {
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&bytes);
+            return Ok(out);
+        }
+        // Corrupted/truncated key file — fall through and overwrite.
+    }
+
+    let key = if FALLBACK_KEY_PROVIDED {
+        FALLBACK_KEY
+    } else {
+        let mut k = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut k);
+        k
+    };
+
+    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {dir:?}: {e}"))?;
+    std::fs::write(&path, key).map_err(|e| format!("write key {path:?}: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    Ok(key)
+}
+
 fn fallback_path(dir: &Path, account: &str) -> PathBuf {
     // Hash the account into a short filename to avoid awkward characters
     // (`::`, `/`, `?`) on disk.
@@ -130,7 +185,8 @@ fn fallback_path(dir: &Path, account: &str) -> PathBuf {
 fn write_fallback_file(dir: &Path, account: &str, password: &str) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {dir:?}: {e}"))?;
 
-    let cipher = Aes256Gcm::new_from_slice(&FALLBACK_KEY)
+    let key = resolve_fallback_key(dir)?;
+    let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| format!("invalid key length: {e}"))?;
     let mut nonce_bytes = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -158,7 +214,8 @@ fn read_fallback_file(dir: &Path, account: &str) -> Result<String, String> {
         return Err("ciphertext too short".to_string());
     }
     let (nonce_bytes, ciphertext) = blob.split_at(12);
-    let cipher = Aes256Gcm::new_from_slice(&FALLBACK_KEY)
+    let key = resolve_fallback_key(dir)?;
+    let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| format!("invalid key length: {e}"))?;
     let plaintext = cipher
         .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
