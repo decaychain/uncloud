@@ -11,6 +11,11 @@ Source0:        %{name}-%{version}.tar.gz
 # Without it cargo and npm cannot fetch dependencies inside the build.
 BuildRequires:  rust
 BuildRequires:  cargo
+# Fedora's pre-packaged wasm target. Without it, `dx build` tries to
+# invoke `rustup target add wasm32-unknown-unknown` (since the project
+# is a WASM frontend), and rustup isn't installed in the COPR chroot —
+# Fedora's Rust comes as system packages, not via rustup.
+BuildRequires:  rust-std-static-wasm32-unknown-unknown
 BuildRequires:  gcc
 BuildRequires:  gcc-c++
 BuildRequires:  pkgconfig
