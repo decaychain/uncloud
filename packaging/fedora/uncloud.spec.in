@@ -16,6 +16,13 @@ BuildRequires:  cargo
 # is a WASM frontend), and rustup isn't installed in the COPR chroot —
 # Fedora's Rust comes as system packages, not via rustup.
 BuildRequires:  rust-std-static-wasm32-unknown-unknown
+# Link the native binary with LLD (matches what GitHub Actions uses
+# via Tauri's bundle pipeline). The default Fedora linker (BFD) was
+# producing a binary with a different DT_NEEDED ordering — libgio-2.0
+# loaded earlier, which on NVIDIA + Wayland triggered an init-order
+# race inside libnvidia-eglcore's libdbus usage. LLD's `--as-needed`
+# default also trims spurious deps to match GitHub's binary.
+BuildRequires:  lld
 BuildRequires:  gcc
 BuildRequires:  gcc-c++
 BuildRequires:  pkgconfig
@@ -74,6 +81,13 @@ cp -r target/dx/uncloud-web/release/web/public/* \
 # Build the desktop binary itself. We deliberately invoke `cargo build`
 # directly rather than `cargo tauri build`: Tauri's bundler exists to
 # produce native packages, which is exactly what this RPM already is.
+#
+# Append `-fuse-ld=lld` to RUSTFLAGS so the native binary is linked with
+# LLD instead of Fedora's default BFD. Matches the GitHub-Actions build,
+# whose binary works on NVIDIA + Wayland where the BFD-linked one
+# crashes due to a DT_NEEDED ordering difference (libgio-2.0 loaded
+# earlier under BFD, racing libnvidia-eglcore's libdbus init).
+export RUSTFLAGS="${RUSTFLAGS:-} -Clink-arg=-fuse-ld=lld"
 cargo build --release --bin uncloud-desktop
 
 %install
