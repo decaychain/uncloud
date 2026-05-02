@@ -14,6 +14,7 @@ BuildRequires:  cargo
 BuildRequires:  gcc
 BuildRequires:  gcc-c++
 BuildRequires:  pkgconfig
+BuildRequires:  pkgconfig(openssl)
 BuildRequires:  pkgconfig(webkit2gtk-4.1)
 BuildRequires:  pkgconfig(gtk+-3.0)
 BuildRequires:  pkgconfig(libsoup-3.0)
@@ -39,8 +40,9 @@ local folder against an Uncloud server).
 %build
 # dioxus-cli is not packaged for Fedora, so we cargo-install it into a
 # build-local prefix. Network access is required (and enabled on the
-# COPR project).
-cargo install dioxus-cli --root %{_builddir}/%{name}-%{version}/cargo-tools
+# COPR project). Pinned to 0.7.5: dx 0.7.7 (current latest on
+# crates.io) refuses to build a project pinned to dioxus 0.7.5.
+cargo install dioxus-cli --version 0.7.5 --root %{_builddir}/%{name}-%{version}/cargo-tools
 export PATH="%{_builddir}/%{name}-%{version}/cargo-tools/bin:$PATH"
 
 # Build the web frontend bundle that the desktop binary serves locally.
