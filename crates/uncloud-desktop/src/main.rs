@@ -5,6 +5,18 @@ fn main() {
     // driver/mesa configurations.
     std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
 
+    // Disable WebKit's DMA-BUF renderer on Linux. WebKit's
+    // `drmMainDevice()` path creates a Wayland GL context to query the
+    // DRM device, which on NVIDIA + Wayland routes through
+    // libnvidia-eglcore.so → libdbus. NVIDIA's bundled dbus message
+    // handling has an ABI mismatch with system libdbus that trips
+    // "dbus message changed byte order since iterator was created" and
+    // SIGABRTs the process. Skipping DMA-BUF lets WebKit pick a
+    // different rendering backend that doesn't cross into NVIDIA's
+    // dbus code.
+    #[cfg(target_os = "linux")]
+    std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+
     // Skip GTK's AT-SPI accessibility bridge. Tauri renders through
     // WebKit anyway, so the bridge wasn't doing useful screen-reader
     // work — and on Fedora 43 it consistently triggers the libdbus
