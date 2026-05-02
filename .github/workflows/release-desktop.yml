@@ -194,53 +194,69 @@ jobs:
   # get auto-updates for free via `dnf upgrade` / `dnf-automatic`.
   publish-fedora:
     runs-on: ubuntu-24.04
-    container:
-      image: fedora:latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Install build prerequisites
         run: |
-          dnf install -y rpm-build rpmdevtools copr-cli git tar
+          sudo apt-get update
+          sudo apt-get install -y rpm python3-pip
+          pip install --user copr-cli
 
-      - name: Sync workspace version from tag
+      # Splits the tag into RPM Version + Release components.
+      #   v0.1.0-alpha.23 → Version=0.1.0, Release=0.alpha.23%{?dist}
+      #   v0.2.0          → Version=0.2.0, Release=1%{?dist}
+      #
+      # This is the standard Fedora pre-release convention. Avoids the
+      # `~` (tilde) separator, which we tried first but which was being
+      # tilde-expanded somewhere in the toolchain. Versions still sort
+      # correctly: `Release: 0.alpha.23` < `Release: 1`, so a final
+      # 0.1.0-1 release will supersede any 0.1.0-0.alpha.* pre-release.
+      - name: Set RPM version + release from tag
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "0,/^version = .*/s//version = \"$VERSION\"/" Cargo.toml
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          VERSION_RAW="${GITHUB_REF_NAME#v}"
+          if [[ "$VERSION_RAW" == *-* ]]; then
+            RPM_VERSION="${VERSION_RAW%%-*}"
+            RPM_RELEASE="0.${VERSION_RAW#*-}"
+          else
+            RPM_VERSION="$VERSION_RAW"
+            RPM_RELEASE="1"
+          fi
+          echo "VERSION_RAW=$VERSION_RAW" >> "$GITHUB_ENV"
+          echo "RPM_VERSION=$RPM_VERSION" >> "$GITHUB_ENV"
+          echo "RPM_RELEASE=$RPM_RELEASE" >> "$GITHUB_ENV"
+          echo "Version=$RPM_VERSION  Release=$RPM_RELEASE"
 
-      # Build the source tarball that the .spec consumes.
-      #
-      # `git ls-files` enumerates tracked files (skipping .git, target,
-      # node_modules, vendor/rustic_core via .gitignore for-free). Tar
-      # reads the actual file contents from the working tree, so the
-      # version-bumped Cargo.toml from the previous step ends up in the
-      # tarball — `git archive` would have used the committed version
-      # instead.
-      #
-      # `--transform` rewrites every entry path to live under a
-      # version-prefixed directory, matching what `%setup -q` expects
-      # the tarball's top-level dir to be.
+      - name: Sync workspace Cargo.toml version
+        run: |
+          sed -i "0,/^version = .*/s//version = \"$VERSION_RAW\"/" Cargo.toml
+          grep '^version' Cargo.toml | head -1
+
+      # Stage the source tree under a versioned directory and tarball
+      # it. `cp -r` + `rm` on a copy is more predictable than wrestling
+      # with `tar --transform` regex and avoids `git ls-files` failing
+      # in environments where the workspace's git metadata isn't where
+      # git expects it.
       - name: Create source tarball
         run: |
-          rpmdev-setuptree
-          # RPM Version doesn't allow `-` (it's the NVR separator), so
-          # pre-release tags like `v0.1.0-alpha.22` map to RPM's tilde
-          # convention: `0.1.0~alpha.22`. Tilde sorts lower than the
-          # unsuffixed release — the correct ordering for a pre-release.
-          VERSION_RPM="${VERSION//-/~}"
-          echo "VERSION_RPM=$VERSION_RPM" >> "$GITHUB_ENV"
-          # The fedora:latest container's git treats the GH workspace as
-          # untrusted by default — relax that for `git ls-files`.
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git ls-files | tar -czf "$HOME/rpmbuild/SOURCES/uncloud-${VERSION_RPM}.tar.gz" \
-            --transform "s,^,uncloud-${VERSION_RPM}/," \
-            -T -
+          mkdir -p "$HOME/rpmbuild/SOURCES" "$HOME/rpmbuild/SPECS" "$HOME/rpmbuild/SRPMS"
+          STAGE=$(mktemp -d)
+          DIRNAME="uncloud-${RPM_VERSION}"
+          cp -r "$GITHUB_WORKSPACE" "$STAGE/$DIRNAME"
+          # Drop everything that shouldn't ship inside the SRPM.
+          rm -rf "$STAGE/$DIRNAME/.git" \
+                 "$STAGE/$DIRNAME/target" \
+                 "$STAGE/$DIRNAME/node_modules" \
+                 "$STAGE/$DIRNAME/vendor/rustic_core"
+          tar -C "$STAGE" -czf "$HOME/rpmbuild/SOURCES/$DIRNAME.tar.gz" "$DIRNAME"
+          rm -rf "$STAGE"
 
-      - name: Render .spec with version
+      - name: Render .spec with version + release
         run: |
-          sed "s/@@VERSION@@/${VERSION_RPM}/g" packaging/fedora/uncloud.spec.in \
-            > "$HOME/rpmbuild/SPECS/uncloud.spec"
+          sed -e "s/@@VERSION@@/${RPM_VERSION}/g" \
+              -e "s/@@RELEASE@@/${RPM_RELEASE}/g" \
+              packaging/fedora/uncloud.spec.in \
+              > "$HOME/rpmbuild/SPECS/uncloud.spec"
 
       - name: Build SRPM
         run: |
@@ -255,6 +271,7 @@ jobs:
 
       - name: Submit to COPR
         run: |
+          export PATH="$HOME/.local/bin:$PATH"
           SRPM=$(ls "$HOME/rpmbuild/SRPMS"/*.src.rpm | head -1)
           # --nowait: kick off the build and exit. COPR's web UI shows
           # progress; we don't want to tie up a GH Actions runner for
