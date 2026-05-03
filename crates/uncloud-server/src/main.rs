@@ -527,11 +527,18 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     // `RUST_LOG` still wins when set; config supplies the default otherwise.
     let config = Config::load_or_default();
 
+    // openssh-sftp-client and the openssh wrapper both emit INFO lines per
+    // SFTP request ("Requesting graceful shutdown of flush_task" etc.) — at
+    // SFTP-heavy workloads (rustic backup runs) they drown the actually
+    // useful logs. Pinned to WARN regardless of RUST_LOG / config.level so
+    // real failures still surface but the per-request chatter doesn't.
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| config.logging.level.clone().into())
+        .add_directive("openssh_sftp_client=warn".parse().unwrap())
+        .add_directive("openssh=warn".parse().unwrap());
+
     tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| config.logging.level.clone().into()),
-        )
+        .with(env_filter)
         .with(tracing_subscriber::fmt::layer())
         .init();
 

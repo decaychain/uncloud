@@ -30,6 +30,7 @@ use rustic_core::{
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::runtime::Handle;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::storage::StorageBackend;
 
@@ -76,6 +77,12 @@ pub struct UncloudSource {
     entries: Arc<Vec<SourceEntry>>,
     total_bytes: u64,
     failures: Arc<AtomicUsize>,
+    /// Caps simultaneous backend `read()` calls so SFTP servers with tight
+    /// per-session handle limits (Hetzner Storage Box etc.) don't reject
+    /// opens once rayon's archiver reaches full parallelism. Each
+    /// `UncloudOpen::open()` for a backend entry acquires one permit and
+    /// holds it until the resulting `Read` is dropped.
+    concurrency: Arc<Semaphore>,
 }
 
 #[derive(Clone, Debug)]
@@ -107,6 +114,7 @@ impl UncloudSource {
         handle: Handle,
         statics: Vec<StaticEntry>,
         files: Vec<FileEntry>,
+        max_concurrent_reads: usize,
     ) -> Self {
         let mut entries: Vec<SourceEntry> = Vec::with_capacity(statics.len() + files.len());
         entries.extend(statics.into_iter().map(SourceEntry::Static));
@@ -119,6 +127,7 @@ impl UncloudSource {
             entries: Arc::new(entries),
             total_bytes,
             failures: Arc::new(AtomicUsize::new(0)),
+            concurrency: Arc::new(Semaphore::new(max_concurrent_reads.max(1))),
         }
     }
 
@@ -142,6 +151,7 @@ impl ReadSource for UncloudSource {
             handle: self.handle.clone(),
             inner: self.entries.clone(),
             failures: self.failures.clone(),
+            concurrency: self.concurrency.clone(),
             idx: 0,
         }
     }
@@ -151,6 +161,7 @@ pub struct UncloudIter {
     handle: Handle,
     inner: Arc<Vec<SourceEntry>>,
     failures: Arc<AtomicUsize>,
+    concurrency: Arc<Semaphore>,
     idx: usize,
 }
 
@@ -160,13 +171,14 @@ impl Iterator for UncloudIter {
     fn next(&mut self) -> Option<Self::Item> {
         let entry = self.inner.get(self.idx)?;
         self.idx += 1;
-        Some(make_entry(&self.handle, &self.failures, entry.clone()))
+        Some(make_entry(&self.handle, &self.failures, &self.concurrency, entry.clone()))
     }
 }
 
 fn make_entry(
     handle: &Handle,
     failures: &Arc<AtomicUsize>,
+    concurrency: &Arc<Semaphore>,
     entry: SourceEntry,
 ) -> RusticResult<ReadSourceEntry<UncloudOpen>> {
     let path = match &entry {
@@ -189,11 +201,13 @@ fn make_entry(
         SourceEntry::Static(s) => UncloudOpen {
             handle: handle.clone(),
             failures: failures.clone(),
+            concurrency: concurrency.clone(),
             kind: OpenKind::Local(s.local_path),
         },
         SourceEntry::File(f) => UncloudOpen {
             handle: handle.clone(),
             failures: failures.clone(),
+            concurrency: concurrency.clone(),
             kind: OpenKind::Backend {
                 backend: f.backend,
                 storage_path: f.storage_path,
@@ -210,6 +224,7 @@ fn make_entry(
 pub struct UncloudOpen {
     handle: Handle,
     failures: Arc<AtomicUsize>,
+    concurrency: Arc<Semaphore>,
     kind: OpenKind,
 }
 
@@ -242,13 +257,23 @@ impl ReadSourceOpen for UncloudOpen {
                 backend,
                 storage_path,
             } => {
-                let async_reader = self
+                // Acquire a permit before the backend.read() so concurrent
+                // open file handles against the source backend are capped.
+                // Held for the lifetime of the resulting reader.
+                let concurrency = self.concurrency.clone();
+                let storage_path_for_err = storage_path.clone();
+                let (permit, async_reader) = self
                     .handle
-                    .block_on(async {
-                        backend
+                    .block_on(async move {
+                        let permit = concurrency
+                            .acquire_owned()
+                            .await
+                            .map_err(|e| std::io::Error::other(format!("semaphore closed: {e}")))?;
+                        let reader = backend
                             .read(&storage_path)
                             .await
-                            .map_err(|e| std::io::Error::other(format!("{e}")))
+                            .map_err(|e| std::io::Error::other(format!("{e}")))?;
+                        Ok::<_, std::io::Error>((permit, reader))
                     })
                     .map_err(|e| {
                         self.failures.fetch_add(1, Ordering::Relaxed);
@@ -257,11 +282,14 @@ impl ReadSourceOpen for UncloudOpen {
                             "Failed to open backup blob `{path}`",
                             e,
                         )
-                        .attach_context("path", storage_path.clone())
+                        .attach_context("path", storage_path_for_err)
                     })?;
-                Ok(Box::new(AsyncReadBridge {
-                    handle: self.handle,
-                    reader: async_reader,
+                Ok(Box::new(GatedReader {
+                    _permit: permit,
+                    inner: AsyncReadBridge {
+                        handle: self.handle,
+                        reader: async_reader,
+                    },
                 }))
             }
         }
@@ -283,5 +311,19 @@ impl Read for AsyncReadBridge {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let reader = self.reader.as_mut();
         self.handle.block_on(async { reader.get_mut().read(buf).await })
+    }
+}
+
+/// `AsyncReadBridge` plus a permit that's released when the reader is
+/// dropped. Used for backend-source reads so the source-storage handle
+/// cap is enforced for the entire read lifetime, not just the open call.
+struct GatedReader {
+    _permit: OwnedSemaphorePermit,
+    inner: AsyncReadBridge,
+}
+
+impl Read for GatedReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
     }
 }

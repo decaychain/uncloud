@@ -29,6 +29,13 @@ pub struct BackupOptions {
     /// Local directory rustic uses for chunked uploads, packfile staging, etc.
     /// `None` falls back to the OS temp dir.
     pub staging_dir: Option<PathBuf>,
+    /// Cap on simultaneous open `read()` calls against the source storage
+    /// backend. Each in-flight reader holds one connection / file handle on
+    /// the backend. SFTP servers (Hetzner Storage Box, OpenSSH stock config)
+    /// limit concurrent SFTP handles per session and the archiver hits that
+    /// cap fast under rayon's full parallelism. `None` falls back to 8 —
+    /// conservative enough for shared-tenant SFTP, plenty for S3/local.
+    pub max_concurrent_source_reads: Option<usize>,
 }
 
 impl Default for BackupOptions {
@@ -38,6 +45,7 @@ impl Default for BackupOptions {
             include_trash: false,
             include_thumbnails: false,
             staging_dir: None,
+            max_concurrent_source_reads: None,
         }
     }
 }
