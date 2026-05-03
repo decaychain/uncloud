@@ -210,7 +210,12 @@ async fn run_one_inner(
     let mut all_files = files;
     all_files.extend(versions);
     let total_blobs = all_files.len();
-    let source = UncloudSource::new(handle, statics, all_files);
+    let max_concurrent = config
+        .backup
+        .options
+        .max_concurrent_source_reads
+        .unwrap_or(8);
+    let source = UncloudSource::new(handle, statics, all_files, max_concurrent);
     let failure_counter = source.failures();
 
     let host = std::env::var("HOSTNAME")

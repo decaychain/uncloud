@@ -6,6 +6,8 @@
 //! exactly one file. The fork is pre-1.0 and likely to churn; centralising
 //! the bridge here means a version bump touches one module instead of many.
 
+use std::path::Path;
+
 use rustic_backend::BackendOptions;
 use rustic_core::{
     ConfigOptions, Credentials, KeyOptions, OpenStatus, Repository, RepositoryOptions,
@@ -30,6 +32,16 @@ fn build_backends(target: &BackupTarget) -> Result<rustic_core::RepositoryBacken
     let mut options = expanded.options;
     options.extend(user_credentials);
 
+    // Pre-flight check the SFTP key file before handing off to OpenDAL.
+    // Without this, an unreadable / world-readable / missing key just
+    // makes ssh hang on auth (BatchMode is on) and surfaces as an opaque
+    // "connection request: timeout" some seconds later.
+    if expanded.uri == "opendal:sftp" {
+        if let Some(key_path) = options.get("key") {
+            validate_ssh_key_file(&target.name, key_path)?;
+        }
+    }
+
     let mut be_opts = BackendOptions::default();
     be_opts.repository = Some(expanded.uri);
     be_opts.options = options;
@@ -40,6 +52,48 @@ fn build_backends(target: &BackupTarget) -> Result<rustic_core::RepositoryBacken
             target.name
         ))
     })
+}
+
+/// Validate an SSH private key file before letting OpenDAL hand it to
+/// `ssh`. Checks: the path exists and is a regular file; the running
+/// process can read it; on Unix the mode bits forbid group/other access
+/// (mirrors what OpenSSH itself enforces — `ssh` rejects keys with
+/// `mode & 0o077 != 0` and the resulting auth failure under
+/// `BatchMode=yes` looks like a hang).
+fn validate_ssh_key_file(target_name: &str, key_path: &str) -> Result<()> {
+    let path = Path::new(key_path);
+    let meta = std::fs::metadata(path).map_err(|e| {
+        AppError::Internal(format!(
+            "backup target {target_name:?}: SSH key file {key_path:?}: {e}",
+        ))
+    })?;
+    if !meta.is_file() {
+        return Err(AppError::Internal(format!(
+            "backup target {target_name:?}: SSH key {key_path:?} is not a regular file",
+        )));
+    }
+    // Open-for-read so a permissions issue surfaces with the actual OS error.
+    std::fs::File::open(path).map_err(|e| {
+        AppError::Internal(format!(
+            "backup target {target_name:?}: SSH key {key_path:?} not readable by current user: {e}",
+        ))
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode();
+        if mode & 0o077 != 0 {
+            return Err(AppError::Internal(format!(
+                "backup target {target_name:?}: SSH key {key_path:?} has mode {:o} \
+                 (group/other readable). OpenSSH refuses keys with permissions \
+                 wider than 0600. Run: chmod 600 {key_path:?}",
+                mode & 0o777,
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 fn build_repo_options(_target: &BackupTarget) -> RepositoryOptions {

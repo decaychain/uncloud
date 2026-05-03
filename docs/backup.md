@@ -270,6 +270,13 @@ backup:
     include_trash: false
     include_thumbnails: false
     staging_dir: /var/lib/uncloud/backup-staging   # default: $TMPDIR
+    # Cap simultaneous open `read()` calls against the source storage
+    # backend. Each in-flight reader holds one connection / file handle.
+    # SFTP servers (Hetzner Storage Box, OpenSSH stock config) limit
+    # concurrent SFTP handles per session and rayon's full archiver
+    # parallelism hits that cap fast. Default 8 — conservative for
+    # shared-tenant SFTP, plenty for S3 / local.
+    # max_concurrent_source_reads: 8
 
   targets:
     - name: nas
@@ -277,8 +284,14 @@ backup:
       #   sftp://[user@]host[:port][/path]   — URL style, custom port
       #   sftp:[user@]host:/path             — legacy, default port 22
       # Auth is key-based (OpenDAL's SFTP service has no password
-      # field). Point `credentials.key` at a private key file; the
-      # public half lives on the server in `~/.ssh/authorized_keys`.
+      # field — it wraps the system `ssh` binary with `BatchMode=yes`,
+      # which forbids any interactive prompt). Point `credentials.key`
+      # at a *private* key file; the public half lives on the server in
+      # `~/.ssh/authorized_keys`. Mode must be 0400 or 0600 (no group
+      # / other access) and the file must be readable by whichever
+      # user runs the backup — uncloud now pre-checks both and errors
+      # clearly if either is wrong, so you don't end up debugging an
+      # opaque "connection request: timeout" from the openssh wrapper.
       repo: "sftp://backup@nas.lan:2222/srv/backups/uncloud"
       # password sources for the snapshot ENCRYPTION key (Restic
       # crypto, separate from the SSH key) — first present wins
