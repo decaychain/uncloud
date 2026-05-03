@@ -344,6 +344,46 @@ impl SftpStorage {
         Ok(Box::pin(file.take(length)))
     }
 
+    async fn write_once(&self, path: &str, data: &[u8]) -> Result<()> {
+        let full = self.resolve(path);
+        let s = self.session().await?;
+        self.ensure_parent_dir(&s.sftp, &full).await?;
+        let mut file = s
+            .create(full)
+            .await
+            .map_err(|e| AppError::Storage(format!("SFTP create failed: {e}")))?;
+        file.write_all(data)
+            .await
+            .map_err(|e| AppError::Storage(format!("SFTP write failed: {e}")))?;
+        file.shutdown()
+            .await
+            .map_err(|e| AppError::Storage(format!("SFTP close failed: {e}")))?;
+        Ok(())
+    }
+
+    async fn rename_once(&self, from: &str, to: &str) -> Result<()> {
+        let from_full = self.resolve(from);
+        let to_full = self.resolve(to);
+        let s = self.session().await?;
+        self.ensure_parent_dir(&s.sftp, &to_full).await?;
+        s.sftp.rename(from_full, to_full)
+            .await
+            .map_err(|e| AppError::Storage(format!("SFTP rename failed: {e}")))?;
+        Ok(())
+    }
+
+    async fn delete_once(&self, path: &str) -> Result<()> {
+        let full = self.resolve(path);
+        let s = self.session().await?;
+        match s.sftp.remove_file(full).await {
+            Ok(()) => Ok(()),
+            // Treat "not found" as success — matches LocalStorage's behaviour
+            // where unlink-on-missing silently no-ops.
+            Err(e) if is_no_such_file(&e) => Ok(()),
+            Err(e) => Err(AppError::Storage(format!("SFTP delete failed: {e}"))),
+        }
+    }
+
     async fn exists_once(&self, path: &str) -> Result<bool> {
         let full = self.resolve(path);
         let s = self.session().await?;
@@ -449,22 +489,19 @@ impl StorageBackend for SftpStorage {
     }
 
     async fn write(&self, path: &str, data: &[u8]) -> Result<()> {
-        let full = self.resolve(path);
-        let s = self.session().await?;
-        self.ensure_parent_dir(&s.sftp, &full).await?;
-        let mut file = s
-            .create(full)
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP create failed: {e}")))?;
-        file.write_all(data)
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP write failed: {e}")))?;
-        file.shutdown()
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP close failed: {e}")))?;
-        Ok(())
+        // Idempotent at the path level — re-issuing produces the same
+        // file contents whether the server saw zero, partial, or full
+        // data on the failed attempt. Caller owns the bytes; no stream
+        // consumption to worry about.
+        retry_idempotent(self, "sftp.write", || self.write_once(path, data)).await
     }
 
+    /// **Not retried.** The input `reader` is consumed by the first attempt;
+    /// re-issuing would either need a rewindable reader (`AsyncSeek`) or an
+    /// in-memory buffer (which kills the streaming win for large uploads),
+    /// or a callsite refactor to provide a `Fn() -> BoxedAsyncRead` that
+    /// produces a fresh reader per attempt. None of those are worth the
+    /// cost until upload reliability becomes a real problem in practice.
     async fn write_stream(
         &self,
         path: &str,
@@ -498,15 +535,10 @@ impl StorageBackend for SftpStorage {
     }
 
     async fn delete(&self, path: &str) -> Result<()> {
-        let full = self.resolve(path);
-        let s = self.session().await?;
-        match s.sftp.remove_file(full).await {
-            Ok(()) => Ok(()),
-            // Treat "not found" as success — matches LocalStorage's behaviour
-            // where unlink-on-missing silently no-ops.
-            Err(e) if is_no_such_file(&e) => Ok(()),
-            Err(e) => Err(AppError::Storage(format!("SFTP delete failed: {e}"))),
-        }
+        // Already idempotent — `is_no_such_file` is mapped to success, so a
+        // retried delete after a successful-but-lost-response first attempt
+        // sees "missing" and reports Ok.
+        retry_idempotent(self, "sftp.delete", || self.delete_once(path)).await
     }
 
     async fn exists(&self, path: &str) -> Result<bool> {
@@ -517,6 +549,12 @@ impl StorageBackend for SftpStorage {
         Ok(None)
     }
 
+    /// **Not retried** — `create_temp` / `append_temp` / `finalize_temp` /
+    /// `abort_temp` together implement the resumable-upload pattern. The
+    /// caller orchestrates them and already knows which step to repeat on
+    /// failure (typically `append_temp` continues from the last byte
+    /// successfully written). Adding implicit retry inside each step
+    /// would create double-retry semantics with the caller's own logic.
     async fn create_temp(&self) -> Result<String> {
         let name = format!("{}.tmp", Uuid::new_v4());
         let full = self.resolve(&format!(".tmp/{}", name));
@@ -566,14 +604,42 @@ impl StorageBackend for SftpStorage {
     }
 
     async fn rename(&self, from: &str, to: &str) -> Result<()> {
-        let from_full = self.resolve(from);
-        let to_full = self.resolve(to);
-        let s = self.session().await?;
-        self.ensure_parent_dir(&s.sftp, &to_full).await?;
-        s.sftp.rename(from_full, to_full)
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP rename failed: {e}")))?;
-        Ok(())
+        // Renames are *almost* idempotent — the catch is the second attempt
+        // sees `from` missing if the first attempt actually landed but the
+        // server's response was lost. Disambiguate by checking whether `to`
+        // exists: if it does and `from` doesn't, the rename succeeded last
+        // time and we should report Ok rather than chase a phantom failure.
+        let max = self.retry.effective_max_attempts();
+        let mut delay = self.retry.base_delay();
+        let max_delay = self.retry.max_delay();
+
+        for attempt in 1..=max {
+            match self.rename_once(from, to).await {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt < max => {
+                    // Possibly a successful-but-lost-response: check the
+                    // destination before assuming the rename failed.
+                    let to_exists = self.exists_once(to).await.unwrap_or(false);
+                    let from_exists = self.exists_once(from).await.unwrap_or(true);
+                    if to_exists && !from_exists {
+                        tracing::warn!(
+                            "sftp.rename: first attempt errored ({e}) but `{to}` exists \
+                             and `{from}` is gone — treating as successful previous attempt"
+                        );
+                        return Ok(());
+                    }
+                    tracing::warn!(
+                        "sftp.rename: attempt {attempt}/{max} failed: {e}; \
+                         reconnecting and retrying in {delay:?}"
+                    );
+                    self.invalidate_session().await;
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(max_delay);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!("loop returns from every iteration")
     }
 
     async fn archive_version(&self, current: &str, version: &str) -> Result<()> {

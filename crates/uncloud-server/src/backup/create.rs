@@ -215,7 +215,13 @@ async fn run_one_inner(
         .options
         .max_concurrent_source_reads
         .unwrap_or(8);
-    let source = UncloudSource::new(handle, statics, all_files, max_concurrent);
+    let source = UncloudSource::new(
+        handle,
+        statics,
+        all_files,
+        max_concurrent,
+        config.storage.retry.clone(),
+    );
     let failure_counter = source.failures();
 
     let host = std::env::var("HOSTNAME")
