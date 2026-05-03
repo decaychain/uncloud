@@ -1,0 +1,18 @@
+[package]
+name = "tauri-plugin-uncloud-biometric"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+license = "AGPL-3.0-or-later"
+description = "Android-only Tauri plugin: BiometricPrompt + Keystore-bound key for KeePass vault unlock"
+links = "tauri-plugin-uncloud-biometric"
+
+[lib]
+name = "tauri_plugin_uncloud_biometric"
+path = "src/lib.rs"
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

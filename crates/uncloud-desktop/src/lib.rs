@@ -1098,6 +1098,7 @@ pub fn run() {
     {
         builder = builder.plugin(tauri_plugin_android_fs::init());
         builder = builder.plugin(tauri_plugin_native_audio::init());
+        builder = builder.plugin(tauri_plugin_uncloud_biometric::init());
     }
 
     builder

@@ -19,6 +19,7 @@ tauri = { version = "2", features = ["tray-icon", "rustls-tls"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-android-fs = "28"
 tauri-plugin-native-audio = { path = "../../vendor/tauri-plugin-native-audio" }
+tauri-plugin-uncloud-biometric = { path = "../../vendor/tauri-plugin-uncloud-biometric" }
 dirs = "5"
 hostname = "0.4"
 serde.workspace = true
