@@ -1,27 +1,21 @@
 use std::collections::HashMap;
 
+use chrono::Duration;
 use dioxus::prelude::*;
+use gloo_timers::future::TimeoutFuture;
 use keepass::db::{Database, Entry, Group};
 use keepass::DatabaseKey;
 use uncloud_common::{FileResponse, FolderResponse};
 use crate::components::icons::{IconChevronRight, IconFingerprint, IconFolder, IconLock, IconLockOpen, IconX};
 use crate::hooks::{api, biometric, use_files};
-use crate::state::AuthState;
+use crate::state::{AuthState, VaultSession, VaultState};
+
+/// Idle TTL for the unlocked vault. Past this, the next mount of
+/// PasswordsPage (or a 30 s ticker while the page is open) clears the
+/// session and forces a fresh biometric prompt or master-password entry.
+const VAULT_IDLE_TTL_SECS: i64 = 5 * 60;
 
 // ── Vault state ────────────────────────────────────────────────────────────
-
-/// The in-memory decrypted vault.
-/// Wrapping in a struct so we can store it in a Signal.
-#[derive(Clone)]
-struct VaultState {
-    db: Database,
-    /// The file ID in Uncloud storage (None if newly created, not yet saved).
-    file_id: Option<String>,
-    /// The file name.
-    file_name: String,
-    /// Whether unsaved changes exist.
-    dirty: bool,
-}
 
 /// A flattened view of an entry for display.
 #[derive(Clone)]
@@ -319,10 +313,49 @@ fn generate_password(length: usize, uppercase: bool, lowercase: bool, digits: bo
 
 #[component]
 pub fn PasswordsPage() -> Element {
-    let mut vault: Signal<Option<VaultState>> = use_signal(|| None);
-    let mut master_password: Signal<String> = use_signal(String::new);
+    // App-level vault session — survives route navigation. Children still
+    // see plain `Signal<Option<VaultState>>` and `Signal<String>` props,
+    // hydrated from the session on mount and synced back via use_effect.
+    let mut session = use_context::<Signal<VaultSession>>();
+
+    // Synchronously expire stale sessions before any child sees them.
+    // This handles "navigate to /passwords after >5 min away" — the
+    // initial reads below pick up the cleared session, not the stale one.
+    if session.peek().is_stale(Duration::seconds(VAULT_IDLE_TTL_SECS)) {
+        session.write().clear();
+    }
+
+    let mut vault: Signal<Option<VaultState>> =
+        use_signal(|| session.peek().state.clone());
+    let mut master_password: Signal<String> =
+        use_signal(|| session.peek().master_password.clone());
     let mut recent_vaults: Signal<Vec<uncloud_common::RecentVaultEntry>> = use_signal(Vec::new);
     let mut loading: Signal<bool> = use_signal(|| true);
+
+    // Mirror local signals back into the session and stamp activity. The
+    // session always reflects the latest decrypted state so route nav-back
+    // can rehydrate without the user re-typing the master password.
+    use_effect(move || {
+        let v = vault();
+        let mp = master_password();
+        let mut s = session.write();
+        s.state = v;
+        s.master_password = mp;
+        s.bump();
+    });
+
+    // Idle auto-lock: while PasswordsPage is mounted, check every 30 s.
+    // The mount-time staleness check above handles the navigated-away case.
+    use_future(move || async move {
+        loop {
+            TimeoutFuture::new(30_000).await;
+            if session.peek().is_stale(Duration::seconds(VAULT_IDLE_TTL_SECS)) {
+                session.write().clear();
+                vault.set(None);
+                master_password.set(String::new());
+            }
+        }
+    });
 
     // Open from folder browser
     let mut show_file_picker: Signal<bool> = use_signal(|| false);
@@ -1248,6 +1281,7 @@ fn VaultBrowser(
     vault: Signal<Option<VaultState>>,
     master_password: String,
 ) -> Element {
+    let mut session = use_context::<Signal<VaultSession>>();
     let mut selected_group: Signal<Option<uuid::Uuid>> = use_signal(|| None);
     let mut selected_entry: Signal<Option<uuid::Uuid>> = use_signal(|| None);
     let mut search_query: Signal<String> = use_signal(String::new);
@@ -1318,6 +1352,10 @@ fn VaultBrowser(
 
     rsx! {
         div { class: "flex flex-col h-full",
+            // Bump activity on any user input within the vault UI so the
+            // 5-min idle TTL only fires after genuine inactivity.
+            onpointerdown: move |_| { session.write().bump(); },
+            onkeydown: move |_| { session.write().bump(); },
             // Toolbar
             div { class: "flex items-center gap-2 mb-4 flex-wrap",
                 h2 { class: "text-xl font-bold flex-1 flex items-center gap-2",
