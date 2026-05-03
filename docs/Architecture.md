@@ -523,6 +523,16 @@ storage:
   # Legacy fallback: when `storages` is empty, a single "local" entry is
   # synthesised from this path. Old configs keep working unchanged.
   # default_path: "/data/uncloud"
+  # Retry policy applied to S3 and SFTP backends for transient errors
+  # (connection resets, throttling, mid-flight timeouts). Local ignores
+  # it — kernel VFS handles transient I/O. Idempotent ops only (read,
+  # read_range, exists, scan); mutating ops bypass retry because most
+  # of them either consume an input stream (write_stream) or run inside
+  # a temp + rename pattern where the caller is better placed to decide.
+  retry:
+    max_attempts: 3                # 1 disables retry; 0 treated as 1
+    base_delay_ms: 200             # doubles per attempt, ±25 % jitter
+    max_delay_ms: 5000             # cap on the exponential backoff
 
 auth:
   session_duration_hours: 168      # 7 days

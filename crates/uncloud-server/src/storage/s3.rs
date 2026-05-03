@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use aws_sdk_s3::config::retry::RetryConfig as AwsRetryConfig;
 use aws_sdk_s3::config::{
     BehaviorVersion, Credentials, Region, RequestChecksumCalculation, ResponseChecksumValidation,
 };
@@ -18,6 +19,7 @@ pub struct S3Storage {
     client: Client,
     bucket: String,
     temp_dir: PathBuf,
+    retry: super::retry::RetryConfig,
 }
 
 impl S3Storage {
@@ -27,6 +29,7 @@ impl S3Storage {
         access_key: &str,
         secret_key: &str,
         region: Option<&str>,
+        retry: super::retry::RetryConfig,
     ) -> Result<Self> {
         let region = Region::new(region.unwrap_or("us-east-1").to_string());
         let creds = Credentials::new(access_key, secret_key, None, None, "uncloud-config");
@@ -40,10 +43,19 @@ impl S3Storage {
         // do), restoring boto3-equivalent performance against MinIO. AWS S3
         // is unaffected because this just opts back into the pre-1.81 wire
         // format. See https://github.com/minio/minio/issues/19528.
+        // The AWS SDK's default retry mode is `Standard` with 3 attempts; we
+        // drive max_attempts and the initial backoff from our shared
+        // RetryConfig so YAML retry knobs apply uniformly to S3 and SFTP.
+        let aws_retry = AwsRetryConfig::standard()
+            .with_max_attempts(retry.effective_max_attempts())
+            .with_initial_backoff(retry.base_delay())
+            .with_max_backoff(retry.max_delay());
+
         let mut conf = aws_sdk_s3::config::Builder::new()
             .behavior_version(BehaviorVersion::latest())
             .region(region)
             .credentials_provider(creds)
+            .retry_config(aws_retry)
             .force_path_style(true)
             .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
             .response_checksum_validation(ResponseChecksumValidation::WhenRequired);
@@ -72,6 +84,7 @@ impl S3Storage {
             client,
             bucket: bucket.to_string(),
             temp_dir,
+            retry,
         })
     }
 
