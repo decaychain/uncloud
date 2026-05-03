@@ -28,6 +28,11 @@ pub struct SftpStorage {
     db: Database,
     storage_id: ObjectId,
     base_path: String,
+    /// Retry policy for idempotent ops (read / read_range / exists / scan).
+    /// Mutating ops bypass it because most of them either consume an input
+    /// stream (write_stream) or run inside a temp+rename pattern where the
+    /// caller is better placed to decide retry semantics.
+    retry: super::retry::RetryConfig,
 }
 
 #[derive(Clone)]
@@ -125,6 +130,7 @@ impl Handler for TofuHandler {
 impl SftpStorage {
     pub async fn new(
         config: &StorageBackendConfig,
+        retry: super::retry::RetryConfig,
         db: Database,
         storage_id: ObjectId,
     ) -> Result<Self> {
@@ -199,6 +205,7 @@ impl SftpStorage {
             db,
             storage_id,
             base_path: base_path.trim_end_matches('/').to_string(),
+            retry,
         };
 
         // Eagerly connect once so misconfig fails fast at startup, and so the
@@ -214,6 +221,14 @@ impl SftpStorage {
             *guard = Some(Arc::new(self.connect().await?));
         }
         Ok(guard.as_ref().expect("just inserted").clone())
+    }
+
+    /// Drop the cached SFTP session so the next operation reconnects.
+    /// Called between retry attempts on failed idempotent ops — a single
+    /// connection-level error tends to invalidate every in-flight request
+    /// against the same session, so reusing it would just fail the same way.
+    async fn invalidate_session(&self) {
+        *self.conn.lock().await = None;
     }
 
     async fn connect(&self) -> Result<Conn> {
@@ -301,9 +316,8 @@ impl SftpStorage {
     }
 }
 
-#[async_trait]
-impl StorageBackend for SftpStorage {
-    async fn read(&self, path: &str) -> Result<BoxedAsyncRead> {
+impl SftpStorage {
+    async fn read_once(&self, path: &str) -> Result<BoxedAsyncRead> {
         let full = self.resolve(path);
         let s = self.session().await?;
         let file = s.sftp.open(full).await.map_err(|e| {
@@ -312,7 +326,12 @@ impl StorageBackend for SftpStorage {
         Ok(Box::pin(file))
     }
 
-    async fn read_range(&self, path: &str, offset: u64, length: u64) -> Result<BoxedAsyncRead> {
+    async fn read_range_once(
+        &self,
+        path: &str,
+        offset: u64,
+        length: u64,
+    ) -> Result<BoxedAsyncRead> {
         let full = self.resolve(path);
         let s = self.session().await?;
         let mut file = s
@@ -323,6 +342,110 @@ impl StorageBackend for SftpStorage {
             .await
             .map_err(|e| AppError::Storage(format!("SFTP seek failed: {e}")))?;
         Ok(Box::pin(file.take(length)))
+    }
+
+    async fn exists_once(&self, path: &str) -> Result<bool> {
+        let full = self.resolve(path);
+        let s = self.session().await?;
+        match s.sftp.metadata(full).await {
+            Ok(_) => Ok(true),
+            Err(e) if is_no_such_file(&e) => Ok(false),
+            Err(e) => Err(AppError::Storage(format!("SFTP stat failed: {e}"))),
+        }
+    }
+
+    async fn scan_once(&self, prefix: &str) -> Result<Vec<ScanEntry>> {
+        let root = self.resolve(prefix);
+        let s = self.session().await?;
+        let mut out = Vec::new();
+        let mut stack: Vec<String> = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            let entries = match s.sftp.read_dir(&dir).await {
+                Ok(e) => e,
+                Err(e) if is_no_such_file(&e) => continue,
+                Err(e) => return Err(AppError::Storage(format!("SFTP read_dir failed: {e}"))),
+            };
+            for entry in entries {
+                let name = entry.file_name();
+                if name == "." || name == ".." {
+                    continue;
+                }
+                let full = if dir.ends_with('/') {
+                    format!("{}{}", dir, name)
+                } else {
+                    format!("{}/{}", dir, name)
+                };
+                let trimmed = full.trim_start_matches('/');
+                let rel = trimmed
+                    .strip_prefix(&format!("{}/", self.base_path.trim_start_matches('/')))
+                    .unwrap_or(trimmed)
+                    .to_string();
+                let attrs = entry.metadata();
+                if attrs.is_dir() {
+                    out.push(ScanEntry {
+                        path: rel,
+                        is_dir: true,
+                        size_bytes: 0,
+                    });
+                    stack.push(full);
+                } else {
+                    out.push(ScanEntry {
+                        path: rel,
+                        is_dir: false,
+                        size_bytes: attrs.size.unwrap_or(0),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Run an idempotent SFTP op through the configured retry policy. On every
+/// failed attempt the cached session is invalidated so the next iteration
+/// reconnects — a connection-level error tends to invalidate every other
+/// in-flight request against the same session anyway.
+async fn retry_idempotent<F, Fut, T>(
+    storage: &SftpStorage,
+    op_name: &str,
+    mut f: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let max = storage.retry.effective_max_attempts();
+    let mut delay = storage.retry.base_delay();
+    let max_delay = storage.retry.max_delay();
+    for attempt in 1..=max {
+        match f().await {
+            Ok(v) => return Ok(v),
+            Err(e) if attempt < max => {
+                tracing::warn!(
+                    "{op_name}: attempt {attempt}/{max} failed: {e}; \
+                     reconnecting and retrying in {delay:?}",
+                );
+                storage.invalidate_session().await;
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(max_delay);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("loop returns from every iteration")
+}
+
+#[async_trait]
+impl StorageBackend for SftpStorage {
+    async fn read(&self, path: &str) -> Result<BoxedAsyncRead> {
+        retry_idempotent(self, "sftp.read", || self.read_once(path)).await
+    }
+
+    async fn read_range(&self, path: &str, offset: u64, length: u64) -> Result<BoxedAsyncRead> {
+        retry_idempotent(self, "sftp.read_range", || {
+            self.read_range_once(path, offset, length)
+        })
+        .await
     }
 
     async fn write(&self, path: &str, data: &[u8]) -> Result<()> {
@@ -387,13 +510,7 @@ impl StorageBackend for SftpStorage {
     }
 
     async fn exists(&self, path: &str) -> Result<bool> {
-        let full = self.resolve(path);
-        let s = self.session().await?;
-        match s.sftp.metadata(full).await {
-            Ok(_) => Ok(true),
-            Err(e) if is_no_such_file(&e) => Ok(false),
-            Err(e) => Err(AppError::Storage(format!("SFTP stat failed: {e}"))),
-        }
+        retry_idempotent(self, "sftp.exists", || self.exists_once(path)).await
     }
 
     async fn available_space(&self) -> Result<Option<u64>> {
@@ -503,51 +620,7 @@ impl StorageBackend for SftpStorage {
     }
 
     async fn scan(&self, prefix: &str) -> Result<Vec<ScanEntry>> {
-        let root = self.resolve(prefix);
-        let s = self.session().await?;
-        let mut out = Vec::new();
-        let mut stack: Vec<String> = vec![root.clone()];
-        while let Some(dir) = stack.pop() {
-            let entries = match s.sftp.read_dir(&dir).await {
-                Ok(e) => e,
-                Err(e) if is_no_such_file(&e) => continue,
-                Err(e) => return Err(AppError::Storage(format!("SFTP read_dir failed: {e}"))),
-            };
-            for entry in entries {
-                let name = entry.file_name();
-                if name == "." || name == ".." {
-                    continue;
-                }
-                let full = if dir.ends_with('/') {
-                    format!("{}{}", dir, name)
-                } else {
-                    format!("{}/{}", dir, name)
-                };
-                // Strip the storage's base_path so the result is relative to
-                // the storage root (matching `LocalStorage::scan`'s contract).
-                let trimmed = full.trim_start_matches('/');
-                let rel = trimmed
-                    .strip_prefix(&format!("{}/", self.base_path.trim_start_matches('/')))
-                    .unwrap_or(trimmed)
-                    .to_string();
-                let attrs = entry.metadata();
-                if attrs.is_dir() {
-                    out.push(ScanEntry {
-                        path: rel,
-                        is_dir: true,
-                        size_bytes: 0,
-                    });
-                    stack.push(full);
-                } else {
-                    out.push(ScanEntry {
-                        path: rel,
-                        is_dir: false,
-                        size_bytes: attrs.size.unwrap_or(0),
-                    });
-                }
-            }
-        }
-        Ok(out)
+        retry_idempotent(self, "sftp.scan", || self.scan_once(prefix)).await
     }
 }
 

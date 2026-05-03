@@ -57,6 +57,12 @@ pub struct StorageConfig {
     /// applies. Required when `storages` is non-empty.
     #[serde(default)]
     pub default: Option<String>,
+    /// Retry policy applied to S3 and SFTP backends for transient errors
+    /// (connection resets, throttling, mid-flight timeouts). The local
+    /// backend ignores it — kernel VFS handles transient I/O. Idempotent
+    /// ops only; mutating ops that consume an input stream skip retry.
+    #[serde(default)]
+    pub retry: crate::storage::retry::RetryConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -511,6 +517,7 @@ impl Default for Config {
                 default_path: Some(PathBuf::from("/data/uncloud")),
                 storages: Vec::new(),
                 default: None,
+                retry: Default::default(),
             },
             auth: AuthConfig {
                 session_duration_hours: 168,
@@ -568,6 +575,7 @@ mod tests {
             default_path: Some(PathBuf::from("/data")),
             storages: vec![],
             default: None,
+            retry: Default::default(),
         };
         let r = cfg.resolve().unwrap();
         assert_eq!(r.default, "local");
@@ -586,6 +594,7 @@ mod tests {
                 },
             }],
             default: None,
+            retry: Default::default(),
         };
         let err = cfg.resolve().unwrap_err();
         assert!(err.contains("default"), "{err}");
@@ -602,6 +611,7 @@ mod tests {
                 },
             }],
             default: Some("nope".into()),
+            retry: Default::default(),
         };
         let err = cfg.resolve().unwrap_err();
         assert!(err.contains("does not match"), "{err}");
@@ -626,6 +636,7 @@ mod tests {
                 },
             ],
             default: Some("main".into()),
+            retry: Default::default(),
         };
         let err = cfg.resolve().unwrap_err();
         assert!(err.contains("duplicate"), "{err}");
@@ -637,6 +648,7 @@ mod tests {
             default_path: None,
             storages: vec![],
             default: None,
+            retry: Default::default(),
         };
         assert!(cfg.resolve().is_err());
     }

@@ -1,4 +1,5 @@
 pub mod local;
+pub mod retry;
 pub mod s3;
 pub mod sftp;
 

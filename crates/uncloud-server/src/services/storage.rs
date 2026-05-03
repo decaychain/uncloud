@@ -111,7 +111,7 @@ impl StorageService {
                 }
             };
 
-            let backend = create_backend(&backend_config, db, storage.id).await?;
+            let backend = create_backend(&backend_config, &config.retry, db, storage.id).await?;
             backends.insert(storage.id, backend);
             by_name.insert(storage.name.clone(), storage.id);
             if is_default {
@@ -240,6 +240,7 @@ impl From<ConfiguredStorageBackend> for StorageBackendConfig {
 
 async fn create_backend(
     config: &StorageBackendConfig,
+    retry: &crate::storage::retry::RetryConfig,
     db: &Database,
     storage_id: ObjectId,
 ) -> Result<Arc<dyn StorageBackend>> {
@@ -261,13 +262,19 @@ async fn create_backend(
                 access_key,
                 secret_key,
                 region.as_deref(),
+                retry.clone(),
             )
             .await?;
             Ok(Arc::new(storage))
         }
         StorageBackendConfig::Sftp { .. } => {
-            let storage =
-                crate::storage::SftpStorage::new(config, db.clone(), storage_id).await?;
+            let storage = crate::storage::SftpStorage::new(
+                config,
+                retry.clone(),
+                db.clone(),
+                storage_id,
+            )
+            .await?;
             Ok(Arc::new(storage))
         }
     }
