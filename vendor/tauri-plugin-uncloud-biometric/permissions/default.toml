@@ -1,0 +1,9 @@
+[default]
+description = "Default permissions for uncloud-biometric: allows all five plugin commands."
+permissions = [
+  "allow-status",
+  "allow-is-enrolled",
+  "allow-enroll",
+  "allow-unlock",
+  "allow-clear",
+]

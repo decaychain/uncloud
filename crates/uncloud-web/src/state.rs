@@ -1,5 +1,50 @@
+use chrono::{DateTime, Local};
+use keepass::db::Database;
 use serde::{Deserialize, Serialize};
 use uncloud_common::{TrackResponse, UserResponse};
+
+// ── Vault session (KeePass) ───────────────────────────────────────────────
+
+/// Decrypted KeePass database held in memory between renders. Wrapped in a
+/// struct so we can store it in a Signal without imposing Serialize on it.
+#[derive(Clone)]
+pub struct VaultState {
+    pub db: Database,
+    /// Source file id in Uncloud storage. None for newly-created vaults that
+    /// haven't been saved yet.
+    pub file_id: Option<String>,
+    pub file_name: String,
+    /// Set when there are unsaved entry/group edits.
+    pub dirty: bool,
+}
+
+/// App-level state for the password vault. Lives at the app root so it
+/// survives route navigation — biometric unlock + a 5-minute idle TTL
+/// only make sense if the unlocked vault outlives a quick detour to
+/// another page.
+#[derive(Clone, Default)]
+pub struct VaultSession {
+    pub state: Option<VaultState>,
+    pub master_password: String,
+    pub last_active_at: Option<DateTime<Local>>,
+}
+
+impl VaultSession {
+    pub fn bump(&mut self) {
+        self.last_active_at = Some(Local::now());
+    }
+
+    pub fn is_stale(&self, ttl: chrono::Duration) -> bool {
+        match self.last_active_at {
+            Some(t) => Local::now() - t > ttl,
+            None => false,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Section {

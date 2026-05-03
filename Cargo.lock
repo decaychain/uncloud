@@ -10217,6 +10217,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tauri-plugin-uncloud-biometric"
+version = "0.1.0"
+dependencies = [
+ "tauri",
+ "tauri-plugin",
+]
+
+[[package]]
 name = "tauri-plugin-updater"
 version = "2.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11077,6 +11085,7 @@ dependencies = [
  "dirs 5.0.1",
  "hostname",
  "keyring",
+ "libc",
  "notify",
  "rand 0.8.6",
  "serde",
@@ -11087,6 +11096,7 @@ dependencies = [
  "tauri-plugin-autostart",
  "tauri-plugin-dialog",
  "tauri-plugin-native-audio",
+ "tauri-plugin-uncloud-biometric",
  "tauri-plugin-updater",
  "tokio",
  "tracing",

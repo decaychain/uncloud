@@ -85,6 +85,7 @@ pub fn App() -> Element {
         }
     });
     use_context_provider(|| Signal::new(PlaylistDirtyTick::default()));
+    use_context_provider(|| Signal::new(crate::state::VaultSession::default()));
 
     // Hydrate the live rescan panel when the logged-in user is an admin.
     // A rescan may already be running (restarted session, different browser,

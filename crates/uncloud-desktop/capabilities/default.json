@@ -12,6 +12,7 @@
     "core:window:allow-close",
     "core:tray:default",
     "dialog:default",
-    "native-audio:default"
+    "native-audio:default",
+    "uncloud-biometric:default"
   ]
 }

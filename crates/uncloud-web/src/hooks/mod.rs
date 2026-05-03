@@ -1,4 +1,5 @@
 pub mod api;
+pub mod biometric;
 pub mod media_session;
 pub mod native_audio;
 pub mod tauri;

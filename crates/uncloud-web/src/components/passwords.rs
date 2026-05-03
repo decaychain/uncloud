@@ -1,24 +1,21 @@
+use std::collections::HashMap;
+
+use chrono::Duration;
 use dioxus::prelude::*;
+use gloo_timers::future::TimeoutFuture;
 use keepass::db::{Database, Entry, Group};
 use keepass::DatabaseKey;
 use uncloud_common::{FileResponse, FolderResponse};
-use crate::components::icons::{IconChevronRight, IconFolder, IconLock, IconLockOpen, IconX};
-use crate::hooks::{api, use_files};
+use crate::components::icons::{IconChevronRight, IconFingerprint, IconFolder, IconLock, IconLockOpen, IconX};
+use crate::hooks::{api, biometric, use_files};
+use crate::state::{AuthState, VaultSession, VaultState};
+
+/// Idle TTL for the unlocked vault. Past this, the next mount of
+/// PasswordsPage (or a 30 s ticker while the page is open) clears the
+/// session and forces a fresh biometric prompt or master-password entry.
+const VAULT_IDLE_TTL_SECS: i64 = 5 * 60;
 
 // ── Vault state ────────────────────────────────────────────────────────────
-
-/// The in-memory decrypted vault.
-/// Wrapping in a struct so we can store it in a Signal.
-#[derive(Clone)]
-struct VaultState {
-    db: Database,
-    /// The file ID in Uncloud storage (None if newly created, not yet saved).
-    file_id: Option<String>,
-    /// The file name.
-    file_name: String,
-    /// Whether unsaved changes exist.
-    dirty: bool,
-}
 
 /// A flattened view of an entry for display.
 #[derive(Clone)]
@@ -105,6 +102,45 @@ fn find_group_entries(group: &Group, group_uuid: uuid::Uuid) -> Vec<EntryView> {
         }
     }
     Vec::new()
+}
+
+// ── Biometric enrolment prompt state ──────────────────────────────────────
+
+/// Set when a manual unlock succeeds and the user is a candidate for
+/// biometric enrolment. PasswordsPage shows `BiometricEnrolPrompt` when
+/// this is `Some`.
+#[derive(Clone)]
+struct EnrolPromptState {
+    user_id: String,
+    vault_id: String,
+    vault_name: String,
+    master_password: String,
+}
+
+/// localStorage key for the per-vault "user said no" flag. Format
+/// `uncloud:bio-skip:{user_id}.{vault_id}` so it never collides across
+/// accounts on the same device.
+fn skip_flag_key(user_id: &str, vault_id: &str) -> String {
+    format!("uncloud:bio-skip:{user_id}.{vault_id}")
+}
+
+fn skip_flag_get(user_id: &str, vault_id: &str) -> bool {
+    web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .and_then(|s| s.get_item(&skip_flag_key(user_id, vault_id)).ok().flatten())
+        .is_some()
+}
+
+fn skip_flag_set(user_id: &str, vault_id: &str) {
+    if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let _ = s.set_item(&skip_flag_key(user_id, vault_id), "1");
+    }
+}
+
+fn skip_flag_clear(user_id: &str, vault_id: &str) {
+    if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let _ = s.remove_item(&skip_flag_key(user_id, vault_id));
+    }
 }
 
 // ── Vault recents API ─────────────────────────────────────────────────────
@@ -277,15 +313,61 @@ fn generate_password(length: usize, uppercase: bool, lowercase: bool, digits: bo
 
 #[component]
 pub fn PasswordsPage() -> Element {
-    let mut vault: Signal<Option<VaultState>> = use_signal(|| None);
-    let mut master_password: Signal<String> = use_signal(String::new);
+    // App-level vault session — survives route navigation. Children still
+    // see plain `Signal<Option<VaultState>>` and `Signal<String>` props,
+    // hydrated from the session on mount and synced back via use_effect.
+    let mut session = use_context::<Signal<VaultSession>>();
+
+    // Synchronously expire stale sessions before any child sees them.
+    // This handles "navigate to /passwords after >5 min away" — the
+    // initial reads below pick up the cleared session, not the stale one.
+    if session.peek().is_stale(Duration::seconds(VAULT_IDLE_TTL_SECS)) {
+        session.write().clear();
+    }
+
+    let mut vault: Signal<Option<VaultState>> =
+        use_signal(|| session.peek().state.clone());
+    let mut master_password: Signal<String> =
+        use_signal(|| session.peek().master_password.clone());
     let mut recent_vaults: Signal<Vec<uncloud_common::RecentVaultEntry>> = use_signal(Vec::new);
     let mut loading: Signal<bool> = use_signal(|| true);
+
+    // Mirror local signals back into the session and stamp activity. The
+    // session always reflects the latest decrypted state so route nav-back
+    // can rehydrate without the user re-typing the master password.
+    use_effect(move || {
+        let v = vault();
+        let mp = master_password();
+        let mut s = session.write();
+        s.state = v;
+        s.master_password = mp;
+        s.bump();
+    });
+
+    // Idle auto-lock: while PasswordsPage is mounted, check every 30 s.
+    // The mount-time staleness check above handles the navigated-away case.
+    use_future(move || async move {
+        loop {
+            TimeoutFuture::new(30_000).await;
+            if session.peek().is_stale(Duration::seconds(VAULT_IDLE_TTL_SECS)) {
+                session.write().clear();
+                vault.set(None);
+                master_password.set(String::new());
+            }
+        }
+    });
 
     // Open from folder browser
     let mut show_file_picker: Signal<bool> = use_signal(|| false);
     // New vault dialog
     let mut show_new_vault: Signal<bool> = use_signal(|| false);
+
+    // Biometric (Android-only): post-unlock prompt + per-recent enrolment cache.
+    // `enrolled_map` is keyed by file_id; populated by a use_effect when
+    // recent_vaults changes. Empty map / always-false on non-Android.
+    let pending_enrol: Signal<Option<EnrolPromptState>> = use_signal(|| None);
+    let mut enrolled_map: Signal<HashMap<String, bool>> = use_signal(HashMap::new);
+    let auth_state = use_context::<Signal<AuthState>>();
 
     // Check if we were navigated here with a specific vault file to open
     let mut vault_open_target = use_context::<Signal<crate::state::VaultOpenTarget>>();
@@ -311,12 +393,38 @@ pub fn PasswordsPage() -> Element {
         });
     });
 
-    // If vault is unlocked, show the vault UI
+    // Whenever the recents list or the signed-in user changes, refresh the
+    // per-vault biometric-enrolment cache. Cheap on non-Android (every call
+    // short-circuits to false). Used by the recents row to decide whether
+    // to show the "Forget biometric" button.
+    use_effect(move || {
+        let recents = recent_vaults();
+        let user_id = auth_state().user.as_ref().map(|u| u.id.clone());
+        spawn(async move {
+            let Some(uid) = user_id else { return };
+            let mut next = HashMap::with_capacity(recents.len());
+            for entry in &recents {
+                let enrolled = biometric::is_enrolled(&uid, &entry.file_id).await;
+                next.insert(entry.file_id.clone(), enrolled);
+            }
+            enrolled_map.set(next);
+        });
+    });
+
+    // If vault is unlocked, show the vault UI. The biometric enrol prompt
+    // overlays it so the user can react to the freshly-unlocked vault
+    // ("Enable biometric unlock?") without being kicked back to the picker.
     if vault().is_some() {
         return rsx! {
             VaultBrowser {
                 vault,
                 master_password: master_password(),
+            }
+            if pending_enrol().is_some() {
+                BiometricEnrolPrompt {
+                    state: pending_enrol,
+                    enrolled_map,
+                }
             }
         };
     }
@@ -343,29 +451,63 @@ pub fn PasswordsPage() -> Element {
                                     let file_name = entry.file_name.clone();
                                     let folder_path = entry.folder_path.clone();
                                     let file_id_rm = file_id.clone();
+                                    let file_id_bio = file_id.clone();
+                                    let user_id_bio = auth_state()
+                                        .user
+                                        .as_ref()
+                                        .map(|u| u.id.clone())
+                                        .unwrap_or_default();
+                                    let user_id_unlock = user_id_bio.clone();
+                                    let bio_enrolled = enrolled_map()
+                                        .get(&file_id)
+                                        .copied()
+                                        .unwrap_or(false);
                                     rsx! {
                                         div { class: "relative",
                                             VaultUnlockCard {
                                                 file_id,
                                                 file_name: file_name.clone(),
                                                 folder_path,
+                                                user_id: user_id_unlock,
                                                 vault,
                                                 master_password,
                                                 recent_vaults,
+                                                pending_enrol,
+                                                enrolled_map,
                                             }
-                                            button {
-                                                class: "btn btn-ghost btn-xs absolute top-2 right-2 text-base-content/40 hover:text-error",
-                                                title: "Remove from recent list",
-                                                onclick: move |_| {
-                                                    let fid = file_id_rm.clone();
-                                                    spawn(async move {
-                                                        let _ = remove_recent_vault_api(&fid).await;
-                                                        if let Ok(recents) = fetch_recent_vaults().await {
-                                                            recent_vaults.set(recents);
-                                                        }
-                                                    });
-                                                },
-                                                IconX { class: "w-3 h-3".to_string() }
+                                            div { class: "absolute top-2 right-2 flex gap-1",
+                                                if bio_enrolled {
+                                                    button {
+                                                        class: "btn btn-ghost btn-xs text-primary hover:text-error",
+                                                        title: "Forget biometric for this vault",
+                                                        onclick: move |_| {
+                                                            let uid = user_id_bio.clone();
+                                                            let fid = file_id_bio.clone();
+                                                            spawn(async move {
+                                                                let _ = biometric::clear(&uid, &fid).await;
+                                                                skip_flag_clear(&uid, &fid);
+                                                                let mut next = enrolled_map();
+                                                                next.insert(fid, false);
+                                                                enrolled_map.set(next);
+                                                            });
+                                                        },
+                                                        IconFingerprint { class: "w-3 h-3".to_string() }
+                                                    }
+                                                }
+                                                button {
+                                                    class: "btn btn-ghost btn-xs text-base-content/40 hover:text-error",
+                                                    title: "Remove from recent list",
+                                                    onclick: move |_| {
+                                                        let fid = file_id_rm.clone();
+                                                        spawn(async move {
+                                                            let _ = remove_recent_vault_api(&fid).await;
+                                                            if let Ok(recents) = fetch_recent_vaults().await {
+                                                                recent_vaults.set(recents);
+                                                            }
+                                                        });
+                                                    },
+                                                    IconX { class: "w-3 h-3".to_string() }
+                                                }
                                             }
                                         }
                                     }
@@ -820,24 +962,32 @@ fn VaultUnlockCard(
     file_id: String,
     file_name: String,
     folder_path: Option<String>,
+    user_id: String,
     vault: Signal<Option<VaultState>>,
     master_password: Signal<String>,
     recent_vaults: Signal<Vec<uncloud_common::RecentVaultEntry>>,
+    pending_enrol: Signal<Option<EnrolPromptState>>,
+    enrolled_map: Signal<HashMap<String, bool>>,
 ) -> Element {
     let mut password = use_signal(String::new);
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut unlocking = use_signal(|| false);
 
-    // Plain function avoids closure-move issues — all state is in Copy signals.
+    let bio_enrolled = enrolled_map().get(&file_id).copied().unwrap_or(false);
+
+    // Manual unlock from the password field. After success, optionally
+    // promotes the vault to the biometric enrol prompt.
     fn do_unlock(
         file_id: String,
         file_name: String,
+        user_id: String,
         password: Signal<String>,
         mut error: Signal<Option<String>>,
         mut unlocking: Signal<bool>,
-        mut master_password: Signal<String>,
-        mut vault: Signal<Option<VaultState>>,
-        mut recent_vaults: Signal<Vec<uncloud_common::RecentVaultEntry>>,
+        master_password: Signal<String>,
+        vault: Signal<Option<VaultState>>,
+        recent_vaults: Signal<Vec<uncloud_common::RecentVaultEntry>>,
+        pending_enrol: Signal<Option<EnrolPromptState>>,
     ) {
         let pw = password();
         if pw.is_empty() {
@@ -848,66 +998,172 @@ fn VaultUnlockCard(
         error.set(None);
 
         spawn(async move {
-            match download_file_bytes(&file_id).await {
-                Ok(bytes) => {
-                    let key = DatabaseKey::new().with_password(&pw);
-                    match Database::parse(&bytes, key) {
-                        Ok(db) => {
-                            // Record in LRU (fire and forget)
-                            let fid = file_id.clone();
-                            let fname = file_name.clone();
-                            spawn(async move {
-                                let _ = add_recent_vault_api(&fid, &fname, None).await;
-                                if let Ok(recents) = fetch_recent_vaults().await {
-                                    recent_vaults.set(recents);
-                                }
-                            });
-
-                            master_password.set(pw);
-                            vault.set(Some(VaultState {
-                                db,
-                                file_id: Some(file_id),
-                                file_name,
-                                dirty: false,
-                            }));
-                        }
-                        Err(e) => {
-                            error.set(Some(format!("Failed to open vault: {:?}", e)));
-                            unlocking.set(false);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error.set(Some(e));
-                    unlocking.set(false);
-                }
-            }
+            finish_unlock(
+                file_id,
+                file_name,
+                pw,
+                Some(pending_enrol),
+                user_id,
+                error,
+                unlocking,
+                master_password,
+                vault,
+                recent_vaults,
+            )
+            .await;
         });
     }
 
-    let (fid_k, fname_k) = (file_id.clone(), file_name.clone());
-    let (fid_b, fname_b) = (file_id.clone(), file_name.clone());
+    // Shared post-secret flow: download bytes, parse with the secret, set
+    // up VaultState. `enrol_target` is `Some` for the manual path so a
+    // candidate vault can prompt for biometric enrolment after unlock; the
+    // biometric-auto path passes `None` since the user is already enrolled.
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_unlock(
+        file_id: String,
+        file_name: String,
+        secret: String,
+        enrol_target: Option<Signal<Option<EnrolPromptState>>>,
+        user_id: String,
+        mut error: Signal<Option<String>>,
+        mut unlocking: Signal<bool>,
+        mut master_password: Signal<String>,
+        mut vault: Signal<Option<VaultState>>,
+        mut recent_vaults: Signal<Vec<uncloud_common::RecentVaultEntry>>,
+    ) {
+        match download_file_bytes(&file_id).await {
+            Ok(bytes) => {
+                let key = DatabaseKey::new().with_password(&secret);
+                match Database::parse(&bytes, key) {
+                    Ok(db) => {
+                        let fid = file_id.clone();
+                        let fname = file_name.clone();
+                        spawn(async move {
+                            let _ = add_recent_vault_api(&fid, &fname, None).await;
+                            if let Ok(recents) = fetch_recent_vaults().await {
+                                recent_vaults.set(recents);
+                            }
+                        });
+
+                        // Decide whether to surface the enrol prompt. Only
+                        // applies on the manual-unlock path; biometric-auto
+                        // skips it.
+                        if let Some(mut target) = enrol_target {
+                            if !skip_flag_get(&user_id, &file_id)
+                                && !biometric::is_enrolled(&user_id, &file_id).await
+                                && biometric::status().await.available
+                            {
+                                target.set(Some(EnrolPromptState {
+                                    user_id: user_id.clone(),
+                                    vault_id: file_id.clone(),
+                                    vault_name: file_name.clone(),
+                                    master_password: secret.clone(),
+                                }));
+                            }
+                        }
+
+                        master_password.set(secret);
+                        vault.set(Some(VaultState {
+                            db,
+                            file_id: Some(file_id),
+                            file_name,
+                            dirty: false,
+                        }));
+                    }
+                    Err(e) => {
+                        error.set(Some(format!("Failed to open vault: {:?}", e)));
+                        unlocking.set(false);
+                    }
+                }
+            }
+            Err(e) => {
+                error.set(Some(e));
+                unlocking.set(false);
+            }
+        }
+    }
+
+    let (fid_k, fname_k, uid_k) = (file_id.clone(), file_name.clone(), user_id.clone());
+    let (fid_b, fname_b, uid_b) = (file_id.clone(), file_name.clone(), user_id.clone());
+    let (fid_bio, fname_bio, uid_bio) = (file_id.clone(), file_name.clone(), user_id.clone());
     let file_name_display = file_name.clone();
     let folder_display = folder_path.clone();
+
+    let on_biometric_unlock = move |_| {
+        let file_id = fid_bio.clone();
+        let file_name = fname_bio.clone();
+        let user_id = uid_bio.clone();
+        unlocking.set(true);
+        error.set(None);
+        spawn(async move {
+            match biometric::unlock(&user_id, &file_id).await {
+                Ok(secret) => {
+                    finish_unlock(
+                        file_id,
+                        file_name,
+                        secret,
+                        // Already enrolled — no follow-up enrol prompt.
+                        None,
+                        user_id,
+                        error,
+                        unlocking,
+                        master_password,
+                        vault,
+                        recent_vaults,
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    unlocking.set(false);
+                    if e == "biometric_invalidated" {
+                        error.set(Some(
+                            "Biometric data changed — please enter your master password to re-enrol.".into(),
+                        ));
+                        // Plugin already wiped the alias + pref; mirror
+                        // that locally so the button disappears immediately.
+                        let mut next = enrolled_map();
+                        next.insert(file_id.clone(), false);
+                        enrolled_map.set(next);
+                    } else if !e.contains("error 13") && !e.contains("error 10") {
+                        // Don't surface plain user-cancel (codes 10 / 13).
+                        // Other errors (hw busy, lockout) are worth showing.
+                        error.set(Some(format!("Biometric unlock failed: {e}")));
+                    }
+                }
+            }
+        });
+    };
 
     rsx! {
         div { class: "card bg-base-200 mb-3",
             div { class: "card-body p-4",
                 div { class: "flex items-center gap-2 mb-2",
                     IconLock { class: "w-5 h-5".to_string() }
-                    div { class: "flex flex-col",
-                        span { class: "font-medium", "{file_name_display}" }
+                    div { class: "flex flex-col min-w-0",
+                        span { class: "font-medium truncate", "{file_name_display}" }
                         if let Some(ref path) = folder_display {
-                            span { class: "text-xs text-base-content/50", "{path}" }
+                            span { class: "text-xs text-base-content/50 truncate", "{path}" }
                         }
                     }
                 }
                 if let Some(err) = error() {
                     div { class: "alert alert-error alert-sm text-sm mb-2", "{err}" }
                 }
-                div { class: "flex gap-2",
+                div { class: "flex flex-col gap-2",
+                    if bio_enrolled {
+                        button {
+                            class: "btn btn-primary btn-sm w-full gap-2",
+                            disabled: unlocking(),
+                            onclick: on_biometric_unlock,
+                            IconFingerprint { class: "w-4 h-4".to_string() }
+                            "Unlock with fingerprint"
+                        }
+                        div { class: "divider text-xs my-0 text-base-content/50",
+                            "or use master password"
+                        }
+                    }
                     input {
-                        class: "input input-bordered input-sm flex-1",
+                        class: "input input-bordered input-sm w-full",
                         r#type: "password",
                         placeholder: "Master password",
                         value: "{password}",
@@ -915,15 +1171,15 @@ fn VaultUnlockCard(
                         oninput: move |e| password.set(e.value()),
                         onkeypress: move |e| {
                             if e.key() == Key::Enter {
-                                do_unlock(fid_k.clone(), fname_k.clone(), password, error, unlocking, master_password, vault, recent_vaults);
+                                do_unlock(fid_k.clone(), fname_k.clone(), uid_k.clone(), password, error, unlocking, master_password, vault, recent_vaults, pending_enrol);
                             }
                         },
                     }
                     button {
-                        class: "btn btn-primary btn-sm",
+                        class: "btn btn-primary btn-sm w-full",
                         disabled: unlocking() || password().is_empty(),
                         onclick: move |_| {
-                            do_unlock(fid_b.clone(), fname_b.clone(), password, error, unlocking, master_password, vault, recent_vaults);
+                            do_unlock(fid_b.clone(), fname_b.clone(), uid_b.clone(), password, error, unlocking, master_password, vault, recent_vaults, pending_enrol);
                         },
                         if unlocking() {
                             span { class: "loading loading-spinner loading-xs" }
@@ -937,6 +1193,90 @@ fn VaultUnlockCard(
     }
 }
 
+// ── Biometric enrolment prompt (one-time per vault) ───────────────────────
+
+#[component]
+fn BiometricEnrolPrompt(
+    state: Signal<Option<EnrolPromptState>>,
+    enrolled_map: Signal<HashMap<String, bool>>,
+) -> Element {
+    let snapshot = state();
+    let Some(s) = snapshot else { return rsx! {} };
+    let mut state_w = state;
+    let mut enrolled_map_w = enrolled_map;
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+    let mut working = use_signal(|| false);
+
+    let vault_name = s.vault_name.clone();
+    let user_id = s.user_id.clone();
+    let vault_id = s.vault_id.clone();
+    let secret = s.master_password.clone();
+
+    let user_id_yes = user_id.clone();
+    let vault_id_yes = vault_id.clone();
+    let user_id_no = user_id.clone();
+    let vault_id_no = vault_id.clone();
+
+    rsx! {
+        div { class: "modal modal-open",
+            div { class: "modal-box max-w-md",
+                h3 { class: "font-bold text-lg mb-2", "Enable biometric unlock?" }
+                p { class: "text-sm text-base-content/70 mb-3",
+                    "Use your fingerprint to unlock "
+                    span { class: "font-medium", "{vault_name}" }
+                    " on this device. The master password is stored in the device's secure keystore and only released after biometric authentication."
+                }
+                if let Some(err) = error() {
+                    div { class: "alert alert-error alert-sm text-sm mb-2", "{err}" }
+                }
+                div { class: "modal-action",
+                    button {
+                        class: "btn btn-ghost",
+                        disabled: working(),
+                        onclick: move |_| {
+                            skip_flag_set(&user_id_no, &vault_id_no);
+                            state_w.set(None);
+                        },
+                        "Not now"
+                    }
+                    button {
+                        class: "btn btn-primary",
+                        disabled: working(),
+                        onclick: move |_| {
+                            let uid = user_id_yes.clone();
+                            let vid = vault_id_yes.clone();
+                            let pw = secret.clone();
+                            working.set(true);
+                            error.set(None);
+                            spawn(async move {
+                                match biometric::enroll(&uid, &vid, &pw).await {
+                                    Ok(()) => {
+                                        let mut next = enrolled_map_w();
+                                        next.insert(vid.clone(), true);
+                                        enrolled_map_w.set(next);
+                                        skip_flag_clear(&uid, &vid);
+                                        state_w.set(None);
+                                    }
+                                    Err(e) => {
+                                        working.set(false);
+                                        error.set(Some(format!("Failed to enable: {e}")));
+                                    }
+                                }
+                            });
+                        },
+                        if working() {
+                            span { class: "loading loading-spinner loading-xs" }
+                        } else {
+                            "Enable"
+                        }
+                    }
+                }
+            }
+            div { class: "modal-backdrop" }
+        }
+    }
+}
+
 // ── Vault browser (main UI after unlock) ───────────────────────────────────
 
 #[component]
@@ -944,6 +1284,7 @@ fn VaultBrowser(
     vault: Signal<Option<VaultState>>,
     master_password: String,
 ) -> Element {
+    let mut session = use_context::<Signal<VaultSession>>();
     let mut selected_group: Signal<Option<uuid::Uuid>> = use_signal(|| None);
     let mut selected_entry: Signal<Option<uuid::Uuid>> = use_signal(|| None);
     let mut search_query: Signal<String> = use_signal(String::new);
@@ -1014,6 +1355,10 @@ fn VaultBrowser(
 
     rsx! {
         div { class: "flex flex-col h-full",
+            // Bump activity on any user input within the vault UI so the
+            // 5-min idle TTL only fires after genuine inactivity.
+            onpointerdown: move |_| { session.write().bump(); },
+            onkeydown: move |_| { session.write().bump(); },
             // Toolbar
             div { class: "flex items-center gap-2 mb-4 flex-wrap",
                 h2 { class: "text-xl font-bold flex-1 flex items-center gap-2",
