@@ -525,10 +525,21 @@ storage:
   # default_path: "/data/uncloud"
   # Retry policy applied to S3 and SFTP backends for transient errors
   # (connection resets, throttling, mid-flight timeouts). Local ignores
-  # it — kernel VFS handles transient I/O. Idempotent ops only (read,
-  # read_range, exists, scan); mutating ops bypass retry because most
-  # of them either consume an input stream (write_stream) or run inside
-  # a temp + rename pattern where the caller is better placed to decide.
+  # it — kernel VFS handles transient I/O.
+  #
+  # SFTP coverage:
+  #   * read / read_range / exists / scan — open-side retry
+  #   * mid-stream reads — auto-reopen at the current byte offset on
+  #     transient SSH_FX_FAILURE etc.
+  #   * write / delete — idempotent, retried directly
+  #   * rename / archive_version / move_to_trash / restore_from_trash —
+  #     retried with a stat(to) idempotency check (handles the case
+  #     where the first attempt landed but the response was lost)
+  #
+  # Intentionally NOT retried (asymmetry documented in sftp.rs):
+  #   * write_stream — consumes the input reader; can't replay
+  #   * create_temp / append_temp / finalize_temp / abort_temp —
+  #     resumable-upload pattern; caller orchestrates retries itself
   retry:
     max_attempts: 3                # 1 disables retry; 0 treated as 1
     base_delay_ms: 200             # doubles per attempt, ±25 % jitter
