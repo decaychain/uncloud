@@ -273,11 +273,22 @@ backup:
 
   targets:
     - name: nas
-      repo: "sftp:backup@nas.lan:/srv/backups/uncloud"
-      # password sources, in priority order — first present wins
+      # SFTP supports two URI forms:
+      #   sftp://[user@]host[:port][/path]   — URL style, custom port
+      #   sftp:[user@]host:/path             — legacy, default port 22
+      # Auth is key-based (OpenDAL's SFTP service has no password
+      # field). Point `credentials.key` at a private key file; the
+      # public half lives on the server in `~/.ssh/authorized_keys`.
+      repo: "sftp://backup@nas.lan:2222/srv/backups/uncloud"
+      # password sources for the snapshot ENCRYPTION key (Restic
+      # crypto, separate from the SSH key) — first present wins
       password_file: /etc/uncloud/backup-nas.key
       # password_env: UNCLOUD_BACKUP_NAS_PW
       # password_command: "pass show uncloud/backup-nas"
+      credentials:
+        key: /etc/uncloud/keys/backup-nas
+        # user: backup                     # overrides URI's user@ part
+        # known_hosts_strategy: strict     # strict | accept-new | accept-unknown
       retention:
         keep_last: 5
         keep_daily: 7

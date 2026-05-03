@@ -10,6 +10,8 @@
 //! - `s3:<bucket>[/prefix]` (uses AWS S3 default endpoint)
 //! - `b2:<bucket>[:prefix]`
 //! - `azure:<container>[:prefix]`
+//! - `sftp://[user@]host[:port][/path]` — URL style, supports custom port
+//! - `sftp:[user@]host:/path` — legacy restic-flavoured form, no port
 //!
 //! Each expansion returns the canonical `opendal:<service>` URI plus a map
 //! of options that should be merged into the user's `credentials` block
@@ -38,6 +40,7 @@ pub fn expand(input: &str) -> ExpandedUri {
         "s3" => expand_s3(rest),
         "b2" => expand_b2(rest),
         "azure" => expand_azure(rest),
+        "sftp" => expand_sftp(rest),
         // Unknown schemes pass through as-is — let rustic error if it's
         // not one it can handle.
         _ => ExpandedUri {
@@ -127,6 +130,62 @@ fn expand_azure(rest: &str) -> ExpandedUri {
     }
 }
 
+/// Translate `sftp:` shorthand into `opendal:sftp` with the right
+/// endpoint / user / root options. Two formats are accepted:
+///
+/// * `sftp://[user@]host[:port][/path]` — URL style. The `:port` is the
+///   reason this expander exists at all; OpenDAL's SFTP service takes
+///   the port as part of the `endpoint=ssh://host:port` value.
+/// * `sftp:[user@]host:/path` — legacy restic-flavoured shorthand.
+///   Always default port 22; included for backward compat with examples
+///   from the upstream `restic` docs.
+///
+/// Auth is key-based — OpenDAL's SFTP service has no password field.
+/// Users can supply `key: /path/to/private-key` (and optionally
+/// `user:`, `known_hosts_strategy:`) in the target's `credentials:`
+/// block; user-supplied options always win, matching the s3/b2 path.
+fn expand_sftp(rest: &str) -> ExpandedUri {
+    let mut options = BTreeMap::new();
+
+    let (user, host_port, root) = if let Some(url_rest) = rest.strip_prefix("//") {
+        // URL form: [user@]host[:port][/path]
+        let (user, hostpart) = match url_rest.split_once('@') {
+            Some((u, h)) => (Some(u.to_string()), h),
+            None => (None, url_rest),
+        };
+        let (host_port, root) = match hostpart.split_once('/') {
+            Some((hp, p)) => (hp.to_string(), format!("/{p}")),
+            None => (hostpart.to_string(), String::new()),
+        };
+        (user, host_port, root)
+    } else {
+        // Legacy form: [user@]host:/path  (no port — `:` separates host
+        // from path, not host from port)
+        let (user, hostpart) = match rest.split_once('@') {
+            Some((u, h)) => (Some(u.to_string()), h),
+            None => (None, rest),
+        };
+        let (host, root) = match hostpart.split_once(":/") {
+            Some((h, p)) => (h.to_string(), format!("/{p}")),
+            None => (hostpart.to_string(), String::new()),
+        };
+        (user, host, root)
+    };
+
+    options.insert("endpoint".to_string(), format!("ssh://{host_port}"));
+    if let Some(u) = user {
+        options.insert("user".to_string(), u);
+    }
+    if !root.is_empty() {
+        options.insert("root".to_string(), root);
+    }
+
+    ExpandedUri {
+        uri: "opendal:sftp".to_string(),
+        options,
+    }
+}
+
 fn split_bucket_root(s: &str) -> (&str, Option<&str>) {
     match s.split_once('/') {
         Some((b, r)) if !r.is_empty() => (b, Some(r)),
@@ -169,6 +228,32 @@ mod tests {
         assert_eq!(r.uri, "opendal:b2");
         assert_eq!(r.options.get("bucket").unwrap(), "my-bucket");
         assert_eq!(r.options.get("root").unwrap(), "/nested/path");
+    }
+
+    #[test]
+    fn sftp_url_with_port() {
+        let r = expand("sftp://backup@nas.lan:2222/srv/backups/uncloud");
+        assert_eq!(r.uri, "opendal:sftp");
+        assert_eq!(r.options.get("endpoint").unwrap(), "ssh://nas.lan:2222");
+        assert_eq!(r.options.get("user").unwrap(), "backup");
+        assert_eq!(r.options.get("root").unwrap(), "/srv/backups/uncloud");
+    }
+
+    #[test]
+    fn sftp_url_no_user_no_port() {
+        let r = expand("sftp://nas.lan/srv/backups/uncloud");
+        assert_eq!(r.options.get("endpoint").unwrap(), "ssh://nas.lan");
+        assert!(r.options.get("user").is_none());
+        assert_eq!(r.options.get("root").unwrap(), "/srv/backups/uncloud");
+    }
+
+    #[test]
+    fn sftp_legacy_shorthand() {
+        let r = expand("sftp:backup@nas.lan:/srv/backups/uncloud");
+        assert_eq!(r.uri, "opendal:sftp");
+        assert_eq!(r.options.get("endpoint").unwrap(), "ssh://nas.lan");
+        assert_eq!(r.options.get("user").unwrap(), "backup");
+        assert_eq!(r.options.get("root").unwrap(), "/srv/backups/uncloud");
     }
 
     #[test]

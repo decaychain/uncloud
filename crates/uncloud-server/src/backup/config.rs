@@ -45,9 +45,15 @@ impl Default for BackupOptions {
 #[derive(Debug, Clone, Deserialize)]
 pub struct BackupTarget {
     pub name: String,
-    /// Restic-format repo URI: `sftp:user@host:/path`, `s3:https://endpoint/bucket`,
-    /// `b2:bucket:prefix`, `rest:https://...`, `rclone:remote:path`, or a plain
-    /// local path. Parsed by `rustic_backend::BackendOptions`.
+    /// Restic-format repo URI. Supported shorthands (see `backup::uri`):
+    /// * `sftp://user@host:port/path` — URL style, custom port
+    /// * `sftp:user@host:/path`       — legacy form, default port 22
+    /// * `s3:https://endpoint/bucket` / `s3:bucket/prefix`
+    /// * `b2:bucket:prefix`
+    /// * `azure:container:prefix`
+    ///
+    /// Native rustic schemes (`rest:`, `rclone:`, `opendal:`, `local:`)
+    /// pass through unchanged. A bare path is treated as local.
     pub repo: String,
     #[serde(flatten)]
     pub password: SecretSource,
