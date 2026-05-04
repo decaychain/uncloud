@@ -223,6 +223,8 @@ impl From<ConfiguredStorageBackend> for StorageBackendConfig {
                 base_path,
                 host_key,
                 host_key_check,
+                connection_pool_size,
+                max_concurrent_ops,
             } => StorageBackendConfig::Sftp {
                 host,
                 port,
@@ -233,6 +235,8 @@ impl From<ConfiguredStorageBackend> for StorageBackendConfig {
                 base_path,
                 host_key,
                 host_key_check,
+                connection_pool_size,
+                max_concurrent_ops,
             },
         }
     }

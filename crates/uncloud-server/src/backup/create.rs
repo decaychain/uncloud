@@ -215,13 +215,7 @@ async fn run_one_inner(
         .options
         .max_concurrent_source_reads
         .unwrap_or(8);
-    let source = UncloudSource::new(
-        handle,
-        statics,
-        all_files,
-        max_concurrent,
-        config.storage.retry.clone(),
-    );
+    let source = UncloudSource::new(handle, statics, all_files, max_concurrent);
     let failure_counter = source.failures();
 
     let host = std::env::var("HOSTNAME")
@@ -241,28 +235,59 @@ async fn run_one_inner(
     let backup_opts = BackupOptions::default();
     let snapshot_path = PathBuf::from("/uncloud");
 
-    let snap = tokio::task::spawn_blocking(move || {
-        repo_handle
-            .to_indexed_ids()?
-            .backup_with_source(&backup_opts, &source, &snapshot_path, snap)
+    // Post-tag on success: only after `backup_with_source` returns AND we
+    // confirm zero failures, do we add `uncloud:complete`. Crashes between
+    // backup_with_source and this check leave the snapshot untagged, which
+    // is the correct state — "we didn't get to verify, so we can't claim
+    // it's complete." The cost is a single save+delete dance in the
+    // common case (snapshots are content-addressed, so adding a tag
+    // requires writing a new snapshot file and deleting the original).
+    let failure_counter_for_close = failure_counter.clone();
+    let snap = tokio::task::spawn_blocking(move || -> rustic_core::RusticResult<_> {
+        let indexed = repo_handle.to_indexed_ids()?;
+        let snap = indexed.backup_with_source(&backup_opts, &source, &snapshot_path, snap)?;
+        let failures =
+            failure_counter_for_close.load(std::sync::atomic::Ordering::Relaxed);
+        if failures == 0 {
+            let old_id = snap.id;
+            let mut tagged = snap.clone();
+            let tag: rustic_core::StringList = "uncloud:complete".parse().unwrap_or_default();
+            tagged.add_tags(vec![tag]);
+            indexed.save_snapshots(vec![tagged])?;
+            indexed.delete_snapshots(std::slice::from_ref(&old_id))?;
+        }
+        rustic_core::RusticResult::Ok(snap)
     })
     .await?
     .map_err(|e| format!("rustic backup failed: {e}"))?;
 
     let failures = failure_counter.load(std::sync::atomic::Ordering::Relaxed);
-    println!(
-        "Snapshot {} written: {} files, {} bytes",
-        snap.id,
-        snap.summary
-            .as_ref()
-            .map(|s| s.total_files_processed)
-            .unwrap_or(0),
-        snap.summary
-            .as_ref()
-            .map(|s| s.total_bytes_processed)
-            .unwrap_or(0)
-    );
-    if failures > 0 {
+    let total_files = snap
+        .summary
+        .as_ref()
+        .map(|s| s.total_files_processed)
+        .unwrap_or(0);
+    let total_bytes = snap
+        .summary
+        .as_ref()
+        .map(|s| s.total_bytes_processed)
+        .unwrap_or(0);
+    if failures == 0 {
+        // The dance above tagged + replaced; `snap.id` is the now-deleted
+        // original. We don't surface it because users would chase a
+        // ghost. The new id lives in `backup list`.
+        println!(
+            "Snapshot written (uncloud:complete): {total_files} files, {total_bytes} bytes",
+        );
+        println!(
+            "Find the snapshot id with: backup list --target {}",
+            target.name,
+        );
+    } else {
+        println!(
+            "Snapshot {} written (untagged — partial): {total_files} files, {total_bytes} bytes",
+            snap.id,
+        );
         println!();
         println!(
             "WARNING: {failures} of {total_blobs} blob(s) failed to read from their \
@@ -273,7 +298,7 @@ async fn run_one_inner(
         );
         println!(
             "Per-blob errors are logged at WARN level above; grep the run output for \
-             `Failed to open backup blob`."
+             `Failed to open backup blob` or `source read of` (mid-stream failures)."
         );
     }
 

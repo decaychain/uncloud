@@ -86,6 +86,8 @@ fn make_password_config(port: u16) -> StorageBackendConfig {
         base_path: HOST_BASE_PATH.into(),
         host_key: None,
         host_key_check: Some("skip".into()), // tofu in DB also works, skip is simpler in tests
+        connection_pool_size: None,
+        max_concurrent_ops: None,
     }
 }
 
@@ -235,6 +237,8 @@ async fn private_key_auth_works() {
         base_path: HOST_BASE_PATH.into(),
         host_key: None,
         host_key_check: Some("skip".into()),
+        connection_pool_size: None,
+        max_concurrent_ops: None,
     };
     let db = mongo_db("uncloud_sftp_test_6").await;
     let storage = SftpStorage::new(&cfg, Default::default(), db, ObjectId::new())

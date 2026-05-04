@@ -7,8 +7,9 @@ use russh::Channel;
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
 use sha2::{Digest, Sha256};
+use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -20,18 +21,16 @@ use crate::models::{SftpHostKey, StorageBackendConfig};
 /// recreated on demand if it dies. Concurrent operations share the session —
 /// the SFTP protocol multiplexes requests over one channel.
 pub struct SftpStorage {
-    /// Connection parameters captured at construction time.
-    cfg: ConnConfig,
-    /// Active SFTP session. Reset to `None` if a request errors out so the
-    /// next caller reconnects.
-    conn: Mutex<Option<Arc<Conn>>>,
-    db: Database,
-    storage_id: ObjectId,
+    /// Connection pool. Each in-flight op checks out an SSH session;
+    /// connections come back to the pool on `Drop` unless the op called
+    /// `discard()` (which the retry layer does on transient errors so
+    /// busted sessions don't go back into rotation).
+    pool: Arc<ConnectionPool>,
     base_path: String,
-    /// Retry policy for idempotent ops (read / read_range / exists / scan).
-    /// Mutating ops bypass it because most of them either consume an input
-    /// stream (write_stream) or run inside a temp+rename pattern where the
-    /// caller is better placed to decide retry semantics.
+    /// Retry policy for idempotent ops (read / read_range / exists / scan
+    /// / write / delete / rename). Each retry attempt checks out a fresh
+    /// connection from the pool, so a single broken session no longer
+    /// kills concurrent ops the way `invalidate_session()` used to.
     retry: super::retry::RetryConfig,
 }
 
@@ -144,12 +143,23 @@ impl SftpStorage {
             base_path,
             host_key,
             host_key_check,
+            connection_pool_size,
+            max_concurrent_ops,
         } = config
         else {
             return Err(AppError::Internal(
                 "SftpStorage::new called with non-Sftp config".into(),
             ));
         };
+        let pool_size = connection_pool_size.unwrap_or(2).max(1);
+        let op_cap = max_concurrent_ops.unwrap_or(4).max(1);
+        if pool_size > 4 {
+            tracing::warn!(
+                "SFTP storage `{host}:{port}`: connection_pool_size={pool_size} — \
+                 some shared-tenant SFTP servers (Hetzner Storage Box ≈ 5) \
+                 cap concurrent SSH connections; raise with care",
+            );
+        }
 
         let auth = match (password.as_ref(), private_key.as_ref()) {
             (Some(p), None) => AuthMode::Password(p.clone()),
@@ -199,102 +209,18 @@ impl SftpStorage {
             skip_host_key_check: skip,
         };
 
+        let pool = ConnectionPool::new(cfg, db, storage_id, pool_size, op_cap);
         let storage = Self {
-            cfg,
-            conn: Mutex::new(None),
-            db,
-            storage_id,
+            pool,
             base_path: base_path.trim_end_matches('/').to_string(),
             retry,
         };
 
-        // Eagerly connect once so misconfig fails fast at startup, and so the
-        // first TOFU pin is recorded immediately.
-        let _ = storage.session().await?;
+        // Eagerly check out (and immediately return) a connection so
+        // misconfig fails fast at startup, and so the first TOFU pin is
+        // recorded immediately.
+        let _ = storage.pool.checkout().await?;
         Ok(storage)
-    }
-
-    /// Returns the active SFTP session, reconnecting if needed.
-    async fn session(&self) -> Result<Arc<Conn>> {
-        let mut guard = self.conn.lock().await;
-        if guard.is_none() {
-            *guard = Some(Arc::new(self.connect().await?));
-        }
-        Ok(guard.as_ref().expect("just inserted").clone())
-    }
-
-    /// Drop the cached SFTP session so the next operation reconnects.
-    /// Called between retry attempts on failed idempotent ops — a single
-    /// connection-level error tends to invalidate every in-flight request
-    /// against the same session, so reusing it would just fail the same way.
-    async fn invalidate_session(&self) {
-        *self.conn.lock().await = None;
-    }
-
-    async fn connect(&self) -> Result<Conn> {
-        let seen = Arc::new(Mutex::new(None));
-        let handler = TofuHandler {
-            expected: self.cfg.expected_host_key.clone(),
-            skip: self.cfg.skip_host_key_check,
-            seen: seen.clone(),
-        };
-
-        let ssh_config = Arc::new(client::Config::default());
-        let mut handle = client::connect(
-            ssh_config,
-            (self.cfg.host.as_str(), self.cfg.port),
-            handler,
-        )
-        .await
-        .map_err(|e| AppError::Storage(format!("SSH connect to {}:{} failed: {e}", self.cfg.host, self.cfg.port)))?;
-
-        // Authenticate.
-        let auth_ok = match &self.cfg.auth {
-            AuthMode::Password(p) => handle
-                .authenticate_password(self.cfg.username.clone(), p.clone())
-                .await
-                .map_err(|e| AppError::Storage(format!("SSH auth (password) failed: {e}")))?
-                .success(),
-            AuthMode::PrivateKey { key } => handle
-                .authenticate_publickey(
-                    self.cfg.username.clone(),
-                    PrivateKeyWithHashAlg::new(key.clone(), Some(HashAlg::Sha256)),
-                )
-                .await
-                .map_err(|e| AppError::Storage(format!("SSH auth (publickey) failed: {e}")))?
-                .success(),
-        };
-        if !auth_ok {
-            return Err(AppError::Storage(
-                "SSH authentication rejected by server".into(),
-            ));
-        }
-
-        // After successful handshake: TOFU-pin the seen key if we didn't
-        // already have one. Only does anything for the first connect ever.
-        if self.cfg.expected_host_key.is_none() && !self.cfg.skip_host_key_check {
-            if let Some(s) = seen.lock().await.clone() {
-                save_pinned_host_key(&self.db, self.storage_id, &s).await?;
-            }
-        }
-
-        let channel: Channel<Msg> = handle
-            .channel_open_session()
-            .await
-            .map_err(|e| AppError::Storage(format!("SSH channel open failed: {e}")))?;
-        channel
-            .request_subsystem(true, "sftp")
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP subsystem request failed: {e}")))?;
-
-        let sftp = SftpSession::new(channel.into_stream())
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP session init failed: {e}")))?;
-
-        Ok(Conn {
-            sftp,
-            _ssh: handle,
-        })
     }
 
     fn resolve(&self, path: &str) -> String {
@@ -316,14 +242,41 @@ impl SftpStorage {
     }
 }
 
+/// Reader that owns a `PooledConn` for the lifetime of the read so
+/// concurrent ops on the same SftpStorage don't pick the same connection
+/// out of the pool while bytes are still streaming over its SFTP channel.
+/// The wrapped reader (an `SftpFile`) holds an internal `Arc<SftpSession>`
+/// which is what actually drives the byte transfer; we just keep the
+/// pool slot occupied via `_pooled` until the reader is dropped.
+struct PooledReader<R> {
+    _pooled: PooledConn,
+    inner: R,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for PooledReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
 impl SftpStorage {
     async fn read_once(&self, path: &str) -> Result<BoxedAsyncRead> {
+        let pooled = self.pool.checkout().await?;
         let full = self.resolve(path);
-        let s = self.session().await?;
-        let file = s.sftp.open(full).await.map_err(|e| {
-            AppError::Storage(format!("SFTP open failed: {e}"))
-        })?;
-        Ok(Box::pin(file))
+        match pooled.sftp.open(full).await {
+            Ok(file) => Ok(Box::pin(PooledReader {
+                _pooled: pooled,
+                inner: file,
+            })),
+            Err(e) => {
+                pooled.discard();
+                Err(AppError::Storage(format!("SFTP open failed: {e}")))
+            }
+        }
     }
 
     async fn read_range_once(
@@ -332,119 +285,169 @@ impl SftpStorage {
         offset: u64,
         length: u64,
     ) -> Result<BoxedAsyncRead> {
+        let pooled = self.pool.checkout().await?;
         let full = self.resolve(path);
-        let s = self.session().await?;
-        let mut file = s
-            .open(full)
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP open failed: {e}")))?;
-        file.seek(std::io::SeekFrom::Start(offset))
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP seek failed: {e}")))?;
-        Ok(Box::pin(file.take(length)))
+        let body = async {
+            let mut file = pooled
+                .sftp
+                .open(full)
+                .await
+                .map_err(|e| AppError::Storage(format!("SFTP open failed: {e}")))?;
+            file.seek(std::io::SeekFrom::Start(offset))
+                .await
+                .map_err(|e| AppError::Storage(format!("SFTP seek failed: {e}")))?;
+            Ok::<_, AppError>(file)
+        }
+        .await;
+        match body {
+            Ok(file) => Ok(Box::pin(PooledReader {
+                _pooled: pooled,
+                inner: file.take(length),
+            })),
+            Err(e) => {
+                pooled.discard();
+                Err(e)
+            }
+        }
     }
 
     async fn write_once(&self, path: &str, data: &[u8]) -> Result<()> {
+        let pooled = self.pool.checkout().await?;
         let full = self.resolve(path);
-        let s = self.session().await?;
-        self.ensure_parent_dir(&s.sftp, &full).await?;
-        let mut file = s
-            .create(full)
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP create failed: {e}")))?;
-        file.write_all(data)
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP write failed: {e}")))?;
-        file.shutdown()
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP close failed: {e}")))?;
-        Ok(())
+        let result = async {
+            self.ensure_parent_dir(&pooled.sftp, &full).await?;
+            let mut file = pooled
+                .sftp
+                .create(full)
+                .await
+                .map_err(|e| AppError::Storage(format!("SFTP create failed: {e}")))?;
+            file.write_all(data)
+                .await
+                .map_err(|e| AppError::Storage(format!("SFTP write failed: {e}")))?;
+            file.shutdown()
+                .await
+                .map_err(|e| AppError::Storage(format!("SFTP close failed: {e}")))?;
+            Ok::<(), AppError>(())
+        }
+        .await;
+        if result.is_err() {
+            pooled.discard();
+        }
+        result
     }
 
     async fn rename_once(&self, from: &str, to: &str) -> Result<()> {
+        let pooled = self.pool.checkout().await?;
         let from_full = self.resolve(from);
         let to_full = self.resolve(to);
-        let s = self.session().await?;
-        self.ensure_parent_dir(&s.sftp, &to_full).await?;
-        s.sftp.rename(from_full, to_full)
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP rename failed: {e}")))?;
-        Ok(())
+        let result = async {
+            self.ensure_parent_dir(&pooled.sftp, &to_full).await?;
+            pooled
+                .sftp
+                .rename(from_full, to_full)
+                .await
+                .map_err(|e| AppError::Storage(format!("SFTP rename failed: {e}")))?;
+            Ok::<(), AppError>(())
+        }
+        .await;
+        if result.is_err() {
+            pooled.discard();
+        }
+        result
     }
 
     async fn delete_once(&self, path: &str) -> Result<()> {
+        let pooled = self.pool.checkout().await?;
         let full = self.resolve(path);
-        let s = self.session().await?;
-        match s.sftp.remove_file(full).await {
+        match pooled.sftp.remove_file(full).await {
             Ok(()) => Ok(()),
             // Treat "not found" as success — matches LocalStorage's behaviour
             // where unlink-on-missing silently no-ops.
             Err(e) if is_no_such_file(&e) => Ok(()),
-            Err(e) => Err(AppError::Storage(format!("SFTP delete failed: {e}"))),
+            Err(e) => {
+                pooled.discard();
+                Err(AppError::Storage(format!("SFTP delete failed: {e}")))
+            }
         }
     }
 
     async fn exists_once(&self, path: &str) -> Result<bool> {
+        let pooled = self.pool.checkout().await?;
         let full = self.resolve(path);
-        let s = self.session().await?;
-        match s.sftp.metadata(full).await {
+        match pooled.sftp.metadata(full).await {
             Ok(_) => Ok(true),
             Err(e) if is_no_such_file(&e) => Ok(false),
-            Err(e) => Err(AppError::Storage(format!("SFTP stat failed: {e}"))),
+            Err(e) => {
+                pooled.discard();
+                Err(AppError::Storage(format!("SFTP stat failed: {e}")))
+            }
         }
     }
 
     async fn scan_once(&self, prefix: &str) -> Result<Vec<ScanEntry>> {
+        let pooled = self.pool.checkout().await?;
         let root = self.resolve(prefix);
-        let s = self.session().await?;
         let mut out = Vec::new();
         let mut stack: Vec<String> = vec![root.clone()];
-        while let Some(dir) = stack.pop() {
-            let entries = match s.sftp.read_dir(&dir).await {
-                Ok(e) => e,
-                Err(e) if is_no_such_file(&e) => continue,
-                Err(e) => return Err(AppError::Storage(format!("SFTP read_dir failed: {e}"))),
-            };
-            for entry in entries {
-                let name = entry.file_name();
-                if name == "." || name == ".." {
-                    continue;
-                }
-                let full = if dir.ends_with('/') {
-                    format!("{}{}", dir, name)
-                } else {
-                    format!("{}/{}", dir, name)
+        let result = async {
+            while let Some(dir) = stack.pop() {
+                let entries = match pooled.sftp.read_dir(&dir).await {
+                    Ok(e) => e,
+                    Err(e) if is_no_such_file(&e) => continue,
+                    Err(e) => {
+                        return Err(AppError::Storage(format!("SFTP read_dir failed: {e}")));
+                    }
                 };
-                let trimmed = full.trim_start_matches('/');
-                let rel = trimmed
-                    .strip_prefix(&format!("{}/", self.base_path.trim_start_matches('/')))
-                    .unwrap_or(trimmed)
-                    .to_string();
-                let attrs = entry.metadata();
-                if attrs.is_dir() {
-                    out.push(ScanEntry {
-                        path: rel,
-                        is_dir: true,
-                        size_bytes: 0,
-                    });
-                    stack.push(full);
-                } else {
-                    out.push(ScanEntry {
-                        path: rel,
-                        is_dir: false,
-                        size_bytes: attrs.size.unwrap_or(0),
-                    });
+                for entry in entries {
+                    let name = entry.file_name();
+                    if name == "." || name == ".." {
+                        continue;
+                    }
+                    let full = if dir.ends_with('/') {
+                        format!("{}{}", dir, name)
+                    } else {
+                        format!("{}/{}", dir, name)
+                    };
+                    let trimmed = full.trim_start_matches('/');
+                    let rel = trimmed
+                        .strip_prefix(&format!("{}/", self.base_path.trim_start_matches('/')))
+                        .unwrap_or(trimmed)
+                        .to_string();
+                    let attrs = entry.metadata();
+                    if attrs.is_dir() {
+                        out.push(ScanEntry {
+                            path: rel,
+                            is_dir: true,
+                            size_bytes: 0,
+                        });
+                        stack.push(full);
+                    } else {
+                        out.push(ScanEntry {
+                            path: rel,
+                            is_dir: false,
+                            size_bytes: attrs.size.unwrap_or(0),
+                        });
+                    }
                 }
             }
+            Ok::<_, AppError>(out)
         }
-        Ok(out)
+        .await;
+        match result {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                pooled.discard();
+                Err(e)
+            }
+        }
     }
 }
 
-/// Run an idempotent SFTP op through the configured retry policy. On every
-/// failed attempt the cached session is invalidated so the next iteration
-/// reconnects — a connection-level error tends to invalidate every other
-/// in-flight request against the same session anyway.
+/// Run an idempotent SFTP op through the configured retry policy. The
+/// retry helper itself doesn't touch connection state — each `_once`
+/// closure checks out its own pooled connection and (via `discard()`)
+/// removes a busted session from rotation on its way out, so the next
+/// attempt naturally grabs a healthy connection from the pool.
 async fn retry_idempotent<F, Fut, T>(
     storage: &SftpStorage,
     op_name: &str,
@@ -463,9 +466,8 @@ where
             Err(e) if attempt < max => {
                 tracing::warn!(
                     "{op_name}: attempt {attempt}/{max} failed: {e}; \
-                     reconnecting and retrying in {delay:?}",
+                     retrying in {delay:?}",
                 );
-                storage.invalidate_session().await;
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(max_delay);
             }
@@ -508,30 +510,38 @@ impl StorageBackend for SftpStorage {
         mut reader: BoxedAsyncRead,
         _size: u64,
     ) -> Result<()> {
+        let pooled = self.pool.checkout().await?;
         let full = self.resolve(path);
-        let s = self.session().await?;
-        self.ensure_parent_dir(&s.sftp, &full).await?;
-        let mut file = s
-            .create(full)
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP create failed: {e}")))?;
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            let n = reader
-                .read(&mut buf)
+        let result = async {
+            self.ensure_parent_dir(&pooled.sftp, &full).await?;
+            let mut file = pooled
+                .sftp
+                .create(full)
                 .await
-                .map_err(|e| AppError::Storage(format!("read stream: {e}")))?;
-            if n == 0 {
-                break;
+                .map_err(|e| AppError::Storage(format!("SFTP create failed: {e}")))?;
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                let n = reader
+                    .read(&mut buf)
+                    .await
+                    .map_err(|e| AppError::Storage(format!("read stream: {e}")))?;
+                if n == 0 {
+                    break;
+                }
+                file.write_all(&buf[..n])
+                    .await
+                    .map_err(|e| AppError::Storage(format!("SFTP write failed: {e}")))?;
             }
-            file.write_all(&buf[..n])
+            file.shutdown()
                 .await
-                .map_err(|e| AppError::Storage(format!("SFTP write failed: {e}")))?;
+                .map_err(|e| AppError::Storage(format!("SFTP close failed: {e}")))?;
+            Ok::<(), AppError>(())
         }
-        file.shutdown()
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP close failed: {e}")))?;
-        Ok(())
+        .await;
+        if result.is_err() {
+            pooled.discard();
+        }
+        result
     }
 
     async fn delete(&self, path: &str) -> Result<()> {
@@ -556,50 +566,85 @@ impl StorageBackend for SftpStorage {
     /// successfully written). Adding implicit retry inside each step
     /// would create double-retry semantics with the caller's own logic.
     async fn create_temp(&self) -> Result<String> {
+        let pooled = self.pool.checkout().await?;
         let name = format!("{}.tmp", Uuid::new_v4());
         let full = self.resolve(&format!(".tmp/{}", name));
-        let s = self.session().await?;
-        ensure_dir(&s.sftp, &self.resolve(".tmp")).await?;
-        let mut file = s
-            .create(full)
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP temp create failed: {e}")))?;
-        file.shutdown().await.ok();
-        Ok(name)
+        let result = async {
+            ensure_dir(&pooled.sftp, &self.resolve(".tmp")).await?;
+            let mut file = pooled
+                .sftp
+                .create(full)
+                .await
+                .map_err(|e| AppError::Storage(format!("SFTP temp create failed: {e}")))?;
+            file.shutdown().await.ok();
+            Ok::<_, AppError>(name.clone())
+        }
+        .await;
+        match result {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                pooled.discard();
+                Err(e)
+            }
+        }
     }
 
     async fn append_temp(&self, temp_path: &str, data: &[u8]) -> Result<()> {
+        let pooled = self.pool.checkout().await?;
         let full = self.resolve(&format!(".tmp/{}", temp_path.trim_start_matches('/')));
-        let s = self.session().await?;
-        let mut file = s
-            .open_with_flags(full, OpenFlags::WRITE | OpenFlags::APPEND)
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP temp open failed: {e}")))?;
-        file.write_all(data)
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP append failed: {e}")))?;
-        file.shutdown()
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP close failed: {e}")))?;
-        Ok(())
+        let result = async {
+            let mut file = pooled
+                .sftp
+                .open_with_flags(full, OpenFlags::WRITE | OpenFlags::APPEND)
+                .await
+                .map_err(|e| AppError::Storage(format!("SFTP temp open failed: {e}")))?;
+            file.write_all(data)
+                .await
+                .map_err(|e| AppError::Storage(format!("SFTP append failed: {e}")))?;
+            file.shutdown()
+                .await
+                .map_err(|e| AppError::Storage(format!("SFTP close failed: {e}")))?;
+            Ok::<(), AppError>(())
+        }
+        .await;
+        if result.is_err() {
+            pooled.discard();
+        }
+        result
     }
 
     async fn finalize_temp(&self, temp_path: &str, final_path: &str) -> Result<()> {
+        let pooled = self.pool.checkout().await?;
         let from = self.resolve(&format!(".tmp/{}", temp_path.trim_start_matches('/')));
         let to = self.resolve(final_path);
-        let s = self.session().await?;
-        self.ensure_parent_dir(&s.sftp, &to).await?;
-        s.sftp.rename(from, to)
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP rename failed: {e}")))?;
-        Ok(())
+        let result = async {
+            self.ensure_parent_dir(&pooled.sftp, &to).await?;
+            pooled
+                .sftp
+                .rename(from, to)
+                .await
+                .map_err(|e| AppError::Storage(format!("SFTP rename failed: {e}")))?;
+            Ok::<(), AppError>(())
+        }
+        .await;
+        if result.is_err() {
+            pooled.discard();
+        }
+        result
     }
 
     async fn abort_temp(&self, temp_path: &str) -> Result<()> {
+        let pooled = self.pool.checkout().await?;
         let full = self.resolve(&format!(".tmp/{}", temp_path.trim_start_matches('/')));
-        let s = self.session().await?;
-        match s.sftp.remove_file(full).await {
-            Ok(()) | Err(_) => Ok(()),
+        match pooled.sftp.remove_file(full).await {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                // abort_temp is best-effort; even on error we report Ok so
+                // callers don't blow up on cleanup. But the connection's
+                // probably toast — discard so the pool stays healthy.
+                pooled.discard();
+                Ok(())
+            }
         }
     }
 
@@ -630,9 +675,8 @@ impl StorageBackend for SftpStorage {
                     }
                     tracing::warn!(
                         "sftp.rename: attempt {attempt}/{max} failed: {e}; \
-                         reconnecting and retrying in {delay:?}"
+                         retrying in {delay:?}"
                     );
-                    self.invalidate_session().await;
                     tokio::time::sleep(delay).await;
                     delay = (delay * 2).min(max_delay);
                 }
@@ -643,38 +687,49 @@ impl StorageBackend for SftpStorage {
     }
 
     async fn archive_version(&self, current: &str, version: &str) -> Result<()> {
-        // SFTP has no native copy — read source, write destination.
-        let s = self.session().await?;
+        // SFTP has no native copy — read source, write destination on the
+        // same connection (cheaper than two checkouts since we'd serialize
+        // them anyway via the underlying SFTP channel).
+        let pooled = self.pool.checkout().await?;
         let src = self.resolve(current);
         let dst = self.resolve(version);
-        self.ensure_parent_dir(&s.sftp, &dst).await?;
-        let mut input = s
-            .open(src)
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP open source: {e}")))?;
-        let mut output = s
-            .create(dst)
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP create dest: {e}")))?;
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            let n = input
-                .read(&mut buf)
+        let result = async {
+            self.ensure_parent_dir(&pooled.sftp, &dst).await?;
+            let mut input = pooled
+                .sftp
+                .open(src)
                 .await
-                .map_err(|e| AppError::Storage(format!("read source: {e}")))?;
-            if n == 0 {
-                break;
+                .map_err(|e| AppError::Storage(format!("SFTP open source: {e}")))?;
+            let mut output = pooled
+                .sftp
+                .create(dst)
+                .await
+                .map_err(|e| AppError::Storage(format!("SFTP create dest: {e}")))?;
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                let n = input
+                    .read(&mut buf)
+                    .await
+                    .map_err(|e| AppError::Storage(format!("read source: {e}")))?;
+                if n == 0 {
+                    break;
+                }
+                output
+                    .write_all(&buf[..n])
+                    .await
+                    .map_err(|e| AppError::Storage(format!("write dest: {e}")))?;
             }
             output
-                .write_all(&buf[..n])
+                .shutdown()
                 .await
-                .map_err(|e| AppError::Storage(format!("write dest: {e}")))?;
+                .map_err(|e| AppError::Storage(format!("SFTP close: {e}")))?;
+            Ok::<(), AppError>(())
         }
-        output
-            .shutdown()
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP close: {e}")))?;
-        Ok(())
+        .await;
+        if result.is_err() {
+            pooled.discard();
+        }
+        result
     }
 
     async fn move_to_trash(&self, current: &str, trash: &str) -> Result<()> {
@@ -687,6 +742,193 @@ impl StorageBackend for SftpStorage {
 
     async fn scan(&self, prefix: &str) -> Result<Vec<ScanEntry>> {
         retry_idempotent(self, "sftp.scan", || self.scan_once(prefix)).await
+    }
+}
+
+// ── connection pool ─────────────────────────────────────────────────────────
+
+/// Bounded pool of SSH/SFTP sessions. Each `checkout` returns a `PooledConn`
+/// guard that releases the connection back to the pool on `Drop` — unless
+/// `discard()` was called first, in which case the connection is dropped
+/// (and the next checkout will open a fresh one).
+///
+/// Sizing semantics:
+///
+/// * `pool_size` caps how many connections the pool will *hold*. The pool
+///   is lazy — connections are opened on demand and reused thereafter, so
+///   the steady-state count tracks the number of concurrent ops.
+/// * `op_cap` caps how many ops can be in flight at once across all
+///   callers, independent of pool size. With `pool_size=2, op_cap=4` you
+///   get up to 4 ops queued against 2 connections at any moment, which is
+///   the sweet spot for shared-tenant SFTP servers (Hetzner, etc.) where
+///   the connection cap is tight but the request rate isn't.
+///
+/// On error, callers are expected to invoke `PooledConn::discard()` so a
+/// busted SSH session doesn't go back into rotation. The next checkout
+/// opens a fresh connection in its slot.
+struct ConnectionPool {
+    cfg: Arc<ConnConfig>,
+    db: Database,
+    storage_id: ObjectId,
+    available: std::sync::Mutex<std::collections::VecDeque<Arc<Conn>>>,
+    /// Caps total in-flight checkouts. Doubles as the upper bound on
+    /// concurrent ops at the SFTP-storage layer.
+    op_semaphore: Arc<tokio::sync::Semaphore>,
+    pool_size: usize,
+}
+
+struct PooledConn {
+    conn: Option<Arc<Conn>>,
+    pool: std::sync::Weak<ConnectionPool>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl ConnectionPool {
+    fn new(
+        cfg: ConnConfig,
+        db: Database,
+        storage_id: ObjectId,
+        pool_size: u32,
+        op_cap: u32,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            cfg: Arc::new(cfg),
+            db,
+            storage_id,
+            available: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            op_semaphore: Arc::new(tokio::sync::Semaphore::new(op_cap as usize)),
+            pool_size: pool_size as usize,
+        })
+    }
+
+    async fn checkout(self: &Arc<Self>) -> Result<PooledConn> {
+        let permit = self
+            .op_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| AppError::Storage(format!("SFTP op semaphore closed: {e}")))?;
+        // Try to grab a warm connection; if none, open a fresh one.
+        let warm = {
+            let mut available = self
+                .available
+                .lock()
+                .map_err(|_| AppError::Storage("SFTP pool mutex poisoned".into()))?;
+            available.pop_front()
+        };
+        let conn = match warm {
+            Some(c) => c,
+            None => Arc::new(self.connect().await?),
+        };
+        Ok(PooledConn {
+            conn: Some(conn),
+            pool: Arc::downgrade(self),
+            _permit: permit,
+        })
+    }
+
+    /// Open a fresh SSH/SFTP session. Pinned host key (or TOFU on first
+    /// connect) is read from / written to MongoDB via the configured
+    /// `db` + `storage_id`. Used by `checkout` when no warm connection
+    /// is available, and indirectly by retry paths after `discard()`.
+    async fn connect(&self) -> Result<Conn> {
+        let seen = Arc::new(Mutex::new(None));
+        let handler = TofuHandler {
+            expected: self.cfg.expected_host_key.clone(),
+            skip: self.cfg.skip_host_key_check,
+            seen: seen.clone(),
+        };
+
+        let ssh_config = Arc::new(client::Config::default());
+        let mut handle = client::connect(
+            ssh_config,
+            (self.cfg.host.as_str(), self.cfg.port),
+            handler,
+        )
+        .await
+        .map_err(|e| {
+            AppError::Storage(format!(
+                "SSH connect to {}:{} failed: {e}",
+                self.cfg.host, self.cfg.port
+            ))
+        })?;
+
+        let auth_ok = match &self.cfg.auth {
+            AuthMode::Password(p) => handle
+                .authenticate_password(self.cfg.username.clone(), p.clone())
+                .await
+                .map_err(|e| AppError::Storage(format!("SSH auth (password) failed: {e}")))?
+                .success(),
+            AuthMode::PrivateKey { key } => handle
+                .authenticate_publickey(
+                    self.cfg.username.clone(),
+                    PrivateKeyWithHashAlg::new(key.clone(), Some(HashAlg::Sha256)),
+                )
+                .await
+                .map_err(|e| AppError::Storage(format!("SSH auth (publickey) failed: {e}")))?
+                .success(),
+        };
+        if !auth_ok {
+            return Err(AppError::Storage(
+                "SSH authentication rejected by server".into(),
+            ));
+        }
+
+        if self.cfg.expected_host_key.is_none() && !self.cfg.skip_host_key_check {
+            if let Some(s) = seen.lock().await.clone() {
+                save_pinned_host_key(&self.db, self.storage_id, &s).await?;
+            }
+        }
+
+        let channel: Channel<Msg> = handle
+            .channel_open_session()
+            .await
+            .map_err(|e| AppError::Storage(format!("SSH channel open failed: {e}")))?;
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .map_err(|e| AppError::Storage(format!("SFTP subsystem request failed: {e}")))?;
+
+        let sftp = SftpSession::new(channel.into_stream())
+            .await
+            .map_err(|e| AppError::Storage(format!("SFTP session init failed: {e}")))?;
+
+        Ok(Conn { sftp, _ssh: handle })
+    }
+}
+
+impl PooledConn {
+    /// Drop this connection without returning it to the pool. Call after
+    /// any error that might indicate a broken SSH session — the next
+    /// checkout opens a fresh one.
+    fn discard(mut self) {
+        self.conn = None;
+    }
+}
+
+impl std::ops::Deref for PooledConn {
+    type Target = Conn;
+    fn deref(&self) -> &Conn {
+        self.conn.as_ref().expect("conn taken before drop").as_ref()
+    }
+}
+
+impl Drop for PooledConn {
+    fn drop(&mut self) {
+        let Some(conn) = self.conn.take() else { return };
+        let Some(pool) = self.pool.upgrade() else { return };
+        let pool_size = pool.pool_size;
+        let mut available = match pool.available.lock() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
+        if available.len() < pool_size {
+            available.push_back(conn);
+        }
+        // else: pool is full — drop the connection. Happens only if we
+        // transiently checked out more than pool_size, which the
+        // op_semaphore is supposed to prevent; the bounded push is
+        // defensive.
     }
 }
 

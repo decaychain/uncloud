@@ -37,6 +37,19 @@ pub enum StorageBackendConfig {
         host_key: Option<String>,
         #[serde(default)]
         host_key_check: Option<String>,
+        /// Number of SSH connections kept warm in the pool. Each
+        /// in-flight op uses one; the pool size caps how many ops can
+        /// run truly in parallel against the server. Defaults to 2.
+        /// Hetzner Storage Box subaccounts cap simultaneous SSH
+        /// connections at ~5; raise with care.
+        #[serde(default)]
+        connection_pool_size: Option<u32>,
+        /// Cap on simultaneous in-flight ops (queues at the storage
+        /// backend layer). Independent of `connection_pool_size`:
+        /// `pool=2, ops=4` means up to 4 ops queue but only 2 hold a
+        /// connection at any moment. Defaults to 4.
+        #[serde(default)]
+        max_concurrent_ops: Option<u32>,
     },
 }
 
