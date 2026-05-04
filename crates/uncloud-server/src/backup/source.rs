@@ -32,7 +32,6 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::runtime::Handle;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::storage::retry::RetryConfig;
 use crate::storage::StorageBackend;
 
 /// Static entry — DB jsonl, manifest, anything already on local disk.
@@ -84,11 +83,6 @@ pub struct UncloudSource {
     /// `UncloudOpen::open()` for a backend entry acquires one permit and
     /// holds it until the resulting `Read` is dropped.
     concurrency: Arc<Semaphore>,
-    /// Retry policy for mid-stream read failures against backend sources.
-    /// SFTP throws SSH_FX_FAILURE for a number of transient reasons (server
-    /// recycling its handle pool, packet loss); without retry, every such
-    /// blip turns into a missing blob in the snapshot.
-    retry: RetryConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -121,7 +115,6 @@ impl UncloudSource {
         statics: Vec<StaticEntry>,
         files: Vec<FileEntry>,
         max_concurrent_reads: usize,
-        retry: RetryConfig,
     ) -> Self {
         let mut entries: Vec<SourceEntry> = Vec::with_capacity(statics.len() + files.len());
         entries.extend(statics.into_iter().map(SourceEntry::Static));
@@ -135,7 +128,6 @@ impl UncloudSource {
             total_bytes,
             failures: Arc::new(AtomicUsize::new(0)),
             concurrency: Arc::new(Semaphore::new(max_concurrent_reads.max(1))),
-            retry,
         }
     }
 
@@ -160,7 +152,6 @@ impl ReadSource for UncloudSource {
             inner: self.entries.clone(),
             failures: self.failures.clone(),
             concurrency: self.concurrency.clone(),
-            retry: self.retry.clone(),
             idx: 0,
         }
     }
@@ -171,7 +162,6 @@ pub struct UncloudIter {
     inner: Arc<Vec<SourceEntry>>,
     failures: Arc<AtomicUsize>,
     concurrency: Arc<Semaphore>,
-    retry: RetryConfig,
     idx: usize,
 }
 
@@ -185,7 +175,6 @@ impl Iterator for UncloudIter {
             &self.handle,
             &self.failures,
             &self.concurrency,
-            &self.retry,
             entry.clone(),
         ))
     }
@@ -195,7 +184,6 @@ fn make_entry(
     handle: &Handle,
     failures: &Arc<AtomicUsize>,
     concurrency: &Arc<Semaphore>,
-    retry: &RetryConfig,
     entry: SourceEntry,
 ) -> RusticResult<ReadSourceEntry<UncloudOpen>> {
     let path = match &entry {
@@ -219,14 +207,12 @@ fn make_entry(
             handle: handle.clone(),
             failures: failures.clone(),
             concurrency: concurrency.clone(),
-            retry: retry.clone(),
             kind: OpenKind::Local(s.local_path),
         },
         SourceEntry::File(f) => UncloudOpen {
             handle: handle.clone(),
             failures: failures.clone(),
             concurrency: concurrency.clone(),
-            retry: retry.clone(),
             kind: OpenKind::Backend {
                 backend: f.backend,
                 storage_path: f.storage_path,
@@ -244,7 +230,6 @@ pub struct UncloudOpen {
     handle: Handle,
     failures: Arc<AtomicUsize>,
     concurrency: Arc<Semaphore>,
-    retry: RetryConfig,
     kind: OpenKind,
 }
 
@@ -315,7 +300,6 @@ impl ReadSourceOpen for UncloudOpen {
                     backend: backend_for_reader,
                     path: storage_path_for_reader,
                     offset: 0,
-                    retry: self.retry,
                     failures: self.failures,
                     failure_recorded: false,
                 }))
@@ -364,7 +348,6 @@ struct BackendSourceReader {
     backend: Arc<dyn StorageBackend>,
     path: String,
     offset: u64,
-    retry: RetryConfig,
     /// Shared with `UncloudSource::failures` — ticked on terminal mid-stream
     /// failure so the post-backup summary and the `uncloud:complete` tag
     /// reflect mid-stream errors, not just open-time ones. Open-side
@@ -392,60 +375,62 @@ impl BackendSourceReader {
 
 impl Read for BackendSourceReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let max = self.retry.effective_max_attempts();
-        let mut delay = self.retry.base_delay();
-        let max_delay = self.retry.max_delay();
-
-        for attempt in 1..=max {
-            let result = {
-                let reader = self.reader.as_mut();
-                self.handle.block_on(async { reader.get_mut().read(buf).await })
-            };
-            match result {
-                Ok(n) => {
-                    self.offset += n as u64;
-                    return Ok(n);
-                }
-                Err(e) if attempt < max => {
+        // Single fall-through retry: if the current reader fails, ask the
+        // backend for a fresh one at the current offset and try once more.
+        // The backend (SftpStorage) does its own pool-aware retry inside
+        // `read_range`, so additional looping here would just stack
+        // attempts on top of attempts.
+        match self.try_read(buf) {
+            Ok(n) => {
+                self.offset += n as u64;
+                return Ok(n);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "source read of `{}` at offset {} failed: {e}; reopening",
+                    self.path,
+                    self.offset,
+                );
+                if let Err(reopen_err) = self.try_reopen() {
                     tracing::warn!(
-                        "source read of `{}` at offset {} failed (attempt {attempt}/{max}): \
-                         {e}; reopening in {delay:?}",
+                        "source reopen of `{}` at offset {} failed: {reopen_err}",
                         self.path,
                         self.offset,
                     );
-                    std::thread::sleep(delay);
-                    delay = (delay * 2).min(max_delay);
-
-                    let backend = self.backend.clone();
-                    let path = self.path.clone();
-                    let offset = self.offset;
-                    let reopen = self.handle.block_on(async move {
-                        backend.read_range(&path, offset, u64::MAX).await
-                    });
-                    match reopen {
-                        Ok(new_reader) => self.reader = new_reader,
-                        Err(reopen_err) => {
-                            tracing::warn!(
-                                "source reopen of `{}` at offset {} failed: {reopen_err}",
-                                self.path,
-                                self.offset,
-                            );
-                            // Reopen exhausted this attempt's recovery path;
-                            // record the failure and bubble up so rustic
-                            // skips the file (and the snapshot stays untagged).
-                            self.record_failure();
-                            return Err(std::io::Error::other(format!(
-                                "reopen failed: {reopen_err}",
-                            )));
-                        }
-                    }
-                }
-                Err(e) => {
                     self.record_failure();
-                    return Err(e);
+                    return Err(std::io::Error::other(format!(
+                        "reopen failed: {reopen_err}",
+                    )));
                 }
             }
         }
-        unreachable!("loop returns from every iteration")
+        match self.try_read(buf) {
+            Ok(n) => {
+                self.offset += n as u64;
+                Ok(n)
+            }
+            Err(e) => {
+                self.record_failure();
+                Err(e)
+            }
+        }
+    }
+}
+
+impl BackendSourceReader {
+    fn try_read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let reader = self.reader.as_mut();
+        self.handle.block_on(async { reader.get_mut().read(buf).await })
+    }
+
+    fn try_reopen(&mut self) -> Result<(), crate::error::AppError> {
+        let backend = self.backend.clone();
+        let path = self.path.clone();
+        let offset = self.offset;
+        let new_reader = self
+            .handle
+            .block_on(async move { backend.read_range(&path, offset, u64::MAX).await })?;
+        self.reader = new_reader;
+        Ok(())
     }
 }

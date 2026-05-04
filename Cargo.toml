@@ -16,6 +16,13 @@ members = [
 [patch.crates-io]
 rustic_core = { git = "https://github.com/decaychain/rustic_core", rev = "a52ac513a98c37f39bf16fa0e471ab33762bab8a" }
 rustic_backend = { git = "https://github.com/decaychain/rustic_core", rev = "a52ac513a98c37f39bf16fa0e471ab33762bab8a" }
+# OpenDAL ships an SFTP service whose bb8 pool is hardcoded to max_size(64).
+# Shared-tenant SFTP servers (Hetzner Storage Box ~= 5) reject parallel
+# connection storms that overflow that cap, surfacing as opaque
+# SSH_FX_FAILURE in rustic_backend's logs. Our fork adds a configurable
+# `pool_size: Option<u32>` to SftpConfig (defaulting to 64 so unset configs
+# match upstream). Bump deliberately when the fork moves.
+opendal = { git = "https://github.com/decaychain/opendal", rev = "2ffa805cf683c4fc57c2ce6f4fcf3fe95a8d3bcd" }
 
 [workspace.package]
 version = "0.1.0"

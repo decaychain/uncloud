@@ -325,6 +325,11 @@ backup:
         key: /etc/uncloud/keys/backup-nas
         # user: backup                     # overrides URI's user@ part
         # known_hosts_strategy: strict     # strict | accept-new | accept-unknown
+        # pool_size: 4                     # bb8 SSH pool size (default 64).
+        # Lower for shared-tenant SFTP (Hetzner Storage Box ~= 5
+        # simultaneous connections per subaccount). Available because
+        # we patch OpenDAL's hardcoded max_size(64) — see workspace
+        # Cargo.toml [patch.crates-io].
       retention:
         keep_last: 5
         keep_daily: 7

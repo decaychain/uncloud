@@ -111,6 +111,16 @@ pub enum ConfiguredStorageBackend {
         /// `skip` logs a warning at startup; use only on trusted networks.
         #[serde(default)]
         host_key_check: Option<String>,
+        /// SSH connection pool size. Each in-flight op uses one connection.
+        /// Default 2. Hetzner Storage Box subaccounts cap simultaneous SSH
+        /// at ~5; raising past 4 will hit that limit on shared-tenant SFTP.
+        #[serde(default)]
+        connection_pool_size: Option<u32>,
+        /// Cap on simultaneous in-flight ops (semaphore at the backend
+        /// layer). Default 4. Independent of pool size — pool=2, ops=4
+        /// means 4 ops queue but only 2 hold a connection at once.
+        #[serde(default)]
+        max_concurrent_ops: Option<u32>,
     },
 }
 
