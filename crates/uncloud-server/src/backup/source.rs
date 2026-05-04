@@ -316,6 +316,8 @@ impl ReadSourceOpen for UncloudOpen {
                     path: storage_path_for_reader,
                     offset: 0,
                     retry: self.retry,
+                    failures: self.failures,
+                    failure_recorded: false,
                 }))
             }
         }
@@ -363,6 +365,29 @@ struct BackendSourceReader {
     path: String,
     offset: u64,
     retry: RetryConfig,
+    /// Shared with `UncloudSource::failures` — ticked on terminal mid-stream
+    /// failure so the post-backup summary and the `uncloud:complete` tag
+    /// reflect mid-stream errors, not just open-time ones. Open-side
+    /// failures tick the counter from `UncloudOpen::open()` directly.
+    failures: Arc<AtomicUsize>,
+    /// Guards against double-counting: rustic may call `read` again after
+    /// a hard error before dropping the reader, and a single failed file
+    /// should be one tick on the counter regardless.
+    failure_recorded: bool,
+}
+
+impl BackendSourceReader {
+    /// Tick the shared failure counter exactly once for this reader, so a
+    /// file that fails to read (after retries) shows up in the post-backup
+    /// summary and prevents the snapshot from being tagged
+    /// `uncloud:complete`. Without this guard, several `read()` calls
+    /// could each tick after a hard error, inflating the failure count.
+    fn record_failure(&mut self) {
+        if !self.failure_recorded {
+            self.failures.fetch_add(1, Ordering::Relaxed);
+            self.failure_recorded = true;
+        }
+    }
 }
 
 impl Read for BackendSourceReader {
@@ -405,15 +430,20 @@ impl Read for BackendSourceReader {
                                 self.path,
                                 self.offset,
                             );
-                            // Bubble up to let the next iteration try again
-                            // (or, if this was the last attempt, return error).
+                            // Reopen exhausted this attempt's recovery path;
+                            // record the failure and bubble up so rustic
+                            // skips the file (and the snapshot stays untagged).
+                            self.record_failure();
                             return Err(std::io::Error::other(format!(
                                 "reopen failed: {reopen_err}",
                             )));
                         }
                     }
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    self.record_failure();
+                    return Err(e);
+                }
             }
         }
         unreachable!("loop returns from every iteration")

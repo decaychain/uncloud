@@ -144,6 +144,29 @@ Snapshot-level `manifest.json`:
 Restic snapshot tags mirror the `tags` field plus any user `--tag`. They are
 the primary input to `prune`'s retention filter.
 
+### `uncloud:complete` tag — verified-clean marker
+
+A snapshot is tagged `uncloud:complete` only after the run finished and
+we confirmed **zero source-read failures** — open-side or mid-stream.
+The tag is added post-flight, not optimistically: if the process is
+interrupted between `backup_with_source` returning and the tag step,
+the snapshot is left untagged, which is the right state ("we didn't get
+to verify, so we can't claim it's complete"). Untagged means "not
+verifiably complete," which covers:
+
+- runs where some files genuinely couldn't be read (storage 5xx, missing
+  versions, permission issues),
+- runs that crashed or were killed before reaching the post-flight check,
+- snapshots created before this feature shipped.
+
+**Side effect**: snapshots are content-addressed, so adding a tag means
+writing a new snapshot file with a new id and deleting the original.
+The id printed during `backup_with_source` (in rustic's logs) refers
+to the pre-tag, now-deleted snapshot; the on-disk id after a clean run
+is different. The `backup create` summary intentionally omits the id
+in the clean case and points users at `backup list` for the current
+id. Partial runs don't have this wrinkle — no retag, no id change.
+
 ## Semantic database dump
 
 NDJSON per collection — one JSON object per line. Lossless but engine-neutral.
