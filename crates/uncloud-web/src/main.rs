@@ -23,9 +23,29 @@ fn main() {
                 match hooks::tauri::get_config().await {
                     Some(cfg) => {
                         hooks::api::seed_api_base(cfg.server_url);
-                        // Restore auth token from localStorage so the WebView
-                        // can authenticate without re-entering credentials.
-                        hooks::api::restore_from_storage();
+                        // The native side performs an auto-login at app start
+                        // and stashes the resulting session token. Pull it
+                        // here so the WebView attaches `Authorization: Bearer`
+                        // to every request — its own cookie jar is empty
+                        // because the native client owns the cookies.
+                        match hooks::tauri::get_auth_status().await {
+                            Some(s) if s.token.is_some() => {
+                                hooks::api::seed_auth_token(s.token.unwrap());
+                            }
+                            Some(s) if s.pending => {
+                                // Auto-login still racing. Fall back to a
+                                // previously-persisted token; the webview
+                                // will reconcile on the next 401 / reload.
+                                hooks::api::restore_from_storage();
+                            }
+                            _ => {
+                                // Auto-login failed (skipped, login rejected,
+                                // engine init failed). The webview must not
+                                // appear authenticated — wipe any stale token
+                                // so the auth flow bounces to login.
+                                hooks::api::clear_auth_token();
+                            }
+                        }
                     }
                     None => {
                         hooks::tauri::mark_needs_setup();

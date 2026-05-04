@@ -44,6 +44,20 @@ pub struct DesktopState {
     pub phase: Arc<Mutex<SyncPhase>>,
     pub stats: Arc<Mutex<SyncStats>>,
     pub client: Arc<RwLock<Option<Arc<Client>>>>,
+    /// Session token captured from the most recent successful login. The
+    /// bundled webview reads it via `get_auth_token` and uses it as a
+    /// `Bearer` token so it doesn't have to maintain its own cookie jar
+    /// against the server's HTTP origin. `std::sync::Mutex` (rather
+    /// than a tokio lock) so the setup callback can flip the companion
+    /// `auth_pending` flag synchronously before spawning the auto-login
+    /// future.
+    pub auth_token: Arc<std::sync::Mutex<Option<String>>>,
+    /// Set to `true` while the startup auto-login is racing with the
+    /// webview opening. Lets the webview tell "auto-login still in
+    /// flight, fall back to localStorage" apart from "auto-login already
+    /// failed, flush localStorage and prompt for credentials". Flipped
+    /// to `false` once the auto-login attempt resolves either way.
+    pub auth_pending: Arc<std::sync::Mutex<bool>>,
     /// Desktop-level single-flight for `run_sync_once`. The engine has its
     /// own mutex around the actual sync work, but the desktop wrapper
     /// also resets `last_run_*` to 0 at the start and records
@@ -754,10 +768,16 @@ async fn login(
     root_path: String,
 ) -> Result<(), String> {
     let client = Arc::new(make_client(&server));
-    client
+    let user_resp = client
         .login(&username, &password)
         .await
         .map_err(|e| e.to_string())?;
+    if let Ok(mut t) = state.auth_token.lock() {
+        *t = user_resp.session_token.clone();
+    }
+    if let Ok(mut p) = state.auth_pending.lock() {
+        *p = false;
+    }
 
     let db_path = sync_db_path(&app).ok_or("Cannot determine data directory")?;
     if let Some(parent) = db_path.parent() {
@@ -818,6 +838,22 @@ async fn login(
     Ok(())
 }
 
+#[derive(Serialize)]
+struct AuthStatusDto {
+    token: Option<String>,
+    /// `true` while the startup auto-login is racing — the webview should
+    /// fall back to its localStorage token. `false` once the attempt has
+    /// resolved either way; in that case `token` is authoritative.
+    pending: bool,
+}
+
+#[tauri::command]
+fn get_auth_status(state: State<'_, DesktopState>) -> Result<AuthStatusDto, String> {
+    let token = state.auth_token.lock().map(|g| g.clone()).unwrap_or(None);
+    let pending = state.auth_pending.lock().map(|g| *g).unwrap_or(false);
+    Ok(AuthStatusDto { token, pending })
+}
+
 #[tauri::command]
 fn get_config(app: AppHandle) -> Option<ConfigDto> {
     load_config_from(&app).map(|c| ConfigDto {
@@ -835,6 +871,8 @@ async fn disconnect(app: AppHandle, state: State<'_, DesktopState>) -> Result<()
 
     *state.engine.write().await = None;
     *state.client.write().await = None;
+    if let Ok(mut t) = state.auth_token.lock() { *t = None; }
+    if let Ok(mut p) = state.auth_pending.lock() { *p = false; }
     *state.phase.lock().await = SyncPhase::NotConfigured;
     *state.stats.lock().await = SyncStats::default();
     #[cfg(desktop)]
@@ -1048,6 +1086,8 @@ pub fn run() {
         phase: Arc::new(Mutex::new(SyncPhase::default())),
         stats: Arc::new(Mutex::new(SyncStats::default())),
         client: Arc::new(RwLock::new(None)),
+        auth_token: Arc::new(std::sync::Mutex::new(None)),
+        auth_pending: Arc::new(std::sync::Mutex::new(false)),
         run_lock: Arc::new(Mutex::new(())),
         #[cfg(desktop)]
         tray: Arc::new(std::sync::Mutex::new(None)),
@@ -1121,26 +1161,56 @@ pub fn run() {
                 let phase_arc = ds.phase.clone();
                 let stats_arc = ds.stats.clone();
                 let client_arc = ds.client.clone();
+                let token_arc = ds.auth_token.clone();
+                let pending_arc = ds.auth_pending.clone();
                 let run_lock_arc_auto = ds.run_lock.clone();
                 #[cfg(desktop)]
                 let tray_arc = ds.tray.clone();
                 let app_handle = app.handle().clone();
+                // Flip pending BEFORE spawning so the webview can't race
+                // and observe `pending=false` while the future is still
+                // queued for execution.
+                if let Ok(mut p) = pending_arc.lock() { *p = true; }
                 async_runtime::spawn(async move {
+                    // Single point that always runs at exit — drops the
+                    // `pending` flag so the webview stops falling back to
+                    // localStorage and, on failure, swaps the tray icon to
+                    // the disconnected state. `succeeded=false` also leaves
+                    // the in-memory `auth_token` cleared so `get_auth_token`
+                    // returns None and the webview wipes its stored token.
+                    let finish = |succeeded: bool| {
+                        if let Ok(mut p) = pending_arc.lock() { *p = false; }
+                        #[cfg(desktop)]
+                        if !succeeded {
+                            apply_tray_state(&tray_arc, EngineState::NotConnected);
+                        }
+                    };
+
                     let Some(secrets) = secrets_dir(&app_handle) else {
                         error!("Auto-login: cannot determine data directory");
+                        finish(false);
                         return;
                     };
                     let Some(password) = secret_store::load_password(&secrets, &cfg.server_url, &cfg.username) else {
                         eprintln!("[uncloud-desktop] Auto-login skipped: no stored credentials");
+                        finish(false);
                         return;
                     };
                     let client = Arc::new(make_client(&cfg.server_url));
                     let login_result = client.login(&cfg.username, &password).await.map_err(|e| e.to_string());
                     match login_result {
-                        Ok(_) => {
+                        Ok(user_resp) => {
+                            if let Ok(mut t) = token_arc.lock() {
+                                *t = user_resp.session_token.clone();
+                            }
                             let db = match sync_db_path(&app_handle) {
                                 Some(p) => { let _ = p.parent().map(std::fs::create_dir_all); p }
-                                None => { error!("Auto-login: cannot determine data directory"); return; }
+                                None => {
+                                    error!("Auto-login: cannot determine data directory");
+                                    if let Ok(mut t) = token_arc.lock() { *t = None; }
+                                    finish(false);
+                                    return;
+                                }
                             };
                             let effective_root: Option<String> = if cfg.root_path.is_empty() {
                                 None
@@ -1172,6 +1242,8 @@ pub fn run() {
                                         restart_file_watcher(&app_handle, &st, &cfg.root_path);
                                     }
 
+                                    finish(true);
+
                                     // Sync-on-start (auto-login path).
                                     spawn_sync(
                                         app_handle.clone(),
@@ -1184,13 +1256,16 @@ pub fn run() {
                                 Err(e) => {
                                     eprintln!("[uncloud-desktop] Auto-login engine init failed: {e}");
                                     error!("Auto-login: engine init failed: {}", e);
+                                    if let Ok(mut t) = token_arc.lock() { *t = None; }
+                                    finish(false);
                                 }
                             }
                         }
                         Err(e) => {
                             eprintln!("[uncloud-desktop] Auto-login login failed: {e}");
                             error!("Auto-login: login failed: {}", e);
-                        },
+                            finish(false);
+                        }
                     }
                 });
             }
@@ -1211,8 +1286,13 @@ pub fn run() {
                     .items(&[&open, &sep, &sync_now_item, &sep, &quit])
                     .build()?;
 
+                // Start in the disconnected state — no engine yet. The
+                // activity listener flips this to `tray-idle.png` once an
+                // engine is wired and reports Connected, so the icon
+                // tracks reality from the very first frame instead of
+                // briefly lying about being connected during boot.
                 let tray_icon = TrayIconBuilder::new()
-                    .icon(tauri::include_image!("icons/tray-idle.png"))
+                    .icon(tauri::include_image!("icons/tray-disconnected.png"))
                     .menu(&menu)
                     .on_tray_icon_event(|tray, event| {
                         if let TrayIconEvent::Click {
@@ -1266,6 +1346,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_status,
             get_config,
+            get_auth_status,
             login,
             disconnect,
             sync_now,

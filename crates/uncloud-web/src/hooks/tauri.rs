@@ -210,6 +210,33 @@ async fn invoke_raw(cmd: &str, args: &JsValue) -> Result<JsValue, String> {
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 
+/// Result of [`get_auth_status`]. `pending=true` means the native auto-login is
+/// still in flight; `pending=false` with `token=None` means it definitively
+/// failed/skipped and the webview should clear its stored credentials.
+pub struct AuthStatus {
+    pub token: Option<String>,
+    pub pending: bool,
+}
+
+/// Fetch the session token + auto-login status from the native side. Used at
+/// app boot to seed the webview's bearer-token auth without re-prompting for
+/// credentials — see `seed_auth_token` in `hooks::api`.
+pub async fn get_auth_status() -> Option<AuthStatus> {
+    let args = Object::new();
+    let result = invoke_raw("get_auth_status", &args).await.ok()?;
+    if result.is_null() || result.is_undefined() {
+        return None;
+    }
+    let token = Reflect::get(&result, &JsValue::from_str("token"))
+        .ok()
+        .and_then(|v| if v.is_null() || v.is_undefined() { None } else { v.as_string() });
+    let pending = Reflect::get(&result, &JsValue::from_str("pending"))
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Some(AuthStatus { token, pending })
+}
+
 pub async fn get_config() -> Option<DesktopConfig> {
     let args = Object::new();
     let result = invoke_raw("get_config", &args).await.ok()?;

@@ -1,7 +1,30 @@
 use dioxus::prelude::*;
 use uncloud_common::RegistrationMode;
 use crate::state::AuthState;
-use crate::hooks::{use_auth, use_search};
+use crate::hooks::{tauri, use_auth, use_search};
+
+/// Set up the desktop's native sync engine when the webview-side login
+/// succeeds outside of first-time setup. Without this, the webview is
+/// authenticated but the Tauri sync engine has no client/credentials —
+/// sync never starts and on next webview open we'd see the login form
+/// again because `state.auth_token` is still empty.
+///
+/// No-op outside of Tauri-desktop. The TOTP / demo / mobile flows all
+/// route through here harmlessly (Android relies on per-folder SAF picks
+/// rather than a global engine, and demo has no real credentials).
+async fn bridge_native_login(username: &str, password: &str) {
+    if !tauri::is_tauri() || tauri::is_android() {
+        return;
+    }
+    let Some(cfg) = tauri::get_config().await else {
+        return;
+    };
+    if let Err(e) = tauri::login(&cfg.server_url, username, password, &cfg.root_path).await {
+        web_sys::console::warn_1(
+            &format!("Native sync engine handoff failed: {e}").into(),
+        );
+    }
+}
 
 #[component]
 pub fn Login() -> Element {
@@ -60,6 +83,7 @@ pub fn Login() -> Element {
                     if resp.totp_required {
                         totp_token.set(resp.totp_token);
                     } else if let Some(user) = resp.user {
+                        bridge_native_login(&username_val, &password_val).await;
                         complete(user);
                     }
                 }
@@ -77,6 +101,8 @@ pub fn Login() -> Element {
 
         let token = totp_token().unwrap_or_default();
         let code = totp_code();
+        let username_val = username();
+        let password_val = password();
         let mut complete = complete_login.clone();
 
         spawn(async move {
@@ -86,6 +112,7 @@ pub fn Login() -> Element {
             match use_auth::totp_verify(&token, &code).await {
                 Ok(resp) => {
                     if let Some(user) = resp.user {
+                        bridge_native_login(&username_val, &password_val).await;
                         complete(user);
                     }
                 }
