@@ -249,6 +249,23 @@ impl LocalFs for AndroidSafFs {
         }
     }
 
+    async fn is_dir(&self, path: &str) -> Result<bool, LocalFsError> {
+        let (root, rel) = Self::split(path);
+        // Empty rel = the SAF tree root itself, which always resolves to a
+        // directory by construction.
+        if rel.is_empty() {
+            return Ok(true);
+        }
+        let api = self.app.android_fs_async();
+        match api.resolve_file_uri(&Self::tree_uri(&root), &rel).await {
+            Ok(uri) => match api.get_info(&uri).await {
+                Ok(entry) => Ok(matches!(entry, Entry::Dir { .. })),
+                Err(_) => Ok(false),
+            },
+            Err(_) => Ok(false),
+        }
+    }
+
     fn join(&self, parent: &str, child: &str) -> String {
         if parent.contains(SEP) {
             format!("{parent}/{child}")

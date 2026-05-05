@@ -7,11 +7,11 @@
 
 #![cfg(desktop)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tauri::{async_runtime, AppHandle};
 use tokio::sync::mpsc;
 use tokio::sync::{Mutex, RwLock};
@@ -24,6 +24,18 @@ use crate::{spawn_sync, SyncPhase, SyncStats};
 /// Bulk operations send hundreds of events in quick succession; this
 /// window collapses them into one trigger.
 const DEBOUNCE: Duration = Duration::from_secs(2);
+
+/// Single message between the OS-side notify callback and the debouncer
+/// task. Carries enough context for the debouncer to decide which paths
+/// (if any) should cancel pending deletes before the post-debounce sync
+/// fires.
+struct WatcherSignal {
+    paths: Vec<PathBuf>,
+    /// `true` for Create/Modify events — those signal a path coming back
+    /// to life and should cancel a journal-side pending delete. Removes
+    /// and metadata-only events are not enough on their own.
+    resurrects: bool,
+}
 
 /// Spawn a recursive watcher on `root`, debounced. Each batch of events
 /// (separated by [`DEBOUNCE`] of silence) fires one [`spawn_sync`] call.
@@ -40,14 +52,22 @@ pub fn start(
     stats: Arc<Mutex<SyncStats>>,
     run_lock: Arc<Mutex<()>>,
 ) -> notify::Result<RecommendedWatcher> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<()>();
+    // Each event carries the paths it touched plus a flag for whether
+    // the kind is a "create or modify" (which cancels a pending delete
+    // on Phase 6a's two-phase tracker). Removes don't cancel — the
+    // engine treats scan-time absence as authoritative, and we don't
+    // want a delete event to invalidate its own pending state.
+    let (tx, mut rx) = mpsc::unbounded_channel::<WatcherSignal>();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| match res {
-        Ok(_event) => {
-            // We don't care which paths or kinds — any change in the
-            // tree warrants a sync. Drop send errors quietly: a closed
-            // channel means the debouncer task exited and we should
-            // stop emitting.
-            let _ = tx.send(());
+        Ok(event) => {
+            let resurrects = matches!(
+                event.kind,
+                EventKind::Create(_) | EventKind::Modify(_)
+            );
+            let _ = tx.send(WatcherSignal {
+                paths: event.paths,
+                resurrects,
+            });
         }
         Err(e) => warn!("file watcher: {}", e),
     })?;
@@ -57,18 +77,47 @@ pub fn start(
     async_runtime::spawn(async move {
         loop {
             // Block until the first event in a quiet period.
-            if rx.recv().await.is_none() {
-                break;
-            }
+            let Some(first) = rx.recv().await else { break };
+            let mut resurrected: Vec<PathBuf> = if first.resurrects {
+                first.paths.clone()
+            } else {
+                Vec::new()
+            };
             // Drain further events; reset the timer each time we see
             // one. When `DEBOUNCE` of silence elapses, fire.
             loop {
                 match tokio::time::timeout(DEBOUNCE, rx.recv()).await {
-                    Ok(Some(_)) => continue,
+                    Ok(Some(sig)) => {
+                        if sig.resurrects {
+                            resurrected.extend(sig.paths);
+                        }
+                        continue;
+                    }
                     Ok(None) => return, // channel closed
                     Err(_) => break,    // debounce window ended
                 }
             }
+
+            // Cancel pending deletes for any path that came back during
+            // this debounce window. Done before spawn_sync so the about-
+            // to-run sync sees the cleared journal and skips Phase 6a's
+            // commit step for those paths.
+            if !resurrected.is_empty() {
+                let engine_snap = engine.read().await.clone();
+                if let Some(eng) = engine_snap {
+                    let mut seen: std::collections::HashSet<PathBuf> =
+                        std::collections::HashSet::new();
+                    for p in resurrected {
+                        if !seen.insert(p.clone()) {
+                            continue;
+                        }
+                        if let Some(s) = p.to_str() {
+                            let _ = eng.cancel_pending_delete_for_path(s).await;
+                        }
+                    }
+                }
+            }
+
             spawn_sync(
                 app.clone(),
                 engine.clone(),

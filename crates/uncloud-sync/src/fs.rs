@@ -78,6 +78,12 @@ pub trait LocalFs: Send + Sync {
     /// Return `true` if a regular file exists at `path`.
     async fn is_file(&self, path: &str) -> Result<bool, LocalFsError>;
 
+    /// Return `true` if a directory exists at `path`. Phase 6a uses this
+    /// to distinguish "single file deleted" from "user removed the whole
+    /// folder," so the latter can be collapsed into one server-side
+    /// folder-delete instead of N file-deletes.
+    async fn is_dir(&self, path: &str) -> Result<bool, LocalFsError>;
+
     /// Join `parent` and `child` using the backend's path separator.
     fn join(&self, parent: &str, child: &str) -> String;
 }
@@ -98,7 +104,10 @@ impl Default for NativeFs {
 }
 
 /// Filenames the walker must never surface regardless of location.
-const EXCLUDED_NAMES: &[&str] = &[".uncloud-sync.db"];
+// Filenames that walk()/walk_dirs() must never yield. These are never
+// uploaded, never compared against the journal, never treated as
+// local-only files. Keep in sync with `sentinel::SENTINEL_FILENAME`.
+const EXCLUDED_NAMES: &[&str] = &[".uncloud-sync.db", ".uncloud-root.json"];
 
 #[async_trait]
 impl LocalFs for NativeFs {
@@ -219,6 +228,19 @@ impl LocalFs for NativeFs {
         })
         .await
         .map_err(|e| LocalFsError::other(format!("is_file task panicked: {e}")))?
+    }
+
+    async fn is_dir(&self, path: &str) -> Result<bool, LocalFsError> {
+        let path_owned = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            match std::fs::metadata(&path_owned) {
+                Ok(m) => Ok(m.is_dir()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(e) => Err(LocalFsError::io(path_owned, e)),
+            }
+        })
+        .await
+        .map_err(|e| LocalFsError::other(format!("is_dir task panicked: {e}")))?
     }
 
     fn join(&self, parent: &str, child: &str) -> String {
