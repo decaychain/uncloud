@@ -373,6 +373,20 @@ pub fn Player() -> Element {
                 if st.status == native_audio::NativeStatus::Ended && s.playing {
                     player.write().playing = false;
                 }
+                // The user paused via the MediaSession UI (lockscreen /
+                // notification). Without this mirror, the next driver-effect
+                // re-run would read stale `state.playing=true` and dispatch
+                // `play()` against a paused ExoPlayer, causing audio to
+                // spontaneously resume. The Loading guard avoids racing the
+                // play→loading→playing transition right after we dispatched
+                // play() ourselves.
+                if !st.is_playing
+                    && s.playing
+                    && st.status != native_audio::NativeStatus::Loading
+                    && st.status != native_audio::NativeStatus::Ended
+                {
+                    player.write().playing = false;
+                }
             }
         });
     });
