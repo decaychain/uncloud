@@ -12,6 +12,7 @@ use uncloud_common::SyncStrategy;
 
 use crate::fs::{LocalFs, NativeFs};
 use crate::journal::{Journal, SyncLogRow};
+use crate::sentinel::{ensure_instance_id, verify_or_mint, SentinelError, SentinelStatus};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -308,6 +309,25 @@ impl SyncEngine {
         self.journal.recent_sync_log(limit).await
     }
 
+    /// Filesystem-watcher hook: when the OS reports any event for
+    /// `local_path`, clear a pending-delete flag on the matching journal
+    /// row. This prevents a transient absence (atomic-replace editors,
+    /// quick rename round-trips) from committing a delete on the next
+    /// sync run. The watcher is *only* allowed to cancel — never to
+    /// commit — because we don't trust it as authoritative.
+    ///
+    /// No-op for paths the journal doesn't know about and for rows that
+    /// don't currently have a pending delete. Returns the number of rows
+    /// cleared (0 or 1 in practice).
+    pub async fn cancel_pending_delete_for_path(
+        &self,
+        local_path: &str,
+    ) -> sqlx::Result<u64> {
+        self.journal
+            .cancel_pending_delete_by_local_path(local_path)
+            .await
+    }
+
     /// Drop rows older than `retention_days` and cap the table at `max_rows`.
     /// Called once at the end of every successful sync.
     pub async fn prune_sync_log(
@@ -402,6 +422,25 @@ impl SyncEngine {
             operation: "Deleted".to_owned(),
             direction: Some("Down".to_owned()),
             resource_type: Some("File".to_owned()),
+            path: self.relative_display_path(local_path),
+            new_path: None,
+            reason: "Sync".to_owned(),
+            note: None,
+        })
+        .await;
+    }
+
+    /// Log a delete we pushed to the server (mirror of `log_delete_local`,
+    /// just on the way up). Used by Phase 6a when the two-phase confirmation
+    /// commits a local deletion.
+    async fn log_delete_remote(&self, local_path: &str, resource_type: &str) {
+        self.ensure_start_emitted().await;
+        self.log_row(SyncLogRow {
+            id: 0,
+            timestamp: Utc::now().to_rfc3339(),
+            operation: "Deleted on server".to_owned(),
+            direction: Some("Up".to_owned()),
+            resource_type: Some(resource_type.to_owned()),
             path: self.relative_display_path(local_path),
             new_path: None,
             reason: "Sync".to_owned(),
@@ -523,6 +562,106 @@ impl SyncEngine {
         //    map with `base_path = None` so subtree lookups still succeed.
         let mut folder_info = self.resolve_folders(&tree.folders).await?;
 
+        // 2.5. Verify (or mint) the `.uncloud-root.json` sentinel at every
+        //      sync base before any phase that interprets file absence.
+        //      Without this, an unmounted volume turns the entire next
+        //      scan into "every previously-synced file is locally deleted
+        //      → push deletes for all of them" — catastrophic. A failure
+        //      here aborts the whole run with a structured error the
+        //      desktop UI can surface to the user.
+        let instance_id = ensure_instance_id(&self.journal).await?;
+        let mut bases_to_verify: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        if let Some(root) = self.root_local_path.as_ref() {
+            bases_to_verify.insert(root.clone());
+        }
+        // Each per-folder `local_path` override is its own physical sync
+        // root (Android's SAF picks land here). Folders that inherit from
+        // an ancestor or fall back to the client-wide root reuse a base
+        // already in the set, so the SQL `DISTINCT local_path` query is
+        // sufficient — no need to walk `folder_info`.
+        for base in self.journal.all_local_path_overrides().await? {
+            bases_to_verify.insert(base);
+        }
+        let mut freshly_minted_bases: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for base in &bases_to_verify {
+            match verify_or_mint(&self.fs, &self.journal, base, &instance_id).await {
+                Ok((SentinelStatus::Minted, _)) => {
+                    freshly_minted_bases.insert(base.clone());
+                }
+                Ok((SentinelStatus::Verified, _)) => {}
+                Err(e @ (SentinelError::Missing { .. }
+                | SentinelError::Mismatch { .. }
+                | SentinelError::Corrupt { .. }
+                | SentinelError::Fs(_)
+                | SentinelError::Journal(_))) => {
+                    report.errors.push(SyncError {
+                        path: base.clone(),
+                        reason: e.to_string(),
+                    });
+                    warn!("Aborting sync: {e}");
+                    return Ok(report);
+                }
+            }
+        }
+
+        // 2.55. Reconcile freshly-minted bases. When `verify_or_mint`
+        //       returns `Minted` for a base it means we never had a
+        //       `sync_bases` row for this path — either a true first
+        //       sync, or the first sync after upgrading from a
+        //       pre-sentinel build. In the latter case the journal may
+        //       contain rows for files that no longer exist locally
+        //       (incoherent migration state). Treating those as Phase
+        //       6a deletions would silently nuke server data, so
+        //       instead we drop the rows and let Phase 4 re-evaluate
+        //       from scratch — the same effect a fresh install would
+        //       have. This branch is intentionally cheap to be wrong
+        //       in: even if a row WAS coherent, dropping it just makes
+        //       Phase 4 redo the compare-and-sync, not lose data.
+        for base in &freshly_minted_bases {
+            let rows = self.journal.all().await?;
+            for row in rows {
+                let inside = row.local_path == *base
+                    || row
+                        .local_path
+                        .strip_prefix(base.as_str())
+                        .map(|r| r.starts_with('/') || r.starts_with('\\'))
+                        .unwrap_or(false);
+                if !inside {
+                    continue;
+                }
+                if row.item_type == "file" {
+                    let exists = self.fs.is_file(&row.local_path).await.unwrap_or(false);
+                    if !exists {
+                        let _ = self.journal.delete(&row.server_id, "file").await;
+                    }
+                } else if row.item_type == "folder" {
+                    let exists = self.fs.is_dir(&row.local_path).await.unwrap_or(false);
+                    if !exists {
+                        let _ = self.journal.delete(&row.server_id, "folder").await;
+                    }
+                }
+            }
+        }
+
+        // 2.6. Prune journal rows pointing outside any verified base. This
+        //      catches stale entries left over from a previous root path,
+        //      a journal DB copied between machines, or a folder whose
+        //      `local_path` override was cleared. Without this prune,
+        //      Phase 4 would honour the stale row (skipping a needed
+        //      download) and Phase 6a could interpret the always-missing
+        //      file as a deletion to push. The sentinel above guarantees
+        //      we still know which roots are real, so anything outside
+        //      them is by definition not part of the current sync.
+        if !bases_to_verify.is_empty() {
+            let bases_ref: Vec<&str> = bases_to_verify.iter().map(String::as_str).collect();
+            let pruned = self.journal.prune_rows_outside_bases(&bases_ref).await?;
+            if pruned > 0 {
+                info!("Pruned {pruned} stale journal row(s) outside any verified base");
+            }
+        }
+
         // 3. Load journal
         let journal_rows = self.journal.all().await?;
         let journal_map: HashMap<(String, String), crate::journal::SyncStateRow> = journal_rows
@@ -608,14 +747,19 @@ impl SyncEngine {
                 continue;
             }
 
-            // If the journal thinks this file is synced but it no longer exists
-            // at the resolved local path, treat it as new. This catches root-path
-            // changes (stale journal rows pointing at an old root) and accidental
-            // local deletes.
+            // Hand off the "missing locally + journal already knows about
+            // this file" case to Phase 6a — that's where the two-phase
+            // deletion logic lives. Re-downloading here would silently
+            // undo the user's `rm`, which used to be the bug we're fixing.
+            //
+            // If the journal has no row at all (genuine first-sight) we
+            // still fall through to the `None` arm below and download.
             let local_exists = self.fs.is_file(local_path).await.unwrap_or(false);
-            let journal_entry = journal_map
-                .get(&key)
-                .filter(|_| local_exists);
+            let in_journal = journal_map.contains_key(&key);
+            if !local_exists && in_journal {
+                continue;
+            }
+            let journal_entry = journal_map.get(&key).filter(|_| local_exists);
 
 
             match journal_entry {
@@ -806,6 +950,222 @@ impl SyncEngine {
                     }
                 }
                 let _ = self.journal.delete(&j.server_id, "file").await;
+            }
+        }
+
+        // 6a. Handle local deletions: rows in journal whose local file is
+        //     gone but the server still has them. Two-phase to absorb
+        //     transient absences (e.g. a watcher missed an edit so a tool
+        //     briefly write-then-replaces a file): the first scan that
+        //     sees the absence sets `delete_pending_since`; only the
+        //     *next* scan still finding it gone commits the delete.
+        //
+        //     Folder-level collapse: if a journal-known folder's local
+        //     directory is missing AND every file the journal had under
+        //     that folder is also missing, push a single `delete_folder`
+        //     instead of N file-deletes. The server cascades the trash
+        //     and leaves a single audit entry.
+        let now = Utc::now().to_rfc3339();
+        let server_files_by_id: std::collections::HashMap<&str, &uncloud_common::FileResponse> =
+            tree.files.iter().map(|f| (f.id.as_str(), f)).collect();
+        let server_folders_by_id: std::collections::HashMap<&str, &uncloud_common::FolderResponse> =
+            tree.folders.iter().map(|f| (f.id.as_str(), f)).collect();
+
+        // Resolve effective strategy for a journal row by looking up its
+        // server record's parent folder. Falls back to TwoWay for root-
+        // level items, which is consistent with the rest of the engine.
+        let strategy_for_file = |file_id: &str| -> SyncStrategy {
+            server_files_by_id
+                .get(file_id)
+                .and_then(|f| f.parent_id.as_deref())
+                .and_then(|pid| folder_info.get(pid))
+                .map(|info| info.strategy)
+                .unwrap_or(SyncStrategy::TwoWay)
+        };
+        let strategy_for_folder = |folder_id: &str| -> SyncStrategy {
+            // The folder itself either has its own info entry or is root.
+            folder_info
+                .get(folder_id)
+                .map(|info| info.strategy)
+                .unwrap_or(SyncStrategy::TwoWay)
+        };
+        let allows_delete_push =
+            |s: SyncStrategy| matches!(s, SyncStrategy::TwoWay | SyncStrategy::ClientToServer);
+
+        // First, identify journal-known folders whose local directory is
+        // gone — those are candidates for collapse. Walk file rows
+        // grouped by parent so we can count "how many of this folder's
+        // children went missing in one go."
+        let mut missing_files_by_parent: std::collections::HashMap<
+            String,
+            Vec<crate::journal::SyncStateRow>,
+        > = std::collections::HashMap::new();
+        let mut orphan_missing_files: Vec<crate::journal::SyncStateRow> = Vec::new();
+        for ((server_id, item_type), j) in &journal_map {
+            if item_type != "file" {
+                continue;
+            }
+            if !server_files_by_id.contains_key(server_id.as_str()) {
+                continue; // Phase 6 covers server-side delete echoes.
+            }
+            let local_exists = self.fs.is_file(&j.local_path).await.unwrap_or(false);
+            if local_exists {
+                continue;
+            }
+            let parent = server_files_by_id
+                .get(server_id.as_str())
+                .and_then(|f| f.parent_id.clone());
+            match parent {
+                Some(pid) => missing_files_by_parent
+                    .entry(pid)
+                    .or_default()
+                    .push(j.clone()),
+                None => orphan_missing_files.push(j.clone()),
+            }
+        }
+
+        // Folder collapse: if a parent folder's local directory is gone
+        // AND every file the server has under it is also missing, push
+        // one folder-delete and mark the children touched so the
+        // file-level pass below skips them.
+        let mut collapsed_file_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for (parent_id, missing) in &missing_files_by_parent {
+            let folder_journal = match journal_map.get(&(parent_id.clone(), "folder".to_owned())) {
+                Some(row) => row,
+                None => continue, // Folder isn't journaled — bail to file-by-file.
+            };
+            let server_count = tree
+                .files
+                .iter()
+                .filter(|f| f.parent_id.as_deref() == Some(parent_id.as_str()))
+                .count();
+            if missing.len() != server_count {
+                continue; // Some children still present locally — partial delete.
+            }
+            // Every child gone — confirm the directory itself is gone.
+            let dir_exists = self.fs.is_dir(&folder_journal.local_path).await.unwrap_or(false);
+            if dir_exists {
+                continue;
+            }
+            let strategy = strategy_for_folder(parent_id);
+            if !allows_delete_push(strategy) {
+                continue;
+            }
+            // Two-phase on the folder row.
+            match folder_journal.delete_pending_since.as_deref() {
+                None => {
+                    let _ = self
+                        .journal
+                        .set_delete_pending(parent_id, "folder", &now)
+                        .await;
+                    // Also pre-mark the children so the file pass below
+                    // doesn't double-mark and produce a stale pending
+                    // delete after the folder is gone.
+                    for j in missing {
+                        let _ = self
+                            .journal
+                            .set_delete_pending(&j.server_id, "file", &now)
+                            .await;
+                        collapsed_file_ids.insert(j.server_id.clone());
+                    }
+                }
+                Some(since) => {
+                    let server_folder = server_folders_by_id.get(parent_id.as_str()).copied();
+                    let folder_changed = server_folder
+                        .map(|f| f.updated_at.as_str() > since)
+                        .unwrap_or(false);
+                    if folder_changed {
+                        // Server moved/renamed the folder while we were
+                        // pending — server wins, drop the pending state
+                        // and let the next scan re-download.
+                        let _ = self.journal.clear_delete_pending(parent_id, "folder").await;
+                        for j in missing {
+                            let _ = self
+                                .journal
+                                .clear_delete_pending(&j.server_id, "file")
+                                .await;
+                        }
+                        continue;
+                    }
+                    match self.client.delete_folder(parent_id).await {
+                        Ok(()) => {
+                            self.log_delete_remote(&folder_journal.local_path, "Folder")
+                                .await;
+                            report
+                                .deleted_local
+                                .push(folder_journal.server_path.clone());
+                            let _ = self.journal.delete(parent_id, "folder").await;
+                            for j in missing {
+                                let _ = self.journal.delete(&j.server_id, "file").await;
+                                collapsed_file_ids.insert(j.server_id.clone());
+                                touched_paths.insert(j.local_path.clone());
+                            }
+                            touched_paths.insert(folder_journal.local_path.clone());
+                        }
+                        Err(e) => report.errors.push(SyncError {
+                            path: folder_journal.server_path.clone(),
+                            reason: e.to_string(),
+                        }),
+                    }
+                }
+            }
+        }
+
+        // File-by-file pass for missing files that couldn't be collapsed
+        // (parent folder still on disk, or parent isn't journaled, or
+        // file is at the server root with no parent).
+        let mut all_missing_files: Vec<crate::journal::SyncStateRow> = Vec::new();
+        for (_pid, mut v) in missing_files_by_parent {
+            all_missing_files.append(&mut v);
+        }
+        all_missing_files.append(&mut orphan_missing_files);
+        for j in all_missing_files {
+            if collapsed_file_ids.contains(&j.server_id) {
+                continue;
+            }
+            let strategy = strategy_for_file(&j.server_id);
+            if !allows_delete_push(strategy) {
+                // Strategy doesn't push deletes (UploadOnly / DownloadOnly /
+                // ServerToClient). Clear any stale pending flag and let
+                // Phase 5 next scan re-download as it always has.
+                if j.delete_pending_since.is_some() {
+                    let _ = self.journal.clear_delete_pending(&j.server_id, "file").await;
+                }
+                continue;
+            }
+            match j.delete_pending_since.as_deref() {
+                None => {
+                    let _ = self
+                        .journal
+                        .set_delete_pending(&j.server_id, "file", &now)
+                        .await;
+                }
+                Some(since) => {
+                    let server_file = match server_files_by_id.get(j.server_id.as_str()) {
+                        Some(f) => *f,
+                        None => continue, // Phase 6 handled it already.
+                    };
+                    if server_file.updated_at.as_str() > since {
+                        // Server-newer-than-pending: server wins, cancel
+                        // the pending delete and let Phase 5 re-download
+                        // next scan.
+                        let _ = self.journal.clear_delete_pending(&j.server_id, "file").await;
+                        continue;
+                    }
+                    match self.client.delete_file(&j.server_id).await {
+                        Ok(()) => {
+                            self.log_delete_remote(&j.local_path, "File").await;
+                            report.deleted_local.push(j.server_path.clone());
+                            let _ = self.journal.delete(&j.server_id, "file").await;
+                            touched_paths.insert(j.local_path.clone());
+                        }
+                        Err(e) => report.errors.push(SyncError {
+                            path: j.server_path.clone(),
+                            reason: e.to_string(),
+                        }),
+                    }
+                }
             }
         }
 

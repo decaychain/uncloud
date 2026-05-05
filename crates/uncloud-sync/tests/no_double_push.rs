@@ -480,31 +480,29 @@ async fn stale_journal_with_wiped_local_does_not_push_back() {
     std::fs::remove_dir_all(&rig.root).unwrap();
     std::fs::create_dir_all(&rig.root).unwrap();
 
-    // Second sync against the same journal.
+    // Second sync against the same journal. The first run minted a
+    // `.uncloud-root.json` sentinel inside the (now-wiped) root, so the
+    // sentinel's absence — combined with the journal still holding a
+    // `sync_bases` row for this path — is the engine's signal that
+    // something's off (volume unmounted, user wiped, journal copied,
+    // …). The run aborts rather than guess. The user is expected to
+    // explicitly reattach via the desktop UI, which clears the base row
+    // so the next sync mints a fresh sentinel and downloads from
+    // scratch — but the engine no longer assumes that intent.
     let engine = build_engine(&rig).await;
     let r2 = engine.incremental_sync().await.unwrap();
 
-    assert_eq!(
-        r2.downloaded.len(),
-        2,
-        "should re-download both files now that local is gone"
+    assert!(!r2.errors.is_empty(), "sync should have aborted: {:?}", r2);
+    assert!(
+        r2.errors.iter().any(|e| e.reason.contains("uncloud-root.json")
+            || e.reason.contains("Sync root")),
+        "expected sentinel error, got {:?}",
+        r2.errors
     );
-    assert_eq!(
-        r2.uploaded.len(),
-        0,
-        "must NOT push wiped-then-redownloaded files back: report.uploaded={:?}",
-        r2.uploaded
-    );
-    assert_eq!(
-        upload_hits.load(Ordering::SeqCst),
-        0,
-        "upload endpoint must not be hit"
-    );
-    assert_eq!(
-        content_hits.load(Ordering::SeqCst),
-        0,
-        "content-replace endpoint must not be hit"
-    );
+    assert_eq!(r2.uploaded.len(), 0, "no uploads on aborted run");
+    assert_eq!(r2.downloaded.len(), 0, "no downloads on aborted run");
+    assert_eq!(upload_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(content_hits.load(Ordering::SeqCst), 0);
 }
 
 /// Directly seed the SQLite journal with a stale row before any sync
@@ -715,17 +713,21 @@ async fn second_engine_instance_after_wipe_doesnt_push_back() {
     std::fs::remove_dir_all(&rig.root).unwrap();
     std::fs::create_dir_all(&rig.root).unwrap();
 
-    // Engine B opens the same journal and syncs.
+    // Engine B opens the same journal and syncs. Wiping the root took
+    // out the sentinel that engine A minted, so engine B sees a journal
+    // that knows about a base whose sentinel is gone — the catastrophic-
+    // wipe signal — and aborts rather than re-downloading or re-pushing
+    // anything. (The user reattaches deliberately via UI.)
     let engine_b = build_engine(&rig).await;
     let report = engine_b.incremental_sync().await.unwrap();
 
-    assert_eq!(report.downloaded.len(), 1);
-    assert_eq!(
-        report.uploaded.len(),
-        0,
-        "engine B must not push back: {:?}",
-        report.uploaded
+    assert!(
+        !report.errors.is_empty(),
+        "engine B should have aborted: {:?}",
+        report
     );
+    assert_eq!(report.downloaded.len(), 0, "no downloads on aborted run");
+    assert_eq!(report.uploaded.len(), 0, "no uploads on aborted run");
     assert_eq!(upload_hits.load(Ordering::SeqCst), 0);
     assert_eq!(content_hits.load(Ordering::SeqCst), 0);
 }
