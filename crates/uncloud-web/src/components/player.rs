@@ -338,10 +338,19 @@ pub fn Player() -> Element {
             return;
         }
         spawn_local(async move {
+            // Tracks the previous tick's `is_playing`. We mirror native
+            // pauses back into PlayerState only on the playing→paused
+            // *transition* — sampling a stationary `idle` would clobber an
+            // in-flight user-initiated play() before it lands on the native
+            // side, leaving native paused with state.playing thrashed back
+            // to false (the "press play after MediaSession-pause does
+            // nothing" regression).
+            let mut last_observed_is_playing = false;
             loop {
                 gloo_timers::future::sleep(std::time::Duration::from_millis(500)).await;
                 let s = player.peek().clone();
                 if s.queue.is_empty() {
+                    last_observed_is_playing = false;
                     continue;
                 }
                 let Ok(Some(st)) = native_audio::get_state().await else {
@@ -373,20 +382,20 @@ pub fn Player() -> Element {
                 if st.status == native_audio::NativeStatus::Ended && s.playing {
                     player.write().playing = false;
                 }
-                // The user paused via the MediaSession UI (lockscreen /
-                // notification). Without this mirror, the next driver-effect
-                // re-run would read stale `state.playing=true` and dispatch
-                // `play()` against a paused ExoPlayer, causing audio to
-                // spontaneously resume. The Loading guard avoids racing the
-                // play→loading→playing transition right after we dispatched
-                // play() ourselves.
-                if !st.is_playing
+                // The user paused via the MediaSession UI. Gating on the
+                // playing→paused transition (rather than `is_playing=false`
+                // alone) prevents racing an in-flight play() that hasn't yet
+                // been observed natively. Loading/Ended guards still skip
+                // the play→loading→playing ramp and the natural end-of-queue.
+                if last_observed_is_playing
+                    && !st.is_playing
                     && s.playing
                     && st.status != native_audio::NativeStatus::Loading
                     && st.status != native_audio::NativeStatus::Ended
                 {
                     player.write().playing = false;
                 }
+                last_observed_is_playing = st.is_playing;
             }
         });
     });
