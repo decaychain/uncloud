@@ -12,7 +12,7 @@ use crate::components::{
     setup::Setup,
     shares_page::SharesPage,
     shopping,
-    tasks::{TasksSchedulePage, TasksProjectPage},
+    tasks::{TasksAssignedPage, TasksSchedulePage, TasksProjectPage},
     trash::Trash,
 };
 
@@ -74,6 +74,9 @@ pub enum Route {
 
         #[route("/tasks")]
         Tasks {},
+
+        #[route("/tasks/assigned")]
+        TasksAssigned {},
 
         #[route("/tasks/project/:id")]
         TasksProject { id: String },
@@ -225,6 +228,13 @@ fn Passwords() -> Element {
 fn Tasks() -> Element {
     rsx! {
         TasksSchedulePage {}
+    }
+}
+
+#[component]
+fn TasksAssigned() -> Element {
+    rsx! {
+        TasksAssignedPage {}
     }
 }
 
