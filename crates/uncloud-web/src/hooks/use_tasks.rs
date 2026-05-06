@@ -497,7 +497,7 @@ pub async fn attach_files(task_id: &str, file_ids: &[&str]) -> Result<(), String
     let body = AttachFilesRequest {
         file_ids: file_ids.iter().map(|s| s.to_string()).collect(),
     };
-    let response = api::post(&format!("/tasks/{}/files", task_id))
+    let response = api::post(&format!("/tasks/{}/attachments", task_id))
         .json(&body)
         .map_err(|e| e.to_string())?
         .send()
@@ -512,7 +512,7 @@ pub async fn attach_files(task_id: &str, file_ids: &[&str]) -> Result<(), String
 }
 
 pub async fn detach_file(task_id: &str, file_id: &str) -> Result<(), String> {
-    let response = api::delete(&format!("/tasks/{}/files/{}", task_id, file_id))
+    let response = api::delete(&format!("/tasks/{}/attachments/{}", task_id, file_id))
         .send()
         .await
         .map_err(|e| e.to_string())?;
