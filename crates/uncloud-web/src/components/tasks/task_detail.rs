@@ -6,6 +6,7 @@ use uncloud_common::{
 };
 
 use crate::hooks::use_tasks;
+use crate::state::AuthState;
 use super::{LABEL_PALETTE, label_color_for};
 
 fn format_recurrence(rule: &RecurrenceRule) -> String {
@@ -105,8 +106,18 @@ pub fn TaskDetail(
     let mut desc_draft = use_signal(String::new);
     let mut editing_desc = use_signal(|| false);
     let mut new_comment = use_signal(String::new);
+    let mut editing_comment_id: Signal<Option<String>> = use_signal(|| None);
+    let mut comment_edit_draft = use_signal(String::new);
+    let mut confirm_delete_comment_id: Signal<Option<String>> = use_signal(|| None);
     let mut new_subtask_title = use_signal(String::new);
     let mut adding_subtask = use_signal(|| false);
+
+    let auth_state = use_context::<Signal<AuthState>>();
+    let current_user_id: Option<String> = auth_state
+        .read()
+        .user
+        .as_ref()
+        .map(|u| u.id.clone());
 
     // Recurrence editing
     let mut editing_recurrence = use_signal(|| false);
@@ -1063,10 +1074,11 @@ pub fn TaskDetail(
                         for sub in subtasks.read().iter() {
                             {
                                 let sub_id = sub.id.clone();
+                                let sub_id_promote = sub_id.clone();
                                 let sub_done = sub.status == TaskStatus::Done;
                                 let sub_title = sub.title.clone();
                                 rsx! {
-                                    div { class: "flex items-center gap-2 py-1",
+                                    div { class: "flex items-center gap-2 py-1 group",
                                         input {
                                             class: "checkbox checkbox-sm",
                                             r#type: "checkbox",
@@ -1090,8 +1102,27 @@ pub fn TaskDetail(
                                             },
                                         }
                                         span {
-                                            class: if sub_done { "text-sm line-through text-base-content/50" } else { "text-sm" },
+                                            class: if sub_done { "flex-1 text-sm line-through text-base-content/50" } else { "flex-1 text-sm" },
                                             "{sub_title}"
+                                        }
+                                        button {
+                                            class: "btn btn-ghost btn-xs opacity-0 group-hover:opacity-100 focus:opacity-100",
+                                            title: "Promote to top-level task",
+                                            onclick: move |_| {
+                                                let sid = sub_id_promote.clone();
+                                                spawn(async move {
+                                                    if use_tasks::promote_subtask(&sid).await.is_ok() {
+                                                        subtasks.write().retain(|s| s.id != sid);
+                                                        if let Some(t) = task.write().as_mut() {
+                                                            if t.subtask_count > 0 {
+                                                                t.subtask_count -= 1;
+                                                            }
+                                                        }
+                                                        on_updated.call(());
+                                                    }
+                                                });
+                                            },
+                                            "Promote"
                                         }
                                     }
                                 }
@@ -1207,21 +1238,140 @@ pub fn TaskDetail(
 
                     div { class: "flex flex-col gap-3",
                         for comment in comments.read().iter() {
-                            div { class: "bg-base-200 rounded-lg p-3",
-                                div { class: "flex items-center gap-2 mb-1",
-                                    div { class: "avatar placeholder",
-                                        div { class: "bg-neutral text-neutral-content w-5 h-5 rounded-full",
-                                            span { class: "text-[10px]",
-                                                {comment.author_username.chars().next().unwrap_or('?').to_uppercase().to_string()}
+                            {
+                                let cid = comment.id.clone();
+                                let cid_edit = cid.clone();
+                                let cid_save = cid.clone();
+                                let cid_delete = cid.clone();
+                                let cid_confirm = cid.clone();
+                                let body = comment.body.clone();
+                                let body_for_edit = body.clone();
+                                let author_username = comment.author_username.clone();
+                                let created_at = comment.created_at.clone();
+                                let edited = comment.created_at != comment.updated_at;
+                                let is_mine = current_user_id.as_deref() == Some(comment.author_id.as_str());
+                                let is_editing = editing_comment_id.read().as_deref() == Some(cid.as_str());
+                                let is_pending_delete =
+                                    confirm_delete_comment_id.read().as_deref() == Some(cid.as_str());
+                                rsx! {
+                                    div { class: "bg-base-200 rounded-lg p-3",
+                                        div { class: "flex items-center gap-2 mb-1",
+                                            div { class: "avatar placeholder",
+                                                div { class: "bg-neutral text-neutral-content w-5 h-5 rounded-full",
+                                                    span { class: "text-[10px]",
+                                                        {author_username.chars().next().unwrap_or('?').to_uppercase().to_string()}
+                                                    }
+                                                }
+                                            }
+                                            span { class: "text-xs font-semibold", "{author_username}" }
+                                            span { class: "text-xs text-base-content/50",
+                                                {created_at.get(..10).unwrap_or(&created_at).to_string()}
+                                            }
+                                            if edited {
+                                                span { class: "text-xs text-base-content/40 italic", "(edited)" }
+                                            }
+                                            if is_mine && !is_editing && !is_pending_delete {
+                                                div { class: "ml-auto flex gap-1",
+                                                    button {
+                                                        class: "btn btn-ghost btn-xs",
+                                                        onclick: move |_| {
+                                                            comment_edit_draft.set(body_for_edit.clone());
+                                                            editing_comment_id.set(Some(cid_edit.clone()));
+                                                        },
+                                                        "Edit"
+                                                    }
+                                                    button {
+                                                        class: "btn btn-ghost btn-xs text-error",
+                                                        onclick: move |_| {
+                                                            confirm_delete_comment_id
+                                                                .set(Some(cid_confirm.clone()));
+                                                        },
+                                                        "Delete"
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if is_editing {
+                                            textarea {
+                                                class: "textarea textarea-bordered textarea-sm w-full text-sm",
+                                                rows: 3,
+                                                value: "{comment_edit_draft}",
+                                                oninput: move |e| comment_edit_draft.set(e.value()),
+                                            }
+                                            div { class: "flex gap-2 mt-2 justify-end",
+                                                button {
+                                                    class: "btn btn-ghost btn-xs",
+                                                    onclick: move |_| {
+                                                        editing_comment_id.set(None);
+                                                        comment_edit_draft.set(String::new());
+                                                    },
+                                                    "Cancel"
+                                                }
+                                                button {
+                                                    class: "btn btn-primary btn-xs",
+                                                    onclick: move |_| {
+                                                        let cid = cid_save.clone();
+                                                        let new_body =
+                                                            comment_edit_draft.peek().trim().to_string();
+                                                        if new_body.is_empty() {
+                                                            return;
+                                                        }
+                                                        editing_comment_id.set(None);
+                                                        comment_edit_draft.set(String::new());
+                                                        spawn(async move {
+                                                            if let Ok(updated) =
+                                                                use_tasks::update_comment(&cid, &new_body)
+                                                                    .await
+                                                            {
+                                                                let mut cw = comments.write();
+                                                                if let Some(c) = cw
+                                                                    .iter_mut()
+                                                                    .find(|c| c.id == updated.id)
+                                                                {
+                                                                    *c = updated;
+                                                                }
+                                                            }
+                                                        });
+                                                    },
+                                                    "Save"
+                                                }
+                                            }
+                                        } else {
+                                            p { class: "text-sm whitespace-pre-wrap", "{body}" }
+                                            if is_pending_delete {
+                                                div { class: "flex gap-2 mt-2 items-center",
+                                                    span { class: "text-xs text-error", "Delete this comment?" }
+                                                    button {
+                                                        class: "btn btn-error btn-xs",
+                                                        onclick: move |_| {
+                                                            let cid = cid_delete.clone();
+                                                            confirm_delete_comment_id.set(None);
+                                                            spawn(async move {
+                                                                if use_tasks::delete_comment(&cid)
+                                                                    .await
+                                                                    .is_ok()
+                                                                {
+                                                                    comments
+                                                                        .write()
+                                                                        .retain(|c| c.id != cid);
+                                                                }
+                                                            });
+                                                        },
+                                                        "Confirm"
+                                                    }
+                                                    button {
+                                                        class: "btn btn-ghost btn-xs",
+                                                        onclick: move |_| {
+                                                            confirm_delete_comment_id.set(None);
+                                                        },
+                                                        "Cancel"
+                                                    }
+                                                }
                                             }
                                         }
                                     }
-                                    span { class: "text-xs font-semibold", "{comment.author_username}" }
-                                    span { class: "text-xs text-base-content/50",
-                                        {comment.created_at.get(..10).unwrap_or(&comment.created_at)}
-                                    }
                                 }
-                                p { class: "text-sm whitespace-pre-wrap", "{comment.body}" }
                             }
                         }
 
