@@ -7,7 +7,7 @@ use uncloud_common::{
     TaskResponse, TaskStatus, UpdateTaskRequest, UpdateTaskStatusRequest,
 };
 
-use crate::hooks::{use_files, use_tasks};
+use crate::hooks::{api, use_files, use_tasks};
 use crate::state::AuthState;
 use super::{LABEL_PALETTE, label_color_for};
 
@@ -1285,6 +1285,7 @@ pub fn TaskDetail(
                                     for fid in attached_ids.iter().cloned() {
                                         {
                                             let fid_chip = fid.clone();
+                                            let fid_open = fid.clone();
                                             let fid_detach = fid.clone();
                                             let tid_d = tid_attach.clone();
                                             let name = attachment_files
@@ -1296,7 +1297,18 @@ pub fn TaskDetail(
                                                 div {
                                                     key: "{fid_chip}",
                                                     class: "badge badge-outline gap-1 py-3",
-                                                    span { class: "text-xs", "{name}" }
+                                                    span {
+                                                        class: "text-xs cursor-pointer hover:underline",
+                                                        title: "Open file",
+                                                        onclick: move |_| {
+                                                            let url = api::authenticated_media_url(
+                                                                &format!("/files/{}/download", fid_open),
+                                                            );
+                                                            let _ = web_sys::window()
+                                                                .and_then(|w| w.open_with_url(&url).ok());
+                                                        },
+                                                        "{name}"
+                                                    }
                                                     button {
                                                         class: "btn btn-ghost btn-xs btn-circle text-error",
                                                         title: "Detach",
