@@ -103,11 +103,13 @@ impl Default for NativeFs {
     fn default() -> Self { Self::new() }
 }
 
-/// Filenames the walker must never surface regardless of location.
-// Filenames that walk()/walk_dirs() must never yield. These are never
-// uploaded, never compared against the journal, never treated as
-// local-only files. Keep in sync with `sentinel::SENTINEL_FILENAME`.
-const EXCLUDED_NAMES: &[&str] = &[".uncloud-sync.db", ".uncloud-root.json"];
+/// Filenames any [`LocalFs`] walker must never yield. These are never
+/// uploaded, never compared against the journal, never treated as
+/// local-only files. Re-exported from the crate root so out-of-tree
+/// `LocalFs` impls (e.g. the Android SAF walker in `uncloud-desktop`)
+/// can apply the same filter and stay in lock-step. Keep in sync with
+/// [`crate::sentinel::SENTINEL_FILENAME`].
+pub const EXCLUDED_NAMES: &[&str] = &[".uncloud-sync.db", ".uncloud-root.json"];
 
 #[async_trait]
 impl LocalFs for NativeFs {

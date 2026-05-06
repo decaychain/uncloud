@@ -25,7 +25,7 @@ use std::time::UNIX_EPOCH;
 use async_trait::async_trait;
 use tauri::AppHandle;
 use tauri_plugin_android_fs::{AndroidFsExt, Entry, FileUri};
-use uncloud_sync::{LocalFs, LocalFsError, WalkEntry};
+use uncloud_sync::{LocalFs, LocalFsError, WalkEntry, EXCLUDED_NAMES};
 
 /// `|` as delimiter is safe: SAF URIs percent-encode everything that isn't
 /// in the unreserved/safe set, and `|` is not in either.
@@ -99,6 +99,14 @@ impl LocalFs for AndroidSafFs {
                 };
                 match entry {
                     Entry::File { last_modified, .. } => {
+                        // Sentinel + journal db must never be uploaded or
+                        // compared against the journal. The desktop walker
+                        // applies the same filter; without it on Android,
+                        // `.uncloud-root.json` propagates to the server and
+                        // then to every other client.
+                        if EXCLUDED_NAMES.iter().any(|&n| n == name) {
+                            continue;
+                        }
                         let mtime = last_modified
                             .duration_since(UNIX_EPOCH)
                             .map(|d| d.as_secs() as i64)
