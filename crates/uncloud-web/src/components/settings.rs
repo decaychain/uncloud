@@ -202,7 +202,7 @@ fn DashboardTilesSection() -> Element {
                             let is_on = enabled.iter().any(|x| x == id);
                             let disabled_for_feature = *id == "shopping" && !shopping_enabled;
                             let enabled_now = enabled.clone();
-                            let mut save = save.clone();
+                            let save = save.clone();
                             rsx! {
                                 label {
                                     class: if disabled_for_feature {

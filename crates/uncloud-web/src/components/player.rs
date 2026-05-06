@@ -528,7 +528,7 @@ pub fn Player() -> Element {
         }
 
         if player_visible {
-            if let Some(track) = track {
+            if let Some(_track) = track {
                 div { class: "fixed bottom-0 left-0 right-0 z-50 bg-base-200 border-t border-base-300 px-4 py-2 pb-safe",
                     div { class: "flex items-center gap-3 max-w-screen-xl mx-auto",
                         // Cover art

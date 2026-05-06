@@ -19,7 +19,6 @@ pub struct S3Storage {
     client: Client,
     bucket: String,
     temp_dir: PathBuf,
-    retry: super::retry::RetryConfig,
 }
 
 impl S3Storage {
@@ -84,7 +83,6 @@ impl S3Storage {
             client,
             bucket: bucket.to_string(),
             temp_dir,
-            retry,
         })
     }
 

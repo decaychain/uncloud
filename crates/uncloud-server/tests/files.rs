@@ -446,8 +446,6 @@ async fn simple_upload_rejects_duplicate_name() {
 
 #[tokio::test]
 async fn complete_upload_rejects_duplicate_name() {
-    use axum_test::multipart::{MultipartForm, Part};
-
     let app = TestApp::new().await;
     app.register_and_login("alice").await;
 

@@ -152,6 +152,7 @@ impl Journal {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn get(
         &self,
         server_id: &str,

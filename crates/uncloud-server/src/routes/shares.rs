@@ -2,7 +2,7 @@ use axum::{
     body::Body,
     extract::{Path, State},
     http::{header, StatusCode},
-    response::{IntoResponse, Response},
+    response::Response,
     Json,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};

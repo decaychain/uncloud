@@ -113,7 +113,7 @@ pub fn FileItem(
                     "card bg-base-100 shadow-sm border border-base-300 cursor-pointer hover:shadow-md hover:ring-2 hover:ring-primary transition-all relative group"
                 },
                 onclick: on_click,
-                ondblclick: move |e| {
+                ondoubleclick: move |e| {
                     e.stop_propagation();
                     if !is_folder { on_open_request.call(()); }
                 },
@@ -226,7 +226,7 @@ pub fn FileItem(
                     "hover cursor-pointer"
                 },
                 onclick: on_click,
-                ondblclick: move |e| {
+                ondoubleclick: move |e| {
                     e.stop_propagation();
                     if !is_folder { on_open_request.call(()); }
                 },

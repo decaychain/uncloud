@@ -1628,7 +1628,7 @@ fn EntryDetail(
     on_delete: EventHandler<()>,
 ) -> Element {
     let mut show_password = use_signal(|| false);
-    let mut copied: Signal<Option<String>> = use_signal(|| None);
+    let copied: Signal<Option<String>> = use_signal(|| None);
 
     let title = entry.get_title().unwrap_or("Untitled").to_string();
     let username = entry.get_username().unwrap_or("").to_string();

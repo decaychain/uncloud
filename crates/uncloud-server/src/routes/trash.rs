@@ -13,7 +13,7 @@ use std::sync::Arc;
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
 use crate::models::{File, FileVersion, Folder};
-use crate::routes::files::{check_name_conflict, file_to_response, resolve_storage_path};
+use crate::routes::files::{check_name_conflict, resolve_storage_path};
 use crate::AppState;
 use uncloud_common::TrashItemResponse;
 

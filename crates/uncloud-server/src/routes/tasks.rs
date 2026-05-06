@@ -288,7 +288,7 @@ pub async fn update_project(
     let project_id =
         ObjectId::parse_str(&id).map_err(|_| AppError::BadRequest("Invalid ID".into()))?;
 
-    let (project, perm) = verify_project_access(&state, project_id, user.id).await?;
+    let (_project, perm) = verify_project_access(&state, project_id, user.id).await?;
     require_admin(&perm)?;
 
     let mut update_doc = doc! {};

@@ -53,7 +53,6 @@ async fn supervise(app: ManagedApp, shutdown: CancellationToken) {
         // entire process tree (e.g. `cargo run` + the binary it spawns).
         #[cfg(unix)]
         {
-            use std::os::unix::process::CommandExt;
             unsafe { cmd.pre_exec(|| { libc::setpgid(0, 0); Ok(()) }); }
         }
 

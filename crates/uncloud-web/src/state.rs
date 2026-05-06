@@ -47,16 +47,6 @@ impl VaultSession {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Section {
-    Files,
-    Gallery,
-    Music,
-    Shopping,
-    Passwords,
-    Settings,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FontScale {
     Small,
     Default,
@@ -119,23 +109,12 @@ impl AuthState {
         self.user.is_some()
     }
 
-    pub fn username(&self) -> Option<&str> {
-        self.user.as_ref().map(|u| u.username.as_str())
-    }
-
     pub fn is_admin(&self) -> bool {
         self.user
             .as_ref()
             .map(|u| u.role == uncloud_common::UserRole::Admin)
             .unwrap_or(false)
     }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct FileBrowserState {
-    pub current_folder: Option<String>,
-    pub selected_items: Vec<String>,
-    pub view_mode: ViewMode,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]

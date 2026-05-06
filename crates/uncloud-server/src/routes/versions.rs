@@ -2,7 +2,7 @@ use axum::{
     body::Body,
     extract::{Path, State},
     http::{header, StatusCode},
-    response::{IntoResponse, Response},
+    response::Response,
     Json,
 };
 use mongodb::bson::{self, doc, oid::ObjectId};

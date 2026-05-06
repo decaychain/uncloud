@@ -58,6 +58,7 @@ pub fn clear_auth_token() {
 
 /// Clear all persisted session data (server URL + auth token).
 /// Used on disconnect / full logout to return to the setup screen.
+#[allow(dead_code)]
 pub fn clear_stored_session() {
     LocalStorage::delete(LS_API_BASE);
     LocalStorage::delete(LS_AUTH_TOKEN);
@@ -159,6 +160,7 @@ pub fn get_v1(path: &str) -> RequestBuilder {
     )
 }
 
+#[allow(dead_code)]
 pub fn post_v1(path: &str) -> RequestBuilder {
     apply_auth(
         Request::post(&api_v1_url(path))
@@ -173,6 +175,7 @@ pub fn put_v1(path: &str) -> RequestBuilder {
     )
 }
 
+#[allow(dead_code)]
 pub fn delete_v1(path: &str) -> RequestBuilder {
     apply_auth(
         Request::delete(&api_v1_url(path))
@@ -199,6 +202,7 @@ pub fn post_raw(url: &str) -> RequestBuilder {
     )
 }
 
+#[allow(dead_code)]
 pub fn put_raw(url: &str) -> RequestBuilder {
     apply_auth(
         Request::put(url)
@@ -206,6 +210,7 @@ pub fn put_raw(url: &str) -> RequestBuilder {
     )
 }
 
+#[allow(dead_code)]
 pub fn delete_raw(url: &str) -> RequestBuilder {
     apply_auth(
         Request::delete(url)
@@ -213,6 +218,7 @@ pub fn delete_raw(url: &str) -> RequestBuilder {
     )
 }
 
+#[allow(dead_code)]
 pub fn patch_raw(url: &str) -> RequestBuilder {
     apply_auth(
         Request::patch(url)

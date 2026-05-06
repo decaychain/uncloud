@@ -391,12 +391,10 @@ async fn dedupe_files(dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
         key: GroupKey,
         ids: Vec<ObjectId>,
         updated_at: Vec<bson::DateTime>,
-        names: Vec<String>,
         count: i64,
     }
     #[derive(Debug, Deserialize)]
     struct GroupKey {
-        owner_id: ObjectId,
         parent_id: Option<ObjectId>,
         name: String,
     }
@@ -408,7 +406,6 @@ async fn dedupe_files(dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
             "count": { "$sum": 1 },
             "ids": { "$push": "$_id" },
             "updated_at": { "$push": "$updated_at" },
-            "names": { "$push": "$name" },
         }},
         doc! { "$match": { "count": { "$gt": 1 } } },
         doc! { "$sort": { "count": -1 } },

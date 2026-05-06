@@ -3,6 +3,8 @@
 //! All icons use `stroke="currentColor"` so they inherit the surrounding text
 //! colour, which means DaisyUI theme + `.active` styling colours them for free.
 
+#![allow(dead_code)]
+
 use dioxus::prelude::*;
 
 fn default_class() -> String { "w-4 h-4".to_string() }

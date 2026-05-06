@@ -5,12 +5,10 @@ use axum::{
         IntoResponse,
     },
 };
-use futures::stream::Stream;
 use std::{convert::Infallible, sync::Arc, time::Duration};
 use tokio_stream::StreamExt;
 
 use crate::middleware::AuthUser;
-use crate::services::events::Event as AppEvent;
 use crate::AppState;
 
 pub async fn events_stream(

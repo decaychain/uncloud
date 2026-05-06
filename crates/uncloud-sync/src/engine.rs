@@ -668,8 +668,6 @@ impl SyncEngine {
             .into_iter()
             .map(|r| ((r.server_id.clone(), r.item_type.clone()), r))
             .collect();
-        for (key, j) in &journal_map {
-        }
 
         let today = Utc::now().date_naive();
 

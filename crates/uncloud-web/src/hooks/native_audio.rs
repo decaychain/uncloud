@@ -149,6 +149,7 @@ pub async fn initialize() -> Result<Option<NativeAudioState>, String> {
     Ok(NativeAudioState::from_js(&v))
 }
 
+#[allow(dead_code)]
 pub async fn set_source(
     src: &str,
     title: Option<&str>,
@@ -249,6 +250,7 @@ pub async fn get_state() -> Result<Option<NativeAudioState>, String> {
     Ok(NativeAudioState::from_js(&v))
 }
 
+#[allow(dead_code)]
 pub async fn dispose() -> Result<(), String> {
     call("dispose", &Object::new().into()).await.map(|_| ())
 }

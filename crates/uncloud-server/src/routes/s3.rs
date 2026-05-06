@@ -12,7 +12,6 @@ use axum::{
 };
 use chrono::Utc;
 use mongodb::bson::{self, doc, oid::ObjectId};
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
@@ -324,16 +323,6 @@ async fn list_buckets(user: &S3User) -> Response {
 // ListObjectsV2
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-struct ListQuery {
-    prefix: Option<String>,
-    delimiter: Option<String>,
-    #[serde(rename = "max-keys")]
-    max_keys: Option<i64>,
-    #[serde(rename = "continuation-token")]
-    continuation_token: Option<String>,
-}
-
 async fn list_objects_v2(
     state: Arc<AppState>,
     user: &S3User,
@@ -383,7 +372,7 @@ async fn list_objects_v2(
         );
     }
 
-    let mut cursor = files_coll.find(filter).await.map_err(|e| {
+    let cursor = files_coll.find(filter).await.map_err(|e| {
         s3_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "InternalError",

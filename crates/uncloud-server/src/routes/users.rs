@@ -3,7 +3,6 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use chrono::Utc;
 use mongodb::bson::{doc, oid::ObjectId};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -171,7 +170,7 @@ pub async fn update_user(
 
     let collection = state.db.collection::<User>("users");
 
-    let user = collection
+    let _user = collection
         .find_one(doc! { "_id": user_id })
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;

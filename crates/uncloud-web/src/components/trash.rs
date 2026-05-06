@@ -123,7 +123,7 @@ pub fn Trash() -> Element {
                                                     onclick: move |_| {
                                                         let id = id_restore.clone();
                                                         let parent = parent_for_restore.clone();
-                                                        let item_name = name_for_conflict.clone();
+                                                        let _item_name = name_for_conflict.clone();
                                                         spawn(async move {
                                                             match use_files::restore_from_trash(&id, None).await {
                                                                 Ok(()) => {

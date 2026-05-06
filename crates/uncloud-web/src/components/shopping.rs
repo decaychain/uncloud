@@ -30,7 +30,7 @@ pub fn ShoppingPage() -> Element {
     let mut selected_category: Signal<Option<String>> = use_signal(|| None);
 
     // Inline inlet: which item's inlet is open
-    let mut open_inlet: Signal<Option<String>> = use_signal(|| None);
+    let open_inlet: Signal<Option<String>> = use_signal(|| None);
 
     // Create inline state
     let mut creating = use_signal(|| false);
@@ -1546,7 +1546,7 @@ fn SettingsPanel(on_close: EventHandler<()>) -> Element {
                         div { class: "space-y-1 mb-2",
                             for shop in shops().iter() {
                                 {
-                                    let sid = shop.id.clone();
+                                    let _sid = shop.id.clone();
                                     let sname = shop.name.clone();
                                     let scats = shop.categories.clone();
                                     let sid_edit = shop.id.clone();
