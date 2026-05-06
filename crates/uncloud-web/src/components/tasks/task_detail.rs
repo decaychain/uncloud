@@ -1,11 +1,13 @@
+use std::collections::HashMap;
+
 use dioxus::prelude::*;
 use uncloud_common::{
-    CreateTaskLabelRequest, CreateTaskRequest, NthWeek, RecurrenceRule, TaskCommentResponse,
-    TaskLabelResponse, TaskPriority, TaskResponse, TaskStatus, UpdateTaskRequest,
-    UpdateTaskStatusRequest,
+    CreateTaskLabelRequest, CreateTaskRequest, FileResponse, FolderResponse, NthWeek,
+    RecurrenceRule, TaskCommentResponse, TaskLabelResponse, TaskPriority, TaskResponse, TaskStatus,
+    UpdateTaskRequest, UpdateTaskStatusRequest,
 };
 
-use crate::hooks::use_tasks;
+use crate::hooks::{use_files, use_tasks};
 use crate::state::AuthState;
 use super::{LABEL_PALETTE, label_color_for};
 
@@ -112,6 +114,11 @@ pub fn TaskDetail(
     let mut new_subtask_title = use_signal(String::new);
     let mut adding_subtask = use_signal(|| false);
 
+    // Attachments: file metadata cache keyed by file id, populated lazily as
+    // we resolve each id on the task or after a successful attach.
+    let mut attachment_files: Signal<HashMap<String, FileResponse>> = use_signal(HashMap::new);
+    let mut show_attach_picker = use_signal(|| false);
+
     let auth_state = use_context::<Signal<AuthState>>();
     let current_user_id: Option<String> = auth_state
         .read()
@@ -191,6 +198,13 @@ pub fn TaskDetail(
                     if let Ok(ls) = use_tasks::list_labels(&t.project_id).await {
                         available_labels.set(ls);
                     }
+                    let mut metadata: HashMap<String, FileResponse> = HashMap::new();
+                    for fid in &t.attachments {
+                        if let Ok(f) = use_files::get_file(fid).await {
+                            metadata.insert(fid.clone(), f);
+                        }
+                    }
+                    attachment_files.set(metadata);
                     task.set(Some(t));
                 }
                 Err(e) => error.set(Some(e)),
@@ -1185,6 +1199,81 @@ pub fn TaskDetail(
                     }
                 }
 
+                // Attachments
+                {
+                    let tid_attach = task_id.clone();
+                    let attached_ids: Vec<String> = task
+                        .read()
+                        .as_ref()
+                        .map(|t| t.attachments.clone())
+                        .unwrap_or_default();
+                    rsx! {
+                        div {
+                            div { class: "flex items-center justify-between",
+                                label { class: "label",
+                                    span { class: "label-text text-xs font-semibold uppercase",
+                                        "Attachments"
+                                    }
+                                }
+                                button {
+                                    class: "btn btn-ghost btn-xs",
+                                    onclick: move |_| show_attach_picker.set(true),
+                                    "+ Attach"
+                                }
+                            }
+                            div { class: "flex flex-wrap gap-1",
+                                if attached_ids.is_empty() {
+                                    p { class: "text-sm text-base-content/40 py-2", "No attachments" }
+                                } else {
+                                    for fid in attached_ids.iter().cloned() {
+                                        {
+                                            let fid_chip = fid.clone();
+                                            let fid_detach = fid.clone();
+                                            let tid_d = tid_attach.clone();
+                                            let name = attachment_files
+                                                .read()
+                                                .get(&fid)
+                                                .map(|f| f.name.clone())
+                                                .unwrap_or_else(|| fid.clone());
+                                            rsx! {
+                                                div {
+                                                    key: "{fid_chip}",
+                                                    class: "badge badge-outline gap-1 py-3",
+                                                    span { class: "text-xs", "{name}" }
+                                                    button {
+                                                        class: "btn btn-ghost btn-xs btn-circle text-error",
+                                                        title: "Detach",
+                                                        onclick: move |_| {
+                                                            let tid = tid_d.clone();
+                                                            let fid = fid_detach.clone();
+                                                            spawn(async move {
+                                                                if use_tasks::detach_file(&tid, &fid)
+                                                                    .await
+                                                                    .is_ok()
+                                                                {
+                                                                    if let Some(t) =
+                                                                        task.write().as_mut()
+                                                                    {
+                                                                        t.attachments
+                                                                            .retain(|x| x != &fid);
+                                                                    }
+                                                                    attachment_files.write().remove(&fid);
+                                                                    on_updated.call(());
+                                                                }
+                                                            });
+                                                        },
+                                                        "×"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Completion history (recurring tasks only — empty Vec
                 // for non-recurring, in which case we render nothing).
                 if !t.completion_history.is_empty() {
@@ -1439,6 +1528,212 @@ pub fn TaskDetail(
                     }
                 }
             }
+        }
+
+        if *show_attach_picker.read() {
+            {
+                let tid_picker = task_id.clone();
+                let already_attached: Vec<String> = task
+                    .read()
+                    .as_ref()
+                    .map(|t| t.attachments.clone())
+                    .unwrap_or_default();
+                rsx! {
+                    TaskFilePicker {
+                        task_id: tid_picker,
+                        already_attached,
+                        on_attach: move |file: FileResponse| {
+                            let fid = file.id.clone();
+                            if let Some(t) = task.write().as_mut() {
+                                if !t.attachments.contains(&fid) {
+                                    t.attachments.push(fid.clone());
+                                }
+                            }
+                            attachment_files.write().insert(fid, file);
+                            on_updated.call(());
+                        },
+                        on_detach: move |fid: String| {
+                            if let Some(t) = task.write().as_mut() {
+                                t.attachments.retain(|x| x != &fid);
+                            }
+                            attachment_files.write().remove(&fid);
+                            on_updated.call(());
+                        },
+                        on_close: move |_| show_attach_picker.set(false),
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── File picker for task attachments ─────────────────────────────────────────
+
+#[component]
+fn TaskFilePicker(
+    task_id: String,
+    already_attached: Vec<String>,
+    on_attach: EventHandler<FileResponse>,
+    on_detach: EventHandler<String>,
+    on_close: EventHandler<()>,
+) -> Element {
+    let mut current_parent: Signal<Option<String>> = use_signal(|| None);
+    let mut folders: Signal<Vec<FolderResponse>> = use_signal(Vec::new);
+    let mut files: Signal<Vec<FileResponse>> = use_signal(Vec::new);
+    let mut breadcrumb: Signal<Vec<FolderResponse>> = use_signal(Vec::new);
+    let mut loading = use_signal(|| false);
+    let mut busy_id: Signal<Option<String>> = use_signal(|| None);
+    let mut attached: Signal<Vec<String>> = use_signal(|| already_attached.clone());
+
+    use_effect(move || {
+        let parent = current_parent();
+        spawn(async move {
+            loading.set(true);
+            if let Ok(flds) = use_files::list_folders(parent.as_deref()).await {
+                folders.set(flds);
+            }
+            if let Ok(fls) = use_files::list_files(parent.as_deref()).await {
+                files.set(fls);
+            }
+            match &parent {
+                Some(pid) => {
+                    if let Ok(crumbs) = use_files::get_breadcrumb(pid).await {
+                        breadcrumb.set(crumbs);
+                    }
+                }
+                None => breadcrumb.set(Vec::new()),
+            }
+            loading.set(false);
+        });
+    });
+
+    rsx! {
+        div { class: "modal modal-open",
+            div {
+                class: "modal-box max-w-md",
+                onclick: move |e| e.stop_propagation(),
+
+                h3 { class: "font-bold text-lg mb-3", "Attach Files" }
+
+                // Breadcrumb
+                div { class: "text-sm breadcrumbs px-0 mb-1",
+                    ul {
+                        li {
+                            a {
+                                class: "cursor-pointer",
+                                onclick: move |_| current_parent.set(None),
+                                "Files"
+                            }
+                        }
+                        for folder in breadcrumb() {
+                            {
+                                let id = folder.id.clone();
+                                rsx! {
+                                    li {
+                                        a {
+                                            class: "cursor-pointer",
+                                            onclick: move |_| current_parent.set(Some(id.clone())),
+                                            "{folder.name}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                div { class: "min-h-40 border border-base-300 rounded-box overflow-y-auto max-h-72",
+                    if loading() {
+                        div { class: "flex justify-center items-center h-28",
+                            span { class: "loading loading-spinner loading-md" }
+                        }
+                    } else if folders().is_empty() && files().is_empty() {
+                        div { class: "flex justify-center items-center h-28 text-base-content/40 text-sm",
+                            "Empty folder"
+                        }
+                    } else {
+                        ul { class: "menu menu-sm p-1",
+                            for folder in folders() {
+                                {
+                                    let id = folder.id.clone();
+                                    rsx! {
+                                        li {
+                                            a {
+                                                onclick: move |_| current_parent.set(Some(id.clone())),
+                                                span { "{folder.name}" }
+                                                span { class: "ml-auto opacity-40 text-xs", "›" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            for file in files() {
+                                {
+                                    let fid = file.id.clone();
+                                    let fid_busy = fid.clone();
+                                    let file_clone = file.clone();
+                                    let is_attached = attached.read().contains(&fid);
+                                    let is_busy = busy_id.read().as_deref() == Some(fid.as_str());
+                                    let tid = task_id.clone();
+                                    rsx! {
+                                        li {
+                                            a {
+                                                class: if is_attached { "active" } else { "" },
+                                                onclick: move |_| {
+                                                    if is_busy {
+                                                        return;
+                                                    }
+                                                    busy_id.set(Some(fid_busy.clone()));
+                                                    let tid = tid.clone();
+                                                    let fid = fid.clone();
+                                                    let file = file_clone.clone();
+                                                    spawn(async move {
+                                                        if is_attached {
+                                                            if use_tasks::detach_file(&tid, &fid)
+                                                                .await
+                                                                .is_ok()
+                                                            {
+                                                                attached.write().retain(|x| x != &fid);
+                                                                on_detach.call(fid);
+                                                            }
+                                                        } else {
+                                                            if use_tasks::attach_files(&tid, &[&fid])
+                                                                .await
+                                                                .is_ok()
+                                                            {
+                                                                attached.write().push(fid.clone());
+                                                                on_attach.call(file);
+                                                            }
+                                                        }
+                                                        busy_id.set(None);
+                                                    });
+                                                },
+                                                span { class: "font-medium", "{file.name}" }
+                                                if is_busy {
+                                                    span { class: "ml-auto loading loading-spinner loading-xs" }
+                                                } else if is_attached {
+                                                    span { class: "ml-auto badge badge-xs badge-primary",
+                                                        "Attached"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                div { class: "modal-action",
+                    button {
+                        class: "btn",
+                        onclick: move |_| on_close.call(()),
+                        "Done"
+                    }
+                }
+            }
+            div { class: "modal-backdrop", onclick: move |_| on_close.call(()) }
         }
     }
 }

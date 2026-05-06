@@ -34,7 +34,7 @@ pub fn Sidebar() -> Element {
         "gallery"
     } else if matches!(route, Route::Music {} | Route::MusicArtist { .. } | Route::MusicAlbum { .. } | Route::MusicFolder { .. } | Route::MusicPlaylist { .. }) {
         "music"
-    } else if matches!(route, Route::Tasks {} | Route::TasksProject { .. }) {
+    } else if matches!(route, Route::Tasks {} | Route::TasksAssigned {} | Route::TasksProject { .. }) {
         "tasks"
     } else if matches!(route, Route::Shopping {} | Route::ShoppingList { .. }) {
         "shopping"
@@ -183,6 +183,15 @@ pub fn Sidebar() -> Element {
                                     onclick: move |_| close_drawer(),
                                     IconCheckSquare {}
                                     span { "Schedule" }
+                                }
+                            }
+                            li {
+                                Link {
+                                    to: Route::TasksAssigned {},
+                                    class: if matches!(route, Route::TasksAssigned {}) { "active" } else { "" },
+                                    onclick: move |_| close_drawer(),
+                                    IconCheckSquare {}
+                                    span { "Assigned to me" }
                                 }
                             }
                             TasksSidebarProjects {}

@@ -543,7 +543,7 @@ pub async fn get_schedule() -> Result<TaskScheduleResponse, String> {
 }
 
 pub async fn get_assigned_to_me() -> Result<Vec<TaskResponse>, String> {
-    let response = api::get("/tasks/assigned")
+    let response = api::get("/tasks/assigned-to-me")
         .send()
         .await
         .map_err(|e| e.to_string())?;

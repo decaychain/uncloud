@@ -1,3 +1,4 @@
+pub mod assigned_view;
 pub mod board_view;
 pub mod board_card;
 pub mod list_view;
@@ -199,6 +200,15 @@ pub fn TasksSchedulePage() -> Element {
     rsx! {
         div { class: "p-4",
             ScheduleView {}
+        }
+    }
+}
+
+#[component]
+pub fn TasksAssignedPage() -> Element {
+    rsx! {
+        div { class: "p-4",
+            assigned_view::AssignedView {}
         }
     }
 }
