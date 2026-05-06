@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use dioxus::prelude::*;
 use uncloud_common::{
     CreateTaskLabelRequest, CreateTaskRequest, FileResponse, FolderResponse, NthWeek,
-    RecurrenceRule, TaskCommentResponse, TaskLabelResponse, TaskPriority, TaskResponse, TaskStatus,
-    UpdateTaskRequest, UpdateTaskStatusRequest,
+    ProjectMemberResponse, RecurrenceRule, TaskCommentResponse, TaskLabelResponse, TaskPriority,
+    TaskResponse, TaskStatus, UpdateTaskRequest, UpdateTaskStatusRequest,
 };
 
 use crate::hooks::{use_files, use_tasks};
@@ -119,6 +119,9 @@ pub fn TaskDetail(
     let mut attachment_files: Signal<HashMap<String, FileResponse>> = use_signal(HashMap::new);
     let mut show_attach_picker = use_signal(|| false);
 
+    // Project members for the assignee picker.
+    let mut members: Signal<Vec<ProjectMemberResponse>> = use_signal(Vec::new);
+
     let auth_state = use_context::<Signal<AuthState>>();
     let current_user_id: Option<String> = auth_state
         .read()
@@ -205,6 +208,9 @@ pub fn TaskDetail(
                         }
                     }
                     attachment_files.set(metadata);
+                    if let Ok(p) = use_tasks::get_project(&t.project_id).await {
+                        members.set(p.members);
+                    }
                     task.set(Some(t));
                 }
                 Err(e) => error.set(Some(e)),
@@ -339,10 +345,18 @@ pub fn TaskDetail(
 
     let tid_status = task_id.clone();
     let tid_priority = task_id.clone();
+    let tid_assignee = task_id.clone();
     let tid_due = task_id.clone();
     let tid_subtask = task_id.clone();
     let tid_labels = task_id.clone();
     let tid_label_create = task_id.clone();
+
+    let current_assignee_id = t.assignee_id.clone().unwrap_or_default();
+    let assignee_options: Vec<(String, String)> = members
+        .read()
+        .iter()
+        .map(|m| (m.user_id.clone(), m.username.clone()))
+        .collect();
 
     rsx! {
         // Backdrop
@@ -495,6 +509,49 @@ pub fn TaskDetail(
                                             selected: is_selected,
                                             "{plabel}"
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Assignee
+                div {
+                    label { class: "label", span { class: "label-text text-xs font-semibold uppercase", "Assignee" } }
+                    select {
+                        class: "select select-bordered select-sm w-full",
+                        onchange: move |e| {
+                            let val = e.value();
+                            // Sentinel "" = unassign; the server treats `Some("")`
+                            // (a string with `is_empty()`) as a clear-assignee
+                            // signal in `update_task`.
+                            let next = val;
+                            let tid = tid_assignee.clone();
+                            spawn(async move {
+                                let mut req = update_req();
+                                req.assignee_id = Some(next);
+                                if let Ok(updated) = use_tasks::update_task(&tid, &req).await {
+                                    task.set(Some(updated));
+                                    on_updated.call(());
+                                }
+                            });
+                        },
+                        option {
+                            value: "",
+                            selected: current_assignee_id.is_empty(),
+                            "Unassigned"
+                        }
+                        for (uid, uname) in assignee_options.iter() {
+                            {
+                                let uid = uid.clone();
+                                let uname = uname.clone();
+                                let is_selected = uid == current_assignee_id;
+                                rsx! {
+                                    option {
+                                        value: "{uid}",
+                                        selected: is_selected,
+                                        "{uname}"
                                     }
                                 }
                             }
