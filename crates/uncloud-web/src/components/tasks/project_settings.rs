@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use uncloud_common::{
     AddProjectMemberRequest, CreateTaskLabelRequest, ProjectMemberResponse, ProjectPermission,
-    TaskLabelResponse, UpdateTaskLabelRequest, UpdateTaskProjectRequest,
+    TaskLabelResponse, UpdateProjectMemberRequest, UpdateTaskLabelRequest, UpdateTaskProjectRequest,
 };
 
 use crate::hooks::{use_shopping, use_tasks};
@@ -109,14 +109,16 @@ pub fn ProjectSettings(
                     for member in current_members.read().iter() {
                         {
                             let member_id = member.user_id.clone();
+                            let member_id_role = member_id.clone();
                             let member_username = member.username.clone();
                             let is_owner = member.user_id == owner_id;
-                            let perm_label = match member.permission {
-                                ProjectPermission::Viewer => "Viewer",
-                                ProjectPermission::Editor => "Editor",
-                                ProjectPermission::Admin => "Admin",
+                            let current_perm = match member.permission {
+                                ProjectPermission::Viewer => "viewer",
+                                ProjectPermission::Editor => "editor",
+                                ProjectPermission::Admin => "admin",
                             };
                             let pid_rm = pid_member.clone();
+                            let pid_role = pid_member.clone();
 
                             rsx! {
                                 div {
@@ -137,7 +139,38 @@ pub fn ProjectSettings(
                                     if is_owner {
                                         span { class: "badge badge-sm badge-primary", "Owner" }
                                     } else {
-                                        span { class: "badge badge-sm badge-ghost", "{perm_label}" }
+                                        select {
+                                            class: "select select-bordered select-xs",
+                                            value: "{current_perm}",
+                                            onchange: move |e| {
+                                                let new_perm = match e.value().as_str() {
+                                                    "viewer" => ProjectPermission::Viewer,
+                                                    "admin" => ProjectPermission::Admin,
+                                                    _ => ProjectPermission::Editor,
+                                                };
+                                                let uid = member_id_role.clone();
+                                                let pid = pid_role.clone();
+                                                spawn(async move {
+                                                    let req = UpdateProjectMemberRequest {
+                                                        permission: new_perm.clone(),
+                                                    };
+                                                    if use_tasks::update_member(&pid, &uid, &req)
+                                                        .await
+                                                        .is_ok()
+                                                    {
+                                                        let mut mw = current_members.write();
+                                                        if let Some(m) =
+                                                            mw.iter_mut().find(|m| m.user_id == uid)
+                                                        {
+                                                            m.permission = new_perm;
+                                                        }
+                                                    }
+                                                });
+                                            },
+                                            option { value: "viewer", "Viewer" }
+                                            option { value: "editor", "Editor" }
+                                            option { value: "admin", "Admin" }
+                                        }
                                         button {
                                             class: "btn btn-ghost btn-xs btn-circle text-error",
                                             title: "Remove member",

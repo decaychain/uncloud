@@ -1,11 +1,16 @@
+use std::collections::HashMap;
+
 use dioxus::prelude::*;
 use uncloud_common::{
-    CreateTaskLabelRequest, CreateTaskRequest, NthWeek, RecurrenceRule, TaskCommentResponse,
-    TaskLabelResponse, TaskPriority, TaskResponse, TaskStatus, UpdateTaskRequest,
-    UpdateTaskStatusRequest,
+    CreateTaskLabelRequest, CreateTaskRequest, FileResponse, FolderResponse, NthWeek,
+    ProjectMemberResponse, RecurrenceRule, TaskCommentResponse, TaskLabelResponse, TaskPriority,
+    TaskResponse, TaskStatus, UpdateTaskRequest, UpdateTaskStatusRequest,
 };
 
-use crate::hooks::use_tasks;
+use crate::components::file_open_viewer::FileOpenViewer;
+use crate::hooks::use_file_opener::{use_file_opener, FileOpenTarget};
+use crate::hooks::{use_files, use_tasks};
+use crate::state::AuthState;
 use super::{LABEL_PALETTE, label_color_for};
 
 fn format_recurrence(rule: &RecurrenceRule) -> String {
@@ -105,8 +110,34 @@ pub fn TaskDetail(
     let mut desc_draft = use_signal(String::new);
     let mut editing_desc = use_signal(|| false);
     let mut new_comment = use_signal(String::new);
+    let mut editing_comment_id: Signal<Option<String>> = use_signal(|| None);
+    let mut comment_edit_draft = use_signal(String::new);
+    let mut confirm_delete_comment_id: Signal<Option<String>> = use_signal(|| None);
     let mut new_subtask_title = use_signal(String::new);
     let mut adding_subtask = use_signal(|| false);
+
+    // Attachments: file metadata cache keyed by file id, populated lazily as
+    // we resolve each id on the task or after a successful attach.
+    let mut attachment_files: Signal<HashMap<String, FileResponse>> = use_signal(HashMap::new);
+    let mut show_attach_picker = use_signal(|| false);
+
+    // Project members for the assignee picker.
+    let mut members: Signal<Vec<ProjectMemberResponse>> = use_signal(Vec::new);
+
+    // In-panel viewer for opening attached files. The dispatch closure
+    // (audio→player, image→Lightbox, etc.) is shared with FileBrowser via
+    // `use_file_opener`.
+    let viewer_target: Signal<Option<FileOpenTarget>> = use_signal(|| None);
+    let open_file = use_file_opener(viewer_target);
+    // `open_file` is `FnMut + Clone`; clone per-iteration / per-closure so each
+    // captures its own mutable copy.
+
+    let auth_state = use_context::<Signal<AuthState>>();
+    let current_user_id: Option<String> = auth_state
+        .read()
+        .user
+        .as_ref()
+        .map(|u| u.id.clone());
 
     // Recurrence editing
     let mut editing_recurrence = use_signal(|| false);
@@ -179,6 +210,16 @@ pub fn TaskDetail(
                     // redundant but harmless.
                     if let Ok(ls) = use_tasks::list_labels(&t.project_id).await {
                         available_labels.set(ls);
+                    }
+                    let mut metadata: HashMap<String, FileResponse> = HashMap::new();
+                    for fid in &t.attachments {
+                        if let Ok(f) = use_files::get_file(fid).await {
+                            metadata.insert(fid.clone(), f);
+                        }
+                    }
+                    attachment_files.set(metadata);
+                    if let Ok(p) = use_tasks::get_project(&t.project_id).await {
+                        members.set(p.members);
                     }
                     task.set(Some(t));
                 }
@@ -314,10 +355,18 @@ pub fn TaskDetail(
 
     let tid_status = task_id.clone();
     let tid_priority = task_id.clone();
+    let tid_assignee = task_id.clone();
     let tid_due = task_id.clone();
     let tid_subtask = task_id.clone();
     let tid_labels = task_id.clone();
     let tid_label_create = task_id.clone();
+
+    let current_assignee_id = t.assignee_id.clone().unwrap_or_default();
+    let assignee_options: Vec<(String, String)> = members
+        .read()
+        .iter()
+        .map(|m| (m.user_id.clone(), m.username.clone()))
+        .collect();
 
     rsx! {
         // Backdrop
@@ -470,6 +519,49 @@ pub fn TaskDetail(
                                             selected: is_selected,
                                             "{plabel}"
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Assignee
+                div {
+                    label { class: "label", span { class: "label-text text-xs font-semibold uppercase", "Assignee" } }
+                    select {
+                        class: "select select-bordered select-sm w-full",
+                        onchange: move |e| {
+                            let val = e.value();
+                            // Sentinel "" = unassign; the server treats `Some("")`
+                            // (a string with `is_empty()`) as a clear-assignee
+                            // signal in `update_task`.
+                            let next = val;
+                            let tid = tid_assignee.clone();
+                            spawn(async move {
+                                let mut req = update_req();
+                                req.assignee_id = Some(next);
+                                if let Ok(updated) = use_tasks::update_task(&tid, &req).await {
+                                    task.set(Some(updated));
+                                    on_updated.call(());
+                                }
+                            });
+                        },
+                        option {
+                            value: "",
+                            selected: current_assignee_id.is_empty(),
+                            "Unassigned"
+                        }
+                        for (uid, uname) in assignee_options.iter() {
+                            {
+                                let uid = uid.clone();
+                                let uname = uname.clone();
+                                let is_selected = uid == current_assignee_id;
+                                rsx! {
+                                    option {
+                                        value: "{uid}",
+                                        selected: is_selected,
+                                        "{uname}"
                                     }
                                 }
                             }
@@ -1063,10 +1155,11 @@ pub fn TaskDetail(
                         for sub in subtasks.read().iter() {
                             {
                                 let sub_id = sub.id.clone();
+                                let sub_id_promote = sub_id.clone();
                                 let sub_done = sub.status == TaskStatus::Done;
                                 let sub_title = sub.title.clone();
                                 rsx! {
-                                    div { class: "flex items-center gap-2 py-1",
+                                    div { class: "flex items-center gap-2 py-1 group",
                                         input {
                                             class: "checkbox checkbox-sm",
                                             r#type: "checkbox",
@@ -1090,8 +1183,27 @@ pub fn TaskDetail(
                                             },
                                         }
                                         span {
-                                            class: if sub_done { "text-sm line-through text-base-content/50" } else { "text-sm" },
+                                            class: if sub_done { "flex-1 text-sm line-through text-base-content/50" } else { "flex-1 text-sm" },
                                             "{sub_title}"
+                                        }
+                                        button {
+                                            class: "btn btn-ghost btn-xs opacity-0 group-hover:opacity-100 focus:opacity-100",
+                                            title: "Promote to top-level task",
+                                            onclick: move |_| {
+                                                let sid = sub_id_promote.clone();
+                                                spawn(async move {
+                                                    if use_tasks::promote_subtask(&sid).await.is_ok() {
+                                                        subtasks.write().retain(|s| s.id != sid);
+                                                        if let Some(t) = task.write().as_mut() {
+                                                            if t.subtask_count > 0 {
+                                                                t.subtask_count -= 1;
+                                                            }
+                                                        }
+                                                        on_updated.call(());
+                                                    }
+                                                });
+                                            },
+                                            "Promote"
                                         }
                                     }
                                 }
@@ -1154,6 +1266,109 @@ pub fn TaskDetail(
                     }
                 }
 
+                // Attachments
+                {
+                    let tid_attach = task_id.clone();
+                    let attached_ids: Vec<String> = task
+                        .read()
+                        .as_ref()
+                        .map(|t| t.attachments.clone())
+                        .unwrap_or_default();
+                    rsx! {
+                        div {
+                            div { class: "flex items-center justify-between",
+                                label { class: "label",
+                                    span { class: "label-text text-xs font-semibold uppercase",
+                                        "Attachments"
+                                    }
+                                }
+                                button {
+                                    class: "btn btn-ghost btn-xs",
+                                    onclick: move |_| show_attach_picker.set(true),
+                                    "+ Attach"
+                                }
+                            }
+                            div { class: "flex flex-wrap gap-1",
+                                if attached_ids.is_empty() {
+                                    p { class: "text-sm text-base-content/40 py-2", "No attachments" }
+                                } else {
+                                    for fid in attached_ids.iter().cloned() {
+                                        {
+                                            let fid_chip = fid.clone();
+                                            let fid_open = fid.clone();
+                                            let fid_detach = fid.clone();
+                                            let tid_d = tid_attach.clone();
+                                            let mut open_file = open_file.clone();
+                                            let name = attachment_files
+                                                .read()
+                                                .get(&fid)
+                                                .map(|f| f.name.clone())
+                                                .unwrap_or_else(|| fid.clone());
+                                            rsx! {
+                                                div {
+                                                    key: "{fid_chip}",
+                                                    class: "badge badge-outline gap-1 py-3",
+                                                    span {
+                                                        class: "text-xs cursor-pointer hover:underline",
+                                                        title: "Open file",
+                                                        onclick: move |_| {
+                                                            let cache = attachment_files.read();
+                                                            let Some(f) = cache.get(&fid_open).cloned()
+                                                            else {
+                                                                return;
+                                                            };
+                                                            // Lightbox carousel for images: the
+                                                            // task's other attached images, in
+                                                            // attachment order.
+                                                            let attached_ids = task
+                                                                .read()
+                                                                .as_ref()
+                                                                .map(|t| t.attachments.clone())
+                                                                .unwrap_or_default();
+                                                            let images: Vec<FileResponse> = attached_ids
+                                                                .iter()
+                                                                .filter_map(|id| cache.get(id).cloned())
+                                                                .filter(|fi| fi.mime_type.starts_with("image/"))
+                                                                .collect();
+                                                            drop(cache);
+                                                            open_file(f, images);
+                                                        },
+                                                        "{name}"
+                                                    }
+                                                    button {
+                                                        class: "btn btn-ghost btn-xs btn-circle text-error",
+                                                        title: "Detach",
+                                                        onclick: move |_| {
+                                                            let tid = tid_d.clone();
+                                                            let fid = fid_detach.clone();
+                                                            spawn(async move {
+                                                                if use_tasks::detach_file(&tid, &fid)
+                                                                    .await
+                                                                    .is_ok()
+                                                                {
+                                                                    if let Some(t) =
+                                                                        task.write().as_mut()
+                                                                    {
+                                                                        t.attachments
+                                                                            .retain(|x| x != &fid);
+                                                                    }
+                                                                    attachment_files.write().remove(&fid);
+                                                                    on_updated.call(());
+                                                                }
+                                                            });
+                                                        },
+                                                        "×"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Completion history (recurring tasks only — empty Vec
                 // for non-recurring, in which case we render nothing).
                 if !t.completion_history.is_empty() {
@@ -1207,21 +1422,140 @@ pub fn TaskDetail(
 
                     div { class: "flex flex-col gap-3",
                         for comment in comments.read().iter() {
-                            div { class: "bg-base-200 rounded-lg p-3",
-                                div { class: "flex items-center gap-2 mb-1",
-                                    div { class: "avatar placeholder",
-                                        div { class: "bg-neutral text-neutral-content w-5 h-5 rounded-full",
-                                            span { class: "text-[10px]",
-                                                {comment.author_username.chars().next().unwrap_or('?').to_uppercase().to_string()}
+                            {
+                                let cid = comment.id.clone();
+                                let cid_edit = cid.clone();
+                                let cid_save = cid.clone();
+                                let cid_delete = cid.clone();
+                                let cid_confirm = cid.clone();
+                                let body = comment.body.clone();
+                                let body_for_edit = body.clone();
+                                let author_username = comment.author_username.clone();
+                                let created_at = comment.created_at.clone();
+                                let edited = comment.created_at != comment.updated_at;
+                                let is_mine = current_user_id.as_deref() == Some(comment.author_id.as_str());
+                                let is_editing = editing_comment_id.read().as_deref() == Some(cid.as_str());
+                                let is_pending_delete =
+                                    confirm_delete_comment_id.read().as_deref() == Some(cid.as_str());
+                                rsx! {
+                                    div { class: "bg-base-200 rounded-lg p-3",
+                                        div { class: "flex items-center gap-2 mb-1",
+                                            div { class: "avatar placeholder",
+                                                div { class: "bg-neutral text-neutral-content w-5 h-5 rounded-full",
+                                                    span { class: "text-[10px]",
+                                                        {author_username.chars().next().unwrap_or('?').to_uppercase().to_string()}
+                                                    }
+                                                }
+                                            }
+                                            span { class: "text-xs font-semibold", "{author_username}" }
+                                            span { class: "text-xs text-base-content/50",
+                                                {created_at.get(..10).unwrap_or(&created_at).to_string()}
+                                            }
+                                            if edited {
+                                                span { class: "text-xs text-base-content/40 italic", "(edited)" }
+                                            }
+                                            if is_mine && !is_editing && !is_pending_delete {
+                                                div { class: "ml-auto flex gap-1",
+                                                    button {
+                                                        class: "btn btn-ghost btn-xs",
+                                                        onclick: move |_| {
+                                                            comment_edit_draft.set(body_for_edit.clone());
+                                                            editing_comment_id.set(Some(cid_edit.clone()));
+                                                        },
+                                                        "Edit"
+                                                    }
+                                                    button {
+                                                        class: "btn btn-ghost btn-xs text-error",
+                                                        onclick: move |_| {
+                                                            confirm_delete_comment_id
+                                                                .set(Some(cid_confirm.clone()));
+                                                        },
+                                                        "Delete"
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if is_editing {
+                                            textarea {
+                                                class: "textarea textarea-bordered textarea-sm w-full text-sm",
+                                                rows: 3,
+                                                value: "{comment_edit_draft}",
+                                                oninput: move |e| comment_edit_draft.set(e.value()),
+                                            }
+                                            div { class: "flex gap-2 mt-2 justify-end",
+                                                button {
+                                                    class: "btn btn-ghost btn-xs",
+                                                    onclick: move |_| {
+                                                        editing_comment_id.set(None);
+                                                        comment_edit_draft.set(String::new());
+                                                    },
+                                                    "Cancel"
+                                                }
+                                                button {
+                                                    class: "btn btn-primary btn-xs",
+                                                    onclick: move |_| {
+                                                        let cid = cid_save.clone();
+                                                        let new_body =
+                                                            comment_edit_draft.peek().trim().to_string();
+                                                        if new_body.is_empty() {
+                                                            return;
+                                                        }
+                                                        editing_comment_id.set(None);
+                                                        comment_edit_draft.set(String::new());
+                                                        spawn(async move {
+                                                            if let Ok(updated) =
+                                                                use_tasks::update_comment(&cid, &new_body)
+                                                                    .await
+                                                            {
+                                                                let mut cw = comments.write();
+                                                                if let Some(c) = cw
+                                                                    .iter_mut()
+                                                                    .find(|c| c.id == updated.id)
+                                                                {
+                                                                    *c = updated;
+                                                                }
+                                                            }
+                                                        });
+                                                    },
+                                                    "Save"
+                                                }
+                                            }
+                                        } else {
+                                            p { class: "text-sm whitespace-pre-wrap", "{body}" }
+                                            if is_pending_delete {
+                                                div { class: "flex gap-2 mt-2 items-center",
+                                                    span { class: "text-xs text-error", "Delete this comment?" }
+                                                    button {
+                                                        class: "btn btn-error btn-xs",
+                                                        onclick: move |_| {
+                                                            let cid = cid_delete.clone();
+                                                            confirm_delete_comment_id.set(None);
+                                                            spawn(async move {
+                                                                if use_tasks::delete_comment(&cid)
+                                                                    .await
+                                                                    .is_ok()
+                                                                {
+                                                                    comments
+                                                                        .write()
+                                                                        .retain(|c| c.id != cid);
+                                                                }
+                                                            });
+                                                        },
+                                                        "Confirm"
+                                                    }
+                                                    button {
+                                                        class: "btn btn-ghost btn-xs",
+                                                        onclick: move |_| {
+                                                            confirm_delete_comment_id.set(None);
+                                                        },
+                                                        "Cancel"
+                                                    }
+                                                }
                                             }
                                         }
                                     }
-                                    span { class: "text-xs font-semibold", "{comment.author_username}" }
-                                    span { class: "text-xs text-base-content/50",
-                                        {comment.created_at.get(..10).unwrap_or(&comment.created_at)}
-                                    }
                                 }
-                                p { class: "text-sm whitespace-pre-wrap", "{comment.body}" }
                             }
                         }
 
@@ -1289,6 +1623,214 @@ pub fn TaskDetail(
                     }
                 }
             }
+        }
+
+        FileOpenViewer { target: viewer_target }
+
+        if *show_attach_picker.read() {
+            {
+                let tid_picker = task_id.clone();
+                let already_attached: Vec<String> = task
+                    .read()
+                    .as_ref()
+                    .map(|t| t.attachments.clone())
+                    .unwrap_or_default();
+                rsx! {
+                    TaskFilePicker {
+                        task_id: tid_picker,
+                        already_attached,
+                        on_attach: move |file: FileResponse| {
+                            let fid = file.id.clone();
+                            if let Some(t) = task.write().as_mut() {
+                                if !t.attachments.contains(&fid) {
+                                    t.attachments.push(fid.clone());
+                                }
+                            }
+                            attachment_files.write().insert(fid, file);
+                            on_updated.call(());
+                        },
+                        on_detach: move |fid: String| {
+                            if let Some(t) = task.write().as_mut() {
+                                t.attachments.retain(|x| x != &fid);
+                            }
+                            attachment_files.write().remove(&fid);
+                            on_updated.call(());
+                        },
+                        on_close: move |_| show_attach_picker.set(false),
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── File picker for task attachments ─────────────────────────────────────────
+
+#[component]
+fn TaskFilePicker(
+    task_id: String,
+    already_attached: Vec<String>,
+    on_attach: EventHandler<FileResponse>,
+    on_detach: EventHandler<String>,
+    on_close: EventHandler<()>,
+) -> Element {
+    let mut current_parent: Signal<Option<String>> = use_signal(|| None);
+    let mut folders: Signal<Vec<FolderResponse>> = use_signal(Vec::new);
+    let mut files: Signal<Vec<FileResponse>> = use_signal(Vec::new);
+    let mut breadcrumb: Signal<Vec<FolderResponse>> = use_signal(Vec::new);
+    let mut loading = use_signal(|| false);
+    let mut busy_id: Signal<Option<String>> = use_signal(|| None);
+    let mut attached: Signal<Vec<String>> = use_signal(|| already_attached.clone());
+
+    use_effect(move || {
+        let parent = current_parent();
+        spawn(async move {
+            loading.set(true);
+            if let Ok(flds) = use_files::list_folders(parent.as_deref()).await {
+                folders.set(flds);
+            }
+            if let Ok(fls) = use_files::list_files(parent.as_deref()).await {
+                files.set(fls);
+            }
+            match &parent {
+                Some(pid) => {
+                    if let Ok(crumbs) = use_files::get_breadcrumb(pid).await {
+                        breadcrumb.set(crumbs);
+                    }
+                }
+                None => breadcrumb.set(Vec::new()),
+            }
+            loading.set(false);
+        });
+    });
+
+    rsx! {
+        div { class: "modal modal-open",
+            div {
+                class: "modal-box max-w-md",
+                onclick: move |e| e.stop_propagation(),
+
+                h3 { class: "font-bold text-lg mb-3", "Attach Files" }
+
+                // Breadcrumb
+                div { class: "text-sm breadcrumbs px-0 mb-1",
+                    ul {
+                        li {
+                            a {
+                                class: "cursor-pointer",
+                                onclick: move |_| current_parent.set(None),
+                                "Files"
+                            }
+                        }
+                        for folder in breadcrumb() {
+                            {
+                                let id = folder.id.clone();
+                                rsx! {
+                                    li {
+                                        a {
+                                            class: "cursor-pointer",
+                                            onclick: move |_| current_parent.set(Some(id.clone())),
+                                            "{folder.name}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                div { class: "min-h-40 border border-base-300 rounded-box overflow-y-auto max-h-72",
+                    if loading() {
+                        div { class: "flex justify-center items-center h-28",
+                            span { class: "loading loading-spinner loading-md" }
+                        }
+                    } else if folders().is_empty() && files().is_empty() {
+                        div { class: "flex justify-center items-center h-28 text-base-content/40 text-sm",
+                            "Empty folder"
+                        }
+                    } else {
+                        ul { class: "menu menu-sm p-1",
+                            for folder in folders() {
+                                {
+                                    let id = folder.id.clone();
+                                    rsx! {
+                                        li {
+                                            a {
+                                                onclick: move |_| current_parent.set(Some(id.clone())),
+                                                span { "{folder.name}" }
+                                                span { class: "ml-auto opacity-40 text-xs", "›" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            for file in files() {
+                                {
+                                    let fid = file.id.clone();
+                                    let fid_busy = fid.clone();
+                                    let file_clone = file.clone();
+                                    let is_attached = attached.read().contains(&fid);
+                                    let is_busy = busy_id.read().as_deref() == Some(fid.as_str());
+                                    let tid = task_id.clone();
+                                    rsx! {
+                                        li {
+                                            a {
+                                                class: if is_attached { "active" } else { "" },
+                                                onclick: move |_| {
+                                                    if is_busy {
+                                                        return;
+                                                    }
+                                                    busy_id.set(Some(fid_busy.clone()));
+                                                    let tid = tid.clone();
+                                                    let fid = fid.clone();
+                                                    let file = file_clone.clone();
+                                                    spawn(async move {
+                                                        if is_attached {
+                                                            if use_tasks::detach_file(&tid, &fid)
+                                                                .await
+                                                                .is_ok()
+                                                            {
+                                                                attached.write().retain(|x| x != &fid);
+                                                                on_detach.call(fid);
+                                                            }
+                                                        } else {
+                                                            if use_tasks::attach_files(&tid, &[&fid])
+                                                                .await
+                                                                .is_ok()
+                                                            {
+                                                                attached.write().push(fid.clone());
+                                                                on_attach.call(file);
+                                                            }
+                                                        }
+                                                        busy_id.set(None);
+                                                    });
+                                                },
+                                                span { class: "font-medium", "{file.name}" }
+                                                if is_busy {
+                                                    span { class: "ml-auto loading loading-spinner loading-xs" }
+                                                } else if is_attached {
+                                                    span { class: "ml-auto badge badge-xs badge-primary",
+                                                        "Attached"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                div { class: "modal-action",
+                    button {
+                        class: "btn",
+                        onclick: move |_| on_close.call(()),
+                        "Done"
+                    }
+                }
+            }
+            div { class: "modal-backdrop", onclick: move |_| on_close.call(()) }
         }
     }
 }
