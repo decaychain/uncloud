@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
-use uncloud_common::{AudioMeta, EffectiveStrategyResponse, FileResponse, FolderResponse, GalleryInclude, MusicInclude, ServerEvent, SyncStrategy, TrackResponse};
+use uncloud_common::{EffectiveStrategyResponse, FileResponse, FolderResponse, GalleryInclude, MusicInclude, ServerEvent, SyncStrategy};
 use crate::components::file_item::FileItem;
+use crate::components::file_open_viewer::FileOpenViewer;
 use crate::components::file_properties::FilePropertiesDrawer;
 use crate::components::icons::{
     IconAlertTriangle, IconChevronRight, IconClipboard, IconFileText, IconFolder, IconFolderOpen,
@@ -10,9 +11,10 @@ use crate::components::icons::{
 };
 use crate::components::upload::{UploadZone, FILE_INPUT_ID};
 use web_sys::wasm_bindgen::JsCast;
-use crate::hooks::{use_files, use_player};
+use crate::hooks::use_file_opener::{use_file_opener, FileOpenTarget};
+use crate::hooks::use_files;
 use crate::router::Route;
-use crate::state::{HighlightTarget, PlayerState, VaultOpenTarget, ViewMode};
+use crate::state::{HighlightTarget, ViewMode};
 
 // ── Selection state ───────────────────────────────────────────────────────────
 
@@ -76,15 +78,6 @@ impl Selection {
     }
 }
 
-// ── ViewerTarget ─────────────────────────────────────────────────────────────
-
-#[derive(Clone)]
-enum ViewerTarget {
-    Image { files: Vec<FileResponse>, index: usize },
-    Text(FileResponse),
-    TextEdit(FileResponse),
-}
-
 // ── FileBrowser ───────────────────────────────────────────────────────────────
 
 #[component]
@@ -117,15 +110,13 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
     // Share link dialog target: Some((resource_id, resource_type, resource_name))
     let mut share_link_target: Signal<Option<(String, String, String)>> = use_signal(|| None);
     // File viewer target
-    let mut viewer_target: Signal<Option<ViewerTarget>> = use_signal(|| None);
+    let mut viewer_target: Signal<Option<FileOpenTarget>> = use_signal(|| None);
     // Version history modal target: Some((file_id, file_name))
     let mut version_history_target: Signal<Option<(String, String)>> = use_signal(|| None);
     // File properties drawer target
     let mut file_properties_target: Signal<Option<String>> = use_signal(|| None);
 
-    let player = use_context::<Signal<PlayerState>>();
-    let mut vault_open_target = use_context::<Signal<VaultOpenTarget>>();
-    let nav = use_navigator();
+    let open_file = use_file_opener(viewer_target);
 
     // Thumbnail version counters — incremented when ProcessingCompleted arrives for a file.
     let mut thumb_vers: Signal<HashMap<String, u32>> = use_signal(HashMap::new);
@@ -452,41 +443,19 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                 on_properties_request: move |_| file_properties_target.set(Some(id_p.clone())),
                                 on_open_request: {
                                     let f = file_for_open.clone();
+                                    let mut open_file = open_file.clone();
                                     move |_| {
-                                        let f = f.clone();
-                                        if f.name.ends_with(".kdbx") {
-                                            vault_open_target.set(VaultOpenTarget {
-                                                file_id: Some(f.id.clone()),
-                                                file_name: Some(f.name.clone()),
-                                            });
-                                            let _ = nav.push(Route::Passwords {});
-                                            return;
-                                        }
-                                        let mime = f.mime_type.as_str();
-                                        if mime.starts_with("audio/") {
-                                            let audio: AudioMeta = f.metadata.get("audio")
-                                                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                                                .unwrap_or_default();
-                                            let track = TrackResponse { file: f, audio };
-                                            use_player::play_queue(player, vec![track], 0);
-                                        } else if mime.starts_with("image/") {
-                                            let images: Vec<FileResponse> = files().into_iter()
-                                                .filter(|fi| fi.mime_type.starts_with("image/"))
-                                                .collect();
-                                            let idx = images.iter().position(|fi| fi.id == f.id).unwrap_or(0);
-                                            viewer_target.set(Some(ViewerTarget::Image { files: images, index: idx }));
-                                        } else if mime == "application/pdf" {
-                                            let url = crate::hooks::api::authenticated_media_url(&format!("/files/{}/download", f.id));
-                                            let _ = web_sys::window().and_then(|w| w.open_with_url_and_target(&url, "_blank").ok());
-                                        } else if mime.starts_with("text/") || mime == "application/json" || mime == "application/xml" {
-                                            viewer_target.set(Some(ViewerTarget::Text(f)));
-                                        }
+                                        let images: Vec<FileResponse> = files()
+                                            .into_iter()
+                                            .filter(|fi| fi.mime_type.starts_with("image/"))
+                                            .collect();
+                                        open_file(f.clone(), images);
                                     }
                                 },
                                 on_edit_request: {
                                     let f = file_for_edit.clone();
                                     move |_| {
-                                        viewer_target.set(Some(ViewerTarget::TextEdit(f.clone())));
+                                        viewer_target.set(Some(FileOpenTarget::TextEdit(f.clone())));
                                     }
                                 },
                                 on_version_history_request: move |_| version_history_target.set(Some((id_v.clone(), name_v.clone()))),
@@ -595,41 +564,19 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                                         on_properties_request: move |_| file_properties_target.set(Some(id_p.clone())),
                                         on_open_request: {
                                             let f = file_for_open.clone();
+                                            let mut open_file = open_file.clone();
                                             move |_| {
-                                                let f = f.clone();
-                                                if f.name.ends_with(".kdbx") {
-                                                    vault_open_target.set(VaultOpenTarget {
-                                                        file_id: Some(f.id.clone()),
-                                                        file_name: Some(f.name.clone()),
-                                                    });
-                                                    let _ = nav.push(Route::Passwords {});
-                                                    return;
-                                                }
-                                                let mime = f.mime_type.as_str();
-                                                if mime.starts_with("audio/") {
-                                                    let audio: AudioMeta = f.metadata.get("audio")
-                                                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                                                        .unwrap_or_default();
-                                                    let track = TrackResponse { file: f, audio };
-                                                    use_player::play_queue(player, vec![track], 0);
-                                                } else if mime.starts_with("image/") {
-                                                    let images: Vec<FileResponse> = files().into_iter()
-                                                        .filter(|fi| fi.mime_type.starts_with("image/"))
-                                                        .collect();
-                                                    let idx = images.iter().position(|fi| fi.id == f.id).unwrap_or(0);
-                                                    viewer_target.set(Some(ViewerTarget::Image { files: images, index: idx }));
-                                                } else if mime == "application/pdf" {
-                                                    let url = crate::hooks::api::authenticated_media_url(&format!("/files/{}/download", f.id));
-                                                    let _ = web_sys::window().and_then(|w| w.open_with_url_and_target(&url, "_blank").ok());
-                                                } else if mime.starts_with("text/") || mime == "application/json" || mime == "application/xml" {
-                                                    viewer_target.set(Some(ViewerTarget::Text(f)));
-                                                }
+                                                let images: Vec<FileResponse> = files()
+                                                    .into_iter()
+                                                    .filter(|fi| fi.mime_type.starts_with("image/"))
+                                                    .collect();
+                                                open_file(f.clone(), images);
                                             }
                                         },
                                         on_edit_request: {
                                             let f = file_for_edit.clone();
                                             move |_| {
-                                                viewer_target.set(Some(ViewerTarget::TextEdit(f.clone())));
+                                                viewer_target.set(Some(FileOpenTarget::TextEdit(f.clone())));
                                             }
                                         },
                                         on_version_history_request: move |_| version_history_target.set(Some((id_v.clone(), name_v.clone()))),
@@ -664,7 +611,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
                 on_created: move |file: FileResponse| {
                     show_new_file.set(false);
                     refresh.set(refresh() + 1);
-                    viewer_target.set(Some(ViewerTarget::TextEdit(file)));
+                    viewer_target.set(Some(FileOpenTarget::TextEdit(file)));
                 },
             }
         }
@@ -801,31 +748,7 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
             }
         }
 
-        if let Some(target) = viewer_target() {
-            match target {
-                ViewerTarget::Image { files: imgs, index } => rsx! {
-                    crate::components::lightbox::Lightbox {
-                        images: imgs,
-                        initial_index: index,
-                        on_close: move |_| viewer_target.set(None),
-                    }
-                },
-                ViewerTarget::Text(file) => rsx! {
-                    crate::components::file_viewer::TextViewer {
-                        file,
-                        start_editing: false,
-                        on_close: move |_| viewer_target.set(None),
-                    }
-                },
-                ViewerTarget::TextEdit(file) => rsx! {
-                    crate::components::file_viewer::TextViewer {
-                        file,
-                        start_editing: true,
-                        on_close: move |_| viewer_target.set(None),
-                    }
-                },
-            }
-        }
+        FileOpenViewer { target: viewer_target }
     }
 }
 

@@ -18,6 +18,7 @@ pub mod use_folder_shares;
 pub mod use_s3;
 pub mod use_apps;
 pub mod use_drag_cleanup;
+pub mod use_file_opener;
 pub mod use_shopping;
 pub mod use_sync_events;
 pub mod use_tasks;

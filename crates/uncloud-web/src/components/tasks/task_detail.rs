@@ -2,23 +2,16 @@ use std::collections::HashMap;
 
 use dioxus::prelude::*;
 use uncloud_common::{
-    AudioMeta, CreateTaskLabelRequest, CreateTaskRequest, FileResponse, FolderResponse, NthWeek,
+    CreateTaskLabelRequest, CreateTaskRequest, FileResponse, FolderResponse, NthWeek,
     ProjectMemberResponse, RecurrenceRule, TaskCommentResponse, TaskLabelResponse, TaskPriority,
-    TaskResponse, TaskStatus, TrackResponse, UpdateTaskRequest, UpdateTaskStatusRequest,
+    TaskResponse, TaskStatus, UpdateTaskRequest, UpdateTaskStatusRequest,
 };
 
-use crate::components::file_viewer::TextViewer;
-use crate::components::lightbox::Lightbox;
-use crate::hooks::{api, use_files, use_player, use_tasks};
-use crate::router::Route;
-use crate::state::{AuthState, PlayerState, VaultOpenTarget};
+use crate::components::file_open_viewer::FileOpenViewer;
+use crate::hooks::use_file_opener::{use_file_opener, FileOpenTarget};
+use crate::hooks::{use_files, use_tasks};
+use crate::state::AuthState;
 use super::{LABEL_PALETTE, label_color_for};
-
-#[derive(Clone)]
-enum AttachmentViewer {
-    Image { files: Vec<FileResponse>, index: usize },
-    Text(FileResponse),
-}
 
 fn format_recurrence(rule: &RecurrenceRule) -> String {
     match rule {
@@ -131,12 +124,13 @@ pub fn TaskDetail(
     // Project members for the assignee picker.
     let mut members: Signal<Vec<ProjectMemberResponse>> = use_signal(Vec::new);
 
-    // In-panel viewer for opening attached files. Mirrors file_browser's
-    // ViewerTarget but kept local so TaskDetail stays self-contained.
-    let mut viewer_target: Signal<Option<AttachmentViewer>> = use_signal(|| None);
-    let player = use_context::<Signal<PlayerState>>();
-    let mut vault_open_target = use_context::<Signal<VaultOpenTarget>>();
-    let nav = use_navigator();
+    // In-panel viewer for opening attached files. The dispatch closure
+    // (audio→player, image→Lightbox, etc.) is shared with FileBrowser via
+    // `use_file_opener`.
+    let viewer_target: Signal<Option<FileOpenTarget>> = use_signal(|| None);
+    let open_file = use_file_opener(viewer_target);
+    // `open_file` is `FnMut + Clone`; clone per-iteration / per-closure so each
+    // captures its own mutable copy.
 
     let auth_state = use_context::<Signal<AuthState>>();
     let current_user_id: Option<String> = auth_state
@@ -1304,6 +1298,7 @@ pub fn TaskDetail(
                                             let fid_open = fid.clone();
                                             let fid_detach = fid.clone();
                                             let tid_d = tid_attach.clone();
+                                            let mut open_file = open_file.clone();
                                             let name = attachment_files
                                                 .read()
                                                 .get(&fid)
@@ -1318,13 +1313,13 @@ pub fn TaskDetail(
                                                         title: "Open file",
                                                         onclick: move |_| {
                                                             let cache = attachment_files.read();
-                                                            let f = match cache.get(&fid_open) {
-                                                                Some(f) => f.clone(),
-                                                                None => return,
+                                                            let Some(f) = cache.get(&fid_open).cloned()
+                                                            else {
+                                                                return;
                                                             };
-                                                            // Build the carousel for image attachments
-                                                            // from the task's other attached images,
-                                                            // preserving attachment order.
+                                                            // Lightbox carousel for images: the
+                                                            // task's other attached images, in
+                                                            // attachment order.
                                                             let attached_ids = task
                                                                 .read()
                                                                 .as_ref()
@@ -1336,54 +1331,7 @@ pub fn TaskDetail(
                                                                 .filter(|fi| fi.mime_type.starts_with("image/"))
                                                                 .collect();
                                                             drop(cache);
-
-                                                            if f.name.ends_with(".kdbx") {
-                                                                vault_open_target.set(VaultOpenTarget {
-                                                                    file_id: Some(f.id.clone()),
-                                                                    file_name: Some(f.name.clone()),
-                                                                });
-                                                                let _ = nav.push(Route::Passwords {});
-                                                                return;
-                                                            }
-                                                            let mime = f.mime_type.as_str();
-                                                            if mime.starts_with("audio/") {
-                                                                let audio: AudioMeta = f
-                                                                    .metadata
-                                                                    .get("audio")
-                                                                    .and_then(|v| {
-                                                                        serde_json::from_value(v.clone()).ok()
-                                                                    })
-                                                                    .unwrap_or_default();
-                                                                let track = TrackResponse {
-                                                                    file: f.clone(),
-                                                                    audio,
-                                                                };
-                                                                use_player::play_queue(player, vec![track], 0);
-                                                            } else if mime.starts_with("image/") {
-                                                                let idx = images
-                                                                    .iter()
-                                                                    .position(|fi| fi.id == f.id)
-                                                                    .unwrap_or(0);
-                                                                viewer_target.set(Some(
-                                                                    AttachmentViewer::Image { files: images, index: idx },
-                                                                ));
-                                                            } else if mime.starts_with("text/")
-                                                                || mime == "application/json"
-                                                                || mime == "application/xml"
-                                                            {
-                                                                viewer_target
-                                                                    .set(Some(AttachmentViewer::Text(f)));
-                                                            } else {
-                                                                // PDF and everything else: open the
-                                                                // download URL in a new tab so the
-                                                                // browser handles native preview /
-                                                                // download as appropriate.
-                                                                let url = api::authenticated_media_url(
-                                                                    &format!("/files/{}/download", f.id),
-                                                                );
-                                                                let _ = web_sys::window()
-                                                                    .and_then(|w| w.open_with_url(&url).ok());
-                                                            }
+                                                            open_file(f, images);
                                                         },
                                                         "{name}"
                                                     }
@@ -1677,23 +1625,7 @@ pub fn TaskDetail(
             }
         }
 
-        if let Some(target) = viewer_target() {
-            match target {
-                AttachmentViewer::Image { files, index } => rsx! {
-                    Lightbox {
-                        images: files,
-                        initial_index: index,
-                        on_close: move |_| viewer_target.set(None),
-                    }
-                },
-                AttachmentViewer::Text(file) => rsx! {
-                    TextViewer {
-                        file,
-                        on_close: move |_| viewer_target.set(None),
-                    }
-                },
-            }
-        }
+        FileOpenViewer { target: viewer_target }
 
         if *show_attach_picker.read() {
             {

@@ -3,6 +3,7 @@ pub mod dashboard;
 pub mod file_browser;
 pub mod file_item;
 pub mod file_viewer;
+pub mod file_open_viewer;
 pub mod upload;
 pub mod context_menu;
 pub mod share_dialog;
