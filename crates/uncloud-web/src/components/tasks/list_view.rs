@@ -881,6 +881,15 @@ pub fn ListView(
             }
             }
 
+            // Trailing section indicator — without this, dropping the last
+            // dragged section back at the end shows no cue (and dropping
+            // any section past the last sibling has no visual feedback).
+            if is_section_drag_active
+                && *drop_section_target.read() == Some(visible_sections.len())
+            {
+                div { class: "h-1 bg-primary rounded-full my-1" }
+            }
+
             // Unsectioned group
             if has_unsectioned {
                 {
