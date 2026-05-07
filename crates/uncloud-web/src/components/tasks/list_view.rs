@@ -66,10 +66,13 @@ fn task_row_drop_at(
     Some((section, idx))
 }
 
-/// Hit-test for an in-flight section drag. Walks the DOM at `(x, y)`
-/// looking for the nearest `data-section-id` and returns the insertion
-/// index inside `sections` excluding the dragged section. `None` when the
-/// pointer is over the dragged section itself or outside any section.
+/// Hit-test for an in-flight section drag. Returns the insertion index
+/// inside `sections` excluding the dragged section. Uses two stages:
+/// (1) walk the DOM at `(x, y)` for a `data-section-id`, ignoring the
+/// dragged section itself in case Dioxus hasn't re-rendered the unmount
+/// yet; (2) if no precise hit, fall back to a Y-coordinate scan through
+/// the other sections' bounding boxes — the user can drop in the gaps
+/// between sections (or below all of them) and still get a valid index.
 fn section_drop_at(
     x: f64,
     y: f64,
@@ -77,19 +80,43 @@ fn section_drop_at(
     sections: &[TaskSectionResponse],
 ) -> Option<usize> {
     let doc = web_sys::window()?.document()?;
+    let others: Vec<&TaskSectionResponse> = sections
+        .iter()
+        .filter(|s| s.id != dragged_section_id)
+        .collect();
+    if others.is_empty() {
+        return None;
+    }
+
+    // (1) Precise hit on a non-dragged section.
     let mut current = doc.element_from_point(x as f32, y as f32);
     while let Some(el) = current {
         if let Some(sid) = el.get_attribute("data-section-id") {
-            let rect = el.get_bounding_client_rect();
-            let midpoint = rect.top() + rect.height() / 2.0;
-            let others: Vec<&TaskSectionResponse> =
-                sections.iter().filter(|s| s.id != dragged_section_id).collect();
-            let pos = others.iter().position(|s| s.id == sid)?;
-            return Some(if y < midpoint { pos } else { pos + 1 });
+            if sid != dragged_section_id {
+                let rect = el.get_bounding_client_rect();
+                let midpoint = rect.top() + rect.height() / 2.0;
+                if let Some(pos) = others.iter().position(|s| s.id == sid) {
+                    return Some(if y < midpoint { pos } else { pos + 1 });
+                }
+            }
         }
         current = el.parent_element();
     }
-    None
+
+    // (2) Fallback: pointer is in a gap (or over the stale dragged-section
+    // DOM). Walk the visible sections and pick the first one whose midpoint
+    // is below the pointer; if none, drop at the end.
+    for (i, sec) in others.iter().enumerate() {
+        let selector = format!("[data-section-id=\"{}\"]", sec.id);
+        if let Ok(Some(el)) = doc.query_selector(&selector) {
+            let rect = el.get_bounding_client_rect();
+            let midpoint = rect.top() + rect.height() / 2.0;
+            if y < midpoint {
+                return Some(i);
+            }
+        }
+    }
+    Some(others.len())
 }
 
 fn priority_dot_class(priority: &TaskPriority) -> &'static str {
@@ -345,6 +372,14 @@ pub fn ListView(
     let section_list = sections.read().clone();
     let dragged_section = drag_section_id.read().clone();
     let is_section_drag_active = dragged_section.is_some();
+    let any_drag_active = drag_task_id.read().is_some() || is_section_drag_active;
+    // `select-none` while dragging keeps the browser from grabbing text
+    // out of section names / row content as the pointer sweeps across them.
+    let list_container_class = if any_drag_active {
+        "space-y-3 select-none cursor-grabbing"
+    } else {
+        "space-y-3"
+    };
     // Hide the dragged section from its origin slot so `drop_section_target`
     // aligns 1:1 with the rendered slots — same trick as the task drag.
     let visible_sections: Vec<TaskSectionResponse> = section_list
@@ -399,7 +434,7 @@ pub fn ListView(
         }
 
         div {
-            class: "space-y-3",
+            class: "{list_container_class}",
             // Container-level hit-test + commit. Per-section listeners
             // are gone — `task_row_drop_at` walks the DOM and identifies
             // the section + insertion index in a single pass.
