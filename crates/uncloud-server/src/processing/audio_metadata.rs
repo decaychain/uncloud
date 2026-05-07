@@ -56,6 +56,11 @@ impl FileProcessor for AudioMetadataProcessor {
             .read_to_end(&mut data)
             .await
             .map_err(|e| format!("Failed to read audio file: {}", e))?;
+        // Release the storage backend's pool slot before the cover-art write
+        // also tries to check one out — otherwise N concurrent processors
+        // can each hold one permit while waiting for a second, deadlocking
+        // the SFTP pool.
+        drop(reader);
 
         let thumbnail_size = self.thumbnail_size;
         let file_name = file.name.clone();
