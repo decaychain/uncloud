@@ -47,13 +47,15 @@ fn attr_to_status(s: &str) -> Option<TaskStatus> {
     }
 }
 
-/// Hit-test for an in-flight drag. Walks the DOM at `(x, y)` looking for
-/// the nearest `data-task-id` (a sibling card the pointer is over) and the
-/// enclosing `data-column-status` (which lane). Returns `(column, drop_index)`
-/// where `drop_index` is the **insertion index within the column's tasks
-/// excluding the dragged card** — the user can drop above, between, or after
-/// any sibling. Returns `None` when the pointer is over the dragged card
-/// itself or outside any column; callers should keep the previous target.
+/// Hit-test for an in-flight drag. Returns `(column, drop_index)` where
+/// `drop_index` is the insertion index inside the column's tasks excluding
+/// the dragged card. Two stages:
+/// (1) walk the DOM at `(x, y)` for a `data-task-id` belonging to a
+/// non-dragged card and the enclosing `data-column-status`;
+/// (2) if no precise card hit (pointer is over the dragged card's
+/// `pointer-events-none` ghost or in a gap), Y-coordinate scan through
+/// the other cards in the matched column — drop above the first whose
+/// midpoint is below the pointer, otherwise drop at the end.
 fn card_drop_at(
     x: f64,
     y: f64,
@@ -67,9 +69,11 @@ fn card_drop_at(
     while let Some(el) = current {
         if hovered_card.is_none() {
             if let Some(tid) = el.get_attribute("data-task-id") {
-                let rect = el.get_bounding_client_rect();
-                let midpoint = rect.top() + rect.height() / 2.0;
-                hovered_card = Some((tid, midpoint));
+                if tid != dragged_task_id {
+                    let rect = el.get_bounding_client_rect();
+                    let midpoint = rect.top() + rect.height() / 2.0;
+                    hovered_card = Some((tid, midpoint));
+                }
             }
         }
         if let Some(attr) = el.get_attribute("data-column-status") {
@@ -85,18 +89,22 @@ fn card_drop_at(
         .iter()
         .filter(|t| t.status == status && t.id != dragged_task_id)
         .collect();
-    let idx = match hovered_card {
-        Some((tid, midpoint)) => {
-            // `position` returns None when the hovered card is the dragged
-            // one (filtered out). In that case bubble up `None` so the caller
-            // keeps the previous drop target — avoids flicker as the user
-            // crosses the still-present dragged-card outline.
-            let pos = lane_tasks.iter().position(|t| t.id == tid)?;
-            if y < midpoint { pos } else { pos + 1 }
+    if let Some((tid, midpoint)) = hovered_card {
+        if let Some(pos) = lane_tasks.iter().position(|t| t.id == tid) {
+            return Some((status, if y < midpoint { pos } else { pos + 1 }));
         }
-        None => lane_tasks.len(),
-    };
-    Some((status, idx))
+    }
+    // Y-fallback: pointer is over the dragged card's ghost or in a gap.
+    for (i, task) in lane_tasks.iter().enumerate() {
+        let selector = format!("[data-task-id=\"{}\"]", task.id);
+        if let Ok(Some(el)) = doc.query_selector(&selector) {
+            let rect = el.get_bounding_client_rect();
+            if y < rect.top() + rect.height() / 2.0 {
+                return Some((status, i));
+            }
+        }
+    }
+    Some((status, lane_tasks.len()))
 }
 
 #[component]
@@ -349,18 +357,33 @@ pub fn BoardView(
 
                     let col_tasks: Vec<TaskResponse> = {
                         let filter = label_filter.read();
-                        let dragged = drag_task_id.read().clone();
                         tasks.read()
                             .iter()
                             .filter(|t| t.status == col_status)
                             .filter(|t| task_matches_label_filter(&t.labels, &filter))
-                            // Hide the dragged card from its lane while in flight
-                            // so `drop_index` aligns 1:1 with the rendered slots.
-                            .filter(|t| dragged.as_deref() != Some(t.id.as_str()))
                             .cloned()
                             .collect()
                     };
                     let count = col_tasks.len();
+
+                    // Keep the dragged card in the render with `pointer-events-none`
+                    // + reduced opacity so the column doesn't collapse mid-drag —
+                    // that collapse pulls the pointer out of the container's hit
+                    // area, killing all subsequent `onpointermove` events. Indicator
+                    // positions need to translate `drop_index` (in dragged-excluded
+                    // space) into render-slot indices, which means shifting past
+                    // the dragged card's slot.
+                    let dragged_id_opt: Option<String> = drag_task_id.read().clone();
+                    let dragged_render_idx: Option<usize> = dragged_id_opt
+                        .as_ref()
+                        .and_then(|id| col_tasks.iter().position(|t| &t.id == id));
+                    let drop_idx_raw: Option<usize> = *drop_index.read();
+                    let drop_idx_render: Option<usize> = drop_idx_raw.map(|d| {
+                        match dragged_render_idx {
+                            Some(d_idx) if d > d_idx => d + 1,
+                            _ => d,
+                        }
+                    });
 
                     let is_drop_target = drop_column.read().as_ref() == Some(&col_status);
                     let has_drag = drag_task_id.read().is_some();
@@ -480,8 +503,12 @@ pub fn BoardView(
                                 {
                                     let task_id_click = task.id.clone();
                                     let task_id_drag = task.id.clone();
-                                    let show_indicator =
-                                        is_drop_target && *drop_index.read() == Some(i);
+                                    let is_dragging_card = dragged_render_idx == Some(i);
+                                    // Suppress the indicator at the dragged card's
+                                    // own slot — that position is the no-op drop.
+                                    let show_indicator = is_drop_target
+                                        && !is_dragging_card
+                                        && drop_idx_render == Some(i);
                                     rsx! {
                                         div {
                                             key: "{task.id}",
@@ -492,7 +519,7 @@ pub fn BoardView(
                                             BoardCard {
                                                 task: task.clone(),
                                                 available_labels: available_labels.read().clone(),
-                                                dragging: false,
+                                                dragging: is_dragging_card,
                                                 on_click: move |_: String| {
                                                     detail_task_id.set(Some(task_id_click.clone()));
                                                 },
@@ -506,7 +533,7 @@ pub fn BoardView(
                             }
 
                             // Trailing indicator (drop at end of lane).
-                            if is_drop_target && *drop_index.read() == Some(col_tasks.len()) {
+                            if is_drop_target && drop_idx_render == Some(col_tasks.len()) {
                                 div { class: "h-1 bg-primary rounded-full mx-1" }
                             }
 
