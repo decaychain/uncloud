@@ -9,6 +9,7 @@ use russh_sftp::protocol::OpenFlags;
 use sha2::{Digest, Sha256};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -16,6 +17,14 @@ use uuid::Uuid;
 use super::{BoxedAsyncRead, ScanEntry, StorageBackend};
 use crate::error::{AppError, Result};
 use crate::models::{SftpHostKey, StorageBackendConfig};
+
+/// Hard ceiling on how long a single SFTP-pool checkout may wait for a
+/// permit. Acts as a safety net against deadlocks of the form "task holds
+/// one pool slot while awaiting a second" (which once silently wedged the
+/// processing pipeline). Sized generously so a legitimate slow upload
+/// won't trip it; if it does fire, the operation surfaces an error
+/// instead of hanging the server.
+const CHECKOUT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// SFTP-backed storage. Holds a single long-lived SSH/SFTP session that is
 /// recreated on demand if it dies. Concurrent operations share the session —
@@ -248,6 +257,14 @@ impl SftpStorage {
 /// The wrapped reader (an `SftpFile`) holds an internal `Arc<SftpSession>`
 /// which is what actually drives the byte transfer; we just keep the
 /// pool slot occupied via `_pooled` until the reader is dropped.
+///
+/// **Deadlock hazard.** The op_semaphore permit is held until this reader
+/// is dropped. Holding one across any subsequent `StorageBackend` op on
+/// the same backend (`write`, `read`, even another `read_all`) can starve
+/// the pool: with N processors each holding one permit while awaiting a
+/// second, no permit is ever released. If you only need the bytes,
+/// prefer `StorageBackend::read_all` — it drops the reader before
+/// returning.
 struct PooledReader<R> {
     _pooled: PooledConn,
     inner: R,
@@ -802,12 +819,23 @@ impl ConnectionPool {
     }
 
     async fn checkout(self: &Arc<Self>) -> Result<PooledConn> {
-        let permit = self
-            .op_semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| AppError::Storage(format!("SFTP op semaphore closed: {e}")))?;
+        let permit = match tokio::time::timeout(
+            CHECKOUT_TIMEOUT,
+            self.op_semaphore.clone().acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => {
+                return Err(AppError::Storage(format!("SFTP op semaphore closed: {e}")));
+            }
+            Err(_) => {
+                return Err(AppError::Storage(format!(
+                    "SFTP pool checkout timed out after {}s — pool may be deadlocked",
+                    CHECKOUT_TIMEOUT.as_secs()
+                )));
+            }
+        };
         // Try to grab a warm connection; if none, open a fresh one.
         let warm = {
             let mut available = self

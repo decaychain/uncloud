@@ -5,9 +5,9 @@ pub mod sftp;
 
 use async_trait::async_trait;
 use std::pin::Pin;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 
-use crate::error::Result;
+use crate::error::{AppError, Result};
 
 pub type BoxedAsyncRead = Pin<Box<dyn AsyncRead + Send + Unpin>>;
 pub type BoxedAsyncWrite = Pin<Box<dyn AsyncWrite + Send + Unpin>>;
@@ -25,6 +25,22 @@ pub struct ScanEntry {
 pub trait StorageBackend: Send + Sync {
     /// Read a file, returning an async reader
     async fn read(&self, path: &str) -> Result<BoxedAsyncRead>;
+
+    /// Read a file fully into memory and drop the reader before returning.
+    /// Prefer this over `read()` whenever the caller plans to issue any
+    /// further backend operations on the same `StorageBackend` while
+    /// processing the bytes — pooled backends (SFTP) tie a connection-pool
+    /// permit to the reader's lifetime, so holding one across a second
+    /// `read()`/`write()` can deadlock under concurrency.
+    async fn read_all(&self, path: &str) -> Result<Vec<u8>> {
+        let mut reader = self.read(path).await?;
+        let mut buf = Vec::new();
+        reader
+            .read_to_end(&mut buf)
+            .await
+            .map_err(|e| AppError::Storage(format!("read_all failed: {e}")))?;
+        Ok(buf)
+    }
 
     /// Read a byte range from a file, returning an async reader that yields
     /// exactly `length` bytes starting at `offset`.

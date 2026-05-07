@@ -118,13 +118,8 @@ async fn extract_pdf_text(file: &File, state: &AppState) -> Result<String, Strin
         .get_backend(file.storage_id)
         .await
         .map_err(|e| e.to_string())?;
-    let mut reader = backend
-        .read(&file.storage_path)
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut data = Vec::new();
-    reader
-        .read_to_end(&mut data)
+    let data = backend
+        .read_all(&file.storage_path)
         .await
         .map_err(|e| format!("Failed to read PDF: {}", e))?;
     tokio::task::spawn_blocking(move || {

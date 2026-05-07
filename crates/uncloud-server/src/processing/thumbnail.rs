@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use bson::doc;
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use image::metadata::Orientation;
-use tokio::io::AsyncReadExt;
 
 use crate::models::{File, TaskType};
 use crate::AppState;
@@ -91,21 +90,10 @@ impl FileProcessor for ThumbnailProcessor {
             .await
             .map_err(|e| e.to_string())?;
 
-        let mut reader = backend
-            .read(&file.storage_path)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let mut data = Vec::new();
-        reader
-            .read_to_end(&mut data)
+        let data = backend
+            .read_all(&file.storage_path)
             .await
             .map_err(|e| format!("Failed to read image: {}", e))?;
-        // Release the storage backend's pool slot before the thumbnail
-        // write also tries to check one out — otherwise N concurrent
-        // processors can each hold one permit while waiting for a second,
-        // deadlocking the SFTP pool.
-        drop(reader);
 
         let size = self.size;
         let max_pixels = self.max_pixels;
