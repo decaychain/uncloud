@@ -66,6 +66,32 @@ fn task_row_drop_at(
     Some((section, idx))
 }
 
+/// Hit-test for an in-flight section drag. Walks the DOM at `(x, y)`
+/// looking for the nearest `data-section-id` and returns the insertion
+/// index inside `sections` excluding the dragged section. `None` when the
+/// pointer is over the dragged section itself or outside any section.
+fn section_drop_at(
+    x: f64,
+    y: f64,
+    dragged_section_id: &str,
+    sections: &[TaskSectionResponse],
+) -> Option<usize> {
+    let doc = web_sys::window()?.document()?;
+    let mut current = doc.element_from_point(x as f32, y as f32);
+    while let Some(el) = current {
+        if let Some(sid) = el.get_attribute("data-section-id") {
+            let rect = el.get_bounding_client_rect();
+            let midpoint = rect.top() + rect.height() / 2.0;
+            let others: Vec<&TaskSectionResponse> =
+                sections.iter().filter(|s| s.id != dragged_section_id).collect();
+            let pos = others.iter().position(|s| s.id == sid)?;
+            return Some(if y < midpoint { pos } else { pos + 1 });
+        }
+        current = el.parent_element();
+    }
+    None
+}
+
 fn priority_dot_class(priority: &TaskPriority) -> &'static str {
     match priority {
         TaskPriority::High => "w-2 h-2 rounded-full bg-error shrink-0",
@@ -204,6 +230,10 @@ pub fn ListView(
     // Insertion index within `drop_section_id`'s top-level task list,
     // excluding the dragged row.
     let mut drop_index: Signal<Option<usize>> = use_signal(|| None);
+    // Section drag state — disjoint from task drag; only one is active
+    // at a time.
+    let mut drag_section_id: Signal<Option<String>> = use_signal(|| None);
+    let mut drop_section_target: Signal<Option<usize>> = use_signal(|| None);
 
     // Task IDs whose due-date label should briefly highlight after the
     // server confirms a status update — the visible signal that
@@ -220,6 +250,10 @@ pub fn ListView(
             drag_task_id.set(None);
             drop_section_id.set(None);
             drop_index.set(None);
+        }
+        if drag_section_id.peek().is_some() {
+            drag_section_id.set(None);
+            drop_section_target.set(None);
         }
     });
 
@@ -309,6 +343,15 @@ pub fn ListView(
     }
 
     let section_list = sections.read().clone();
+    let dragged_section = drag_section_id.read().clone();
+    let is_section_drag_active = dragged_section.is_some();
+    // Hide the dragged section from its origin slot so `drop_section_target`
+    // aligns 1:1 with the rendered slots — same trick as the task drag.
+    let visible_sections: Vec<TaskSectionResponse> = section_list
+        .iter()
+        .filter(|s| dragged_section.as_deref() != Some(s.id.as_str()))
+        .cloned()
+        .collect();
     let all_tasks = tasks.read().clone();
 
     // Only top-level tasks (no parent)
@@ -361,19 +404,64 @@ pub fn ListView(
             // are gone — `task_row_drop_at` walks the DOM and identifies
             // the section + insertion index in a single pass.
             onpointermove: move |e: Event<PointerData>| {
-                let Some(tid) = drag_task_id.peek().clone() else { return };
                 let p = e.client_coordinates();
+                let active_section_drag = drag_section_id.peek().clone();
+                if let Some(sid) = active_section_drag {
+                    let snap = sections.peek().clone();
+                    if let Some(idx) = section_drop_at(p.x, p.y, &sid, &snap) {
+                        let current = *drop_section_target.peek();
+                        if current != Some(idx) {
+                            drop_section_target.set(Some(idx));
+                        }
+                    }
+                    return;
+                }
+                let Some(tid) = drag_task_id.peek().clone() else { return };
                 let snap = tasks.peek().clone();
                 if let Some((section, idx)) = task_row_drop_at(p.x, p.y, &tid, &snap) {
-                    if drop_section_id.peek().as_deref() != Some(section.as_str()) {
+                    let current_section = drop_section_id.peek().clone();
+                    if current_section.as_deref() != Some(section.as_str()) {
                         drop_section_id.set(Some(section));
                     }
-                    if *drop_index.peek() != Some(idx) {
+                    let current_idx = *drop_index.peek();
+                    if current_idx != Some(idx) {
                         drop_index.set(Some(idx));
                     }
                 }
             },
             onpointerup: move |_| {
+                // Section reorder takes precedence: if the user was dragging
+                // a section, commit that and skip the task-drag branch.
+                let active_section_drag = drag_section_id.peek().clone();
+                if let Some(sid) = active_section_drag {
+                    let target_idx = *drop_section_target.peek();
+                    drag_section_id.set(None);
+                    drop_section_target.set(None);
+                    let Some(idx) = target_idx else { return };
+                    let mut all = sections.peek().clone();
+                    let Some(from_idx) = all.iter().position(|s| s.id == sid)
+                    else { return };
+                    let dragged = all.remove(from_idx);
+                    let safe_idx = idx.min(all.len());
+                    all.insert(safe_idx, dragged);
+                    let new_ids: Vec<String> =
+                        all.iter().map(|s| s.id.clone()).collect();
+                    sections.set(all);
+                    let pid = pid_sig.peek().clone();
+                    spawn(async move {
+                        let refs: Vec<&str> =
+                            new_ids.iter().map(|s| s.as_str()).collect();
+                        if use_tasks::reorder_sections(&pid, &refs).await.is_err() {
+                            if let Ok(s) =
+                                use_tasks::list_sections(&pid).await
+                            {
+                                sections.set(s);
+                            }
+                        }
+                    });
+                    return;
+                }
+
                 let task_id = drag_task_id.peek().clone();
                 let target = drop_section_id.peek().clone();
                 let target_idx = *drop_index.peek();
@@ -470,18 +558,25 @@ pub fn ListView(
                 drag_task_id.set(None);
                 drop_section_id.set(None);
                 drop_index.set(None);
+                drag_section_id.set(None);
+                drop_section_target.set(None);
             },
             onpointercancel: move |_| {
                 drag_task_id.set(None);
                 drop_section_id.set(None);
                 drop_index.set(None);
+                drag_section_id.set(None);
+                drop_section_target.set(None);
             },
             // Sections
-            for section in section_list.iter() {
+            for (section_idx, section) in visible_sections.iter().enumerate() {
                 {
                     let sec_id = section.id.clone();
                     let sec_id_toggle = section.id.clone();
+                    let sec_id_drag = section.id.clone();
                     let sec_name = section.name.clone();
+                    let show_section_indicator = is_section_drag_active
+                        && *drop_section_target.read() == Some(section_idx);
                     let is_collapsed = collapsed.read().contains(&sec_id);
 
                     let section_tasks: Vec<TaskResponse> = {
@@ -511,25 +606,46 @@ pub fn ListView(
 
                     rsx! {
                         div {
-                            class: "{section_class}",
-                            "data-section-id": "{sec_id}",
-
-                            // Section header
+                            key: "{sec_id}",
+                            if show_section_indicator {
+                                div { class: "h-1 bg-primary rounded-full my-1" }
+                            }
                             div {
-                                class: "group flex items-center gap-2 px-4 py-2.5 cursor-pointer select-none",
-                                onclick: move |_| {
-                                    let mut c = collapsed.write();
-                                    if c.contains(&sec_id_toggle) {
-                                        c.remove(&sec_id_toggle);
-                                    } else {
-                                        c.insert(sec_id_toggle.clone());
-                                    }
-                                },
+                                class: "{section_class}",
+                                "data-section-id": "{sec_id}",
 
-                                // Collapse arrow
-                                svg {
-                                    class: if is_collapsed {
-                                        "w-4 h-4 shrink-0 transition-transform -rotate-90"
+                                // Section header
+                                div {
+                                    class: "group flex items-center gap-2 px-4 py-2.5 cursor-pointer select-none",
+                                    onclick: move |_| {
+                                        let mut c = collapsed.write();
+                                        if c.contains(&sec_id_toggle) {
+                                            c.remove(&sec_id_toggle);
+                                        } else {
+                                            c.insert(sec_id_toggle.clone());
+                                        }
+                                    },
+
+                                    // Drag handle for section reorder.
+                                    span {
+                                        class: "cursor-grab active:cursor-grabbing opacity-30 hover:opacity-70 shrink-0",
+                                        style: "touch-action: none;",
+                                        title: "Drag to reorder section",
+                                        onpointerdown: move |e: Event<PointerData>| {
+                                            e.stop_propagation();
+                                            e.prevent_default();
+                                            drag_section_id.set(Some(sec_id_drag.clone()));
+                                        },
+                                        onclick: move |e: Event<MouseData>| {
+                                            e.stop_propagation();
+                                        },
+                                        "⠿"
+                                    }
+
+                                    // Collapse arrow
+                                    svg {
+                                        class: if is_collapsed {
+                                            "w-4 h-4 shrink-0 transition-transform -rotate-90"
                                     } else {
                                         "w-4 h-4 shrink-0 transition-transform"
                                     },
@@ -727,6 +843,7 @@ pub fn ListView(
                         }
                     }
                 }
+            }
             }
 
             // Unsectioned group
