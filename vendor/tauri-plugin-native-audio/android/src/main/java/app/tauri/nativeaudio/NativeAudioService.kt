@@ -107,8 +107,14 @@ class NativeAudioService : MediaSessionService() {
                     }
 
                     override fun onNotificationCancelled(notificationId: Int, dismissedByUser: Boolean) {
+                        // Demote from foreground (the user dismissed the notification)
+                        // but keep the service alive so ExoPlayer + MediaSession +
+                        // audio-focus state stay coherent. Calling stopSelf() here
+                        // leaves the player in a state the next play() can't recover
+                        // from with playWhenReady alone — the user has to re-set the
+                        // queue to get sound back. Android will reclaim the process
+                        // under memory pressure when nothing else holds it.
                         stopForegroundCompat(remove = true)
-                        stopSelf()
                     }
                 },
             )

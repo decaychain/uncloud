@@ -390,6 +390,14 @@ object NativeAudioRuntime {
         synchronized(lock) {
             ensure(context)
             val exoPlayer = player ?: return
+            // Defensive recovery: if the player still has its queue but slipped
+            // back to STATE_IDLE (e.g. after an error, or after the foreground
+            // service was torn down by the user dismissing the notification),
+            // setting playWhenReady alone won't start anything — the player
+            // needs prepare() to transition back through BUFFERING → READY.
+            if (exoPlayer.playbackState == Player.STATE_IDLE && exoPlayer.mediaItemCount > 0) {
+                exoPlayer.prepare()
+            }
             if (exoPlayer.playbackState == Player.STATE_ENDED) {
                 exoPlayer.seekTo(0L)
             }
