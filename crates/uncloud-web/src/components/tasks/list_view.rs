@@ -36,9 +36,11 @@ fn task_row_drop_at(
     while let Some(el) = current {
         if hovered_row.is_none() {
             if let Some(tid) = el.get_attribute("data-task-id") {
-                let rect = el.get_bounding_client_rect();
-                let midpoint = rect.top() + rect.height() / 2.0;
-                hovered_row = Some((tid, midpoint));
+                if tid != dragged_task_id {
+                    let rect = el.get_bounding_client_rect();
+                    let midpoint = rect.top() + rect.height() / 2.0;
+                    hovered_row = Some((tid, midpoint));
+                }
             }
         }
         if let Some(sid) = el.get_attribute("data-section-id") {
@@ -56,14 +58,23 @@ fn task_row_drop_at(
                 && t.id != dragged_task_id
         })
         .collect();
-    let idx = match hovered_row {
-        Some((tid, midpoint)) => {
-            let pos = section_tasks.iter().position(|t| t.id == tid)?;
-            if y < midpoint { pos } else { pos + 1 }
+    if let Some((tid, midpoint)) = hovered_row {
+        if let Some(pos) = section_tasks.iter().position(|t| t.id == tid) {
+            return Some((section, if y < midpoint { pos } else { pos + 1 }));
         }
-        None => section_tasks.len(),
-    };
-    Some((section, idx))
+    }
+    // Y-fallback: pointer fell through the dragged row's ghost or hovered
+    // a gap. Pick the first sibling whose midpoint is below the pointer.
+    for (i, task) in section_tasks.iter().enumerate() {
+        let selector = format!("[data-task-id=\"{}\"]", task.id);
+        if let Ok(Some(el)) = doc.query_selector(&selector) {
+            let rect = el.get_bounding_client_rect();
+            if y < rect.top() + rect.height() / 2.0 {
+                return Some((section, i));
+            }
+        }
+    }
+    Some((section, section_tasks.len()))
 }
 
 /// Hit-test for an in-flight section drag. Returns the insertion index
@@ -380,13 +391,19 @@ pub fn ListView(
     } else {
         "space-y-3"
     };
-    // Hide the dragged section from its origin slot so `drop_section_target`
-    // aligns 1:1 with the rendered slots — same trick as the task drag.
-    let visible_sections: Vec<TaskSectionResponse> = section_list
-        .iter()
-        .filter(|s| dragged_section.as_deref() != Some(s.id.as_str()))
-        .cloned()
-        .collect();
+    // Render the dragged section in place (faded via section_class) so the
+    // list doesn't collapse mid-drag. Translate `drop_section_target`
+    // (excludes dragged) into render-slot indices for the indicator.
+    let visible_sections: Vec<TaskSectionResponse> = section_list.clone();
+    let dragged_section_render_idx: Option<usize> = dragged_section
+        .as_ref()
+        .and_then(|id| visible_sections.iter().position(|s| &s.id == id));
+    let drop_section_target_raw: Option<usize> = *drop_section_target.read();
+    let drop_section_target_render: Option<usize> =
+        drop_section_target_raw.map(|d| match dragged_section_render_idx {
+            Some(d_idx) if d > d_idx => d + 1,
+            _ => d,
+        });
     let all_tasks = tasks.read().clone();
 
     // Only top-level tasks (no parent)
@@ -610,30 +627,52 @@ pub fn ListView(
                     let sec_id_toggle = section.id.clone();
                     let sec_id_drag = section.id.clone();
                     let sec_name = section.name.clone();
+                    let is_dragging_section =
+                        dragged_section_render_idx == Some(section_idx);
+                    // Suppress the indicator at the dragged section's own slot
+                    // — that position is the no-op drop.
                     let show_section_indicator = is_section_drag_active
-                        && *drop_section_target.read() == Some(section_idx);
+                        && !is_dragging_section
+                        && drop_section_target_render == Some(section_idx);
                     let is_collapsed = collapsed.read().contains(&sec_id);
 
                     let section_tasks: Vec<TaskResponse> = {
                         let filter = label_filter.read();
-                        let dragged = drag_task_id.read().clone();
                         top_level
                             .iter()
                             .filter(|t| t.section_id.as_ref() == Some(&sec_id))
                             .filter(|t| task_matches_label_filter(&t.labels, &filter))
-                            // Hide the dragged row from its origin section so
-                            // `drop_index` aligns 1:1 with rendered rows.
-                            .filter(|t| dragged.as_deref() != Some(t.id.as_str()))
                             .cloned()
                             .cloned()
                             .collect()
                     };
                     let count = section_tasks.len();
 
+                    // Keep the dragged row rendered (faded via `is_dragging` in
+                    // render_task_row) so the section doesn't collapse mid-drag
+                    // and pull the pointer outside the container's hit area.
+                    // Translate `drop_index` (excludes the dragged) into
+                    // render-slot indices for the indicator.
+                    let dragged_id_for_section: Option<String> = drag_task_id.read().clone();
+                    let dragged_render_idx_section: Option<usize> = dragged_id_for_section
+                        .as_ref()
+                        .and_then(|id| section_tasks.iter().position(|t| &t.id == id));
+                    let drop_idx_raw_section: Option<usize> = *drop_index.read();
+                    let drop_idx_render_section: Option<usize> = drop_idx_raw_section.map(|d| {
+                        match dragged_render_idx_section {
+                            Some(d_idx) if d > d_idx => d + 1,
+                            _ => d,
+                        }
+                    });
+
                     let is_drop_target = drop_section_id.read().as_ref() == Some(&sec_id);
                     let has_drag = drag_task_id.read().is_some();
 
-                    let section_class = if is_drop_target && has_drag {
+                    let section_class = if is_dragging_section {
+                        // Dragged section is faded + pointer-events-none so the
+                        // hit-test sees through to siblings behind it.
+                        "bg-base-200 rounded-box opacity-30 pointer-events-none"
+                    } else if is_drop_target && has_drag {
                         "bg-base-200 rounded-box ring-2 ring-primary"
                     } else {
                         "bg-base-200 rounded-box"
@@ -777,8 +816,11 @@ pub fn ListView(
                                             for (i, task) in section_tasks.iter().enumerate() {
                                                 {
                                                     let avail_labels = available_labels.read().clone();
-                                                    let show_indicator =
-                                                        is_drop_target && *drop_index.read() == Some(i);
+                                                    let is_dragging_row =
+                                                        dragged_render_idx_section == Some(i);
+                                                    let show_indicator = is_drop_target
+                                                        && !is_dragging_row
+                                                        && drop_idx_render_section == Some(i);
                                                     rsx! {
                                                         div {
                                                             key: "{task.id}",
@@ -803,7 +845,8 @@ pub fn ListView(
 
                                             // Trailing indicator (drop at end of section).
                                             if is_drop_target
-                                                && *drop_index.read() == Some(section_tasks.len())
+                                                && drop_idx_render_section
+                                                    == Some(section_tasks.len())
                                             {
                                                 div { class: "h-1 bg-primary rounded-full mx-2 my-1" }
                                             }
@@ -885,7 +928,7 @@ pub fn ListView(
             // dragged section back at the end shows no cue (and dropping
             // any section past the last sibling has no visual feedback).
             if is_section_drag_active
-                && *drop_section_target.read() == Some(visible_sections.len())
+                && drop_section_target_render == Some(visible_sections.len())
             {
                 div { class: "h-1 bg-primary rounded-full my-1" }
             }
@@ -1135,8 +1178,10 @@ fn render_task_row(
 
     let is_dragging = drag_task_id.read().as_ref() == Some(&task_id);
     let row_class = if is_dragging {
+        // pointer-events-none lets `elementFromPoint` see past the dragged row
+        // — without this, the hit-test keeps landing on the dragged ghost.
         format!(
-            "{} flex items-center gap-2 pr-3 py-1.5 rounded-lg opacity-30 group select-none",
+            "{} flex items-center gap-2 pr-3 py-1.5 rounded-lg opacity-30 group select-none pointer-events-none",
             indent_class
         )
     } else {
