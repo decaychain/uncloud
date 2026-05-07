@@ -215,7 +215,9 @@ pub fn BoardView(
     }
 
     let container_class = if drag_task_id.read().is_some() {
-        "flex gap-4 overflow-x-auto lg:overflow-x-visible pb-4 cursor-grabbing"
+        // `select-none` while dragging keeps the browser from grabbing text
+        // out of column headers / counts as the pointer sweeps across them.
+        "flex gap-4 overflow-x-auto lg:overflow-x-visible pb-4 cursor-grabbing select-none"
     } else {
         "flex gap-4 overflow-x-auto lg:overflow-x-visible pb-4"
     };
