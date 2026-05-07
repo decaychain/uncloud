@@ -15,6 +15,57 @@ use super::{task_matches_label_filter, LabelFilterBar};
 
 // ── Helpers ──
 
+/// Hit-test for an in-flight task drag in the list view. Walks the DOM at
+/// `(x, y)` looking for the nearest `data-task-id` (a sibling row the
+/// pointer is over) and the enclosing `data-section-id`. Returns
+/// `(section_id, drop_index)` where `drop_index` is the insertion index
+/// within the section's top-level tasks **excluding the dragged task** —
+/// the user can drop above, between, or after siblings. Returns `None`
+/// when the pointer is over the dragged row itself or outside any section
+/// (callers keep the previous target).
+fn task_row_drop_at(
+    x: f64,
+    y: f64,
+    dragged_task_id: &str,
+    tasks: &[TaskResponse],
+) -> Option<(String, usize)> {
+    let doc = web_sys::window()?.document()?;
+    let mut current = doc.element_from_point(x as f32, y as f32);
+    let mut hovered_row: Option<(String, f64)> = None;
+    let mut sec_id: Option<String> = None;
+    while let Some(el) = current {
+        if hovered_row.is_none() {
+            if let Some(tid) = el.get_attribute("data-task-id") {
+                let rect = el.get_bounding_client_rect();
+                let midpoint = rect.top() + rect.height() / 2.0;
+                hovered_row = Some((tid, midpoint));
+            }
+        }
+        if let Some(sid) = el.get_attribute("data-section-id") {
+            sec_id = Some(sid);
+            break;
+        }
+        current = el.parent_element();
+    }
+    let section = sec_id?;
+    let section_tasks: Vec<&TaskResponse> = tasks
+        .iter()
+        .filter(|t| {
+            t.parent_task_id.is_none()
+                && t.section_id.as_deref() == Some(section.as_str())
+                && t.id != dragged_task_id
+        })
+        .collect();
+    let idx = match hovered_row {
+        Some((tid, midpoint)) => {
+            let pos = section_tasks.iter().position(|t| t.id == tid)?;
+            if y < midpoint { pos } else { pos + 1 }
+        }
+        None => section_tasks.len(),
+    };
+    Some((section, idx))
+}
+
 fn priority_dot_class(priority: &TaskPriority) -> &'static str {
     match priority {
         TaskPriority::High => "w-2 h-2 rounded-full bg-error shrink-0",
@@ -150,6 +201,9 @@ pub fn ListView(
     // Drag state
     let mut drag_task_id: Signal<Option<String>> = use_signal(|| None);
     let mut drop_section_id: Signal<Option<String>> = use_signal(|| None);
+    // Insertion index within `drop_section_id`'s top-level task list,
+    // excluding the dragged row.
+    let mut drop_index: Signal<Option<usize>> = use_signal(|| None);
 
     // Task IDs whose due-date label should briefly highlight after the
     // server confirms a status update — the visible signal that
@@ -165,6 +219,7 @@ pub fn ListView(
         if drag_task_id.peek().is_some() {
             drag_task_id.set(None);
             drop_section_id.set(None);
+            drop_index.set(None);
         }
     });
 
@@ -300,22 +355,145 @@ pub fn ListView(
             }
         }
 
-        div { class: "space-y-3",
+        div {
+            class: "space-y-3",
+            // Container-level hit-test + commit. Per-section listeners
+            // are gone — `task_row_drop_at` walks the DOM and identifies
+            // the section + insertion index in a single pass.
+            onpointermove: move |e: Event<PointerData>| {
+                let Some(tid) = drag_task_id.peek().clone() else { return };
+                let p = e.client_coordinates();
+                let snap = tasks.peek().clone();
+                if let Some((section, idx)) = task_row_drop_at(p.x, p.y, &tid, &snap) {
+                    if drop_section_id.peek().as_deref() != Some(section.as_str()) {
+                        drop_section_id.set(Some(section));
+                    }
+                    if *drop_index.peek() != Some(idx) {
+                        drop_index.set(Some(idx));
+                    }
+                }
+            },
+            onpointerup: move |_| {
+                let task_id = drag_task_id.peek().clone();
+                let target = drop_section_id.peek().clone();
+                let target_idx = *drop_index.peek();
+                drag_task_id.set(None);
+                drop_section_id.set(None);
+                drop_index.set(None);
+
+                let Some(tid) = task_id else { return };
+                let Some(new_sec) = target else { return };
+                let pid = pid_sig.peek().clone();
+
+                let current_sec = tasks
+                    .peek()
+                    .iter()
+                    .find(|t| t.id == tid)
+                    .and_then(|t| t.section_id.clone());
+
+                if current_sec.as_ref() == Some(&new_sec) {
+                    // Within-section reorder — same approach as the board:
+                    // move the dragged task in the local Vec by mapping the
+                    // section-local insertion index to a global index, then
+                    // ship the full ordered ID list to `reorder_tasks`.
+                    let Some(idx) = target_idx else { return };
+                    let target_section = new_sec.clone();
+                    let mut all = tasks.peek().clone();
+                    let Some(from_global) =
+                        all.iter().position(|t| t.id == tid)
+                    else { return };
+                    let dragged = all.remove(from_global);
+                    let section_indices: Vec<usize> = all
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, t)| {
+                            t.parent_task_id.is_none()
+                                && t.section_id.as_deref()
+                                    == Some(target_section.as_str())
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    let to_global = if idx >= section_indices.len() {
+                        section_indices
+                            .last()
+                            .copied()
+                            .map(|n| n + 1)
+                            .unwrap_or(all.len())
+                    } else {
+                        section_indices[idx]
+                    };
+                    all.insert(to_global, dragged);
+                    let new_ids: Vec<String> =
+                        all.iter().map(|t| t.id.clone()).collect();
+                    tasks.set(all);
+                    spawn(async move {
+                        let refs: Vec<&str> =
+                            new_ids.iter().map(|s| s.as_str()).collect();
+                        if use_tasks::reorder_tasks(&pid, &refs).await.is_err() {
+                            if let Ok(t) =
+                                use_tasks::list_tasks(&pid, None, None).await
+                            {
+                                tasks.set(t);
+                            }
+                        }
+                    });
+                    return;
+                }
+
+                spawn(async move {
+                    let req = uncloud_common::UpdateTaskRequest {
+                        section_id: Some(new_sec),
+                        title: None,
+                        description: None,
+                        status: None,
+                        status_note: None,
+                        priority: None,
+                        assignee_id: None,
+                        labels: None,
+                        due_date: None,
+                        recurrence_rule: None,
+                        position: None,
+                    };
+                    if let Ok(updated) = use_tasks::update_task(&tid, &req).await {
+                        let mut tw = tasks.write();
+                        if let Some(t) = tw.iter_mut().find(|t| t.id == updated.id) {
+                            *t = updated;
+                        }
+                    }
+                    // Re-fetch to get accurate ordering after a cross-section move.
+                    if let Ok(t) = use_tasks::list_tasks(&pid, None, None).await {
+                        tasks.set(t);
+                    }
+                });
+            },
+            onpointerleave: move |_| {
+                drag_task_id.set(None);
+                drop_section_id.set(None);
+                drop_index.set(None);
+            },
+            onpointercancel: move |_| {
+                drag_task_id.set(None);
+                drop_section_id.set(None);
+                drop_index.set(None);
+            },
             // Sections
             for section in section_list.iter() {
                 {
                     let sec_id = section.id.clone();
                     let sec_id_toggle = section.id.clone();
-                    let sec_id_drop = section.id.clone();
                     let sec_name = section.name.clone();
                     let is_collapsed = collapsed.read().contains(&sec_id);
 
                     let section_tasks: Vec<TaskResponse> = {
                         let filter = label_filter.read();
+                        let dragged = drag_task_id.read().clone();
                         top_level
                             .iter()
                             .filter(|t| t.section_id.as_ref() == Some(&sec_id))
                             .filter(|t| task_matches_label_filter(&t.labels, &filter))
+                            // Hide the dragged row from its origin section so
+                            // `drop_index` aligns 1:1 with rendered rows.
+                            .filter(|t| dragged.as_deref() != Some(t.id.as_str()))
                             .cloned()
                             .cloned()
                             .collect()
@@ -334,50 +512,7 @@ pub fn ListView(
                     rsx! {
                         div {
                             class: "{section_class}",
-                            onpointerenter: move |_| {
-                                if drag_task_id.read().is_some() {
-                                    drop_section_id.set(Some(sec_id_drop.clone()));
-                                }
-                            },
-                            onpointerup: move |_| {
-                                let task_id = drag_task_id.peek().clone();
-                                let target = drop_section_id.peek().clone();
-                                drag_task_id.set(None);
-                                drop_section_id.set(None);
-
-                                if let (Some(tid), Some(new_sec)) = (task_id, target) {
-                                    let current_sec = tasks.peek().iter().find(|t| t.id == tid).and_then(|t| t.section_id.clone());
-                                    if current_sec.as_ref() == Some(&new_sec) {
-                                        return;
-                                    }
-                                    let pid = pid_sig.peek().clone();
-                                    spawn(async move {
-                                        let req = uncloud_common::UpdateTaskRequest {
-                                            section_id: Some(new_sec),
-                                            title: None,
-                                            description: None,
-                                            status: None,
-                                            status_note: None,
-                                            priority: None,
-                                            assignee_id: None,
-                                            labels: None,
-                                            due_date: None,
-                                            recurrence_rule: None,
-                                            position: None,
-                                        };
-                                        if let Ok(updated) = use_tasks::update_task(&tid, &req).await {
-                                            let mut tw = tasks.write();
-                                            if let Some(t) = tw.iter_mut().find(|t| t.id == updated.id) {
-                                                *t = updated;
-                                            }
-                                        }
-                                        // Re-fetch to get accurate ordering
-                                        if let Ok(t) = use_tasks::list_tasks(&pid, None, None).await {
-                                            tasks.set(t);
-                                        }
-                                    });
-                                }
-                            },
+                            "data-section-id": "{sec_id}",
 
                             // Section header
                             div {
@@ -488,24 +623,41 @@ pub fn ListView(
 
                                     rsx! {
                                         div { class: "px-2 pb-2",
-                                            for task in section_tasks.iter() {
+                                            for (i, task) in section_tasks.iter().enumerate() {
                                                 {
                                                     let avail_labels = available_labels.read().clone();
-                                                    render_task_row(
-                                                        task,
-                                                        &all_tasks,
-                                                        &avail_labels,
-                                                        0,
-                                                        tasks,
-                                                        detail_task_id,
-                                                        drag_task_id,
-                                                        expanded_parents,
-                                                        flashing_dates,
-                                                    )
+                                                    let show_indicator =
+                                                        is_drop_target && *drop_index.read() == Some(i);
+                                                    rsx! {
+                                                        div {
+                                                            key: "{task.id}",
+                                                            if show_indicator {
+                                                                div { class: "h-1 bg-primary rounded-full mx-2 my-1" }
+                                                            }
+                                                            {render_task_row(
+                                                                task,
+                                                                &all_tasks,
+                                                                &avail_labels,
+                                                                0,
+                                                                tasks,
+                                                                detail_task_id,
+                                                                drag_task_id,
+                                                                expanded_parents,
+                                                                flashing_dates,
+                                                            )}
+                                                        }
+                                                    }
                                                 }
                                             }
 
-                                            if section_tasks.is_empty() && !is_adding {
+                                            // Trailing indicator (drop at end of section).
+                                            if is_drop_target
+                                                && *drop_index.read() == Some(section_tasks.len())
+                                            {
+                                                div { class: "h-1 bg-primary rounded-full mx-2 my-1" }
+                                            }
+
+                                            if section_tasks.is_empty() && !is_adding && !has_drag {
                                                 div { class: "text-base-content/40 text-center text-sm py-4",
                                                     "No tasks in this section"
                                                 }
@@ -854,9 +1006,15 @@ fn render_task_row(
     let subtask_count = task.subtask_count;
     let subtask_done_count = task.subtask_done_count;
 
+    // `data-task-id` only on the top-level wrapper — subtasks aren't
+    // draggable so the hit-test should snap to the parent row's bbox even
+    // when the pointer is over an expanded subtask.
+    let data_task_id = if depth == 0 { Some(task_id.clone()) } else { None };
+
     rsx! {
         div {
             key: "{task_id}",
+            "data-task-id": data_task_id,
 
             // Main row
             div {
