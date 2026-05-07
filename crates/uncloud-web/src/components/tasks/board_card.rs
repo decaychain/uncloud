@@ -44,17 +44,23 @@ pub fn BoardCard(
     dragging: bool,
 ) -> Element {
     let card_class = if dragging {
-        "card bg-base-100 shadow-sm cursor-pointer select-none opacity-30 flex-row"
+        // pointer-events-none lets `elementFromPoint` see straight through the
+        // dragged card to whatever is under it — without this the hit-test
+        // keeps returning the dragged card itself and the drop indicator
+        // can't track the user's pointer past its starting position.
+        "card bg-base-100 shadow-sm cursor-pointer select-none opacity-30 flex-row pointer-events-none"
     } else {
         "card bg-base-100 shadow-sm cursor-pointer select-none hover:shadow-md transition-shadow flex-row"
     };
 
     let task_id_click = task.id.clone();
     let task_id_drag = task.id.clone();
+    let task_id_attr = task.id.clone();
 
     rsx! {
         div {
             class: "{card_class}",
+            "data-task-id": "{task_id_attr}",
             onclick: move |_| on_click.call(task_id_click.clone()),
 
             // Grip handle — only this zone initiates drag. `touch-action: none`

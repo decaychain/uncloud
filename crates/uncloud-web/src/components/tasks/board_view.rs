@@ -47,20 +47,56 @@ fn attr_to_status(s: &str) -> Option<TaskStatus> {
     }
 }
 
-/// Walk up the DOM from `(x, y)` looking for an element with a
-/// `data-column-status` attribute and return the matching `TaskStatus`.
-fn column_status_at_point(x: f64, y: f64) -> Option<TaskStatus> {
+/// Hit-test for an in-flight drag. Walks the DOM at `(x, y)` looking for
+/// the nearest `data-task-id` (a sibling card the pointer is over) and the
+/// enclosing `data-column-status` (which lane). Returns `(column, drop_index)`
+/// where `drop_index` is the **insertion index within the column's tasks
+/// excluding the dragged card** — the user can drop above, between, or after
+/// any sibling. Returns `None` when the pointer is over the dragged card
+/// itself or outside any column; callers should keep the previous target.
+fn card_drop_at(
+    x: f64,
+    y: f64,
+    dragged_task_id: &str,
+    tasks: &[TaskResponse],
+) -> Option<(TaskStatus, usize)> {
     let doc = web_sys::window()?.document()?;
     let mut current = doc.element_from_point(x as f32, y as f32);
+    let mut hovered_card: Option<(String, f64)> = None;
+    let mut col_status: Option<TaskStatus> = None;
     while let Some(el) = current {
+        if hovered_card.is_none() {
+            if let Some(tid) = el.get_attribute("data-task-id") {
+                let rect = el.get_bounding_client_rect();
+                let midpoint = rect.top() + rect.height() / 2.0;
+                hovered_card = Some((tid, midpoint));
+            }
+        }
         if let Some(attr) = el.get_attribute("data-column-status") {
             if let Some(s) = attr_to_status(&attr) {
-                return Some(s);
+                col_status = Some(s);
+                break;
             }
         }
         current = el.parent_element();
     }
-    None
+    let status = col_status?;
+    let lane_tasks: Vec<&TaskResponse> = tasks
+        .iter()
+        .filter(|t| t.status == status && t.id != dragged_task_id)
+        .collect();
+    let idx = match hovered_card {
+        Some((tid, midpoint)) => {
+            // `position` returns None when the hovered card is the dragged
+            // one (filtered out). In that case bubble up `None` so the caller
+            // keeps the previous drop target — avoids flicker as the user
+            // crosses the still-present dragged-card outline.
+            let pos = lane_tasks.iter().position(|t| t.id == tid)?;
+            if y < midpoint { pos } else { pos + 1 }
+        }
+        None => lane_tasks.len(),
+    };
+    Some((status, idx))
 }
 
 #[component]
@@ -84,6 +120,10 @@ pub fn BoardView(
     // Drag state
     let mut drag_task_id: Signal<Option<String>> = use_signal(|| None);
     let mut drop_column: Signal<Option<TaskStatus>> = use_signal(|| None);
+    // Insertion index inside `drop_column`'s task list, excluding the dragged
+    // card. Set together with `drop_column` from the container hit-test so
+    // both stay coherent.
+    let mut drop_index: Signal<Option<usize>> = use_signal(|| None);
 
     // Document-level safety net for drags ending outside any column.
     // Window listeners fire after local handlers bubble up, so a drop
@@ -92,6 +132,7 @@ pub fn BoardView(
         if drag_task_id.peek().is_some() {
             drag_task_id.set(None);
             drop_column.set(None);
+            drop_index.set(None);
         }
     });
 
@@ -192,61 +233,113 @@ pub fn BoardView(
             onpointerup: move |_| {
                 let task_id = drag_task_id.peek().clone();
                 let target = drop_column.peek().clone();
+                let target_idx = *drop_index.peek();
                 drag_task_id.set(None);
                 drop_column.set(None);
+                drop_index.set(None);
 
-                if let (Some(tid), Some(new_status)) = (task_id, target) {
-                    let current = tasks.peek().iter().find(|t| t.id == tid).map(|t| t.status.clone());
-                    if current.as_ref() == Some(&new_status) {
-                        return;
-                    }
+                let Some(tid) = task_id else { return };
+                let Some(new_status) = target else { return };
+                let pid = pid_sig.peek().clone();
+
+                let current_status = tasks
+                    .peek()
+                    .iter()
+                    .find(|t| t.id == tid)
+                    .map(|t| t.status.clone());
+
+                if current_status.as_ref() == Some(&new_status) {
+                    // Within-lane reorder. Build the new project-wide task
+                    // ordering by moving `tid` to `target_idx` within the
+                    // lane (excluding the dragged card from the recipient's
+                    // index), then ship the full ordered ID list — the
+                    // server assigns positions from the array order.
+                    let Some(idx) = target_idx else { return };
+                    let original_status = new_status.clone();
+                    let mut all = tasks.peek().clone();
+                    let Some(from_global) =
+                        all.iter().position(|t| t.id == tid)
+                    else { return };
+                    let dragged = all.remove(from_global);
+                    let lane_indices: Vec<usize> = all
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, t)| t.status == original_status)
+                        .map(|(i, _)| i)
+                        .collect();
+                    // `idx` is the lane-local insertion index. Translate to
+                    // a global index by mapping through `lane_indices`.
+                    let to_global = if idx >= lane_indices.len() {
+                        lane_indices
+                            .last()
+                            .copied()
+                            .map(|n| n + 1)
+                            .unwrap_or(all.len())
+                    } else {
+                        lane_indices[idx]
+                    };
+                    all.insert(to_global, dragged);
+                    let new_ids: Vec<String> =
+                        all.iter().map(|t| t.id.clone()).collect();
+                    tasks.set(all);
                     spawn(async move {
-                        let req = UpdateTaskStatusRequest {
-                            status: new_status,
-                            status_note: None,
-                        };
-                        if let Ok(updated) = use_tasks::update_task_status(&tid, &req).await {
-                            let mut tw = tasks.write();
-                            if let Some(t) = tw.iter_mut().find(|t| t.id == updated.id) {
-                                *t = updated;
+                        let refs: Vec<&str> =
+                            new_ids.iter().map(|s| s.as_str()).collect();
+                        if use_tasks::reorder_tasks(&pid, &refs).await.is_err() {
+                            // Refetch to recover the canonical ordering.
+                            if let Ok(t) = use_tasks::list_tasks(&pid, None, None).await {
+                                tasks.set(t);
                             }
-                            let next = detail_refresh.peek().wrapping_add(1);
-                            detail_refresh.set(next);
                         }
                     });
+                    return;
                 }
+
+                spawn(async move {
+                    let req = UpdateTaskStatusRequest {
+                        status: new_status,
+                        status_note: None,
+                    };
+                    if let Ok(updated) = use_tasks::update_task_status(&tid, &req).await {
+                        let mut tw = tasks.write();
+                        if let Some(t) = tw.iter_mut().find(|t| t.id == updated.id) {
+                            *t = updated;
+                        }
+                        let next = detail_refresh.peek().wrapping_add(1);
+                        detail_refresh.set(next);
+                    }
+                });
             },
-            // Touch pointers are implicitly captured to the card that received
-            // pointerdown, so onpointerenter on sibling columns never fires on
-            // mobile. Walk the DOM at the current coordinate instead.
+            // Unified hit-test for both mouse and touch. The dragged card
+            // has `pointer-events: none` so `elementFromPoint` walks past
+            // it to whatever sibling the pointer is actually over.
             onpointermove: move |e: Event<PointerData>| {
-                if drag_task_id.peek().is_none() {
-                    return;
-                }
-                let pt = e.pointer_type();
-                if pt != "touch" && pt != "pen" {
-                    return;
-                }
+                let Some(tid) = drag_task_id.peek().clone() else { return };
                 let p = e.client_coordinates();
-                if let Some(status) = column_status_at_point(p.x, p.y) {
+                let snap = tasks.peek().clone();
+                if let Some((status, idx)) = card_drop_at(p.x, p.y, &tid, &snap) {
                     if drop_column.peek().as_ref() != Some(&status) {
                         drop_column.set(Some(status));
+                    }
+                    if *drop_index.peek() != Some(idx) {
+                        drop_index.set(Some(idx));
                     }
                 }
             },
             onpointerleave: move |_| {
                 drag_task_id.set(None);
                 drop_column.set(None);
+                drop_index.set(None);
             },
             onpointercancel: move |_| {
                 drag_task_id.set(None);
                 drop_column.set(None);
+                drop_index.set(None);
             },
 
             for col in COLUMNS.iter() {
                 {
                     let col_status = col.status.clone();
-                    let col_status_enter = col.status.clone();
                     let col_status_add = col.status.clone();
                     let col_status_submit = col.status.clone();
                     let col_status_attr = status_to_attr(&col.status);
@@ -254,10 +347,14 @@ pub fn BoardView(
 
                     let col_tasks: Vec<TaskResponse> = {
                         let filter = label_filter.read();
+                        let dragged = drag_task_id.read().clone();
                         tasks.read()
                             .iter()
                             .filter(|t| t.status == col_status)
                             .filter(|t| task_matches_label_filter(&t.labels, &filter))
+                            // Hide the dragged card from its lane while in flight
+                            // so `drop_index` aligns 1:1 with the rendered slots.
+                            .filter(|t| dragged.as_deref() != Some(t.id.as_str()))
                             .cloned()
                             .collect()
                     };
@@ -277,14 +374,6 @@ pub fn BoardView(
                         div {
                             class: "{col_class}",
                             "data-column-status": "{col_status_attr}",
-                            // Mouse drag: onpointerenter works because mouse
-                            // pointers are not captured. Touch uses the
-                            // container-level onpointermove + elementFromPoint.
-                            onpointerenter: move |_| {
-                                if drag_task_id.read().is_some() {
-                                    drop_column.set(Some(col_status_enter.clone()));
-                                }
-                            },
 
                             // Column header
                             div { class: "flex items-center justify-between mb-1",
@@ -381,32 +470,46 @@ pub fn BoardView(
                                 }
                             }
 
-                            // Task cards
-                            for task in col_tasks.iter() {
+                            // Task cards. The dragged card is filtered out of
+                            // `col_tasks` so `drop_index` indexes directly into
+                            // the rendered slots — render the indicator at the
+                            // gap whose position matches `drop_index`.
+                            for (i, task) in col_tasks.iter().enumerate() {
                                 {
                                     let task_id_click = task.id.clone();
                                     let task_id_drag = task.id.clone();
-                                    let is_dragging = drag_task_id.read().as_ref() == Some(&task.id);
-
+                                    let show_indicator =
+                                        is_drop_target && *drop_index.read() == Some(i);
                                     rsx! {
-                                        BoardCard {
+                                        div {
                                             key: "{task.id}",
-                                            task: task.clone(),
-                                            available_labels: available_labels.read().clone(),
-                                            dragging: is_dragging,
-                                            on_click: move |_: String| {
-                                                detail_task_id.set(Some(task_id_click.clone()));
-                                            },
-                                            on_drag_start: move |_: String| {
-                                                drag_task_id.set(Some(task_id_drag.clone()));
-                                            },
+                                            class: "flex flex-col gap-2",
+                                            if show_indicator {
+                                                div { class: "h-1 bg-primary rounded-full mx-1" }
+                                            }
+                                            BoardCard {
+                                                task: task.clone(),
+                                                available_labels: available_labels.read().clone(),
+                                                dragging: false,
+                                                on_click: move |_: String| {
+                                                    detail_task_id.set(Some(task_id_click.clone()));
+                                                },
+                                                on_drag_start: move |_: String| {
+                                                    drag_task_id.set(Some(task_id_drag.clone()));
+                                                },
+                                            }
                                         }
                                     }
                                 }
                             }
 
+                            // Trailing indicator (drop at end of lane).
+                            if is_drop_target && *drop_index.read() == Some(col_tasks.len()) {
+                                div { class: "h-1 bg-primary rounded-full mx-1" }
+                            }
+
                             // Empty state
-                            if col_tasks.is_empty() && !is_adding {
+                            if col_tasks.is_empty() && !is_adding && !has_drag {
                                 div { class: "text-base-content/40 text-center text-sm py-8",
                                     "No tasks"
                                 }
