@@ -97,6 +97,10 @@ RUN file target/${RUST_TARGET}/release/uncloud-server | grep -q "static"
 # Runtime: scratch + static binary + CA certs
 FROM scratch
 
+# Re-declare so ${RUST_TARGET} expands in the COPY below — ARGs from earlier
+# stages are not visible across FROM boundaries.
+ARG RUST_TARGET=x86_64-unknown-linux-musl
+
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /app/target/${RUST_TARGET}/release/uncloud-server /uncloud-server
 
