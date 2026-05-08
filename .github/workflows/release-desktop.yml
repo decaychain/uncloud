@@ -76,9 +76,15 @@ jobs:
             target/release/bundle/rpm/*.rpm
 
   build-windows:
-    runs-on: windows-latest
-    outputs:
-      installer-name: ${{ steps.detect.outputs.installer-name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: x64
+          - runner: windows-11-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -122,20 +128,17 @@ jobs:
           cargo tauri build --bundles nsis
 
       - name: Stage signed bundle for the manifest job
-        id: detect
         shell: bash
         run: |
           INSTALLER=$(ls target/release/bundle/nsis/*.exe | head -1)
-          NAME=$(basename "$INSTALLER")
-          mkdir -p artifacts/windows
-          cp "$INSTALLER" "${INSTALLER}.sig" artifacts/windows/
-          echo "installer-name=$NAME" >> "$GITHUB_OUTPUT"
+          mkdir -p "artifacts/windows-${{ matrix.arch }}"
+          cp "$INSTALLER" "${INSTALLER}.sig" "artifacts/windows-${{ matrix.arch }}/"
 
       - name: Upload signed bundle artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-signed
-          path: artifacts/windows/
+          name: windows-signed-${{ matrix.arch }}
+          path: artifacts/windows-${{ matrix.arch }}/
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
@@ -154,30 +157,46 @@ jobs:
     needs: build-windows
     runs-on: ubuntu-24.04
     steps:
-      - name: Download Windows signed bundle
+      - name: Download Windows x64 signed bundle
         uses: actions/download-artifact@v4
         with:
-          name: windows-signed
-          path: artifacts/windows
+          name: windows-signed-x64
+          path: artifacts/x64
+
+      - name: Download Windows arm64 signed bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-signed-arm64
+          path: artifacts/arm64
 
       - name: Generate latest.json
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          INSTALLER_NAME="${{ needs.build-windows.outputs.installer-name }}"
-          SIG=$(cat artifacts/windows/*.sig)
           PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          X64_INSTALLER=$(ls artifacts/x64/*.exe | head -1)
+          X64_NAME=$(basename "$X64_INSTALLER")
+          X64_SIG=$(cat artifacts/x64/*.sig)
+
+          ARM64_INSTALLER=$(ls artifacts/arm64/*.exe | head -1)
+          ARM64_NAME=$(basename "$ARM64_INSTALLER")
+          ARM64_SIG=$(cat artifacts/arm64/*.sig)
+
           jq -n \
             --arg version "$VERSION" \
             --arg notes "Release v$VERSION" \
             --arg pub_date "$PUB_DATE" \
-            --arg signature "$SIG" \
-            --arg url "https://github.com/decaychain/uncloud/releases/download/v$VERSION/$INSTALLER_NAME" \
+            --arg x64_sig "$X64_SIG" \
+            --arg x64_url "https://github.com/decaychain/uncloud/releases/download/v$VERSION/$X64_NAME" \
+            --arg arm64_sig "$ARM64_SIG" \
+            --arg arm64_url "https://github.com/decaychain/uncloud/releases/download/v$VERSION/$ARM64_NAME" \
             '{
               version: $version,
               notes: $notes,
               pub_date: $pub_date,
               platforms: {
-                "windows-x86_64": { signature: $signature, url: $url }
+                "windows-x86_64": { signature: $x64_sig, url: $x64_url },
+                "windows-aarch64": { signature: $arm64_sig, url: $arm64_url }
               }
             }' > latest.json
           cat latest.json
