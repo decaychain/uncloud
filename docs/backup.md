@@ -102,6 +102,7 @@ there is no storage cost to organising things for human-friendly restore.
     invites.jsonl
     user_preferences.jsonl
     playlists.jsonl
+    music_categories.jsonl
     shopping_lists.jsonl
     shopping_items.jsonl
     shopping_list_items.jsonl
@@ -202,9 +203,9 @@ Anything new that needs backing up must be added here consciously.
 ```
 users, folders, files, file_versions, storages, shares, folder_shares,
 api_tokens, s3_credentials, sftp_host_keys, apps, webhooks, sync_events,
-invites, user_preferences, playlists, shopping_lists, shopping_items,
-shopping_list_items, shopping_categories, shops, task_projects,
-task_sections, tasks, task_comments, task_labels
+invites, user_preferences, playlists, music_categories, shopping_lists,
+shopping_items, shopping_list_items, shopping_categories, shops,
+task_projects, task_sections, tasks, task_comments, task_labels
 ```
 
 **Skip**:
