@@ -169,9 +169,21 @@ fn MetadataView(scope: LibraryScope) -> Element {
         };
     }
 
-    // Selected category id (when scope is Category(id)).
+    // Dropdown selection. For Category(id) scope it's the active category.
+    // For Folder(id) scope, surface the (alphabetically) first category that
+    // contains the folder so the dropdown reflects what the user is browsing
+    // — most folders only ever belong to a single category, so this matches
+    // the user's mental model in the common case.
     let current_category_id = match &scope {
         LibraryScope::Category(id) => Some(id.clone()),
+        LibraryScope::Folder(fid) => {
+            let mut matches: Vec<MusicCategory> = categories()
+                .into_iter()
+                .filter(|c| c.folder_ids.iter().any(|f| f == fid))
+                .collect();
+            matches.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            matches.into_iter().next().map(|c| c.id)
+        }
         _ => None,
     };
     let folder_scope_id = match &scope {
@@ -188,7 +200,11 @@ fn MetadataView(scope: LibraryScope) -> Element {
         if matches!(nav_state(), MetadataNav::Artists) {
             div { class: "flex flex-wrap items-center gap-3 mb-4",
                 label { class: "input input-bordered input-sm flex items-center gap-2 flex-1 min-w-48",
-                    IconSearch { class: "w-4 h-4 opacity-60".to_string() }
+                    if search_loading() {
+                        span { class: "loading loading-spinner loading-xs opacity-60" }
+                    } else {
+                        IconSearch { class: "w-4 h-4 opacity-60".to_string() }
+                    }
                     input {
                         r#type: "search",
                         class: "grow",
@@ -229,11 +245,15 @@ fn MetadataView(scope: LibraryScope) -> Element {
 
         match nav_state() {
             MetadataNav::Artists => {
-                if !filter().trim().is_empty() {
+                // Only switch to the SearchResults layout once the first
+                // response has arrived. While the user is mid-keystroke
+                // (200 ms debounce + network), we keep the artist grid up so
+                // the page doesn't collapse to a spinner and back.
+                let has_results = !filter().trim().is_empty() && search_results().is_some();
+                if has_results {
                     rsx! {
                         SearchResults {
                             results: search_results(),
-                            loading: search_loading(),
                             on_artist_select: move |name: String| {
                                 nav_state.set(MetadataNav::Artist(name));
                             },
@@ -369,7 +389,6 @@ pub fn MusicScopeFolderView(id: String) -> Element {
 #[component]
 fn SearchResults(
     results: Option<uncloud_common::MusicSearchResponse>,
-    loading: bool,
     on_artist_select: EventHandler<String>,
     on_album_select: EventHandler<MusicAlbumResponse>,
 ) -> Element {
@@ -380,16 +399,15 @@ fn SearchResults(
 
     let player = use_context::<Signal<PlayerState>>();
 
+    // Caller renders this only after the first response has arrived, so
+    // `results` should always be Some here. We treat None defensively as
+    // a no-op rather than a spinner — that keeps the layout shape stable.
     let Some(r) = results else {
-        return rsx! {
-            div { class: "flex items-center justify-center py-12",
-                span { class: "loading loading-spinner loading-md" }
-            }
-        };
+        return rsx! { div {} };
     };
 
     let no_hits = r.artists.is_empty() && r.albums.is_empty() && r.tracks.is_empty();
-    if no_hits && !loading {
+    if no_hits {
         return rsx! {
             div { class: "flex flex-col items-center justify-center py-16 gap-2 text-base-content/60",
                 p { class: "text-lg", "No matches" }
@@ -405,12 +423,6 @@ fn SearchResults(
 
     rsx! {
         div { class: "space-y-8",
-            if loading {
-                div { class: "absolute right-0 mt-1",
-                    span { class: "loading loading-spinner loading-xs opacity-50" }
-                }
-            }
-
             // ── Artists ─────────
             if !r.artists.is_empty() {
                 div { class: "space-y-2",
