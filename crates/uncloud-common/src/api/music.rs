@@ -63,3 +63,39 @@ pub struct MusicAlbumResponse {
     /// File ID of any track in the album whose `has_cover_art` is true.
     pub cover_file_id: Option<String>,
 }
+
+/// Cross-entity search result. Each list is capped server-side; `total_*`
+/// reflects the unbounded match count so the frontend can show "+N more".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MusicSearchResponse {
+    pub artists: Vec<ArtistResponse>,
+    pub albums: Vec<MusicAlbumResponse>,
+    pub tracks: Vec<TrackResponse>,
+    pub total_artists: usize,
+    pub total_albums: usize,
+    pub total_tracks: usize,
+}
+
+/// User-defined Music category — a named label attached to one or more
+/// folders. Used to scope the Library view to a subset of the music tree.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MusicCategory {
+    pub id: String,
+    pub name: String,
+    pub folder_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateMusicCategoryRequest {
+    pub name: String,
+    #[serde(default)]
+    pub folder_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateMusicCategoryRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_ids: Option<Vec<String>>,
+}

@@ -402,6 +402,8 @@ All authenticated routes are mounted under both `/api/...` and `/api/v1/...`. Th
 | `/api/music/artists` | GET | Artist list |
 | `/api/music/artists/{name}/albums` | GET | Albums by artist |
 | `/api/music/albums/{artist}/{album}/tracks` | GET | Tracks in album |
+| `/api/music/categories` | GET/POST | List/create music categories |
+| `/api/music/categories/{id}` | PUT/DELETE | Update / delete category |
 | `/api/playlists` | GET/POST | List/create playlists |
 | `/api/playlists/{id}` | GET/PUT/DELETE | CRUD playlist |
 | `/api/playlists/{id}/tracks` | POST/DELETE | Add/remove tracks |

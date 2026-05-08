@@ -44,6 +44,7 @@ pub const COLLECTION_ALLOWLIST: &[&str] = &[
     "invites",
     "user_preferences",
     "playlists",
+    "music_categories",
     "shopping_lists",
     "shopping_items",
     "shopping_list_items",

@@ -32,7 +32,16 @@ pub fn Sidebar() -> Element {
         "dashboard"
     } else if matches!(route, Route::Gallery {} | Route::GalleryAlbum { .. }) {
         "gallery"
-    } else if matches!(route, Route::Music {} | Route::MusicArtist { .. } | Route::MusicAlbum { .. } | Route::MusicFolder { .. } | Route::MusicPlaylist { .. }) {
+    } else if matches!(
+        route,
+        Route::Music {}
+            | Route::MusicArtist { .. }
+            | Route::MusicAlbum { .. }
+            | Route::MusicFolder { .. }
+            | Route::MusicScopeFolder { .. }
+            | Route::MusicScopeCategory { .. }
+            | Route::MusicPlaylist { .. },
+    ) {
         "music"
     } else if matches!(route, Route::Tasks {} | Route::TasksAssigned {} | Route::TasksProject { .. }) {
         "tasks"
@@ -557,11 +566,14 @@ fn initial_collapsed(
 #[component]
 fn MusicSidebarFolders() -> Element {
     let mut folders_sig: Signal<Vec<MusicFolderResponse>> = use_signal(Vec::new);
+    let mut categorized: Signal<std::collections::HashSet<String>> =
+        use_signal(std::collections::HashSet::new);
     // Set of folder IDs that have been manually collapsed by the user.
     let mut collapsed: Signal<std::collections::HashSet<String>> =
         use_signal(std::collections::HashSet::new);
     let route = use_route::<Route>();
     let expand_depth = use_context::<Signal<u32>>();
+    let cat_dirty = use_context::<Signal<crate::state::MusicCategoryDirtyTick>>();
 
     // Load folders; initialize collapsed from the depth preference.
     use_effect(move || {
@@ -574,6 +586,27 @@ fn MusicSidebarFolders() -> Element {
             }
         });
     });
+
+    // Load categories — populate the set of folders that belong to ≥1 category
+    // so we can mark them in the tree and reroute clicks to the scoped library.
+    // `use_reactive!` makes the dependency on `cat_dirty` explicit; bare
+    // auto-tracking inside `use_effect` was unreliable here — bumps from the
+    // ManageCategoriesModal weren't always observed without a manual reload.
+    use_effect(use_reactive!(|cat_dirty| {
+        let _ = cat_dirty();
+        spawn(async move {
+            if let Ok(cats) = crate::hooks::use_music_categories::list_categories().await {
+                let mut set: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for c in cats {
+                    for fid in c.folder_ids {
+                        set.insert(fid);
+                    }
+                }
+                categorized.set(set);
+            }
+        });
+    }));
 
     // When the depth preference changes, reset collapsed to match the new setting.
     // Manual toggles made during this session are discarded — that's intentional.
@@ -589,10 +622,9 @@ fn MusicSidebarFolders() -> Element {
         return rsx! {};
     }
 
-    let active_id: Option<String> = if let Route::MusicFolder { id } = &route {
-        Some(id.clone())
-    } else {
-        None
+    let active_id: Option<String> = match &route {
+        Route::MusicFolder { id } | Route::MusicScopeFolder { id } => Some(id.clone()),
+        _ => None,
     };
 
     // When the active folder changes, auto-expand all its ancestors.
@@ -625,6 +657,7 @@ fn MusicSidebarFolders() -> Element {
         .collect();
 
     let col = collapsed();
+    let cat_set = categorized();
     let flattened = flatten_music_folder_tree(&folders);
 
     rsx! {
@@ -647,7 +680,13 @@ fn MusicSidebarFolders() -> Element {
                     let is_active = active_id.as_deref() == Some(&fid);
                     let is_parent = has_children.contains(&fid);
                     let is_collapsed = col.contains(&fid);
+                    let is_categorized = cat_set.contains(&fid);
                     let indent_px = depth * 12;
+                    let target = if is_categorized {
+                        Route::MusicScopeFolder { id: folder.folder_id.clone() }
+                    } else {
+                        Route::MusicFolder { id: folder.folder_id.clone() }
+                    };
 
                     rsx! {
                         li {
@@ -674,15 +713,20 @@ fn MusicSidebarFolders() -> Element {
                                     }
                                 } else {
                                     // Spacer so leaf folders align with siblings.
-                                    span { class: "w-5 flex-shrink-0" }
+                                    // Width must match the btn-xs btn-circle toggle (w-6 = 24px),
+                                    // otherwise leaf icons drift 4px left of parent icons.
+                                    span { class: "w-6 flex-shrink-0" }
                                 }
                                 Link {
-                                    to: Route::MusicFolder { id: folder.folder_id.clone() },
+                                    to: target,
                                     class: if is_active {
                                         "flex-1 text-sm font-medium break-words min-w-0 flex items-center gap-2"
+                                    } else if is_categorized {
+                                        "flex-1 text-sm break-words min-w-0 flex items-center gap-2 text-primary"
                                     } else {
                                         "flex-1 text-sm break-words min-w-0 flex items-center gap-2"
                                     },
+                                    title: if is_categorized { "Open in scoped library" } else { "" },
                                     onclick: move |_| close_drawer(),
                                     IconFolder {}
                                     span { class: "truncate", "{folder.name}" }

@@ -193,6 +193,13 @@ pub struct PinnedPlaylistState(pub Option<String>);
 #[derive(Clone, Default, PartialEq)]
 pub struct PlaylistDirtyTick(pub u32);
 
+/// Bumped whenever a music category is created, renamed, deleted, or its
+/// folder membership changes. Sidebar + Library Categories dropdown listen
+/// so the UI reflects new category state without a manual reload — there is
+/// no server-side category SSE event.
+#[derive(Clone, Default, PartialEq)]
+pub struct MusicCategoryDirtyTick(pub u32);
+
 impl PlayerState {
     pub fn current_track(&self) -> Option<&TrackResponse> {
         self.queue.get(self.current_index)

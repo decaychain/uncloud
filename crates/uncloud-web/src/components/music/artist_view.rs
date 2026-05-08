@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use uncloud_common::MusicAlbumResponse;
 use crate::hooks::{use_music, use_player};
+use crate::hooks::use_music::LibraryScope;
 use crate::state::PlayerState;
 use super::album_grid::AlbumGrid;
 use crate::components::icons::IconAlertTriangle;
@@ -8,6 +9,8 @@ use crate::components::icons::IconAlertTriangle;
 #[component]
 pub fn ArtistView(
     name: String,
+    #[props(default = LibraryScope::All)]
+    scope: LibraryScope,
     on_back: EventHandler<()>,
     on_album_select: EventHandler<MusicAlbumResponse>,
 ) -> Element {
@@ -17,12 +20,14 @@ pub fn ArtistView(
     let mut error: Signal<Option<String>> = use_signal(|| None);
 
     let name_effect = name.clone();
-    use_effect(use_reactive!(|name_effect| {
+    let scope_effect = scope.clone();
+    use_effect(use_reactive!(|(name_effect, scope_effect)| {
         let artist_name = name_effect;
+        let scope = scope_effect;
         spawn(async move {
             loading.set(true);
             error.set(None);
-            match use_music::list_artist_albums(&artist_name).await {
+            match use_music::list_artist_albums_scoped(&artist_name, &scope).await {
                 Ok(a) => albums.set(a),
                 Err(e) => error.set(Some(e)),
             }
@@ -48,6 +53,7 @@ pub fn ArtistView(
         };
     }
 
+    let scope_for_play = scope.clone();
     rsx! {
         div {
             div { class: "flex items-center gap-3 mb-4",
@@ -63,8 +69,11 @@ pub fn ArtistView(
                 on_select: on_album_select,
                 on_play: move |album: MusicAlbumResponse| {
                     let player_sig = player;
+                    let scope = scope_for_play.clone();
                     spawn(async move {
-                        if let Ok(tracks) = use_music::list_album_tracks(&album.artist, &album.name).await {
+                        if let Ok(tracks) =
+                            use_music::list_album_tracks_scoped(&album.artist, &album.name, &scope).await
+                        {
                             use_player::play_queue(player_sig, tracks, 0);
                         }
                     });

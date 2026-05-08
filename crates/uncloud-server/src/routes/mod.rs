@@ -116,6 +116,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/music/artists", get(music::list_artists))
         .route("/music/artists/{name}/albums", get(music::list_artist_albums))
         .route("/music/albums/{artist}/{album}/tracks", get(music::list_album_tracks))
+        .route("/music/categories", get(music::list_categories).post(music::create_category))
+        .route("/music/categories/{id}", put(music::update_category).delete(music::delete_category))
+        .route("/music/search", get(music::search_music))
         // Playlists
         .route("/playlists", get(playlists::list_playlists))
         .route("/playlists", post(playlists::create_playlist))
