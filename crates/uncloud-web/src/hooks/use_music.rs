@@ -8,6 +8,28 @@ fn encode(s: &str) -> String {
     js_sys::encode_uri_component(s).as_string().unwrap_or_else(|| s.to_string())
 }
 
+/// Optional restriction applied to library queries (artists / albums / tracks).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum LibraryScope {
+    #[default]
+    All,
+    Folder(String),
+    Category(String),
+}
+
+impl LibraryScope {
+    /// Returns the query-string suffix including a leading `?`, or empty
+    /// when the scope is `All`. Always safe to append to a URL with no
+    /// existing query string.
+    pub fn query_string(&self) -> String {
+        match self {
+            Self::All => String::new(),
+            Self::Folder(id) => format!("?folder_id={}", encode(id)),
+            Self::Category(id) => format!("?category_id={}", encode(id)),
+        }
+    }
+}
+
 pub async fn list_music_tracks(
     folder_id: Option<&str>,
     cursor: Option<&str>,
@@ -55,8 +77,9 @@ pub async fn list_music_folders() -> Result<Vec<MusicFolderResponse>, String> {
     }
 }
 
-pub async fn list_artists() -> Result<Vec<ArtistResponse>, String> {
-    let response = api::get("/music/artists")
+pub async fn list_artists_scoped(scope: &LibraryScope) -> Result<Vec<ArtistResponse>, String> {
+    let url = format!("/music/artists{}", scope.query_string());
+    let response = api::get(&url)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -71,8 +94,16 @@ pub async fn list_artists() -> Result<Vec<ArtistResponse>, String> {
     }
 }
 
-pub async fn list_artist_albums(artist: &str) -> Result<Vec<MusicAlbumResponse>, String> {
-    let response = api::get(&format!("/music/artists/{}/albums", encode(artist)))
+pub async fn list_artist_albums_scoped(
+    artist: &str,
+    scope: &LibraryScope,
+) -> Result<Vec<MusicAlbumResponse>, String> {
+    let url = format!(
+        "/music/artists/{}/albums{}",
+        encode(artist),
+        scope.query_string()
+    );
+    let response = api::get(&url)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -87,15 +118,21 @@ pub async fn list_artist_albums(artist: &str) -> Result<Vec<MusicAlbumResponse>,
     }
 }
 
-pub async fn list_album_tracks(artist: &str, album: &str) -> Result<Vec<TrackResponse>, String> {
-    let response = api::get(&format!(
-        "/music/albums/{}/{}/tracks",
+pub async fn list_album_tracks_scoped(
+    artist: &str,
+    album: &str,
+    scope: &LibraryScope,
+) -> Result<Vec<TrackResponse>, String> {
+    let url = format!(
+        "/music/albums/{}/{}/tracks{}",
         encode(artist),
-        encode(album)
-    ))
-    .send()
-    .await
-    .map_err(|e| e.to_string())?;
+        encode(album),
+        scope.query_string()
+    );
+    let response = api::get(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
 
     if response.ok() {
         response

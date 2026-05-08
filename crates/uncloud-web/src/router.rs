@@ -6,7 +6,10 @@ use crate::components::{
     file_browser::FileBrowser,
     layout::Layout,
     gallery::{Gallery, GalleryAlbum},
-    music::{Music, MusicArtistView, MusicAlbumView as MusicAlbumViewComp, MusicFolderView, MusicPlaylistView},
+    music::{
+        Music, MusicArtistView, MusicAlbumView as MusicAlbumViewComp, MusicFolderView,
+        MusicPlaylistView, MusicScopeCategoryView, MusicScopeFolderView,
+    },
     passwords::PasswordsPage,
     settings::SettingsPage,
     setup::Setup,
@@ -62,6 +65,12 @@ pub enum Route {
 
         #[route("/music/folder/:id")]
         MusicFolder { id: String },
+
+        #[route("/music/scope/folder/:id")]
+        MusicScopeFolder { id: String },
+
+        #[route("/music/scope/category/:id")]
+        MusicScopeCategory { id: String },
 
         #[route("/music/playlist/:id")]
         MusicPlaylist { id: String },
@@ -207,6 +216,20 @@ fn MusicFolder(id: String) -> Element {
         div { class: "p-4",
             MusicFolderView { key: "{id}", folder_id: id }
         }
+    }
+}
+
+#[component]
+fn MusicScopeFolder(id: String) -> Element {
+    rsx! {
+        MusicScopeFolderView { key: "{id}", id }
+    }
+}
+
+#[component]
+fn MusicScopeCategory(id: String) -> Element {
+    rsx! {
+        MusicScopeCategoryView { key: "{id}", id }
     }
 }
 

@@ -1,12 +1,19 @@
 use dioxus::prelude::*;
 use uncloud_common::TrackResponse;
 use crate::hooks::{api, use_music, use_player};
+use crate::hooks::use_music::LibraryScope;
 use crate::state::PlayerState;
 use super::track_list::TrackList;
 use crate::components::icons::{IconAlertTriangle, IconMusic, IconPlay};
 
 #[component]
-pub fn AlbumView(artist: String, album: String, on_back: EventHandler<()>) -> Element {
+pub fn AlbumView(
+    artist: String,
+    album: String,
+    #[props(default = LibraryScope::All)]
+    scope: LibraryScope,
+    on_back: EventHandler<()>,
+) -> Element {
     let player = use_context::<Signal<PlayerState>>();
     let mut tracks: Signal<Vec<TrackResponse>> = use_signal(Vec::new);
     let mut loading = use_signal(|| true);
@@ -14,13 +21,15 @@ pub fn AlbumView(artist: String, album: String, on_back: EventHandler<()>) -> El
 
     let artist_effect = artist.clone();
     let album_effect = album.clone();
-    use_effect(use_reactive!(|(artist_effect, album_effect)| {
+    let scope_effect = scope.clone();
+    use_effect(use_reactive!(|(artist_effect, album_effect, scope_effect)| {
         let a = artist_effect;
         let b = album_effect;
+        let s = scope_effect;
         spawn(async move {
             loading.set(true);
             error.set(None);
-            match use_music::list_album_tracks(&a, &b).await {
+            match use_music::list_album_tracks_scoped(&a, &b, &s).await {
                 Ok(t) => tracks.set(t),
                 Err(e) => error.set(Some(e)),
             }

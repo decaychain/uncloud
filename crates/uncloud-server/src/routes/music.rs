@@ -1,20 +1,23 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::Json;
 use bson::doc;
+use chrono::Utc;
 use mongodb::bson::oid::ObjectId;
 use serde::Deserialize;
 
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
-use crate::models::{File, Folder, FolderShare};
+use crate::models::{File, Folder, FolderShare, MusicCategory};
 use crate::routes::files::{build_folder_path, file_to_response, resolve_included_folder_ids_by};
 use crate::AppState;
 use uncloud_common::{
-    ArtistResponse, AudioMeta, InheritableSetting, MusicAlbumResponse, MusicFolderResponse,
-    MusicTracksResponse, TrackResponse,
+    ArtistResponse, AudioMeta, CreateMusicCategoryRequest, InheritableSetting, MusicAlbumResponse,
+    MusicCategory as MusicCategoryDto, MusicFolderResponse, MusicTracksResponse, TrackResponse,
+    UpdateMusicCategoryRequest,
 };
 
 #[derive(Debug, Deserialize)]
@@ -418,11 +421,127 @@ fn extract_audio_meta(f: &File) -> AudioMeta {
         .unwrap_or_default()
 }
 
+/// Restrict `parent_ids` (full music-included set) to those whose folder is
+/// inside one of `scope_roots` or any of its descendants. Walks the parent→
+/// children chains for owned + shared-owner folders so subtrees of shared
+/// folders work too.
+async fn restrict_to_subtrees(
+    state: &AppState,
+    user_id: ObjectId,
+    parent_ids: Vec<mongodb::bson::Bson>,
+    scope_roots: &[ObjectId],
+) -> Result<Vec<mongodb::bson::Bson>> {
+    use futures::TryStreamExt;
+
+    if scope_roots.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let folders_coll = state.db.collection::<Folder>("folders");
+
+    let mut owner_ids: HashSet<ObjectId> = HashSet::from([user_id]);
+    let shares_coll = state.db.collection::<FolderShare>("folder_shares");
+    let shares: Vec<FolderShare> = shares_coll
+        .find(doc! { "grantee_id": user_id, "music_include": "include" })
+        .await?
+        .try_collect()
+        .await?;
+    for s in &shares {
+        owner_ids.insert(s.owner_id);
+    }
+
+    let owner_bson: Vec<mongodb::bson::Bson> = owner_ids
+        .iter()
+        .copied()
+        .map(mongodb::bson::Bson::ObjectId)
+        .collect();
+    let mut cursor = folders_coll
+        .find(doc! { "owner_id": { "$in": &owner_bson }, "deleted_at": bson::Bson::Null })
+        .await?;
+    let mut all_folders: Vec<Folder> = Vec::new();
+    while cursor.advance().await? {
+        all_folders.push(cursor.deserialize_current()?);
+    }
+
+    let mut children_map: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
+    for f in &all_folders {
+        if let Some(pid) = f.parent_id {
+            children_map.entry(pid).or_default().push(f.id);
+        }
+    }
+
+    let mut allowed: HashSet<ObjectId> = HashSet::new();
+    for &root in scope_roots {
+        if !allowed.insert(root) {
+            continue;
+        }
+        let mut stack = vec![root];
+        while let Some(fid) = stack.pop() {
+            if let Some(children) = children_map.get(&fid) {
+                for &c in children {
+                    if allowed.insert(c) {
+                        stack.push(c);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(parent_ids
+        .into_iter()
+        .filter(|b| match b {
+            mongodb::bson::Bson::ObjectId(oid) => allowed.contains(oid),
+            _ => false,
+        })
+        .collect())
+}
+
+/// Resolve a (folder_id, category_id) pair into a list of root folder
+/// ObjectIds to scope by. Validates that the user owns the category.
+async fn resolve_scope_roots(
+    state: &AppState,
+    user_id: ObjectId,
+    folder_id: Option<&str>,
+    category_id: Option<&str>,
+) -> Result<Option<Vec<ObjectId>>> {
+    if let Some(fid) = folder_id {
+        let oid = ObjectId::parse_str(fid)
+            .map_err(|_| AppError::BadRequest("Invalid folder_id".to_string()))?;
+        return Ok(Some(vec![oid]));
+    }
+    if let Some(cid) = category_id {
+        let oid = ObjectId::parse_str(cid)
+            .map_err(|_| AppError::BadRequest("Invalid category_id".to_string()))?;
+        let coll = state.db.collection::<MusicCategory>("music_categories");
+        let cat = coll
+            .find_one(doc! { "_id": oid, "owner_id": user_id })
+            .await?
+            .ok_or_else(|| AppError::NotFound("MusicCategory".to_string()))?;
+        return Ok(Some(cat.folder_ids));
+    }
+    Ok(None)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LibraryScopeQuery {
+    pub folder_id: Option<String>,
+    pub category_id: Option<String>,
+}
+
 pub async fn list_artists(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    Query(scope): Query<LibraryScopeQuery>,
 ) -> Result<Json<Vec<ArtistResponse>>> {
-    let parent_ids = music_included_parent_ids(&state, user.id).await?;
+    let mut parent_ids = music_included_parent_ids(&state, user.id).await?;
+
+    if let Some(roots) =
+        resolve_scope_roots(&state, user.id, scope.folder_id.as_deref(), scope.category_id.as_deref())
+            .await?
+    {
+        parent_ids = restrict_to_subtrees(&state, user.id, parent_ids, &roots).await?;
+    }
+
     if parent_ids.is_empty() {
         return Ok(Json(Vec::new()));
     }
@@ -472,9 +591,18 @@ pub async fn list_artists(
 pub async fn list_artist_albums(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
-    axum::extract::Path(artist_name): axum::extract::Path<String>,
+    Path(artist_name): Path<String>,
+    Query(scope): Query<LibraryScopeQuery>,
 ) -> Result<Json<Vec<MusicAlbumResponse>>> {
-    let parent_ids = music_included_parent_ids(&state, user.id).await?;
+    let mut parent_ids = music_included_parent_ids(&state, user.id).await?;
+
+    if let Some(roots) =
+        resolve_scope_roots(&state, user.id, scope.folder_id.as_deref(), scope.category_id.as_deref())
+            .await?
+    {
+        parent_ids = restrict_to_subtrees(&state, user.id, parent_ids, &roots).await?;
+    }
+
     if parent_ids.is_empty() {
         return Ok(Json(Vec::new()));
     }
@@ -581,9 +709,18 @@ pub async fn list_artist_albums(
 pub async fn list_album_tracks(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
-    axum::extract::Path((artist_name, album_name)): axum::extract::Path<(String, String)>,
+    Path((artist_name, album_name)): Path<(String, String)>,
+    Query(scope): Query<LibraryScopeQuery>,
 ) -> Result<Json<Vec<TrackResponse>>> {
-    let parent_ids = music_included_parent_ids(&state, user.id).await?;
+    let mut parent_ids = music_included_parent_ids(&state, user.id).await?;
+
+    if let Some(roots) =
+        resolve_scope_roots(&state, user.id, scope.folder_id.as_deref(), scope.category_id.as_deref())
+            .await?
+    {
+        parent_ids = restrict_to_subtrees(&state, user.id, parent_ids, &roots).await?;
+    }
+
     if parent_ids.is_empty() {
         return Ok(Json(Vec::new()));
     }
@@ -661,4 +798,158 @@ pub async fn list_album_tracks(
         .collect();
 
     Ok(Json(tracks))
+}
+
+// ── Music Categories ────────────────────────────────────────────────────────
+
+fn category_to_dto(c: &MusicCategory) -> MusicCategoryDto {
+    MusicCategoryDto {
+        id: c.id.to_hex(),
+        name: c.name.clone(),
+        folder_ids: c.folder_ids.iter().map(|i| i.to_hex()).collect(),
+    }
+}
+
+fn parse_folder_ids(ids: &[String]) -> Result<Vec<ObjectId>> {
+    ids.iter()
+        .map(|s| {
+            ObjectId::parse_str(s)
+                .map_err(|_| AppError::BadRequest(format!("Invalid folder_id: {}", s)))
+        })
+        .collect()
+}
+
+pub async fn list_categories(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Vec<MusicCategoryDto>>> {
+    let coll = state.db.collection::<MusicCategory>("music_categories");
+    let options = mongodb::options::FindOptions::builder()
+        .sort(doc! { "name": 1 })
+        .build();
+    let mut cursor = coll
+        .find(doc! { "owner_id": user.id })
+        .with_options(options)
+        .await?;
+
+    let mut out = Vec::new();
+    while cursor.advance().await? {
+        let cat: MusicCategory = cursor.deserialize_current()?;
+        out.push(category_to_dto(&cat));
+    }
+
+    Ok(Json(out))
+}
+
+pub async fn create_category(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(body): Json<CreateMusicCategoryRequest>,
+) -> Result<(StatusCode, Json<MusicCategoryDto>)> {
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return Err(AppError::BadRequest("Category name cannot be empty".to_string()));
+    }
+    let folder_ids = parse_folder_ids(&body.folder_ids)?;
+
+    let coll = state.db.collection::<MusicCategory>("music_categories");
+
+    let existing = coll
+        .find_one(doc! { "owner_id": user.id, "name": &name })
+        .await?;
+    if existing.is_some() {
+        return Err(AppError::Conflict(format!(
+            "A category named \"{}\" already exists",
+            name
+        )));
+    }
+
+    let cat = MusicCategory::new(user.id, name, folder_ids);
+    coll.insert_one(&cat).await?;
+
+    Ok((StatusCode::CREATED, Json(category_to_dto(&cat))))
+}
+
+pub async fn update_category(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateMusicCategoryRequest>,
+) -> Result<Json<MusicCategoryDto>> {
+    let cat_id = ObjectId::parse_str(&id)
+        .map_err(|_| AppError::BadRequest("Invalid category ID".to_string()))?;
+
+    let coll = state.db.collection::<MusicCategory>("music_categories");
+    let cat = coll
+        .find_one(doc! { "_id": cat_id, "owner_id": user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("MusicCategory".to_string()))?;
+
+    let mut update_doc = doc! {};
+
+    if let Some(ref name) = body.name {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(AppError::BadRequest("Category name cannot be empty".to_string()));
+        }
+        if name != cat.name {
+            let dup = coll
+                .find_one(doc! {
+                    "owner_id": user.id,
+                    "name": name,
+                    "_id": { "$ne": cat_id },
+                })
+                .await?;
+            if dup.is_some() {
+                return Err(AppError::Conflict(format!(
+                    "A category named \"{}\" already exists",
+                    name
+                )));
+            }
+        }
+        update_doc.insert("name", name);
+    }
+
+    if let Some(folder_ids) = body.folder_ids {
+        let parsed = parse_folder_ids(&folder_ids)?;
+        let bson_ids: Vec<bson::Bson> =
+            parsed.iter().copied().map(bson::Bson::ObjectId).collect();
+        update_doc.insert("folder_ids", bson_ids);
+    }
+
+    if !update_doc.is_empty() {
+        update_doc.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
+        coll.update_one(
+            doc! { "_id": cat_id, "owner_id": user.id },
+            doc! { "$set": update_doc },
+        )
+        .await?;
+    }
+
+    let updated = coll
+        .find_one(doc! { "_id": cat_id, "owner_id": user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("MusicCategory".to_string()))?;
+
+    Ok(Json(category_to_dto(&updated)))
+}
+
+pub async fn delete_category(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    let cat_id = ObjectId::parse_str(&id)
+        .map_err(|_| AppError::BadRequest("Invalid category ID".to_string()))?;
+
+    let coll = state.db.collection::<MusicCategory>("music_categories");
+    let result = coll
+        .delete_one(doc! { "_id": cat_id, "owner_id": user.id })
+        .await?;
+
+    if result.deleted_count == 0 {
+        return Err(AppError::NotFound("MusicCategory".to_string()));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }

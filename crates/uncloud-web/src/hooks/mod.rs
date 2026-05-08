@@ -9,6 +9,7 @@ pub mod use_events;
 pub mod use_music;
 pub mod use_player;
 pub mod use_playlists;
+pub mod use_music_categories;
 pub mod use_preferences;
 pub mod use_processing;
 pub mod use_storages;
