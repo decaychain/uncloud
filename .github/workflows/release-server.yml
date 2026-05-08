@@ -10,8 +10,23 @@ permissions:
   packages: write
 
 jobs:
+  # Build the server image natively on each architecture so the Rust + WASM
+  # compile happens at full speed (QEMU emulation for Rust here would be
+  # painfully slow). Each matrix entry pushes its own arch-tagged image and
+  # uploads its native binary. The merge job below stitches both into a
+  # single multi-arch manifest under :VERSION and :latest.
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+            rust_target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            rust_target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -25,24 +40,52 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image
+      - name: Build and push arch-tagged Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.server
           push: true
+          build-args: |
+            RUST_TARGET=${{ matrix.rust_target }}
           tags: |
-            ghcr.io/decaychain/uncloud-server:${{ env.VERSION }}
-            ghcr.io/decaychain/uncloud-server:latest
+            ghcr.io/decaychain/uncloud-server:${{ env.VERSION }}-${{ matrix.arch }}
+            ghcr.io/decaychain/uncloud-server:latest-${{ matrix.arch }}
 
       - name: Extract static binary from image
         run: |
-          docker create --name extract ghcr.io/decaychain/uncloud-server:${{ env.VERSION }}
-          docker cp extract:/uncloud-server uncloud-server-linux-amd64
+          docker create --name extract ghcr.io/decaychain/uncloud-server:${{ env.VERSION }}-${{ matrix.arch }}
+          docker cp extract:/uncloud-server uncloud-server-linux-${{ matrix.arch }}
           docker rm extract
-          chmod +x uncloud-server-linux-amd64
+          chmod +x uncloud-server-linux-${{ matrix.arch }}
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: uncloud-server-linux-amd64
+          files: uncloud-server-linux-${{ matrix.arch }}
+
+  # Combine the two arch-tagged images into a single multi-arch manifest so
+  # `docker pull ghcr.io/decaychain/uncloud-server:VERSION` (and :latest)
+  # resolves to the right image based on the puller's architecture.
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set version from tag
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifests
+        run: |
+          for tag in "${VERSION}" "latest"; do
+            docker buildx imagetools create \
+              -t ghcr.io/decaychain/uncloud-server:${tag} \
+              ghcr.io/decaychain/uncloud-server:${VERSION}-amd64 \
+              ghcr.io/decaychain/uncloud-server:${VERSION}-arm64
+          done
