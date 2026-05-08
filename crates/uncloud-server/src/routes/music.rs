@@ -16,8 +16,8 @@ use crate::routes::files::{build_folder_path, file_to_response, resolve_included
 use crate::AppState;
 use uncloud_common::{
     ArtistResponse, AudioMeta, CreateMusicCategoryRequest, InheritableSetting, MusicAlbumResponse,
-    MusicCategory as MusicCategoryDto, MusicFolderResponse, MusicTracksResponse, TrackResponse,
-    UpdateMusicCategoryRequest,
+    MusicCategory as MusicCategoryDto, MusicFolderResponse, MusicSearchResponse,
+    MusicTracksResponse, TrackResponse, UpdateMusicCategoryRequest,
 };
 
 #[derive(Debug, Deserialize)]
@@ -952,4 +952,191 @@ pub async fn delete_category(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Music search ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct SearchQuery {
+    pub q: Option<String>,
+    pub folder_id: Option<String>,
+    pub category_id: Option<String>,
+    pub limit: Option<usize>,
+}
+
+const SEARCH_DEFAULT_LIMIT: usize = 25;
+const SEARCH_MAX_LIMIT: usize = 200;
+
+pub async fn search_music(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<MusicSearchResponse>> {
+    let q = query.q.unwrap_or_default().trim().to_lowercase();
+    let limit = query
+        .limit
+        .unwrap_or(SEARCH_DEFAULT_LIMIT)
+        .clamp(1, SEARCH_MAX_LIMIT);
+
+    let mut parent_ids = music_included_parent_ids(&state, user.id).await?;
+
+    if let Some(roots) = resolve_scope_roots(
+        &state,
+        user.id,
+        query.folder_id.as_deref(),
+        query.category_id.as_deref(),
+    )
+    .await?
+    {
+        parent_ids = restrict_to_subtrees(&state, user.id, parent_ids, &roots).await?;
+    }
+
+    if q.is_empty() || parent_ids.is_empty() {
+        return Ok(Json(MusicSearchResponse {
+            artists: Vec::new(),
+            albums: Vec::new(),
+            tracks: Vec::new(),
+            total_artists: 0,
+            total_albums: 0,
+            total_tracks: 0,
+        }));
+    }
+
+    let files = fetch_audio_files(&state, user.id, &parent_ids).await?;
+
+    // Aggregate artists + albums across the entire scope (so totals like
+    // track_count reflect reality, not just matching tracks).
+    let mut artist_albums: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut artist_tracks: HashMap<String, i64> = HashMap::new();
+    struct AlbumAgg {
+        year: Option<i32>,
+        track_count: i64,
+        cover_file_id: Option<String>,
+    }
+    let mut albums_agg: HashMap<(String, String), AlbumAgg> = HashMap::new();
+
+    let mut matching_track_files: Vec<&File> = Vec::new();
+
+    for f in &files {
+        let audio = extract_audio_meta(f);
+        let artist = audio
+            .artist
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Unknown Artist")
+            .to_string();
+        let album = audio
+            .album
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Unknown Album")
+            .to_string();
+        let title = audio.title.clone().unwrap_or_default();
+        let album_artist = audio.album_artist.clone().unwrap_or_default();
+
+        artist_albums
+            .entry(artist.clone())
+            .or_default()
+            .insert(album.clone());
+        *artist_tracks.entry(artist.clone()).or_default() += 1;
+
+        let alb = albums_agg
+            .entry((artist.clone(), album.clone()))
+            .or_insert(AlbumAgg {
+                year: audio.year,
+                track_count: 0,
+                cover_file_id: None,
+            });
+        alb.track_count += 1;
+        if alb.year.is_none() {
+            alb.year = audio.year;
+        }
+        if audio.has_cover_art && alb.cover_file_id.is_none() {
+            alb.cover_file_id = Some(f.id.to_hex());
+        }
+
+        // Track-level match: any of title/artist/album/album_artist contains q.
+        let track_match = title.to_lowercase().contains(&q)
+            || artist.to_lowercase().contains(&q)
+            || album.to_lowercase().contains(&q)
+            || album_artist.to_lowercase().contains(&q);
+        if track_match {
+            matching_track_files.push(f);
+        }
+    }
+
+    // Filter artists by name match.
+    let mut artists: Vec<ArtistResponse> = artist_albums
+        .iter()
+        .filter(|(name, _)| name.to_lowercase().contains(&q))
+        .map(|(name, albums)| ArtistResponse {
+            name: name.clone(),
+            album_count: albums.len() as i64,
+            track_count: artist_tracks.get(name).copied().unwrap_or(0),
+        })
+        .collect();
+    artists.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    let total_artists = artists.len();
+
+    // Filter albums by album name OR artist name match.
+    let mut albums: Vec<MusicAlbumResponse> = albums_agg
+        .iter()
+        .filter(|((artist, album), _)| {
+            album.to_lowercase().contains(&q) || artist.to_lowercase().contains(&q)
+        })
+        .map(|((artist, album), info)| MusicAlbumResponse {
+            name: album.clone(),
+            artist: artist.clone(),
+            year: info.year,
+            track_count: info.track_count,
+            cover_file_id: info.cover_file_id.clone(),
+        })
+        .collect();
+    albums.sort_by(|a, b| {
+        let year_cmp = match (a.year, b.year) {
+            (Some(ya), Some(yb)) => ya.cmp(&yb),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        };
+        year_cmp.then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    let total_albums = albums.len();
+
+    // Tracks: build TrackResponse for each matching file, sorted by title then created_at.
+    matching_track_files.sort_by(|a, b| {
+        let title_a = extract_audio_meta(a).title.unwrap_or_default();
+        let title_b = extract_audio_meta(b).title.unwrap_or_default();
+        title_a
+            .to_lowercase()
+            .cmp(&title_b.to_lowercase())
+            .then_with(|| b.created_at.cmp(&a.created_at))
+    });
+    let total_tracks = matching_track_files.len();
+
+    let tracks: Vec<TrackResponse> = matching_track_files
+        .iter()
+        .take(limit)
+        .map(|f| {
+            let file_resp = file_to_response(f);
+            let audio: AudioMeta = file_resp
+                .metadata
+                .get("audio")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            TrackResponse { file: file_resp, audio }
+        })
+        .collect();
+
+    artists.truncate(limit);
+    albums.truncate(limit);
+
+    Ok(Json(MusicSearchResponse {
+        artists,
+        albums,
+        tracks,
+        total_artists,
+        total_albums,
+        total_tracks,
+    }))
 }

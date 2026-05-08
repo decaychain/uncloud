@@ -140,6 +140,8 @@ pub fn ManageCategoriesModal(
                                             cats.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
                                             categories.set(cats);
                                             new_name.set(String::new());
+                                            let next = dirty.peek().0 + 1;
+                                            dirty.set(MusicCategoryDirtyTick(next));
                                             on_changed.call(());
                                         }
                                         Err(e) => {

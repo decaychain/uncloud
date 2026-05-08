@@ -589,7 +589,10 @@ fn MusicSidebarFolders() -> Element {
 
     // Load categories — populate the set of folders that belong to ≥1 category
     // so we can mark them in the tree and reroute clicks to the scoped library.
-    use_effect(move || {
+    // `use_reactive!` makes the dependency on `cat_dirty` explicit; bare
+    // auto-tracking inside `use_effect` was unreliable here — bumps from the
+    // ManageCategoriesModal weren't always observed without a manual reload.
+    use_effect(use_reactive!(|cat_dirty| {
         let _ = cat_dirty();
         spawn(async move {
             if let Ok(cats) = crate::hooks::use_music_categories::list_categories().await {
@@ -603,7 +606,7 @@ fn MusicSidebarFolders() -> Element {
                 categorized.set(set);
             }
         });
-    });
+    }));
 
     // When the depth preference changes, reset collapsed to match the new setting.
     // Manual toggles made during this session are discarded — that's intentional.

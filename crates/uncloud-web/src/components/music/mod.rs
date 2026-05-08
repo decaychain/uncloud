@@ -14,7 +14,7 @@ use uncloud_common::{
     ArtistResponse, MusicAlbumResponse, MusicCategory, PlaylistSummary, ServerEvent,
 };
 
-use crate::components::icons::{IconAlertTriangle, IconSearch, IconX};
+use crate::components::icons::{IconAlertTriangle, IconSearch};
 use crate::hooks::{use_music, use_music_categories, use_playlists};
 use crate::hooks::use_music::LibraryScope;
 use crate::router::Route;
@@ -37,13 +37,17 @@ enum MetadataNav {
 // ── MetadataView ────────────────────────────────────────────────────────────
 
 #[component]
-fn MetadataView(scope: LibraryScope, scope_label: Option<String>) -> Element {
+fn MetadataView(scope: LibraryScope) -> Element {
     let nav = use_navigator();
     let mut nav_state: Signal<MetadataNav> = use_signal(|| MetadataNav::Artists);
     let mut artists: Signal<Vec<ArtistResponse>> = use_signal(Vec::new);
     let mut playlists: Signal<Vec<PlaylistSummary>> = use_signal(Vec::new);
     let mut categories: Signal<Vec<MusicCategory>> = use_signal(Vec::new);
     let mut filter: Signal<String> = use_signal(String::new);
+    let mut search_results: Signal<Option<uncloud_common::MusicSearchResponse>> =
+        use_signal(|| None);
+    let mut search_loading = use_signal(|| false);
+    let mut search_epoch: Signal<u32> = use_signal(|| 0);
     let mut loading = use_signal(|| true);
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut refresh = use_signal(|| 0u32);
@@ -80,6 +84,8 @@ fn MetadataView(scope: LibraryScope, scope_label: Option<String>) -> Element {
         filter.set(String::new());
     }));
 
+    let cat_dirty = use_context::<Signal<crate::state::MusicCategoryDirtyTick>>();
+
     let scope_for_effect = scope.clone();
     use_effect(use_reactive!(|(scope_for_effect, refresh)| {
         let _ = refresh;
@@ -89,10 +95,9 @@ fn MetadataView(scope: LibraryScope, scope_label: Option<String>) -> Element {
             // the spinner (via use_signal(|| true)). Otherwise an SSE event
             // would cover any Artist/Album sub-view rendered below.
             error.set(None);
-            let (artists_res, playlists_res, categories_res) = futures::join!(
+            let (artists_res, playlists_res) = futures::join!(
                 use_music::list_artists_scoped(&scope),
                 use_playlists::list_playlists(),
-                use_music_categories::list_categories(),
             );
             match artists_res {
                 Ok(a) => artists.set(a),
@@ -101,10 +106,48 @@ fn MetadataView(scope: LibraryScope, scope_label: Option<String>) -> Element {
             if let Ok(p) = playlists_res {
                 playlists.set(p);
             }
-            if let Ok(c) = categories_res {
+            loading.set(false);
+        });
+    }));
+
+    // Categories live on a separate dependency (cat_dirty) so creating /
+    // renaming / removing a category from the folder-view modal updates the
+    // dropdown without needing an SSE bump.
+    use_effect(use_reactive!(|cat_dirty| {
+        let _ = cat_dirty();
+        spawn(async move {
+            if let Ok(c) = use_music_categories::list_categories().await {
                 categories.set(c);
             }
-            loading.set(false);
+        });
+    }));
+
+    // Debounced cross-entity search. When the filter is non-empty, fetch
+    // matching artists/albums/tracks from the server; clear when empty.
+    let q_for_effect = filter();
+    let scope_for_search = scope.clone();
+    use_effect(use_reactive!(|(q_for_effect, scope_for_search)| {
+        let q = q_for_effect.trim().to_string();
+        if q.is_empty() {
+            search_results.set(None);
+            search_loading.set(false);
+            return;
+        }
+        search_loading.set(true);
+        let next_epoch = *search_epoch.peek() + 1;
+        search_epoch.set(next_epoch);
+        let scope = scope_for_search.clone();
+        spawn(async move {
+            gloo_timers::future::TimeoutFuture::new(200).await;
+            // Stale-request guard: only the latest typed query wins.
+            if *search_epoch.peek() != next_epoch {
+                return;
+            }
+            match use_music::search_music(&q, &scope, None).await {
+                Ok(r) => search_results.set(Some(r)),
+                Err(_) => {}
+            }
+            search_loading.set(false);
         });
     }));
 
@@ -144,12 +187,12 @@ fn MetadataView(scope: LibraryScope, scope_label: Option<String>) -> Element {
         // Search + categories control row, only shown on the Artists view.
         if matches!(nav_state(), MetadataNav::Artists) {
             div { class: "flex flex-wrap items-center gap-3 mb-4",
-                label { class: "input input-bordered input-sm flex items-center gap-2 flex-1 min-w-48 max-w-sm",
+                label { class: "input input-bordered input-sm flex items-center gap-2 flex-1 min-w-48",
                     IconSearch { class: "w-4 h-4 opacity-60".to_string() }
                     input {
                         r#type: "search",
                         class: "grow",
-                        placeholder: "Filter artists or albums…",
+                        placeholder: "Search artists, albums, tracks…",
                         value: "{filter}",
                         oninput: move |e| filter.set(e.value()),
                     }
@@ -174,13 +217,6 @@ fn MetadataView(scope: LibraryScope, scope_label: Option<String>) -> Element {
                         }
                     }
                 }
-                if let Some(label) = scope_label.clone() {
-                    div { class: "badge badge-primary badge-outline gap-1 cursor-pointer",
-                        onclick: move |_| { let _ = nav.push(Route::Music {}); },
-                        span { "Scope: {label}" }
-                        IconX { class: "w-3 h-3".to_string() }
-                    }
-                }
                 if let Some(fid) = folder_scope_id.clone() {
                     Link {
                         to: Route::MusicFolder { id: fid },
@@ -193,22 +229,29 @@ fn MetadataView(scope: LibraryScope, scope_label: Option<String>) -> Element {
 
         match nav_state() {
             MetadataNav::Artists => {
-                let q = filter().to_lowercase();
-                let filtered: Vec<ArtistResponse> = if q.is_empty() {
-                    artists()
-                } else {
-                    artists().into_iter()
-                        .filter(|a| a.name.to_lowercase().contains(&q))
-                        .collect()
-                };
-                rsx! {
-                    div { class: "space-y-6",
-                        if matches!(scope, LibraryScope::All) {
-                            playlist_list::PlaylistList { playlists: playlists() }
+                if !filter().trim().is_empty() {
+                    rsx! {
+                        SearchResults {
+                            results: search_results(),
+                            loading: search_loading(),
+                            on_artist_select: move |name: String| {
+                                nav_state.set(MetadataNav::Artist(name));
+                            },
+                            on_album_select: move |a: MusicAlbumResponse| {
+                                nav_state.set(MetadataNav::Album(a.artist, a.name));
+                            },
                         }
-                        artist_list::ArtistList {
-                            artists: filtered,
-                            on_select: move |name: String| nav_state.set(MetadataNav::Artist(name)),
+                    }
+                } else {
+                    rsx! {
+                        div { class: "space-y-6",
+                            if matches!(scope, LibraryScope::All) {
+                                playlist_list::PlaylistList { playlists: playlists() }
+                            }
+                            artist_list::ArtistList {
+                                artists: artists(),
+                                on_select: move |name: String| nav_state.set(MetadataNav::Artist(name)),
+                            }
                         }
                     }
                 }
@@ -254,7 +297,7 @@ pub fn Music() -> Element {
             div { class: "flex items-center justify-between",
                 h1 { class: "text-2xl font-bold", "Music" }
             }
-            MetadataView { scope: LibraryScope::All, scope_label: None }
+            MetadataView { scope: LibraryScope::All }
         }
     }
 }
@@ -285,7 +328,7 @@ pub fn MusicScopeCategoryView(id: String) -> Element {
                     }
                 }
             }
-            MetadataView { scope: LibraryScope::Category(id), scope_label: label }
+            MetadataView { scope: LibraryScope::Category(id) }
         }
     }
 }
@@ -316,7 +359,128 @@ pub fn MusicScopeFolderView(id: String) -> Element {
                     }
                 }
             }
-            MetadataView { scope: LibraryScope::Folder(id), scope_label: label }
+            MetadataView { scope: LibraryScope::Folder(id) }
+        }
+    }
+}
+
+// ── SearchResults ───────────────────────────────────────────────────────────
+
+#[component]
+fn SearchResults(
+    results: Option<uncloud_common::MusicSearchResponse>,
+    loading: bool,
+    on_artist_select: EventHandler<String>,
+    on_album_select: EventHandler<MusicAlbumResponse>,
+) -> Element {
+    use track_list::TrackList;
+    use album_grid::AlbumGrid;
+    use crate::hooks::use_player;
+    use crate::state::PlayerState;
+
+    let player = use_context::<Signal<PlayerState>>();
+
+    let Some(r) = results else {
+        return rsx! {
+            div { class: "flex items-center justify-center py-12",
+                span { class: "loading loading-spinner loading-md" }
+            }
+        };
+    };
+
+    let no_hits = r.artists.is_empty() && r.albums.is_empty() && r.tracks.is_empty();
+    if no_hits && !loading {
+        return rsx! {
+            div { class: "flex flex-col items-center justify-center py-16 gap-2 text-base-content/60",
+                p { class: "text-lg", "No matches" }
+                p { class: "text-sm", "Try a different search term." }
+            }
+        };
+    }
+
+    let artists_extra = r.total_artists.saturating_sub(r.artists.len());
+    let albums_extra = r.total_albums.saturating_sub(r.albums.len());
+    let tracks_extra = r.total_tracks.saturating_sub(r.tracks.len());
+    let tracks_for_play = r.tracks.clone();
+
+    rsx! {
+        div { class: "space-y-8",
+            if loading {
+                div { class: "absolute right-0 mt-1",
+                    span { class: "loading loading-spinner loading-xs opacity-50" }
+                }
+            }
+
+            // ── Artists ─────────
+            if !r.artists.is_empty() {
+                div { class: "space-y-2",
+                    h2 { class: "text-lg font-semibold", "Artists" }
+                    div { class: "grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4",
+                        for artist in r.artists.iter() {
+                            {
+                                let name = artist.name.clone();
+                                let name_click = artist.name.clone();
+                                let album_count = artist.album_count;
+                                let track_count = artist.track_count;
+                                let first_letter = name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                                rsx! {
+                                    div {
+                                        class: "card bg-base-100 shadow-sm border border-base-300 cursor-pointer hover:shadow-md hover:ring-2 hover:ring-primary transition-all",
+                                        onclick: move |_| on_artist_select.call(name_click.clone()),
+                                        div { class: "card-body items-center text-center p-4 gap-2",
+                                            div { class: "avatar placeholder",
+                                                div { class: "bg-primary text-primary-content rounded-full w-16 h-16",
+                                                    span { class: "text-2xl font-bold", "{first_letter}" }
+                                                }
+                                            }
+                                            div { class: "text-sm font-medium truncate w-full", title: "{name}", "{name}" }
+                                            div { class: "text-xs text-base-content/50",
+                                                "{album_count} albums · {track_count} tracks"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if artists_extra > 0 {
+                        p { class: "text-xs text-base-content/50", "+{artists_extra} more artists — refine your search to narrow." }
+                    }
+                }
+            }
+
+            // ── Albums ─────────
+            if !r.albums.is_empty() {
+                div { class: "space-y-2",
+                    h2 { class: "text-lg font-semibold", "Albums" }
+                    AlbumGrid {
+                        albums: r.albums.clone(),
+                        on_select: on_album_select,
+                        on_play: None,
+                    }
+                    if albums_extra > 0 {
+                        p { class: "text-xs text-base-content/50", "+{albums_extra} more albums — refine your search to narrow." }
+                    }
+                }
+            }
+
+            // ── Tracks ─────────
+            if !r.tracks.is_empty() {
+                div { class: "space-y-2",
+                    h2 { class: "text-lg font-semibold", "Tracks" }
+                    TrackList {
+                        tracks: r.tracks.clone(),
+                        show_artist: true,
+                        show_album: true,
+                        on_play: move |idx: usize| {
+                            use_player::play_queue(player, tracks_for_play.clone(), idx);
+                        },
+                    }
+                    if tracks_extra > 0 {
+                        p { class: "text-xs text-base-content/50", "+{tracks_extra} more tracks — refine your search to narrow." }
+                    }
+                }
+            }
         }
     }
 }

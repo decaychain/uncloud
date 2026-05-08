@@ -1,5 +1,6 @@
 use uncloud_common::{
-    ArtistResponse, MusicAlbumResponse, MusicFolderResponse, MusicTracksResponse, TrackResponse,
+    ArtistResponse, MusicAlbumResponse, MusicFolderResponse, MusicSearchResponse,
+    MusicTracksResponse, TrackResponse,
 };
 
 use super::api;
@@ -141,5 +142,34 @@ pub async fn list_album_tracks_scoped(
             .map_err(|e| e.to_string())
     } else {
         Err("Failed to load album tracks".to_string())
+    }
+}
+
+pub async fn search_music(
+    query: &str,
+    scope: &LibraryScope,
+    limit: Option<usize>,
+) -> Result<MusicSearchResponse, String> {
+    let mut params = vec![format!("q={}", encode(query))];
+    match scope {
+        LibraryScope::All => {}
+        LibraryScope::Folder(id) => params.push(format!("folder_id={}", encode(id))),
+        LibraryScope::Category(id) => params.push(format!("category_id={}", encode(id))),
+    }
+    if let Some(l) = limit {
+        params.push(format!("limit={}", l));
+    }
+    let url = format!("/music/search?{}", params.join("&"));
+    let response = api::get(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if response.ok() {
+        response
+            .json::<MusicSearchResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err("Search failed".to_string())
     }
 }
