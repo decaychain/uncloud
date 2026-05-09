@@ -49,6 +49,14 @@ pub fn OAuthConsent() -> Element {
     let mut submitting = use_signal(|| false);
 
     use_effect(move || {
+        // Wait for the app-level bootstrap (`use_auth::me()`) to settle
+        // before deciding whether the user is signed in. Otherwise the
+        // initial render with `loading=true, user=None` would bounce us
+        // to /login on every page load.
+        if auth_state.read().loading {
+            return;
+        }
+
         // If not logged in, bounce to /login carrying the full URL so we
         // can come back here after auth.
         if auth_state.read().user.is_none() {

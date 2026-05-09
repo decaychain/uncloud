@@ -79,7 +79,14 @@ pub fn Login() -> Element {
                 .filter(|n| n.starts_with('/') && !n.starts_with("//"));
 
             if let Some(target) = next {
-                nav.replace(target.as_str());
+                // Use a hard navigation so the query string is preserved
+                // verbatim — `nav.replace(&str)` strips the query when it
+                // matches the path to a known Route variant. The full
+                // reload re-bootstraps auth via /auth/me with the cookie
+                // we just set.
+                if let Some(window) = web_sys::window() {
+                    let _ = window.location().set_href(&target);
+                }
                 return;
             }
 
