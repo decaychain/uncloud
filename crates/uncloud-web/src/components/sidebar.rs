@@ -503,14 +503,18 @@ fn GallerySidebarAlbums() -> Element {
                     li {
                         Link {
                             to: Route::GalleryAlbum { id: album.folder_id.clone() },
-                            class: if is_active { "active" } else { "" },
+                            class: if is_active {
+                                "flex items-center gap-2 min-w-0 active"
+                            } else {
+                                "flex items-center gap-2 min-w-0"
+                            },
                             style: "padding-left: calc(0.75rem + {indent_px}px)",
                             onclick: move |_| close_drawer(),
                             if depth > 0 {
-                                span { class: "opacity-30 mr-1 text-xs", "└" }
+                                span { class: "opacity-30 text-xs flex-shrink-0", "└" }
                             }
                             IconFolder {}
-                            span { "{album.name}" }
+                            span { class: "truncate min-w-0", "{album.name}" }
                         }
                     }
                 }
