@@ -24,6 +24,7 @@ pub mod admin_processing;
 pub mod sync_events;
 pub mod audit;
 pub mod duplicates;
+pub mod oauth;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -57,10 +58,28 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/apps/register", post(apps::register_app))
         .route("/apps/webhooks", post(apps::register_webhook));
 
+    // OAuth — public endpoints (discovery, registration, token, revoke).
+    // Mounted at root paths (no /api prefix) because the OAuth/MCP specs
+    // assume well-known and oauth/* live at the host root.
+    let oauth_public_routes = Router::new()
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth::authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth::protected_resource_metadata),
+        )
+        .route("/oauth/register", post(oauth::register_client))
+        .route("/oauth/token", post(oauth::token_endpoint))
+        .route("/oauth/revoke", post(oauth::revoke_endpoint))
+        .route("/oauth/clients/lookup", get(oauth::lookup_client));
+
     let public_routes = Router::new()
         .route("/health", get(health_check))
         .nest("/api", public_api.clone())
-        .nest("/api/v1", public_api.merge(public_v1_only));
+        .nest("/api/v1", public_api.merge(public_v1_only))
+        .merge(oauth_public_routes);
 
     // -- Authenticated routes defined once, nested under /api and /api/v1 --
     let auth_api = Router::new()
@@ -211,7 +230,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/s3/credentials/{id}", delete(s3_credentials::delete_credential))
         .route("/apps", get(apps::list_apps))
         .route("/auth/me/features", put(auth::update_my_features))
-        .route("/auth/me/preferences", put(auth::update_my_preferences));
+        .route("/auth/me/preferences", put(auth::update_my_preferences))
+        // OAuth consent + connected-apps management (authenticated)
+        .route("/oauth/authorize", post(oauth::authorize_submit))
+        .route("/oauth/connected-apps", get(oauth::list_connected_apps))
+        .route("/oauth/connected-apps/{client_id}", delete(oauth::revoke_connected_app));
 
     let auth_routes = Router::new()
         .nest("/api", auth_api.clone())

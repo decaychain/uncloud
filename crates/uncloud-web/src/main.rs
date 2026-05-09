@@ -6,6 +6,11 @@ mod hooks;
 
 fn main() {
     console_error_panic_hook::set_once();
+    // Snapshot the URL's query string before the Dioxus router takes over.
+    // Routes like /oauth/authorize have no params, so the router strips the
+    // query during its first pushState — stashing it here lets the consent
+    // component read it later via `hooks::api::initial_search()`.
+    hooks::api::snapshot_initial_url();
     // In Tauri mode we must get the server URL from the native config before
     // launching Dioxus, because the Router's first pushState would otherwise
     // clear any hash fragment we could have used. We spawn an async task so
