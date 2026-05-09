@@ -7,6 +7,25 @@ use web_sys::RequestCredentials;
 thread_local! {
     static CACHED_BASE: RefCell<Option<String>> = const { RefCell::new(None) };
     static AUTH_TOKEN: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The query string the SPA was loaded with, captured before
+    /// `dioxus::launch` because the router strips it during normalisation.
+    /// Read with `initial_search()`.
+    static INITIAL_SEARCH: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// Capture `window.location.search` before the Dioxus router takes over.
+/// Must be called once at the top of `main` (before `dioxus::launch`).
+pub fn snapshot_initial_url() {
+    let search = web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .unwrap_or_default();
+    INITIAL_SEARCH.with(|cell| *cell.borrow_mut() = search);
+}
+
+/// The query string the SPA was loaded with (including the leading `?`,
+/// or empty). Survives router normalisation.
+pub fn initial_search() -> String {
+    INITIAL_SEARCH.with(|cell| cell.borrow().clone())
 }
 
 const LS_API_BASE: &str = "uncloud_api_base";

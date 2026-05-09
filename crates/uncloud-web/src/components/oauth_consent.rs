@@ -2,24 +2,18 @@ use std::collections::HashMap;
 
 use dioxus::prelude::*;
 
+use crate::hooks::api;
 use crate::hooks::use_oauth::{self, AuthorizeSubmit, OAuthClient};
 use crate::state::AuthState;
 
 fn parse_query() -> HashMap<String, String> {
     let mut out = HashMap::new();
-    let Some(window) = web_sys::window() else {
-        return out;
-    };
-    let search = window
-        .location()
-        .search()
-        .unwrap_or_default()
-        .trim_start_matches('?')
-        .to_string();
-    if search.is_empty() {
+    let search = api::initial_search();
+    let trimmed = search.trim_start_matches('?');
+    if trimmed.is_empty() {
         return out;
     }
-    for pair in search.split('&') {
+    for pair in trimmed.split('&') {
         let mut iter = pair.splitn(2, '=');
         let key = iter.next().unwrap_or("").to_string();
         let val = iter.next().unwrap_or("").to_string();
