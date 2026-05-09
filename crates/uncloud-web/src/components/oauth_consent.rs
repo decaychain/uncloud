@@ -43,10 +43,15 @@ pub fn OAuthConsent() -> Element {
     let auth_state = use_context::<Signal<AuthState>>();
     let nav = use_navigator();
 
-    let mut params = use_signal(HashMap::<String, String>::new);
+    // Parse the URL query string at mount. The Dioxus router normalises the
+    // visible URL once it takes over (it has no params on the OAuthAuthorize
+    // route), which strips ?client_id=...; reading later than mount races
+    // and finds an empty search.
+    let params = use_signal(parse_query);
     let mut client = use_signal(|| None::<OAuthClient>);
     let mut error = use_signal(|| None::<String>);
     let mut submitting = use_signal(|| false);
+    let mut lookup_started = use_signal(|| false);
 
     use_effect(move || {
         // Wait for the app-level bootstrap (`use_auth::me()`) to settle
@@ -60,34 +65,36 @@ pub fn OAuthConsent() -> Element {
         // If not logged in, bounce to /login carrying the full URL so we
         // can come back here after auth.
         if auth_state.read().user.is_none() {
-            let here = web_sys::window()
-                .map(|w| {
-                    format!(
-                        "{}{}",
-                        w.location().pathname().unwrap_or_default(),
-                        w.location().search().unwrap_or_default()
-                    )
-                })
-                .unwrap_or_default();
+            let p = params.read();
+            let qs: Vec<String> = p
+                .iter()
+                .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
+                .collect();
+            let here = if qs.is_empty() {
+                "/oauth/authorize".to_string()
+            } else {
+                format!("/oauth/authorize?{}", qs.join("&"))
+            };
             let next = urlencoding::encode(&here);
             nav.replace(format!("/login?next={}", next));
             return;
         }
 
-        let parsed = parse_query();
-        let client_id = parsed.get("client_id").cloned();
-        params.set(parsed);
-
-        if let Some(client_id) = client_id {
-            spawn(async move {
-                match use_oauth::lookup_client(&client_id).await {
-                    Ok(c) => client.set(Some(c)),
-                    Err(e) => error.set(Some(format!("Could not load client: {}", e))),
-                }
-            });
-        } else {
-            error.set(Some("Missing client_id".into()));
+        if *lookup_started.read() {
+            return;
         }
+        let client_id = params.read().get("client_id").cloned();
+        let Some(client_id) = client_id else {
+            error.set(Some("Missing client_id".into()));
+            return;
+        };
+        lookup_started.set(true);
+        spawn(async move {
+            match use_oauth::lookup_client(&client_id).await {
+                Ok(c) => client.set(Some(c)),
+                Err(e) => error.set(Some(format!("Could not load client: {}", e))),
+            }
+        });
     });
 
     let mut submit = move |decision: &'static str| {
