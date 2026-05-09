@@ -139,12 +139,29 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         .await?;
 
     // Folders indexes
+    //
+    // Same shape as the files unique index above: a partial filter on
+    // `deleted_at: null` so that soft-deleted (trashed) folders don't occupy
+    // their (owner, parent, name) slot. Without the filter, a trashed folder
+    // blocks any later attempt to recreate a folder with the same name —
+    // notably during a storage rescan, where the import would E11000 on the
+    // soft-deleted record. Older deployments may already have a non-partial
+    // index under the same name; drop it before re-creating so MongoDB doesn't
+    // reject the new options.
     let folders = db.collection::<mongodb::bson::Document>("folders");
+    let _ = folders.drop_index("owner_id_1_parent_id_1_name_1").await;
     folders
         .create_index(
             IndexModel::builder()
                 .keys(mongodb::bson::doc! { "owner_id": 1, "parent_id": 1, "name": 1 })
-                .options(IndexOptions::builder().unique(true).build())
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(
+                            mongodb::bson::doc! { "deleted_at": mongodb::bson::Bson::Null },
+                        )
+                        .build(),
+                )
                 .build(),
         )
         .await?;
