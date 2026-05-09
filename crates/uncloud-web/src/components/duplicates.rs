@@ -293,14 +293,8 @@ fn SubsetCard(pair: SubsetPair, on_resolved: EventHandler<()>) -> Element {
 
 #[component]
 fn StrayCard(set: StraySet, on_resolved: EventHandler<()>) -> Element {
-    // Pre-select all but the first (oldest) file by default.
-    let initial_selected: HashSet<String> = set
-        .files
-        .iter()
-        .skip(1)
-        .map(|f| f.id.clone())
-        .collect();
-    let mut selected: Signal<HashSet<String>> = use_signal(move || initial_selected.clone());
+    // Default to nothing selected — user actively picks what to remove.
+    let mut selected: Signal<HashSet<String>> = use_signal(HashSet::new);
     let mut deleting = use_signal(|| false);
     let mut error: Signal<Option<String>> = use_signal(|| None);
 
@@ -309,22 +303,30 @@ fn StrayCard(set: StraySet, on_resolved: EventHandler<()>) -> Element {
     let files = set.files.clone();
     let selected_count = selected().len();
 
-    let do_delete = {
+    let do_delete = move |_| {
+        spawn(async move {
+            deleting.set(true);
+            error.set(None);
+            let ids: Vec<String> = selected().iter().cloned().collect();
+            let (_ok, errs) = use_duplicates::delete_files(ids).await;
+            if !errs.is_empty() {
+                error.set(Some(format!("{} deletions failed", errs.len())));
+            }
+            deleting.set(false);
+            on_resolved.call(());
+        });
+    };
+
+    let select_all_but_oldest = {
         let files = files.clone();
         move |_| {
-            let _ = files.clone();
-            spawn(async move {
-                deleting.set(true);
-                error.set(None);
-                let ids: Vec<String> = selected().iter().cloned().collect();
-                let (_ok, errs) = use_duplicates::delete_files(ids).await;
-                if !errs.is_empty() {
-                    error.set(Some(format!("{} deletions failed", errs.len())));
-                }
-                deleting.set(false);
-                on_resolved.call(());
-            });
+            let ids: HashSet<String> = files.iter().skip(1).map(|f| f.id.clone()).collect();
+            selected.set(ids);
         }
+    };
+
+    let clear_selection = move |_| {
+        selected.set(HashSet::new());
     };
 
     rsx! {
@@ -345,10 +347,30 @@ fn StrayCard(set: StraySet, on_resolved: EventHandler<()>) -> Element {
                         if deleting() {
                             "Deleting…"
                         } else {
-                            "Delete selected ({selected_count})"
+                            "Delete checked ({selected_count})"
                         }
                     }
                 }
+
+                p { class: "text-sm text-base-content/70 mt-1",
+                    "Tick the copies you want moved to trash."
+                }
+
+                div { class: "flex gap-2 mt-2",
+                    button {
+                        class: "btn btn-ghost btn-xs",
+                        disabled: deleting(),
+                        onclick: select_all_but_oldest,
+                        "Select all but oldest"
+                    }
+                    button {
+                        class: "btn btn-ghost btn-xs",
+                        disabled: deleting() || selected_count == 0,
+                        onclick: clear_selection,
+                        "Clear"
+                    }
+                }
+
                 ul { class: "mt-2 text-sm",
                     for f in files.iter() {
                         {
@@ -361,12 +383,12 @@ fn StrayCard(set: StraySet, on_resolved: EventHandler<()>) -> Element {
                                         class: "checkbox checkbox-sm",
                                         checked: selected().contains(&id),
                                         disabled: deleting(),
-                                        onchange: move |evt| {
+                                        onchange: move |_| {
                                             let mut s = selected();
-                                            if evt.value() == "true" {
-                                                s.insert(id_change.clone());
-                                            } else {
+                                            if s.contains(&id_change) {
                                                 s.remove(&id_change);
+                                            } else {
+                                                s.insert(id_change.clone());
                                             }
                                             selected.set(s);
                                         },
