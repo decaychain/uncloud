@@ -18,6 +18,7 @@ Uncloud is a self-hosted personal cloud storage system. It is a Rust workspace w
 | Implemented feature inventory | [docs/Features.md](docs/Features.md) |
 | Outstanding work / planned features | [docs/Roadmap.md](docs/Roadmap.md) |
 | Desktop auto-update (Windows NSIS + Fedora COPR) | [docs/Auto-Update.md](docs/Auto-Update.md) |
+| Test inventory + how to run them | [TESTING.md](TESTING.md) |
 | Design notes (per-feature) | `docs/*.md` (kebab-case files) |
 
 When you change behaviour that affects any of the above, update the relevant doc in the same change. Keep this index slim — it is auto-loaded into every Claude session, so detail belongs in the linked files.

@@ -93,8 +93,10 @@ Uncloud/
           folder.rs            ← Folder, SyncStrategy
           folder_share.rs      ← FolderShare, SharePermissionModel
           storage.rs           ← Storage (backend config doc)
+          sftp_host_key.rs     ← SFTP TOFU host-key pin (per storage_id)
           share.rs             ← Share (public link), ShareResourceType
           playlist.rs          ← Playlist, PlaylistTrack
+          music_category.rs    ← MusicCategory (user-defined library scope: name + folder_ids)
           shopping.rs          ← ShoppingCategory, Shop, ShoppingItem, ShoppingList,
                                  ShoppingListItem
           task.rs              ← TaskProject, TaskSection, Task, TaskComment, TaskLabel,
@@ -107,6 +109,8 @@ Uncloud/
           totp_challenge.rs    ← short-lived two-step-login challenge
           user_preferences.rs  ← UserPreferences (dashboard_tiles), VaultRecentsDoc
           sync_event.rs        ← SyncEvent (audit log row, TTL-purged)
+          backup_lock.rs       ← single-writer lock for backup runs (heartbeat-based)
+          migration_lock.rs    ← single-writer lock for offline storage migrations
         middleware/
           auth.rs              ← AuthUser extractor; cookie + Bearer-token auth_middleware;
                                  admin_middleware
@@ -135,6 +139,7 @@ Uncloud/
           file_item.rs         ← Individual file card/row (thumbnail, context menu trigger)
           file_properties.rs   ← File details panel
           file_viewer.rs       ← File viewer (image lightbox, text, PDF, audio, password vault)
+          file_open_viewer.rs  ← Open-file dispatcher (chooses viewer or native handoff)
           upload.rs            ← Upload zone (hidden input + drag-and-drop)
           context_menu.rs      ← Right-click / long-press dropdown
           share_dialog.rs      ← Public share-link modal (password, expiry, download limit)
@@ -158,6 +163,7 @@ Uncloud/
             playlist_view.rs   ← Playlist detail (track list + reorder)
             playlist_panel.rs  ← Persistent right-side playlist panel
             track_list.rs      ← Reusable track list component
+            manage_categories.rs ← Modal: toggle a folder's category memberships, create new category
           player.rs            ← Audio player bar (play/pause, skip, queue, progress)
           tasks/
             mod.rs             ← Tasks page shell
@@ -165,6 +171,7 @@ Uncloud/
             board_card.rs      ← Single task card
             list_view.rs       ← Flat list view
             schedule_view.rs   ← Date-grouped schedule
+            assigned_view.rs   ← Cross-project "assigned to me" feed
             task_detail.rs     ← Task drawer (description, comments, attachments, subtasks)
             project_settings.rs ← Per-project settings (members, sections, view)
           settings.rs          ← Settings page (profile, TOTP, S3 keys, sessions, sync,
@@ -180,10 +187,14 @@ Uncloud/
         hooks/
           api.rs               ← API base URL helpers (seed_api_base for desktop)
           tauri.rs             ← Tauri JS bridge (invoke, get_config, autostart)
+          biometric.rs         ← Biometric unlock bridge (desktop / Android)
           use_auth.rs          ← login/logout/register, TOTP, change-password, server-info
           use_files.rs         ← fetch/upload/delete/move/copy file API calls
+          use_file_opener.rs   ← native open-with handoff (desktop / Android)
+          use_drag_cleanup.rs  ← document-level pointerup safety net for drag operations
           use_events.rs        ← SSE subscription hook (FnMut handler)
-          use_music.rs         ← music track/artist/album API calls
+          use_music.rs         ← music track/artist/album API calls (with LibraryScope)
+          use_music_categories.rs ← music category CRUD
           use_player.rs        ← audio player state management
           use_playlists.rs     ← playlist CRUD API calls
           use_search.rs        ← search API calls
@@ -389,6 +400,8 @@ All authenticated routes are mounted under both `/api/...` and `/api/v1/...`. Th
 | `/api/folders/{id}/copy` | POST | Copy folder (recursive) |
 | `/api/folders/{id}/breadcrumb` | GET | Folder breadcrumb chain |
 | `/api/folders/{id}/effective-strategy` | GET | Resolved sync strategy |
+| `/api/folders/{id}/effective-storage` | GET | Resolved storage backend (id + name) |
+| `/api/storages` | GET | List storage names (non-admin; used by folder-level storage picker) |
 | `/api/sync/tree` | GET | Full sync tree |
 | `/api/folder-shares` | POST | Share folder with another user |
 | `/api/folder-shares/by-me` | GET | List folders I've shared |
@@ -404,6 +417,7 @@ All authenticated routes are mounted under both `/api/...` and `/api/v1/...`. Th
 | `/api/music/albums/{artist}/{album}/tracks` | GET | Tracks in album |
 | `/api/music/categories` | GET/POST | List/create music categories |
 | `/api/music/categories/{id}` | PUT/DELETE | Update / delete category |
+| `/api/music/search` | GET | Cross-entity search (artists + albums + tracks); accepts `?folder_id=` / `?category_id=` to scope |
 | `/api/playlists` | GET/POST | List/create playlists |
 | `/api/playlists/{id}` | GET/PUT/DELETE | CRUD playlist |
 | `/api/playlists/{id}/tracks` | POST/DELETE | Add/remove tracks |
@@ -449,6 +463,7 @@ All authenticated routes are mounted under both `/api/...` and `/api/v1/...`. Th
 | `/api/tasks/labels/{id}` | PUT/DELETE | Update/delete label |
 | `/api/tasks/{id}` | GET/PUT/DELETE | CRUD task |
 | `/api/tasks/{id}/status` | PUT | Update task status |
+| `/api/tasks/{id}/completion-history` | DELETE | Clear recurring-task completion history |
 | `/api/tasks/{id}/subtasks` | POST | Create subtask |
 | `/api/tasks/{id}/promote` | POST | Promote subtask to top-level |
 | `/api/tasks/{id}/attachments` | POST | Attach files |
