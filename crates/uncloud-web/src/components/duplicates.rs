@@ -6,6 +6,18 @@ use uncloud_common::{DuplicateReport, MirrorCluster, StraySet, SubsetPair};
 use crate::components::icons::{IconCopy, IconRefreshCw, IconTrash};
 use crate::hooks::use_duplicates;
 
+/// What a card reports back to the page after a successful resolve, so the
+/// page can mutate the report locally without a full refetch (which would
+/// blink and reset scroll position). `Refetch` is the fallback when the
+/// card can't optimistically reconcile (e.g. partial-failure delete).
+#[derive(Debug, Clone)]
+enum Resolution {
+    MirrorRemoved(String),
+    SubsetRemoved(String),
+    StrayFilesRemoved(String, Vec<String>),
+    Refetch,
+}
+
 #[component]
 pub fn DuplicatesPage() -> Element {
     let mut report: Signal<Option<DuplicateReport>> = use_signal(|| None);
@@ -28,6 +40,32 @@ pub fn DuplicatesPage() -> Element {
 
     let do_rescan = move |_| {
         refresh.set(refresh() + 1);
+    };
+
+    let on_resolution = move |action: Resolution| {
+        if matches!(action, Resolution::Refetch) {
+            refresh.set(refresh() + 1);
+            return;
+        }
+        let mut r = match report() {
+            Some(r) => r,
+            None => return,
+        };
+        match action {
+            Resolution::MirrorRemoved(id) => r.mirror_clusters.retain(|c| c.id != id),
+            Resolution::SubsetRemoved(id) => r.subsets.retain(|s| s.id != id),
+            Resolution::StrayFilesRemoved(sid, ids) => {
+                if let Some(s) = r.stray_sets.iter_mut().find(|s| s.id == sid) {
+                    s.files.retain(|f| !ids.contains(&f.id));
+                }
+                // A hash group with fewer than 2 remaining files is no longer a
+                // duplicate set — drop it entirely.
+                r.stray_sets.retain(|s| s.files.len() >= 2);
+            }
+            Resolution::Refetch => unreachable!(),
+        }
+        recompute_totals(&mut r);
+        report.set(Some(r));
     };
 
     rsx! {
@@ -73,7 +111,7 @@ pub fn DuplicatesPage() -> Element {
                             MirrorCard {
                                 key: "{cluster.id}",
                                 cluster: cluster.clone(),
-                                on_resolved: move |_| { refresh.set(refresh() + 1); },
+                                on_resolved: on_resolution,
                             }
                         }
                     }
@@ -86,7 +124,7 @@ pub fn DuplicatesPage() -> Element {
                             SubsetCard {
                                 key: "{pair.id}",
                                 pair: pair.clone(),
-                                on_resolved: move |_| { refresh.set(refresh() + 1); },
+                                on_resolved: on_resolution,
                             }
                         }
                     }
@@ -99,7 +137,7 @@ pub fn DuplicatesPage() -> Element {
                             StrayCard {
                                 key: "{set.id}",
                                 set: set.clone(),
-                                on_resolved: move |_| { refresh.set(refresh() + 1); },
+                                on_resolved: on_resolution,
                             }
                         }
                     }
@@ -107,6 +145,25 @@ pub fn DuplicatesPage() -> Element {
             }
         }
     }
+}
+
+fn recompute_totals(r: &mut DuplicateReport) {
+    let mirror_files: u32 = r.mirror_clusters.iter().map(|c| c.file_count).sum();
+    let subset_files: u32 = r.subsets.iter().map(|s| s.file_count).sum();
+    let stray_files: u32 = r
+        .stray_sets
+        .iter()
+        .map(|s| s.files.len() as u32)
+        .sum();
+    let mirror_bytes: i64 = r.mirror_clusters.iter().map(|c| c.total_bytes).sum();
+    let subset_bytes: i64 = r.subsets.iter().map(|s| s.total_bytes).sum();
+    let stray_bytes: i64 = r
+        .stray_sets
+        .iter()
+        .map(|s| s.size_bytes * (s.files.len() as i64 - 1).max(0))
+        .sum();
+    r.total_duplicate_files = mirror_files + subset_files + stray_files;
+    r.total_wasted_bytes = mirror_bytes + subset_bytes + stray_bytes;
 }
 
 #[component]
@@ -132,19 +189,22 @@ fn ReportSummary(report: DuplicateReport) -> Element {
 }
 
 #[component]
-fn MirrorCard(cluster: MirrorCluster, on_resolved: EventHandler<()>) -> Element {
+fn MirrorCard(cluster: MirrorCluster, on_resolved: EventHandler<Resolution>) -> Element {
     let mut keep_id = use_signal(|| cluster.suggested_keep_folder_id.clone());
     let mut deleting = use_signal(|| false);
     let mut error: Signal<Option<String>> = use_signal(|| None);
 
     let folders = cluster.folders.clone();
+    let cluster_id = cluster.id.clone();
     let bytes_label = format_bytes(cluster.total_bytes);
     let cluster_total_files: u32 = cluster.folders.iter().map(|f| f.file_count).sum();
 
     let do_delete = {
         let folders = folders.clone();
+        let cluster_id = cluster_id.clone();
         move |_| {
             let folders = folders.clone();
+            let cluster_id = cluster_id.clone();
             spawn(async move {
                 deleting.set(true);
                 error.set(None);
@@ -155,20 +215,25 @@ fn MirrorCard(cluster: MirrorCluster, on_resolved: EventHandler<()>) -> Element 
                     .map(|f| f.id.clone())
                     .collect();
 
-                match collect_files_in_folders(&to_delete).await {
+                let resolution = match collect_files_in_folders(&to_delete).await {
                     Ok(file_ids) => {
                         let (_ok, errs) = use_duplicates::delete_files(file_ids).await;
-                        if !errs.is_empty() {
-                            error.set(Some(format!(
-                                "{} deletions failed",
-                                errs.len()
-                            )));
+                        if errs.is_empty() {
+                            Some(Resolution::MirrorRemoved(cluster_id))
+                        } else {
+                            error.set(Some(format!("{} deletions failed", errs.len())));
+                            Some(Resolution::Refetch)
                         }
                     }
-                    Err(e) => error.set(Some(e)),
-                }
+                    Err(e) => {
+                        error.set(Some(e));
+                        None
+                    }
+                };
                 deleting.set(false);
-                on_resolved.call(());
+                if let Some(r) = resolution {
+                    on_resolved.call(r);
+                }
             });
         }
     };
@@ -227,11 +292,12 @@ fn MirrorCard(cluster: MirrorCluster, on_resolved: EventHandler<()>) -> Element 
 }
 
 #[component]
-fn SubsetCard(pair: SubsetPair, on_resolved: EventHandler<()>) -> Element {
+fn SubsetCard(pair: SubsetPair, on_resolved: EventHandler<Resolution>) -> Element {
     let mut deleting = use_signal(|| false);
     let mut error: Signal<Option<String>> = use_signal(|| None);
 
     let bytes_label = format_bytes(pair.total_bytes);
+    let pair_id = pair.id.clone();
     let subset_id = pair.subset.id.clone();
     let subset_path = pair.subset.path.clone();
     let superset_path = pair.superset.path.clone();
@@ -239,25 +305,31 @@ fn SubsetCard(pair: SubsetPair, on_resolved: EventHandler<()>) -> Element {
 
     let do_delete = move |_| {
         let subset_id = subset_id.clone();
+        let pair_id = pair_id.clone();
         spawn(async move {
             deleting.set(true);
             error.set(None);
             let mut folders = HashSet::new();
             folders.insert(subset_id);
-            match collect_files_in_folders(&folders).await {
+            let resolution = match collect_files_in_folders(&folders).await {
                 Ok(file_ids) => {
                     let (_ok, errs) = use_duplicates::delete_files(file_ids).await;
-                    if !errs.is_empty() {
-                        error.set(Some(format!(
-                            "{} deletions failed",
-                            errs.len()
-                        )));
+                    if errs.is_empty() {
+                        Some(Resolution::SubsetRemoved(pair_id))
+                    } else {
+                        error.set(Some(format!("{} deletions failed", errs.len())));
+                        Some(Resolution::Refetch)
                     }
                 }
-                Err(e) => error.set(Some(e)),
-            }
+                Err(e) => {
+                    error.set(Some(e));
+                    None
+                }
+            };
             deleting.set(false);
-            on_resolved.call(());
+            if let Some(r) = resolution {
+                on_resolved.call(r);
+            }
         });
     };
 
@@ -292,7 +364,7 @@ fn SubsetCard(pair: SubsetPair, on_resolved: EventHandler<()>) -> Element {
 }
 
 #[component]
-fn StrayCard(set: StraySet, on_resolved: EventHandler<()>) -> Element {
+fn StrayCard(set: StraySet, on_resolved: EventHandler<Resolution>) -> Element {
     // Default to nothing selected — user actively picks what to remove.
     let mut selected: Signal<HashSet<String>> = use_signal(HashSet::new);
     let mut deleting = use_signal(|| false);
@@ -301,19 +373,27 @@ fn StrayCard(set: StraySet, on_resolved: EventHandler<()>) -> Element {
     let bytes_label = format_bytes(set.size_bytes);
     let total_files = set.files.len();
     let files = set.files.clone();
+    let set_id = set.id.clone();
     let selected_count = selected().len();
 
     let do_delete = move |_| {
+        let set_id = set_id.clone();
         spawn(async move {
             deleting.set(true);
             error.set(None);
             let ids: Vec<String> = selected().iter().cloned().collect();
+            let attempted = ids.clone();
             let (_ok, errs) = use_duplicates::delete_files(ids).await;
-            if !errs.is_empty() {
+            let resolution = if errs.is_empty() {
+                // Clear local selection so the now-deleted IDs don't linger.
+                selected.set(HashSet::new());
+                Resolution::StrayFilesRemoved(set_id, attempted)
+            } else {
                 error.set(Some(format!("{} deletions failed", errs.len())));
-            }
+                Resolution::Refetch
+            };
             deleting.set(false);
-            on_resolved.call(());
+            on_resolved.call(resolution);
         });
     };
 
