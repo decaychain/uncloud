@@ -99,7 +99,7 @@ Music library with artist/album aggregation, folder browsing, playlist managemen
 - **DB**: `Playlist` model with `tracks: Vec<PlaylistTrack>` (each has `file_id` and `position`); `MusicCategory` model `{ owner_id, name, folder_ids }` for user-defined library scopes
 - **Music Categories**: user labels attached to one or more music folders. The Library tab shows a category dropdown + live filter; clicking a categorized folder in the sidebar opens the library scoped to that folder's subtree (file browser still reachable via "Browse files"). Categories are managed from a folder's "⋮ → Manage categories…" menu.
 - **Frontend**:
-  - Music page with tabs: Artists, Albums, Folders, Playlists
+  - Music page with tabs: Library (search + category filter), Artists, Albums, Folders, Playlists
   - Sub-pages: `/music/artist/:name`, `/music/album/:artist/:album`, `/music/folder/:id`, `/music/scope/folder/:id`, `/music/scope/category/:id`, `/music/playlist/:id`
   - Components in `components/music/`: `artist_list`, `artist_view`, `album_grid`, `album_view`, `folder_view`, `playlist_list`, `playlist_view`, `playlist_panel` (persistent right-side), `track_list`, `manage_categories`
   - `player.rs`: persistent audio player bar with play/pause, skip, queue display, progress
@@ -248,7 +248,7 @@ Todoist-style task manager with projects, sections, subtasks, comments, attachme
   - `schedule_view.rs` — calendar / agenda view
   - `task_detail.rs` — drawer with description, comments, subtasks, attachments, labels chip-input + create-inline picker
   - `project_settings.rs` — members, sections, labels CRUD (8-colour palette, rename/recolour/delete with cascade)
-- **Routes**: `/tasks`, `/tasks/project/:id`
+- **Routes**: `/tasks`, `/tasks/project/:id`, `/tasks/assigned` (cross-project assigned-to-me feed)
 - **Labels**: project-scoped (`TaskLabel { project_id, name, color }`); tasks store `labels: Vec<String>` of label *names*, with server-side cascade on rename/delete. UI renders coloured name chips on both board cards and list rows (max 2 + overflow on list rows); label colours are looked up from the project's catalogue with a stable grey fallback. Filter strip (`LabelFilterBar` in `tasks/mod.rs`) at the top of board/list views narrows visible tasks (OR semantics).
 - **Live updates**: every mutation (task, section, label CRUD + reorders + status changes) emits `ServerEvent::TaskChanged` to the project's owner and members. `BoardView` / `ListView` refetch tasks; `TasksProjectPage` refetches the label catalogue; `ScheduleView` refetches the schedule on any TaskChanged. The open `TaskDetail` re-fetches via `refresh_key` when the changed `task_id` matches.
 
@@ -292,6 +292,19 @@ Admin panel for storage and user management. Guarded by `admin_middleware`.
 - **Processing rerun**: `POST /api/admin/processing/rerun` re-enqueues every applicable file across all processors
 - **Frontend**: admin sections in `settings.rs` (only visible when `AuthState.is_admin()`)
 - **User model**: `UserRole` enum (Admin/User), `quota_bytes: Option<i64>`, `used_bytes: i64`, `status` (Active/Pending/Disabled), `disabled_features: Vec<String>`
+
+## Backup
+
+`uncloud-server backup` writes a single deduplicated, encrypted snapshot of the entire instance — database state plus all file blobs — to a [Restic](https://restic.net/)-format repository. Built on [`rustic_core`](https://docs.rs/rustic_core/) so repos are byte-compatible with the official `restic` CLI.
+
+- **Subcommands**: `backup init`, `backup create`, `backup list`, `backup check`, `backup prune`, `backup restore` (all under `uncloud-server backup`)
+- **Snapshot contents**: NDJSON dump per MongoDB collection (engine-neutral, not BSON wire format) plus all file blobs organised under `/files/{owner}/{logical path}`. Versions are included by default; trash is opt-in.
+- **Repo backends**: SFTP, S3 / B2 / R2, Azure, GCS, REST server (with append-only mode), rclone, or local. Configured per `target` in `config.yaml` under `backup.targets`.
+- **Restore is in-place**: writes DB documents back into MongoDB and blobs back into matching storage backends (matched by name; falls back to default storage). No "extract to a path" mode, since that doesn't model multi-backend installations.
+- **`uncloud:complete` tag**: applied post-flight only after verifying zero source-read failures. Untagged snapshots indicate "not verifiably complete" (errors, crash, interrupted run).
+- **Locking**: `backup_lock` collection enforces single-writer exclusion across runs; `backup unlock` clears a stale lock from a crashed run.
+- **Modules**: `crates/uncloud-server/src/backup/` — `config`, `create`, `dump`, `lock`, `manage`, `repo`, `restore`, `source`, `uri`.
+- Design: [backup.md](backup.md).
 
 ## File Sync (Folder-Level Strategy)
 

@@ -13,11 +13,14 @@ Self-hosted personal cloud storage. Manage your files, photos, and music from an
 - **Password manager** — KeePass-compatible (.kdbx) vault with client-side encryption, entry/group management, and password generator
 - **Sharing** — public links with optional password, expiry, and download limits
 - **Desktop sync** — two-way file sync with per-folder strategy
+- **Pluggable storage** — local filesystem, any S3-compatible service (AWS S3, Backblaze B2, Cloudflare R2, MinIO), or any SSH-accessible host (SFTP); mix and match per folder
+- **S3-compatible API** — point `s5cmd`, `rclone`, `aws-cli`, or any SigV4 client at Uncloud
+- **Encrypted backups** — `uncloud-server backup` writes deduplicated, encrypted snapshots (database + file blobs) to a Restic-format repository (SFTP, S3, B2, Azure, GCS, REST, or local)
 - **Multi-platform** — web, desktop (Linux/Windows), and Android
 
 ## Architecture
 
-- **Server**: Rust (Axum + MongoDB + local filesystem)
+- **Server**: Rust (Axum + MongoDB; pluggable storage: local / S3 / SFTP)
 - **Web frontend**: Dioxus 0.7 (Rust/WASM) + Tailwind CSS + DaisyUI
 - **Desktop**: Tauri v2 (bundles the web frontend)
 - **Android**: Tauri v2 (Android WebView)
@@ -83,7 +86,7 @@ docker compose up -d
 
 ### From Binary
 
-Download `uncloud-server-linux-amd64` from [Releases](https://github.com/decaychain/uncloud/releases):
+Static binaries for `linux-amd64` and `linux-arm64` are published on [Releases](https://github.com/decaychain/uncloud/releases):
 
 ```bash
 chmod +x uncloud-server-linux-amd64
@@ -93,7 +96,7 @@ chmod +x uncloud-server-linux-amd64
 
 ### Desktop / Android
 
-Download from [Releases](https://github.com/decaychain/uncloud/releases).
+Download from [Releases](https://github.com/decaychain/uncloud/releases). Linux desktop and Android packages ship for both `amd64` and `arm64`.
 
 ## Building from Source
 
@@ -103,7 +106,7 @@ cargo run -p uncloud-server
 
 # Web frontend (dev mode — see above)
 
-# Desktop (Linux: requires webkit2gtk4.1-devel, libsoup3-devel)
+# Desktop (Linux: requires webkit2gtk4.1-devel, libsoup3-devel, libappindicator-gtk3-devel)
 ./build-desktop.sh
 
 # Android
