@@ -28,3 +28,4 @@ pub mod right_drawer;
 pub mod file_properties;
 pub mod tasks;
 pub mod activity;
+pub mod duplicates;

@@ -3,6 +3,7 @@ use gloo_storage::Storage;
 use crate::components::{
     auth::{Login, Register},
     dashboard::DashboardPage,
+    duplicates::DuplicatesPage,
     file_browser::FileBrowser,
     layout::Layout,
     gallery::{Gallery, GalleryAlbum},
@@ -77,6 +78,9 @@ pub enum Route {
 
         #[route("/trash")]
         Trash {},
+
+        #[route("/duplicates")]
+        Duplicates {},
 
         #[route("/passwords")]
         Passwords {},
@@ -244,6 +248,13 @@ fn MusicPlaylist(id: String) -> Element {
 fn Passwords() -> Element {
     rsx! {
         PasswordsPage {}
+    }
+}
+
+#[component]
+fn Duplicates() -> Element {
+    rsx! {
+        DuplicatesPage {}
     }
 }
 

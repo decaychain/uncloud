@@ -72,6 +72,7 @@ Uncloud/
           sync_events.rs       ← list sync events for the current user
           vault_recents.rs     ← per-user "recent password vaults" list
           admin_processing.rs  ← admin: rerun all processing tasks
+          duplicates.rs        ← duplicate detection: hash-grouped sets, mirror clusters, subset pairs
         services/
           auth.rs              ← AuthService (sessions, password hashing, TOTP, invites,
                                  demo accounts, user bytes)
@@ -178,6 +179,7 @@ Uncloud/
                                  admin: storages, users, invites, processing rerun)
           setup.rs             ← First-run onboarding (Tauri desktop only)
           trash.rs             ← Trash view (restore / permanently delete)
+          duplicates.rs        ← Duplicates view (mirror folders / subsets / stray hash sets, with bulk delete)
           version_history.rs   ← Version history panel for a file
           shopping.rs          ← Shopping page: lists, items, categories, shops, share list
           passwords.rs         ← KeePass-format password vaults (browse, open, recents)
@@ -208,6 +210,7 @@ Uncloud/
           use_processing.rs    ← admin processing rerun
           use_sync_events.rs   ← sync audit log
           use_preferences.rs   ← dashboard_tiles persistence
+          use_duplicates.rs    ← duplicate report fetch + parallel-delete wrapper
           media_session.rs     ← Browser MediaSession API (lock-screen / Bluetooth controls)
           native_audio.rs      ← Tauri/Android native-audio bridge for background playback
       assets/
@@ -433,6 +436,7 @@ All authenticated routes are mounted under both `/api/...` and `/api/v1/...`. Th
 | `/api/search/reindex` | POST | Admin: rebuild search index |
 | `/api/events` | GET | SSE event stream |
 | `/api/sync-events` | GET | Sync audit log (paged) |
+| `/api/duplicates` | GET | Duplicate-file report (mirror clusters + subsets + stray hash sets) |
 | `/api/vault-recents` | GET/POST | List/add recent password vault |
 | `/api/vault-recents/{file_id}` | DELETE | Remove from recents |
 | `/api/shopping/categories` | GET/POST | List/create shopping categories |

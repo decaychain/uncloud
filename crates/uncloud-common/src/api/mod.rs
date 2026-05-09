@@ -13,6 +13,7 @@ pub mod vault_recents;
 pub mod tasks;
 pub mod preferences;
 pub mod sync_events;
+pub mod duplicates;
 
 pub use auth::*;
 pub use files::*;
@@ -29,3 +30,4 @@ pub use vault_recents::*;
 pub use tasks::*;
 pub use preferences::*;
 pub use sync_events::*;
+pub use duplicates::*;

@@ -23,3 +23,4 @@ pub mod use_file_opener;
 pub mod use_shopping;
 pub mod use_sync_events;
 pub mod use_tasks;
+pub mod use_duplicates;
