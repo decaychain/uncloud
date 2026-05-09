@@ -293,6 +293,34 @@ Admin panel for storage and user management. Guarded by `admin_middleware`.
 - **Frontend**: admin sections in `settings.rs` (only visible when `AuthState.is_admin()`)
 - **User model**: `UserRole` enum (Admin/User), `quota_bytes: Option<i64>`, `used_bytes: i64`, `status` (Active/Pending/Disabled), `disabled_features: Vec<String>`
 
+## Duplicate Detection
+
+Find and clean up duplicate files in your library. Detection is exact-match
+on `checksum_sha256`; the UI collapses the noisy cases server-side so a
+mirrored backup folder shows as one card, not thousands.
+
+- **Algorithm**: aggregation pipeline `$group` by checksum (live, non-empty
+  files only), then folder-pair classification — Equal pairs cluster into
+  mirror groups via union-find; strict subsets become subset cards;
+  everything else is rendered as per-hash stray sets.
+- **API**: `GET /api/duplicates` returns the full report
+  (`mirror_clusters`, `subsets`, `stray_sets` plus a `total_wasted_bytes`
+  summary).
+- **Bulk delete**: cards reuse `DELETE /api/files/{id}` (soft-delete to
+  trash) with a parallel-delete wrapper capped at 8 concurrent calls.
+  Mirror cards walk the to-be-deleted folder subtrees to gather every file
+  ID; subset cards delete every file inside the subset folder; stray cards
+  delete the user-selected files.
+- **Smart picker**: mirror clusters default to the shallowest path that
+  doesn't match a backup-suggestive segment (`Backup`, `Archive`, `Old`,
+  `Trash`, `.uncloud`); user can override via the dropdown.
+- **DB index**: partial index on `(owner_id, checksum_sha256)` filtered by
+  `deleted_at: null, size_bytes: { $gt: 0 }`.
+- **Frontend**: `/duplicates` route, sidebar entry next to Trash;
+  `components/duplicates.rs` (page + `MirrorCard` + `SubsetCard` +
+  `StrayCard`); `hooks/use_duplicates.rs`.
+- Design: [duplicate-detection.md](duplicate-detection.md).
+
 ## Backup
 
 `uncloud-server backup` writes a single deduplicated, encrypted snapshot of the entire instance — database state plus all file blobs — to a [Restic](https://restic.net/)-format repository. Built on [`rustic_core`](https://docs.rs/rustic_core/) so repos are byte-compatible with the official `restic` CLI.

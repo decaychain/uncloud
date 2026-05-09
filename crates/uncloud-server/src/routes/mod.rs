@@ -23,6 +23,7 @@ pub mod task_items;
 pub mod admin_processing;
 pub mod sync_events;
 pub mod audit;
+pub mod duplicates;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -196,7 +197,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/tasks/schedule", get(task_items::get_schedule))
         .route("/tasks/assigned-to-me", get(task_items::get_assigned_to_me))
         // Sync audit log
-        .route("/sync-events", get(sync_events::list_sync_events));
+        .route("/sync-events", get(sync_events::list_sync_events))
+        // Duplicate detection
+        .route("/duplicates", get(duplicates::get_duplicate_report));
 
     // v1-only routes (API tokens, S3 credentials, apps)
     let v1_only = Router::new()

@@ -98,6 +98,24 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
                 .build(),
         )
         .await?;
+    // Accelerates the duplicate-detection aggregation (one-pass `$group` on
+    // checksum). Partial-filtered to live, non-empty files — the duplicate
+    // pipeline ignores trash, soft-deletes, and empty-file hashes anyway.
+    files
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "checksum_sha256": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(mongodb::bson::doc! {
+                            "deleted_at": mongodb::bson::Bson::Null,
+                            "size_bytes": { "$gt": 0 },
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     // Live-file uniqueness — the on-disk layout (`{username}/{chain}/{name}`)
     // assumes one document per logical path. A *partial* index restricts
     // uniqueness to live (non-soft-deleted) rows so trash entries don't

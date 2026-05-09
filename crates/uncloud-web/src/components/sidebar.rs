@@ -4,7 +4,7 @@ use uncloud_common::{AlbumResponse, MusicFolderResponse, PlaylistSummary, TaskPr
 use crate::hooks::tauri as tauri_hook;
 use crate::components::icons::{
     IconCheckSquare, IconFolder, IconHistory, IconImage, IconKey, IconLayoutGrid, IconLink, IconListMusic, IconMusic, IconPalette,
-    IconRefreshCw, IconSettings, IconShield, IconShoppingCart, IconTrash, IconUser, IconUsers,
+    IconCopy, IconRefreshCw, IconSettings, IconShield, IconShoppingCart, IconTrash, IconUser, IconUsers,
 };
 use crate::hooks::{use_apps, use_files, use_music, use_playlists, use_tasks};
 use crate::hooks::use_apps::AppEntry;
@@ -325,6 +325,15 @@ pub fn Sidebar() -> Element {
                                     onclick: move |_| close_drawer(),
                                     IconTrash {}
                                     span { "Trash" }
+                                }
+                            }
+                            li {
+                                Link {
+                                    to: Route::Duplicates {},
+                                    class: if matches!(route, Route::Duplicates {}) { "active" } else { "" },
+                                    onclick: move |_| close_drawer(),
+                                    IconCopy {}
+                                    span { "Duplicates" }
                                 }
                             }
                             SidebarApps {}
