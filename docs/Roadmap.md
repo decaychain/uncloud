@@ -33,3 +33,9 @@ Both major items from the original roadmap (App Platform, S3-Compatible API) hav
 
 - `App.enabled_for: Vec<ObjectId>` is in the model but there's no admin UI to gate apps per-user (currently apps are visible to everyone).
 - No dev story yet for how a sidecar app authenticates user actions (presumably it'd use `/api/v1/auth/tokens` minted per-user, but the round-trip is undocumented).
+
+## Finance Tracker
+
+- Personal expense / IOU tracker scoped at "monthly CSV import + categorize + per-currency balances", deliberately simpler than Lunch Money / YNAB. No budgets, no FX conversion, no double-entry, no bank API integrations.
+- Designed around making CSV re-imports safe: stable `source_ref` hash per row, imported fields separated from user-applied fields with provenance, re-imports surface a diff preview and never overwrite manual categorization. Transaction-with-legs schema from day one to leave splits as a future addition without a migration.
+- Design: [finance-tracker-design.md](finance-tracker-design.md). Not started.
