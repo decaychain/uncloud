@@ -123,19 +123,36 @@ async fn extract_pdf_text(file: &File, state: &AppState) -> Result<String, Strin
         .await
         .map_err(|e| format!("Failed to read PDF: {}", e))?;
     tokio::task::spawn_blocking(move || {
-        pdf_extract::extract_text_from_mem(&data)
-            .map(|text| {
-                if text.len() > MAX_TEXT_BYTES {
-                    text[..MAX_TEXT_BYTES].to_string()
-                } else {
-                    text
-                }
-            })
-            .unwrap_or_else(|e| {
+        // pdf_extract panics on some valid-but-uncommon PDF features
+        // (e.g. DeviceN colour spaces). Treat those as extraction failures
+        // rather than letting them propagate as spawn_blocking join errors.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pdf_extract::extract_text_from_mem(&data)
+        }));
+        match result {
+            Ok(Ok(text)) => truncate_on_char_boundary(text, MAX_TEXT_BYTES),
+            Ok(Err(e)) => {
                 warn!("PDF extraction failed: {}", e);
                 String::new()
-            })
+            }
+            Err(_) => {
+                warn!("PDF extraction panicked; skipping");
+                String::new()
+            }
+        }
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {}", e))
+}
+
+fn truncate_on_char_boundary(mut text: String, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text
 }
