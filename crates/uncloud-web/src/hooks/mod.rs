@@ -24,3 +24,4 @@ pub mod use_shopping;
 pub mod use_sync_events;
 pub mod use_tasks;
 pub mod use_duplicates;
+pub mod use_oauth;

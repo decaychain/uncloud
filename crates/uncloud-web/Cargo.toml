@@ -49,6 +49,7 @@ web-sys = { version = "0.3", features = [
 ] }
 js-sys = "0.3"
 futures = "0.3"
+urlencoding = "2"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 keepass = { git = "https://github.com/decaychain/keepass-rs", features = ["save_kdbx4"] }
 uuid = { version = "1", features = ["v4", "js"] }

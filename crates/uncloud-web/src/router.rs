@@ -11,6 +11,7 @@ use crate::components::{
         Music, MusicArtistView, MusicAlbumView as MusicAlbumViewComp, MusicFolderView,
         MusicPlaylistView, MusicScopeCategoryView, MusicScopeFolderView,
     },
+    oauth_consent::OAuthConsent,
     passwords::PasswordsPage,
     settings::SettingsPage,
     setup::Setup,
@@ -35,6 +36,11 @@ pub enum Route {
     // First-run onboarding (Tauri desktop only, shown when no config saved).
     #[route("/setup")]
     Setup {},
+
+    // OAuth consent — outside the main layout so the page is a focused
+    // dialog. Auth-gated inside the component (redirects to /login).
+    #[route("/oauth/authorize")]
+    OAuthAuthorize {},
 
     #[layout(Layout)]
         #[route("/")]
@@ -290,6 +296,13 @@ fn Shopping() -> Element {
 fn ShoppingList(id: String) -> Element {
     rsx! {
         shopping::ShoppingListView { key: "{id}", list_id: id }
+    }
+}
+
+#[component]
+fn OAuthAuthorize() -> Element {
+    rsx! {
+        OAuthConsent {}
     }
 }
 

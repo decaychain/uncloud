@@ -177,6 +177,7 @@ Stable surface for sidecar apps and scripts.
   - **DB**: `api_tokens` collection; `ApiToken` model stores SHA-256 hash only (raw token shown once on creation)
   - **API**: `POST /api/v1/auth/tokens` (create — returns raw token), `GET /api/v1/auth/tokens` (list metadata), `DELETE /api/v1/auth/tokens/{id}` (revoke)
   - **Auth**: `auth_middleware` accepts `Authorization: Bearer <token>` in addition to session cookies
+- **OAuth 2.1 authorization server**: Uncloud is its own OAuth provider. Public clients (Claude.ai's MCP connector, `claude mcp add`, third-party apps, future federation) register dynamically (RFC 7591), walk the standard authorize → token flow with PKCE, and receive scoped access tokens (`files:read`, `files:write`, `files:delete`). Discovery via `/.well-known/oauth-authorization-server` (RFC 8414) and `/.well-known/oauth-protected-resource` (RFC 9728). Refresh tokens rotate on use. Connected apps are listed and revocable in **Settings → Account → Connected apps**. Legacy personal access tokens continue to work unchanged. See [docs/oauth.md](oauth.md) for the full design.
 
 ## App Platform (sidecar HTTP services)
 

@@ -23,11 +23,32 @@ impl std::ops::Deref for AuthUser {
     }
 }
 
-/// Try to resolve a bearer token: first as a session token, then as an API token.
-async fn resolve_bearer_token(state: &AppState, token: &str) -> Option<User> {
-    // 1. Try session lookup
+/// Scopes carried by an OAuth-issued bearer. `None` means "no scope filter"
+/// (session cookie or legacy PAT) — full access. `Some(vec)` means the
+/// request is gated to those scopes; routes opt in to checking via the
+/// `Scopes` extractor.
+#[derive(Clone, Default)]
+pub struct Scopes(pub Option<Vec<String>>);
+
+impl Scopes {
+    pub fn allows(&self, required: &str) -> bool {
+        match &self.0 {
+            None => true,
+            Some(s) => s.iter().any(|sc| sc == required),
+        }
+    }
+}
+
+/// Try to resolve a bearer token: first as a session token, then as an API
+/// token. Returns the user and any OAuth scopes attached to the token (None
+/// for sessions and legacy PATs).
+async fn resolve_bearer_token(
+    state: &AppState,
+    token: &str,
+) -> Option<(User, Option<Vec<String>>)> {
+    // 1. Try session lookup — sessions never carry scopes.
     if let Ok((user, _session)) = state.auth.validate_session(token).await {
-        return Some(user);
+        return Some((user, None));
     }
 
     // 2. Try API token lookup (hash the bearer value and match)
@@ -37,8 +58,11 @@ async fn resolve_bearer_token(state: &AppState, token: &str) -> Option<User> {
         .find_one(mongodb::bson::doc! { "token_hash": &hash })
         .await
     {
+        if api_token.is_expired() {
+            return None;
+        }
         if let Ok(Some(user)) = state.auth.get_user_by_id(api_token.user_id).await {
-            return Some(user);
+            return Some((user, api_token.scopes));
         }
     }
 
@@ -60,6 +84,7 @@ pub async fn auth_middleware(
     if let Some(cookie) = jar.get(SESSION_COOKIE) {
         if let Ok((user, _session)) = state.auth.validate_session(cookie.value()).await {
             request.extensions_mut().insert(AuthUser(user));
+            request.extensions_mut().insert(Scopes(None));
             return next.run(request).await;
         }
     }
@@ -71,8 +96,9 @@ pub async fn auth_middleware(
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
     {
-        if let Some(user) = resolve_bearer_token(&state, bearer).await {
+        if let Some((user, scopes)) = resolve_bearer_token(&state, bearer).await {
             request.extensions_mut().insert(AuthUser(user));
+            request.extensions_mut().insert(Scopes(scopes));
             return next.run(request).await;
         }
     }
@@ -81,8 +107,9 @@ pub async fn auth_middleware(
     if let Some(query) = request.uri().query() {
         for param in query.split('&') {
             if let Some(token) = param.strip_prefix("token=") {
-                if let Some(user) = resolve_bearer_token(&state, token).await {
+                if let Some((user, scopes)) = resolve_bearer_token(&state, token).await {
                     request.extensions_mut().insert(AuthUser(user));
+                    request.extensions_mut().insert(Scopes(scopes));
                     return next.run(request).await;
                 }
             }
@@ -101,6 +128,7 @@ pub async fn optional_auth_middleware(
     if let Some(cookie) = jar.get(SESSION_COOKIE) {
         if let Ok((user, _session)) = state.auth.validate_session(cookie.value()).await {
             request.extensions_mut().insert(AuthUser(user));
+            request.extensions_mut().insert(Scopes(None));
             return next.run(request).await;
         }
     }
@@ -111,8 +139,9 @@ pub async fn optional_auth_middleware(
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
     {
-        if let Some(user) = resolve_bearer_token(&state, bearer).await {
+        if let Some((user, scopes)) = resolve_bearer_token(&state, bearer).await {
             request.extensions_mut().insert(AuthUser(user));
+            request.extensions_mut().insert(Scopes(scopes));
         }
     }
 
@@ -141,7 +170,7 @@ pub async fn admin_middleware(
             .and_then(|h| h.to_str().ok())
             .and_then(|h| h.strip_prefix("Bearer "))
         {
-            resolved_user = resolve_bearer_token(&state, bearer).await;
+            resolved_user = resolve_bearer_token(&state, bearer).await.map(|(u, _)| u);
         }
     }
 
@@ -171,5 +200,19 @@ where
             .get::<AuthUser>()
             .cloned()
             .ok_or((StatusCode::UNAUTHORIZED, "Not authenticated"))
+    }
+}
+
+impl<S> axum::extract::FromRequestParts<S> for Scopes
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(parts.extensions.get::<Scopes>().cloned().unwrap_or_default())
     }
 }

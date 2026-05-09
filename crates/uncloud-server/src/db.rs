@@ -218,6 +218,59 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
                 .build(),
         )
         .await?;
+    // Lookup OAuth-issued tokens by refresh token (sparse — only OAuth rows
+    // have one).
+    api_tokens
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "refresh_token_hash": 1 })
+                .options(IndexOptions::builder().unique(true).sparse(true).build())
+                .build(),
+        )
+        .await?;
+    // List connected clients per user.
+    api_tokens
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "user_id": 1, "client_id": 1 })
+                .build(),
+        )
+        .await?;
+
+    // OAuth client registrations
+    let oauth_clients = db.collection::<mongodb::bson::Document>("oauth_clients");
+    oauth_clients
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "client_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    // OAuth authorization codes — TTL on expires_at so consumed/expired rows
+    // are cleaned up automatically.
+    let oauth_codes = db.collection::<mongodb::bson::Document>("oauth_authorization_codes");
+    oauth_codes
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "code_hash": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    oauth_codes
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(std::time::Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     // S3 credentials indexes
     let s3_creds = db.collection::<mongodb::bson::Document>("s3_credentials");

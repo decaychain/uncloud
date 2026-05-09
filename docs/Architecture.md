@@ -63,6 +63,8 @@ Uncloud/
           tasks.rs             ← projects, sections, labels (CRUD + member management)
           task_items.rs        ← tasks, subtasks, comments, attachments, schedule, reorder
           tokens.rs            ← scoped Bearer API tokens (create/list/revoke)
+          oauth.rs             ← OAuth 2.1 surface (discovery, dynamic registration,
+                                 authorize, token, revoke, connected-apps mgmt) — see docs/oauth.md
           s3.rs                ← S3-compatible API handler (mounted at /s3)
           s3_credentials.rs    ← /api/v1/s3/credentials CRUD
           apps.rs              ← app registration, webhook registration, list_apps,
@@ -102,7 +104,10 @@ Uncloud/
                                  ShoppingListItem
           task.rs              ← TaskProject, TaskSection, Task, TaskComment, TaskLabel,
                                  ProjectMember, TaskStatus, TaskPriority, RecurrenceRule
-          api_token.rs         ← ApiToken (SHA-256 hashed Bearer tokens)
+          api_token.rs         ← ApiToken (SHA-256 hashed Bearer tokens; OAuth-issued
+                                 tokens add optional client_id/scopes/expires_at/refresh_hash)
+          oauth_client.rs      ← OAuthClient (dynamically-registered clients)
+          oauth_authorization_code.rs ← short-lived authorization codes (TTL'd)
           s3_credential.rs     ← S3Credential (access_key_id + plaintext secret for SigV4)
           app.rs               ← App (registered sidecar app: name, base_url, nav_label, icon)
           webhook.rs           ← Webhook (URL + events + secret per app)
@@ -384,6 +389,15 @@ All authenticated routes are mounted under both `/api/...` and `/api/v1/...`. Th
 | `/api/v1/auth/me/preferences` | PUT | **v1-only** — update dashboard tiles |
 | `/api/v1/auth/tokens` | GET/POST | **v1-only** — list/create scoped Bearer API tokens |
 | `/api/v1/auth/tokens/{id}` | DELETE | **v1-only** — revoke a Bearer token |
+| `/.well-known/oauth-authorization-server` | GET | OAuth 2.1 server metadata (RFC 8414); root path, no auth |
+| `/.well-known/oauth-protected-resource` | GET | OAuth protected resource metadata (RFC 9728) |
+| `/oauth/register` | POST | Dynamic OAuth client registration (RFC 7591); root path, no auth |
+| `/oauth/clients/lookup` | GET | Public client lookup by `client_id` (used by consent UI) |
+| `/oauth/token` | POST | OAuth token endpoint (authorization_code + refresh_token grants) |
+| `/oauth/revoke` | POST | Token revocation (RFC 7009) |
+| `/api/v1/oauth/authorize` | POST | Consent submit; mints authorization code with PKCE binding |
+| `/api/v1/oauth/connected-apps` | GET | **v1-only** — list connected OAuth clients for current user |
+| `/api/v1/oauth/connected-apps/{client_id}` | DELETE | **v1-only** — revoke all tokens for a client |
 | `/api/files` | GET | List files (query: `parent_id`) |
 | `/api/files/{id}` | GET/PUT/DELETE | Get/update/delete file |
 | `/api/files/{id}/download` | GET | Download file (range support) |

@@ -40,6 +40,7 @@ pub fn SettingsPage(tab: String) -> Element {
                     ChangePasswordSection {}
                     TotpSection {}
                     S3AccessKeysSection {}
+                    ConnectedAppsSection {}
                 },
                 "sync" if is_desktop => rsx! {
                     h1 { class: "text-2xl font-bold", "Sync" }
@@ -548,6 +549,103 @@ fn S3AccessKeysSection() -> Element {
                             class: "btn btn-sm btn-outline",
                             onclick: move |_| show_create.set(true),
                             "Generate new key"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Connected apps (OAuth)
+
+#[component]
+pub fn ConnectedAppsSection() -> Element {
+    use crate::hooks::use_oauth::{self, ConnectedApp};
+
+    let mut apps = use_signal(Vec::<ConnectedApp>::new);
+    let mut loading = use_signal(|| true);
+    let mut error = use_signal(|| None::<String>);
+
+    let refresh = use_callback(move |()| {
+        spawn(async move {
+            loading.set(true);
+            error.set(None);
+            match use_oauth::list_connected_apps().await {
+                Ok(list) => apps.set(list),
+                Err(e) => error.set(Some(e)),
+            }
+            loading.set(false);
+        });
+    });
+
+    use_effect(move || {
+        refresh.call(());
+    });
+
+    let revoke = move |client_id: String| {
+        spawn(async move {
+            if let Err(e) = use_oauth::revoke_connected_app(&client_id).await {
+                error.set(Some(e));
+                return;
+            }
+            refresh.call(());
+        });
+    };
+
+    rsx! {
+        div { class: "card bg-base-100 shadow",
+            div { class: "card-body",
+                h2 { class: "card-title", "Connected apps" }
+                p { class: "text-sm text-base-content/70",
+                    "Apps and AI assistants that have been granted OAuth access to your account."
+                }
+
+                if let Some(err) = error.read().clone() {
+                    div { class: "alert alert-error mt-2", "{err}" }
+                }
+
+                if loading() {
+                    div { class: "py-4 flex justify-center",
+                        span { class: "loading loading-spinner" }
+                    }
+                } else if apps.read().is_empty() {
+                    p { class: "text-base-content/60 italic py-2",
+                        "No connected apps yet."
+                    }
+                } else {
+                    table { class: "table table-sm mt-2",
+                        thead {
+                            tr {
+                                th { "App" }
+                                th { "Scopes" }
+                                th { "Last issued" }
+                                th { "" }
+                            }
+                        }
+                        tbody {
+                            for app in apps.read().iter() {
+                                tr { key: "{app.client_id}",
+                                    td {
+                                        div { class: "font-medium", "{app.client_name}" }
+                                        div { class: "text-xs text-base-content/50", "{app.client_id}" }
+                                    }
+                                    td { class: "text-xs", "{app.scopes.join(\", \")}" }
+                                    td { class: "text-xs", "{app.last_issued_at}" }
+                                    td {
+                                        button {
+                                            class: "btn btn-ghost btn-xs text-error",
+                                            onclick: {
+                                                let id = app.client_id.clone();
+                                                let revoke = revoke.clone();
+                                                move |_| revoke(id.clone())
+                                            },
+                                            "Revoke"
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

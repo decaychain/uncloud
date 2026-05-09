@@ -11163,6 +11163,7 @@ dependencies = [
  "uncloud-client",
  "uncloud-common",
  "uncloud-sync",
+ "url",
  "urlencoding",
  "uuid",
 ]
@@ -11205,6 +11206,7 @@ dependencies = [
  "serde",
  "serde_json",
  "uncloud-common",
+ "urlencoding",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
