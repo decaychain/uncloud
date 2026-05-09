@@ -56,6 +56,33 @@ pub fn Login() -> Element {
         spawn(async move {
             let enabled = use_search::fetch_search_enabled().await;
             search_enabled.set(enabled);
+
+            // Honour ?next=... when present (e.g., from /oauth/authorize
+            // bouncing through login). Restricted to same-origin paths so a
+            // crafted login URL can't redirect to an attacker-controlled
+            // site after auth.
+            let next = web_sys::window()
+                .and_then(|w| w.location().search().ok())
+                .map(|s| s.trim_start_matches('?').to_string())
+                .and_then(|qs| {
+                    qs.split('&').find_map(|kv| {
+                        let mut it = kv.splitn(2, '=');
+                        let k = it.next()?;
+                        let v = it.next()?;
+                        if k == "next" {
+                            urlencoding::decode(v).ok().map(|c| c.into_owned())
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .filter(|n| n.starts_with('/') && !n.starts_with("//"));
+
+            if let Some(target) = next {
+                nav.replace(target.as_str());
+                return;
+            }
+
             // Mobile (below Tailwind's `lg` breakpoint) lands on the Dashboard;
             // desktop keeps the traditional Files view because the sidebar
             // already exposes everything there.
