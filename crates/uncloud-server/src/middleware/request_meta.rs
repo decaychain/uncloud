@@ -46,6 +46,7 @@ fn parse_source(val: &str) -> Option<SyncEventSource> {
         "admin" => Some(SyncEventSource::Admin),
         "public" => Some(SyncEventSource::Public),
         "system" => Some(SyncEventSource::System),
+        "mcp" => Some(SyncEventSource::Mcp),
         _ => None,
     }
 }

@@ -353,6 +353,7 @@ fn source_label(s: SyncEventSource) -> &'static str {
         SyncEventSource::Admin => "Admin",
         SyncEventSource::Public => "Public",
         SyncEventSource::System => "System",
+        SyncEventSource::Mcp => "MCP",
     }
 }
 
@@ -369,6 +370,7 @@ fn parse_source_code(v: &str) -> Option<SyncEventSource> {
         "admin" => Some(SyncEventSource::Admin),
         "public" => Some(SyncEventSource::Public),
         "system" => Some(SyncEventSource::System),
+        "mcp" => Some(SyncEventSource::Mcp),
         _ => None,
     }
 }

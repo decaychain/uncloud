@@ -21,6 +21,7 @@ pub fn source_code(s: SyncEventSource) -> &'static str {
         SyncEventSource::Admin => "admin",
         SyncEventSource::Public => "public",
         SyncEventSource::System => "system",
+        SyncEventSource::Mcp => "mcp",
     }
 }
 
