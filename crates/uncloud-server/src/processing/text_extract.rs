@@ -113,6 +113,10 @@ async fn extract_plain_text(file: &File, state: &AppState) -> Result<String, Str
 }
 
 async fn extract_pdf_text(file: &File, state: &AppState) -> Result<String, String> {
+    use std::process::Stdio;
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+
     let backend = state
         .storage
         .get_backend(file.storage_id)
@@ -122,27 +126,63 @@ async fn extract_pdf_text(file: &File, state: &AppState) -> Result<String, Strin
         .read_all(&file.storage_path)
         .await
         .map_err(|e| format!("Failed to read PDF: {}", e))?;
-    tokio::task::spawn_blocking(move || {
-        // pdf_extract panics on some valid-but-uncommon PDF features
-        // (e.g. DeviceN colour spaces). Treat those as extraction failures
-        // rather than letting them propagate as spawn_blocking join errors.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            pdf_extract::extract_text_from_mem(&data)
-        }));
-        match result {
-            Ok(Ok(text)) => truncate_on_char_boundary(text, MAX_TEXT_BYTES),
-            Ok(Err(e)) => {
-                warn!("PDF extraction failed: {}", e);
-                String::new()
-            }
-            Err(_) => {
-                warn!("PDF extraction panicked; skipping");
-                String::new()
-            }
+
+    // pdf_extract (and its lopdf dependency) panics on uncommon-but-valid
+    // PDF features and occasionally on malformed input. catch_unwind catches
+    // controlled panics but not native faults from unsafe code. Run the
+    // extraction in a fresh subprocess so any crash — clean panic, abort, or
+    // SIGSEGV — only kills the helper, never the server.
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("current_exe: {}", e))?;
+    let mut child = tokio::process::Command::new(&exe)
+        .arg("extract-pdf")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("spawn extractor: {}", e))?;
+
+    // Feed the PDF in via a separate task so we don't deadlock against the
+    // child filling its stdout pipe before we've finished writing stdin.
+    let mut stdin = child.stdin.take().expect("piped");
+    let writer = tokio::spawn(async move {
+        let _ = stdin.write_all(&data).await;
+        // dropping closes the pipe, which the child observes as EOF
+    });
+
+    // 60s wall-clock cap. Some PDFs put pdf_extract into a tight parsing
+    // loop; without a timeout that would tie up a processing slot.
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(60),
+        child.wait_with_output(),
+    )
+    .await;
+    let _ = writer.await;
+
+    match outcome {
+        Err(_) => {
+            warn!("PDF extraction timed out; killed subprocess");
+            Ok(String::new())
         }
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {}", e))
+        Ok(Err(e)) => {
+            warn!("PDF extractor wait failed: {}", e);
+            Ok(String::new())
+        }
+        Ok(Ok(output)) if !output.status.success() => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(
+                "PDF extractor exited {:?}: {}",
+                output.status.code(),
+                stderr.trim()
+            );
+            Ok(String::new())
+        }
+        Ok(Ok(output)) => {
+            let text = String::from_utf8_lossy(&output.stdout).into_owned();
+            Ok(truncate_on_char_boundary(text, MAX_TEXT_BYTES))
+        }
+    }
 }
 
 fn truncate_on_char_boundary(mut text: String, max_bytes: usize) -> String {
@@ -155,4 +195,38 @@ fn truncate_on_char_boundary(mut text: String, max_bytes: usize) -> String {
     }
     text.truncate(end);
     text
+}
+
+/// Body of the `extract-pdf` CLI subcommand: read a PDF from stdin, call
+/// pdf_extract, write the truncated plain text to stdout. Invoked as a
+/// subprocess by `extract_pdf_text` so that pdf_extract crashes cannot
+/// destabilise the main server process. Exits non-zero on extraction error
+/// or panic; stderr carries the diagnostic.
+pub fn run_extract_pdf_subprocess() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{Read, Write};
+
+    let mut data = Vec::new();
+    std::io::stdin().lock().read_to_end(&mut data)?;
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pdf_extract::extract_text_from_mem(&data)
+    }));
+
+    match result {
+        Ok(Ok(text)) => {
+            // Cap output here so the parent can safely buffer the entire
+            // response without risking OOM on a pathological PDF.
+            let truncated = truncate_on_char_boundary(text, MAX_TEXT_BYTES);
+            std::io::stdout().lock().write_all(truncated.as_bytes())?;
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            eprintln!("pdf_extract: {}", e);
+            std::process::exit(1);
+        }
+        Err(_) => {
+            eprintln!("pdf_extract panicked");
+            std::process::exit(2);
+        }
+    }
 }

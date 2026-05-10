@@ -203,8 +203,23 @@ enum BackupCmd {
 
 // ── Entry point ─────────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Fast path for the post-upload pipeline's PDF helper: the server
+    // re-invokes itself as `<exe> extract-pdf` for every PDF so that a
+    // pdf_extract crash can't take the main process down. Bail out before
+    // tokio + clap setup so per-call spawn cost stays minimal.
+    let mut argv = std::env::args().skip(1);
+    if argv.next().as_deref() == Some("extract-pdf") {
+        return uncloud_server::processing::text_extract::run_extract_pdf_subprocess();
+    }
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
