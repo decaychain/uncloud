@@ -31,6 +31,6 @@ The original roadmap items — App Platform, S3-Compatible API, and unified Back
 
 ## Finance Tracker
 
-- Personal expense / IOU tracker scoped at "monthly CSV import + categorize + per-currency balances", deliberately simpler than Lunch Money / YNAB. No budgets, no FX conversion, no double-entry, no bank API integrations.
+- Personal expense tracker (with a pending-settlements module for informal debts owed to or from people) scoped at "monthly CSV import + categorize + per-currency balances", deliberately simpler than Lunch Money / YNAB. No budgets, no FX conversion, no double-entry, no bank API integrations.
 - Designed around making CSV re-imports safe: stable `source_ref` hash per row, imported fields separated from user-applied fields with provenance, re-imports surface a diff preview and never overwrite manual categorization. Transaction-with-legs schema from day one to leave splits as a future addition without a migration.
 - Design: [finance-tracker-design.md](finance-tracker-design.md). Not started.

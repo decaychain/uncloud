@@ -4,7 +4,7 @@
 
 ## Overview
 
-A built-in personal finance tracker for Uncloud, scoped at "log + categorize + monthly summary" rather than a full accounting tool. Primary workflow: once a month, import a CSV from each bank, categorize new transactions, settle outstanding IOUs.
+A built-in personal finance tracker for Uncloud, scoped at "log + categorize + monthly summary" rather than a full accounting tool. Primary workflow: once a month, import a CSV from each bank, categorize new transactions, clear outstanding pending settlements (informal debts owed to or from people).
 
 Explicitly **out of scope** for the first version: budgets, double-entry semantics, FX conversion, stocks / investment tracking, automated bank API integration (Plaid-style), recurring transaction detection, merchant inference.
 
@@ -49,13 +49,14 @@ A **rule** is a substring or regex pattern on transaction `description` that map
 
 Rules stay deliberately simple. No ML, no fuzzy matching, no merchant resolution; manual triage handles the long tail. Real-world coverage from substring rules + manual is ~95% with very little upkeep.
 
-### IOUs (separate module)
+### Pending settlements (separate module)
 
-Loans / "outgoing invoices" are a separate model from transactions, not a special transaction type:
+Informal debts — money you've spent on someone else's behalf, money someone has lent you, group-dinner-style "you'll pay me back later" promises — are a separate model from transactions, not a special transaction type. The label **pending settlement** captures the state: an obligation that exists in your records and is awaiting actual money movement to clear.
 
 ```
-Iou:
+PendingSettlement:
   id, owner_id, counterparty (free-text name), amount, currency
+  direction: owed_to_me | owed_by_me
   category_id (reuses transaction categories — "beer", "garage repair", etc.)
   description, opened_at
   status: open | settled | forgiven
@@ -63,7 +64,7 @@ Iou:
     once the money actually moves)
 ```
 
-The list view groups by counterparty and currency: "Alice owes you EUR 30, USD 15"; "Bob owes you EUR 10". Closing an IOU as `settled` optionally links to the transaction that received the payment, so you can audit later.
+The list view groups by counterparty and currency: "Alice owes you EUR 30, USD 15"; "Bob owes you EUR 10"; "You owe Carol EUR 12". Closing a settlement as `settled` optionally links to the transaction that received (or made) the payment, so you can audit later. `forgiven` covers the case where you write off the obligation without money moving — small amounts, lost contact, etc.
 
 ## Import Workflow — The Critical Part
 
@@ -144,8 +145,8 @@ Transaction        owner_id, account_id, source_ref UNIQUE(account_id, source_re
 TransactionLeg     transaction_id, amount, category_id NULLABLE, category_source, rule_id, note
 ImportProfile      owner_id, name, account_id, ...mapping fields...
 ImportBatch       owner_id, account_id, profile_id, source_filename, source_hash, imported_at, summary
-Iou                owner_id, counterparty, amount, currency, category_id, description,
-                   opened_at, status, settled_at, settlement_transaction_id
+PendingSettlement  owner_id, counterparty, direction, amount, currency, category_id,
+                   description, opened_at, status, settled_at, settlement_transaction_id
 ```
 
 ## API Sketch
@@ -163,7 +164,7 @@ All under `/api/finance/...`:
 - `POST /imports/preview` — multipart CSV upload + profile_id, returns diff (no DB writes)
 - `POST /imports/apply` — confirms a previewed diff, returns ImportBatch
 - `GET /import-batches`, `DELETE /import-batches/{id}` — undo a batch (preserving manual edits to the affected transactions where possible)
-- `GET/POST /ious`, `PUT /ious/{id}/settle`, `PUT /ious/{id}/forgive`, `DELETE /ious/{id}`
+- `GET/POST /settlements`, `PUT /settlements/{id}/settle`, `PUT /settlements/{id}/forgive`, `DELETE /settlements/{id}`
 
 ## Frontend Structure
 
@@ -175,7 +176,7 @@ Sidebar section `Finance`, with sub-views:
 - **Categories**: tree view + edit.
 - **Rules**: list + edit + "Apply rules" button.
 - **Import**: pick profile, upload CSV, see diff preview, confirm.
-- **IOUs**: open / settled / forgiven, grouped by counterparty.
+- **Pending settlements**: open / settled / forgiven, grouped by counterparty and direction (owed to you vs. owed by you).
 
 ## Deferred / Open
 
