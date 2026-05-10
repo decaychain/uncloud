@@ -425,6 +425,11 @@ the recommended tool by the spec maintainers.
   catching up; benefit is a bounded request latency. Phase 2 can plumb
   the extractor synchronously if real usage shows the retry is too
   awkward.
-- **No CORS on `/mcp`**. The MCP transport is server-to-server (Claude
-  backend, not a browser), so we don't add CORS headers. Re-add if
-  somebody builds a browser-based MCP client.
+- **CORS scope**. MCP Inspector and the OAuth smoke-script callback
+  both run in a local browser, so the global CORS layer allows any
+  `http(s)://localhost`/`127.0.0.1` origin in addition to the existing
+  Tauri origins. `Mcp-Session-Id` and `Mcp-Protocol-Version` are in
+  the allowed/exposed header set. Production deployments will need a
+  config-driven allowlist of remote origins (Claude.ai's connector
+  origin in particular); deferred until somebody runs Uncloud with a
+  real public origin.
