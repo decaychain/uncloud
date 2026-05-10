@@ -1,9 +1,9 @@
 use std::sync::Arc;
-use axum::http::{HeaderValue, Method};
+use axum::http::Method;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::routing::get;
 use clap::{Parser, Subcommand};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -202,6 +202,20 @@ enum BackupCmd {
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────
+
+/// True for `http(s)://localhost[:port]` and `http(s)://127.0.0.1[:port]`.
+/// Used by the CORS predicate so any local-development browser tool
+/// (MCP Inspector, OAuth smoke callback, dev servers) can hit the API.
+fn is_localhost_origin(origin: &str) -> bool {
+    let rest = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"));
+    let Some(rest) = rest else {
+        return false;
+    };
+    let host = rest.split(':').next().unwrap_or("");
+    host == "localhost" || host == "127.0.0.1"
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fast path for the post-upload pipeline's PDF helper: the server
@@ -651,14 +665,38 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
         .route("/{*path}", get(uncloud_server::frontend::static_handler))
         .fallback(get(uncloud_server::frontend::index_handler));
 
+    // CORS allowlist: the desktop app's tauri:// origins plus any
+    // localhost / 127.0.0.1 port so browser-based dev tools (MCP
+    // Inspector, OAuth smoke callback listener, future Dioxus dev
+    // server) can call OAuth discovery and /mcp during local testing.
+    // The predicate echoes the request origin back, which is required
+    // for `Access-Control-Allow-Credentials: true` to work (browsers
+    // reject credentialed responses with a literal `*` origin).
     let cors = CorsLayer::new()
-        .allow_origin([
-            "tauri://localhost".parse::<HeaderValue>().unwrap(),
-            "https://tauri.localhost".parse::<HeaderValue>().unwrap(),
-            "http://tauri.localhost".parse::<HeaderValue>().unwrap(),
+        .allow_origin(AllowOrigin::predicate(|origin, _| {
+            let Ok(s) = origin.to_str() else {
+                return false;
+            };
+            matches!(
+                s,
+                "tauri://localhost" | "https://tauri.localhost" | "http://tauri.localhost"
+            ) || is_localhost_origin(s)
+        }))
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::PATCH,
+            Method::OPTIONS,
         ])
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::PATCH])
-        .allow_headers([CONTENT_TYPE, AUTHORIZATION])
+        .allow_headers([
+            CONTENT_TYPE,
+            AUTHORIZATION,
+            axum::http::HeaderName::from_static("mcp-session-id"),
+            axum::http::HeaderName::from_static("mcp-protocol-version"),
+        ])
+        .expose_headers([axum::http::HeaderName::from_static("mcp-session-id")])
         .allow_credentials(true);
 
     let app = api_router
