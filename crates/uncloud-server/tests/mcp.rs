@@ -159,18 +159,26 @@ async fn ping_returns_empty_result() {
 }
 
 #[tokio::test]
-async fn tools_list_advertises_three_read_only_tools() {
+async fn tools_list_advertises_all_tools() {
     let app = TestApp::new().await;
     app.register_and_login("alice").await;
 
     let (status, body, _) = rpc(&app, "tools/list", json!({})).await;
     assert_eq!(status, StatusCode::OK);
     let tools = body["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 3);
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"list_files"));
-    assert!(names.contains(&"read_file"));
-    assert!(names.contains(&"search_files"));
+    for expected in [
+        "list_files",
+        "read_file",
+        "search_files",
+        "create_folder",
+        "write_file",
+        "move",
+        "copy",
+        "delete",
+    ] {
+        assert!(names.contains(&expected), "missing tool: {}", expected);
+    }
     for t in tools {
         assert!(
             t["inputSchema"].is_object(),
@@ -501,6 +509,490 @@ async fn read_file_returns_is_error_when_path_does_not_exist() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["result"]["isError"], true);
+
+    app.cleanup().await;
+}
+
+// ===========================================================================
+// Phase 2 — write tools
+// ===========================================================================
+
+async fn assert_listing_contains(app: &TestApp, path: &str, name: &str) {
+    let (status, body, _) = rpc(
+        app,
+        "tools/call",
+        json!({ "name": "list_files", "arguments": { "path": path } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_str(
+        body["result"]["content"][0]["text"].as_str().unwrap(),
+    )
+    .expect("inner json");
+    let names: Vec<String> = parsed["folders"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .chain(parsed["files"].as_array().unwrap_or(&vec![]))
+        .filter_map(|e| e["name"].as_str().map(|s| s.to_string()))
+        .collect();
+    assert!(
+        names.iter().any(|n| n == name),
+        "{} not in listing for {}: {:?}",
+        name,
+        path,
+        names
+    );
+}
+
+async fn assert_listing_missing(app: &TestApp, path: &str, name: &str) {
+    let (status, body, _) = rpc(
+        app,
+        "tools/call",
+        json!({ "name": "list_files", "arguments": { "path": path } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_str(
+        body["result"]["content"][0]["text"].as_str().unwrap(),
+    )
+    .expect("inner json");
+    let names: Vec<String> = parsed["folders"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .chain(parsed["files"].as_array().unwrap_or(&vec![]))
+        .filter_map(|e| e["name"].as_str().map(|s| s.to_string()))
+        .collect();
+    assert!(
+        names.iter().all(|n| n != name),
+        "{} unexpectedly present in {}: {:?}",
+        name,
+        path,
+        names
+    );
+}
+
+#[tokio::test]
+async fn create_folder_creates_new_folder() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+
+    let (status, body, _) = rpc(
+        &app,
+        "tools/call",
+        json!({ "name": "create_folder", "arguments": { "path": "/Inbox" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["result"]["isError"], false);
+    assert_listing_contains(&app, "/", "Inbox").await;
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn create_folder_fails_when_parent_missing() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+
+    let (status, body, _) = rpc(
+        &app,
+        "tools/call",
+        json!({ "name": "create_folder", "arguments": { "path": "/Missing/Sub" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["result"]["isError"], true);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn create_folder_fails_when_path_exists() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+    let _ = rpc(
+        &app,
+        "tools/call",
+        json!({ "name": "create_folder", "arguments": { "path": "/Dup" } }),
+    )
+    .await;
+
+    let (status, body, _) = rpc(
+        &app,
+        "tools/call",
+        json!({ "name": "create_folder", "arguments": { "path": "/Dup" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["result"]["isError"], true);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn write_file_creates_new_file() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+
+    let (status, body, _) = rpc(
+        &app,
+        "tools/call",
+        json!({
+            "name": "write_file",
+            "arguments": { "path": "/draft.md", "content": "hello" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_str(
+        body["result"]["content"][0]["text"].as_str().unwrap(),
+    )
+    .expect("inner json");
+    assert_eq!(parsed["overwrote"], false);
+    assert_eq!(parsed["path"], "/draft.md");
+    assert_eq!(parsed["size_bytes"], 5);
+
+    // Round-trip via read_file.
+    let (_, read_body, _) = rpc(
+        &app,
+        "tools/call",
+        json!({ "name": "read_file", "arguments": { "path": "/draft.md" } }),
+    )
+    .await;
+    let read_parsed: Value = serde_json::from_str(
+        read_body["result"]["content"][0]["text"].as_str().unwrap(),
+    )
+    .expect("inner json");
+    assert_eq!(read_parsed["content"], "hello");
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn write_file_collision_without_overwrite() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+    let _ = rpc(
+        &app,
+        "tools/call",
+        json!({
+            "name": "write_file",
+            "arguments": { "path": "/note.txt", "content": "first" }
+        }),
+    )
+    .await;
+
+    let (_, body, _) = rpc(
+        &app,
+        "tools/call",
+        json!({
+            "name": "write_file",
+            "arguments": { "path": "/note.txt", "content": "second" }
+        }),
+    )
+    .await;
+    assert_eq!(body["result"]["isError"], true);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn write_file_overwrite_replaces_content() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+    let _ = rpc(
+        &app,
+        "tools/call",
+        json!({
+            "name": "write_file",
+            "arguments": { "path": "/note.txt", "content": "first" }
+        }),
+    )
+    .await;
+
+    let (_, body, _) = rpc(
+        &app,
+        "tools/call",
+        json!({
+            "name": "write_file",
+            "arguments": {
+                "path": "/note.txt",
+                "content": "second",
+                "overwrite": true
+            }
+        }),
+    )
+    .await;
+    assert_eq!(body["result"]["isError"], false);
+    let parsed: Value = serde_json::from_str(
+        body["result"]["content"][0]["text"].as_str().unwrap(),
+    )
+    .expect("inner json");
+    assert_eq!(parsed["overwrote"], true);
+
+    let (_, read_body, _) = rpc(
+        &app,
+        "tools/call",
+        json!({ "name": "read_file", "arguments": { "path": "/note.txt" } }),
+    )
+    .await;
+    let read_parsed: Value = serde_json::from_str(
+        read_body["result"]["content"][0]["text"].as_str().unwrap(),
+    )
+    .expect("inner json");
+    assert_eq!(read_parsed["content"], "second");
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn move_file_renames_within_root() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+    app.upload("a.txt", b"x", "text/plain").await;
+
+    let (_, body, _) = rpc(
+        &app,
+        "tools/call",
+        json!({
+            "name": "move",
+            "arguments": { "source_path": "/a.txt", "destination_path": "/b.txt" }
+        }),
+    )
+    .await;
+    assert_eq!(body["result"]["isError"], false);
+    assert_listing_contains(&app, "/", "b.txt").await;
+    assert_listing_missing(&app, "/", "a.txt").await;
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn move_file_into_subfolder() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+    let _ = rpc(
+        &app,
+        "tools/call",
+        json!({ "name": "create_folder", "arguments": { "path": "/sub" } }),
+    )
+    .await;
+    app.upload("a.txt", b"x", "text/plain").await;
+
+    let (_, body, _) = rpc(
+        &app,
+        "tools/call",
+        json!({
+            "name": "move",
+            "arguments": { "source_path": "/a.txt", "destination_path": "/sub/a.txt" }
+        }),
+    )
+    .await;
+    assert_eq!(body["result"]["isError"], false);
+    assert_listing_contains(&app, "/sub", "a.txt").await;
+    assert_listing_missing(&app, "/", "a.txt").await;
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn move_folder_renames() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+    let _ = rpc(
+        &app,
+        "tools/call",
+        json!({ "name": "create_folder", "arguments": { "path": "/old" } }),
+    )
+    .await;
+
+    let (_, body, _) = rpc(
+        &app,
+        "tools/call",
+        json!({
+            "name": "move",
+            "arguments": { "source_path": "/old", "destination_path": "/new" }
+        }),
+    )
+    .await;
+    assert_eq!(body["result"]["isError"], false);
+    assert_listing_contains(&app, "/", "new").await;
+    assert_listing_missing(&app, "/", "old").await;
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn copy_file_creates_duplicate() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+    app.upload("a.txt", b"hello", "text/plain").await;
+
+    let (_, body, _) = rpc(
+        &app,
+        "tools/call",
+        json!({
+            "name": "copy",
+            "arguments": { "source_path": "/a.txt", "destination_path": "/b.txt" }
+        }),
+    )
+    .await;
+    assert_eq!(body["result"]["isError"], false);
+    assert_listing_contains(&app, "/", "a.txt").await;
+    assert_listing_contains(&app, "/", "b.txt").await;
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn delete_file_soft_deletes() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+    app.upload("doomed.txt", b"x", "text/plain").await;
+
+    let (_, body, _) = rpc(
+        &app,
+        "tools/call",
+        json!({ "name": "delete", "arguments": { "path": "/doomed.txt" } }),
+    )
+    .await;
+    assert_eq!(body["result"]["isError"], false);
+    assert_listing_missing(&app, "/", "doomed.txt").await;
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn delete_folder_soft_deletes() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+    let _ = rpc(
+        &app,
+        "tools/call",
+        json!({ "name": "create_folder", "arguments": { "path": "/trashbin" } }),
+    )
+    .await;
+
+    let (_, body, _) = rpc(
+        &app,
+        "tools/call",
+        json!({ "name": "delete", "arguments": { "path": "/trashbin" } }),
+    )
+    .await;
+    assert_eq!(body["result"]["isError"], false);
+    assert_listing_missing(&app, "/", "trashbin").await;
+
+    app.cleanup().await;
+}
+
+// ===========================================================================
+// Phase 2 — scope gating on tools/call (MCP)
+// ===========================================================================
+
+#[tokio::test]
+async fn read_only_token_blocked_on_create_folder() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+    let token = mint_token(&app, "files:read").await;
+    let _ = app.server.post("/api/auth/logout").await;
+
+    let resp = app
+        .server
+        .post("/mcp")
+        .add_header("authorization", format!("Bearer {}", token))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "create_folder", "arguments": { "path": "/x" } }
+        }))
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::OK);
+    let body: Value = resp.json();
+    assert_eq!(body["error"]["code"], -32002);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn write_token_blocked_on_delete() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+    let token = mint_token(&app, "files:write").await;
+    let _ = app.server.post("/api/auth/logout").await;
+
+    let resp = app
+        .server
+        .post("/mcp")
+        .add_header("authorization", format!("Bearer {}", token))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "delete", "arguments": { "path": "/x" } }
+        }))
+        .await;
+    let body: Value = resp.json();
+    assert_eq!(body["error"]["code"], -32002);
+
+    app.cleanup().await;
+}
+
+// ===========================================================================
+// Phase 2 — REST scope enforcement
+// ===========================================================================
+
+#[tokio::test]
+async fn rest_create_folder_requires_files_write_scope() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+    let token = mint_token(&app, "files:read").await;
+    let _ = app.server.post("/api/auth/logout").await;
+
+    let resp = app
+        .server
+        .post("/api/folders")
+        .add_header("authorization", format!("Bearer {}", token))
+        .json(&json!({ "name": "x" }))
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::FORBIDDEN);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn rest_delete_file_requires_files_delete_scope() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+    let uploaded = app.upload("doomed.txt", b"x", "text/plain").await;
+    let file_id = uploaded["id"].as_str().unwrap().to_string();
+
+    let token = mint_token(&app, "files:write").await;
+    let _ = app.server.post("/api/auth/logout").await;
+
+    let resp = app
+        .server
+        .delete(&format!("/api/files/{}", file_id))
+        .add_header("authorization", format!("Bearer {}", token))
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::FORBIDDEN);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn rest_session_cookie_bypasses_scope_check() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+    // Cookie session has Scopes(None) so all writes succeed.
+    let resp = app
+        .server
+        .post("/api/folders")
+        .json(&json!({ "name": "still-works" }))
+        .await;
+    assert!(resp.status_code().is_success(), "got {}", resp.status_code());
 
     app.cleanup().await;
 }

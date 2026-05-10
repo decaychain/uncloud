@@ -37,6 +37,21 @@ impl Scopes {
             Some(s) => s.iter().any(|sc| sc == required),
         }
     }
+
+    /// Reject the request if the bearer's scopes don't include `required`.
+    /// Sessions and legacy PATs (`Scopes(None)`) always pass — only OAuth
+    /// bearers ever fail this check, and they only fail if the requested
+    /// scope wasn't granted.
+    pub fn require(&self, required: &str) -> Result<(), crate::error::AppError> {
+        if self.allows(required) {
+            Ok(())
+        } else {
+            Err(crate::error::AppError::Forbidden(format!(
+                "Scope `{}` required",
+                required
+            )))
+        }
+    }
 }
 
 /// Try to resolve a bearer token: first as a session token, then as an API

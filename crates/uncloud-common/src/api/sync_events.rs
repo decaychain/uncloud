@@ -31,6 +31,10 @@ pub enum SyncEventSource {
     Admin,
     Public,
     System,
+    /// Audit-source for changes made via the MCP write tools — separated
+    /// from UserWeb so the activity feed can show "via Claude" rather
+    /// than impersonating a browser session.
+    Mcp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

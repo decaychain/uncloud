@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use crate::middleware::{
     admin_meta_middleware, admin_middleware, auth_middleware, request_meta_middleware,
-    sigv4_middleware,
+    require_files_delete, require_files_write, sigv4_middleware,
 };
 use crate::AppState;
 
@@ -97,32 +97,35 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Files
         .route("/files", get(files::list_files))
         .route("/files/{id}", get(files::get_file))
-        .route("/files/{id}", put(files::update_file))
-        .route("/files/{id}", delete(files::delete_file))
+        .route("/files/{id}", put(files::update_file).layer(middleware::from_fn(require_files_write)))
+        .route("/files/{id}", delete(files::delete_file).layer(middleware::from_fn(require_files_delete)))
         .route("/files/{id}/download", get(files::download_file))
-        .route("/files/{id}/copy", post(files::copy_file))
+        .route("/files/{id}/copy", post(files::copy_file).layer(middleware::from_fn(require_files_write)))
         .route("/files/{id}/thumb", get(files::get_thumbnail))
         .route("/files/{id}/content", post(files::update_file_content)
-            .layer(DefaultBodyLimit::disable()))
+            .layer(DefaultBodyLimit::disable())
+            .layer(middleware::from_fn(require_files_write)))
         .route("/files/{id}/versions", get(versions::list_versions))
         .route("/files/{file_id}/versions/{version_id}", get(versions::download_version))
         .route("/files/{file_id}/versions/{version_id}/restore", post(versions::restore_version))
         // Uploads
-        .route("/uploads/init", post(files::init_upload))
+        .route("/uploads/init", post(files::init_upload).layer(middleware::from_fn(require_files_write)))
         .route("/uploads/simple", post(files::simple_upload)
-            .layer(DefaultBodyLimit::disable()))
+            .layer(DefaultBodyLimit::disable())
+            .layer(middleware::from_fn(require_files_write)))
         .route("/uploads/{id}/chunk", post(files::upload_chunk)
-            .layer(DefaultBodyLimit::disable()))
-        .route("/uploads/{id}/complete", post(files::complete_upload))
-        .route("/uploads/{id}", delete(files::cancel_upload))
+            .layer(DefaultBodyLimit::disable())
+            .layer(middleware::from_fn(require_files_write)))
+        .route("/uploads/{id}/complete", post(files::complete_upload).layer(middleware::from_fn(require_files_write)))
+        .route("/uploads/{id}", delete(files::cancel_upload).layer(middleware::from_fn(require_files_write)))
         // Folders
         .route("/folders", get(folders::list_folders))
-        .route("/folders", post(folders::create_folder))
+        .route("/folders", post(folders::create_folder).layer(middleware::from_fn(require_files_write)))
         .route("/storages", get(storages::list_storages_public))
         .route("/folders/{id}", get(folders::get_folder))
-        .route("/folders/{id}", put(folders::update_folder))
-        .route("/folders/{id}", delete(folders::delete_folder))
-        .route("/folders/{id}/copy", post(folders::copy_folder))
+        .route("/folders/{id}", put(folders::update_folder).layer(middleware::from_fn(require_files_write)))
+        .route("/folders/{id}", delete(folders::delete_folder).layer(middleware::from_fn(require_files_delete)))
+        .route("/folders/{id}/copy", post(folders::copy_folder).layer(middleware::from_fn(require_files_write)))
         .route("/folders/{id}/breadcrumb", get(folders::get_folder_breadcrumb))
         .route("/folders/{id}/effective-strategy", get(folders::get_effective_strategy))
         .route("/folders/{id}/effective-storage", get(folders::get_effective_storage))
@@ -156,9 +159,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/shares/{id}", delete(shares::delete_share))
         // Trash
         .route("/trash", get(trash::list_trash))
-        .route("/trash", delete(trash::empty_trash))
-        .route("/trash/{id}/restore", post(trash::restore_from_trash))
-        .route("/trash/{id}", delete(trash::permanently_delete))
+        .route("/trash", delete(trash::empty_trash).layer(middleware::from_fn(require_files_delete)))
+        .route("/trash/{id}/restore", post(trash::restore_from_trash).layer(middleware::from_fn(require_files_write)))
+        .route("/trash/{id}", delete(trash::permanently_delete).layer(middleware::from_fn(require_files_delete)))
         // Search
         .route("/search/status", get(search::search_status))
         .route("/search", get(search::search_files))

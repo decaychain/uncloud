@@ -132,6 +132,69 @@ pub async fn resolve_file(
     Ok(file)
 }
 
+/// Whatever lives at the path — a folder or a file. Used by the
+/// write tools (move/copy/delete) that operate on either.
+pub enum Target {
+    Folder(Folder),
+    File(File),
+}
+
+/// Resolve a path to whatever lives there. Folders take precedence if
+/// somehow both existed at the same path (the unique indexes prevent
+/// it, but we check folders first because directory traversal needs to
+/// match folders mid-path anyway).
+pub async fn resolve_target(
+    state: &AppState,
+    owner_id: ObjectId,
+    segments: &[String],
+) -> Result<Target, ToolError> {
+    if segments.is_empty() {
+        return Err(ToolError::exec(
+            "operation cannot target the root folder",
+        ));
+    }
+    let folders = state.db.collection::<Folder>("folders");
+    let last = segments.last().unwrap();
+    let parent_segments = &segments[..segments.len() - 1];
+    let parent = resolve_folder(state, owner_id, parent_segments).await?;
+    let parent_filter = match &parent {
+        Some(f) => Bson::ObjectId(f.id),
+        None => Bson::Null,
+    };
+    if let Some(folder) = folders
+        .find_one(doc! {
+            "owner_id": owner_id,
+            "parent_id": parent_filter.clone(),
+            "name": last,
+            "deleted_at": Bson::Null,
+        })
+        .await
+        .map_err(|e| ToolError::exec(format!("folder lookup failed: {}", e)))?
+    {
+        return Ok(Target::Folder(folder));
+    }
+    let files = state.db.collection::<File>("files");
+    if let Some(file) = files
+        .find_one(doc! {
+            "owner_id": owner_id,
+            "parent_id": parent_filter,
+            "name": last,
+            "deleted_at": Bson::Null,
+        })
+        .await
+        .map_err(|e| ToolError::exec(format!("file lookup failed: {}", e)))?
+    {
+        return Ok(Target::File(file));
+    }
+    Err(ToolError::exec(format!(
+        "nothing exists at path `{}`",
+        format_args!(
+            "/{}",
+            segments.join("/")
+        )
+    )))
+}
+
 /// Compute the absolute path of a file/folder by walking its parent
 /// chain. Used to put a `path` field on every entry the tools return.
 /// Bounded loop for safety in case of corrupted parent_id cycles.
