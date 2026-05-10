@@ -345,14 +345,69 @@ storage later is a back-compat-safe schema change.
 
 Already in place from Phase 0:
 
-- `GET /.well-known/oauth-protected-resource` lists `resource: "<base>/mcp"`.
+- `GET /.well-known/oauth-protected-resource` lists `resource: "<base>"`.
 - `GET /.well-known/oauth-authorization-server` lives under the same
   base URL.
 
 MCP Inspector (and Claude.ai) walk these to find the authorize endpoint
 and exchange a token. No changes needed in Phase 1 — the discovery
-metadata already advertises the resource path; we just have to make the
-path work.
+metadata already advertises the resource; we just have to make the
+`/mcp` path work.
+
+The `issuer` / `authorization_endpoint` / `token_endpoint` URLs in those
+documents are derived from the request's `X-Forwarded-Proto` and
+`X-Forwarded-Host` headers (falling back to `Host`). Behind a reverse
+proxy, make sure the proxy sets these:
+
+```nginx
+proxy_set_header Host              $host;
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header X-Forwarded-Host  $host;
+```
+
+Without those, discovery advertises `http://127.0.0.1:<port>` (the
+upstream socket) and remote clients can't complete the OAuth dance.
+
+## Connecting clients
+
+### Claude.ai (web connector)
+
+In Claude.ai → **Settings → Connectors → Add custom connector**, enter
+the **full MCP endpoint URL including `/mcp`**:
+
+```
+https://your-uncloud-host/mcp
+```
+
+Not the bare origin. Claude.ai derives the OAuth discovery paths from
+the URL's origin but POSTs every JSON-RPC call to the URL **verbatim**.
+A bare host (e.g. `https://your-uncloud-host`) gets you through OAuth
+consent and then fails with "Couldn't reach the MCP server" or
+"Authorization with the MCP server failed", because the `initialize`
+call lands on `/` (405) instead of `/mcp`.
+
+After the consent screen, Claude.ai asks once which scopes to grant
+(`files:read`, `files:write`, `files:delete`); the user can deselect
+write/delete to give a model read-only access.
+
+### MCP Inspector
+
+```
+npx @modelcontextprotocol/inspector
+```
+
+Choose **Streamable HTTP**, paste the same `https://your-uncloud-host/mcp`,
+click **Connect**. Inspector handles the OAuth dance via a localhost
+callback, then lets you list and invoke tools interactively. Useful for
+verifying server behavior outside Claude.ai.
+
+### `claude mcp add` (CLI)
+
+```
+claude mcp add uncloud --transport http https://your-uncloud-host/mcp
+```
+
+Same URL rule applies.
 
 ## Implementation plan
 

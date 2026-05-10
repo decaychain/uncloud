@@ -15,6 +15,7 @@ Self-hosted personal cloud storage. Manage your files, photos, and music from an
 - **Desktop sync** — two-way file sync with per-folder strategy
 - **Pluggable storage** — local filesystem, any S3-compatible service (AWS S3, Backblaze B2, Cloudflare R2, MinIO), or any SSH-accessible host (SFTP); mix and match per folder
 - **S3-compatible API** — point `s5cmd`, `rclone`, `aws-cli`, or any SigV4 client at Uncloud
+- **MCP server** — connect Claude.ai (or any Model Context Protocol client) to your files via OAuth 2.1; tools for listing, reading, searching, creating, writing, moving, copying, and deleting
 - **Encrypted backups** — `uncloud-server backup` writes deduplicated, encrypted snapshots (database + file blobs) to a Restic-format repository (SFTP, S3, B2, Azure, GCS, REST, or local)
 - **Multi-platform** — web, desktop (Linux/Windows), and Android
 
@@ -116,6 +117,21 @@ cargo run -p uncloud-server
 ## Configuration
 
 See [`config.example.yaml`](config.example.yaml) for all available options.
+
+## Connecting an MCP client
+
+Uncloud exposes a Model Context Protocol endpoint at `/mcp`, gated by
+OAuth 2.1 with PKCE. To connect Claude.ai, MCP Inspector, or
+`claude mcp add`, point the client at the **full URL including `/mcp`**:
+
+```
+https://your-uncloud-host/mcp
+```
+
+The client will walk OAuth discovery, register itself, and run you
+through a consent screen on your Uncloud instance. See
+[`docs/mcp.md`](docs/mcp.md) for the full setup guide, tool reference,
+and reverse-proxy header requirements.
 
 ## License
 
