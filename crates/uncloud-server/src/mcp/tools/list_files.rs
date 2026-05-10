@@ -3,6 +3,7 @@ use std::sync::Arc;
 use mongodb::bson::{doc, oid::ObjectId, Bson};
 use serde_json::{json, Value};
 
+use crate::mcp::path;
 use crate::middleware::auth::AuthUser;
 use crate::models::file::File;
 use crate::models::folder::Folder;
@@ -14,9 +15,9 @@ pub fn input_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "folder_id": {
+            "path": {
                 "type": "string",
-                "description": "Folder ObjectId hex. Omit or empty for the root folder."
+                "description": "Absolute, case-sensitive folder path (e.g. \"/Documents\"). Use \"/\" or omit for the root folder. Must not contain '..' or backslashes."
             },
             "limit": {
                 "type": "integer",
@@ -34,11 +35,8 @@ pub async fn call(
     state: &Arc<AppState>,
     user: &AuthUser,
 ) -> Result<Value, ToolError> {
-    let folder_id_str = args
-        .get("folder_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
+    let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or("/");
+    let segments = path::parse(path_str)?;
 
     let limit = args
         .get("limit")
@@ -46,52 +44,24 @@ pub async fn call(
         .map(|n| n.clamp(1, 200) as usize)
         .unwrap_or(50);
 
-    let parent_id: Option<ObjectId> = if folder_id_str.is_empty() {
-        None
-    } else {
-        Some(
-            ObjectId::parse_str(folder_id_str)
-                .map_err(|_| ToolError::invalid("folder_id is not a valid ObjectId"))?,
-        )
-    };
+    let folder = path::resolve_folder(state, user.id, &segments).await?;
+    let parent_id: Option<ObjectId> = folder.as_ref().map(|f| f.id);
 
     let folders_coll = state.db.collection::<Folder>("folders");
     let files_coll = state.db.collection::<File>("files");
 
-    // Resolve the folder (and confirm ownership) for non-root listings.
-    let folder_summary = if let Some(pid) = parent_id {
-        let folder = folders_coll
-            .find_one(doc! { "_id": pid, "deleted_at": Bson::Null })
-            .await
-            .map_err(|e| ToolError::exec(format!("folder lookup failed: {}", e)))?
-            .ok_or_else(|| ToolError::exec("folder not found"))?;
-        if folder.owner_id != user.id {
-            // No share resolution from MCP in v1 — keeps the surface
-            // narrow. Re-evaluate when MCP needs to expose shared folders.
-            return Err(ToolError::exec("folder not found"));
-        }
-        Some(folder)
-    } else {
-        None
-    };
-
-    // Folders in this parent.
-    let folder_filter = match parent_id {
-        Some(pid) => doc! {
-            "owner_id": user.id,
-            "parent_id": pid,
-            "deleted_at": Bson::Null,
-        },
-        None => doc! {
-            "owner_id": user.id,
-            "parent_id": Bson::Null,
-            "deleted_at": Bson::Null,
-        },
+    let parent_filter = match parent_id {
+        Some(pid) => Bson::ObjectId(pid),
+        None => Bson::Null,
     };
 
     let mut child_folders: Vec<Folder> = Vec::new();
     let mut cursor = folders_coll
-        .find(folder_filter)
+        .find(doc! {
+            "owner_id": user.id,
+            "parent_id": parent_filter.clone(),
+            "deleted_at": Bson::Null,
+        })
         .await
         .map_err(|e| ToolError::exec(format!("folders query failed: {}", e)))?;
     while cursor.advance().await.unwrap_or(false) {
@@ -103,25 +73,15 @@ pub async fn call(
         }
     }
 
-    // Files in this parent — only fetch up to the remaining budget so
-    // the combined response stays under `limit` entries.
     let remaining = limit.saturating_sub(child_folders.len());
     let mut child_files: Vec<File> = Vec::new();
     if remaining > 0 {
-        let file_filter = match parent_id {
-            Some(pid) => doc! {
-                "owner_id": user.id,
-                "parent_id": pid,
-                "deleted_at": Bson::Null,
-            },
-            None => doc! {
-                "owner_id": user.id,
-                "parent_id": Bson::Null,
-                "deleted_at": Bson::Null,
-            },
-        };
         let mut cursor = files_coll
-            .find(file_filter)
+            .find(doc! {
+                "owner_id": user.id,
+                "parent_id": parent_filter,
+                "deleted_at": Bson::Null,
+            })
             .await
             .map_err(|e| ToolError::exec(format!("files query failed: {}", e)))?;
         while cursor.advance().await.unwrap_or(false) {
@@ -134,11 +94,27 @@ pub async fn call(
         }
     }
 
-    let folder_field = folder_summary.as_ref().map(|f| {
+    // Compose the absolute path for each child by joining the folder
+    // path we already resolved with the child's name. Cheaper than
+    // calling path::build_for_folder/file per entry, which would walk
+    // the parent chain redundantly.
+    let folder_path = match folder.as_ref() {
+        Some(f) => path::build_for_folder(state, f).await,
+        None => "/".to_string(),
+    };
+    let join = |name: &str| -> String {
+        if folder_path == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", folder_path, name)
+        }
+    };
+
+    let folder_field = folder.as_ref().map(|f| {
         json!({
             "id": f.id.to_hex(),
+            "path": folder_path,
             "name": f.name,
-            "parent_id": f.parent_id.map(|p| p.to_hex()),
         })
     });
 
@@ -146,10 +122,12 @@ pub async fn call(
         "folder": folder_field,
         "folders": child_folders.iter().map(|f| json!({
             "id": f.id.to_hex(),
+            "path": join(&f.name),
             "name": f.name,
         })).collect::<Vec<_>>(),
         "files": child_files.iter().map(|f| json!({
             "id": f.id.to_hex(),
+            "path": join(&f.name),
             "name": f.name,
             "mime_type": f.mime_type,
             "size_bytes": f.size_bytes,

@@ -184,7 +184,7 @@ Request:
   "method": "tools/call",
   "params": {
     "name": "list_files",
-    "arguments": { "folder_id": "..." }
+    "arguments": { "path": "/Documents" }
   }
 }
 ```
@@ -218,6 +218,17 @@ On error: `isError: true`, `content[0].text` carries a human message.
 All three require `files:read`. Output is a JSON-encoded string in a
 `text` content block (see above).
 
+### Path syntax
+
+Tools that take a path accept an **absolute, case-sensitive, slash-delimited**
+string rooted at the user's root: `/Documents/notes.txt`. Empty string
+and `/` both mean root. Trailing slashes are ignored. Backslashes,
+empty segments (`//`), and `.`/`..` segments are rejected with
+`-32602` — the model is meant to address files using the same path
+strings the listing returned, with no separator ambiguity. Filenames
+that contain a literal backslash can't be addressed via these tools;
+use the future id-based write tools when those land.
+
 ### `list_files`
 
 Wraps `routes::folders::list_folders` + `routes::files::list_files`.
@@ -228,9 +239,9 @@ Input schema:
 {
   "type": "object",
   "properties": {
-    "folder_id": {
+    "path": {
       "type": "string",
-      "description": "Folder ObjectId hex. Omit or empty string for the root folder."
+      "description": "Absolute, case-sensitive folder path. \"/\" or omitted means root."
     },
     "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
   }
@@ -241,16 +252,17 @@ Output (JSON in the text block):
 
 ```json
 {
-  "folder": { "id": "...", "name": "..." },
-  "folders": [{ "id": "...", "name": "...", "size_bytes": 0 }],
-  "files":   [{ "id": "...", "name": "...", "mime_type": "...", "size_bytes": 0 }],
+  "folder": { "id": "...", "path": "/Documents", "name": "Documents" },
+  "folders": [{ "id": "...", "path": "/Documents/Sub", "name": "Sub" }],
+  "files":   [{ "id": "...", "path": "/Documents/notes.txt", "name": "notes.txt", "mime_type": "text/plain", "size_bytes": 0, "updated_at": "..." }],
   "next_cursor": null
 }
 ```
 
-Cursor field is reserved for pagination — v1 returns up to `limit`
-entries and a null cursor. Pagination lands when somebody hits the limit
-in practice.
+Every entry carries both `path` (what the model uses to call sibling
+tools) and `id` (stable across renames, useful when the model wants
+to chain calls without refetching). Cursor field is reserved for
+pagination — v1 returns up to `limit` entries and a null cursor.
 
 ### `read_file`
 
@@ -261,9 +273,12 @@ Input:
 ```json
 {
   "type": "object",
-  "required": ["file_id"],
+  "required": ["path"],
   "properties": {
-    "file_id": { "type": "string" },
+    "path": {
+      "type": "string",
+      "description": "Absolute, case-sensitive file path."
+    },
     "max_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 65536 }
   }
 }
@@ -305,9 +320,13 @@ Input:
 }
 ```
 
-Output: array of hits as Meilisearch returns them — `{ id, name,
-mime_type, size_bytes, parent_id, snippet }`. Owner filter is enforced
-server-side as it already is on `/api/search`.
+Output: array of hits, each with `{ id, path, name, mime_type,
+size_bytes }`. The `path` is rebuilt from the live parent-id chain at
+response time so it stays accurate after a move/rename — Meilisearch
+holds the stale id but Mongo holds the truth. Owner filter is enforced
+server-side as it already is on `/api/search`. Hits whose underlying
+file has since been deleted or whose owner no longer matches are
+silently dropped.
 
 If Meilisearch is disabled in config, the tool returns an empty result
 plus a `disabled: true` field in the JSON. We don't synthesise a

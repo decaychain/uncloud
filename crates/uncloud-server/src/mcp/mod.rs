@@ -8,6 +8,7 @@
 
 pub mod handler;
 pub mod jsonrpc;
+pub mod path;
 pub mod tools;
 
 pub use handler::mcp_handler;

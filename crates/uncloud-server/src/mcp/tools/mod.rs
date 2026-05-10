@@ -34,19 +34,19 @@ pub struct ToolDescriptor {
 pub const TOOLS: &[ToolDescriptor] = &[
     ToolDescriptor {
         name: "list_files",
-        description: "List folders and files inside a folder. Omit folder_id (or pass an empty string) to list the root folder.",
+        description: "List folders and files at the given absolute, case-sensitive path (e.g. \"/Documents\"). Use \"/\" or omit for the root. Each returned entry includes its absolute path.",
         input_schema: list_files::input_schema,
         required_scope: "files:read",
     },
     ToolDescriptor {
         name: "read_file",
-        description: "Read the contents of a text-like file (text/*, JSON, XML, JS) or the cached extracted text of a PDF. Output is capped to max_bytes (default 64 KiB, hard cap 1 MiB).",
+        description: "Read a text-like file (text/*, JSON, XML, JS) or the cached extracted text of a PDF. Path is absolute and case-sensitive (e.g. \"/Documents/notes.txt\"). Output is capped to max_bytes (default 64 KiB, hard cap 1 MiB).",
         input_schema: read_file::input_schema,
         required_scope: "files:read",
     },
     ToolDescriptor {
         name: "search_files",
-        description: "Full-text search over the user's files (filename + extracted content). Returns hits with id, name, mime_type, and parent_id.",
+        description: "Full-text search over the user's files (filename + extracted content). Returns hits with absolute path, name, and mime_type.",
         input_schema: search_files::input_schema,
         required_scope: "files:read",
     },
@@ -74,6 +74,7 @@ pub async fn dispatch(
 
 /// Tool-side errors. The handler maps these to JSON-RPC errors or to a
 /// successful response with `isError: true` depending on the kind.
+#[derive(Debug)]
 pub enum ToolError {
     /// Bad input — JSON-RPC -32602.
     InvalidParams(String),

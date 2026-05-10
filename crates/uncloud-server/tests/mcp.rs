@@ -193,7 +193,7 @@ async fn tools_call_list_files_returns_user_root_listing() {
     let (status, body, _) = rpc(
         &app,
         "tools/call",
-        json!({ "name": "list_files", "arguments": { "folder_id": "" } }),
+        json!({ "name": "list_files", "arguments": { "path": "/" } }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -202,7 +202,11 @@ async fn tools_call_list_files_returns_user_root_listing() {
     let text = result["content"][0]["text"].as_str().expect("text content");
     let parsed: Value = serde_json::from_str(text).expect("inner json");
     let files = parsed["files"].as_array().expect("files array");
-    assert!(files.iter().any(|f| f["name"] == "greeting.txt"));
+    let entry = files
+        .iter()
+        .find(|f| f["name"] == "greeting.txt")
+        .expect("greeting.txt in listing");
+    assert_eq!(entry["path"], "/greeting.txt");
 
     app.cleanup().await;
 }
@@ -211,15 +215,13 @@ async fn tools_call_list_files_returns_user_root_listing() {
 async fn tools_call_read_file_returns_text_content() {
     let app = TestApp::new().await;
     app.register_and_login("alice").await;
-    let uploaded = app
-        .upload("notes.txt", b"line one\nline two", "text/plain")
+    app.upload("notes.txt", b"line one\nline two", "text/plain")
         .await;
-    let file_id = uploaded["id"].as_str().unwrap().to_string();
 
     let (status, body, _) = rpc(
         &app,
         "tools/call",
-        json!({ "name": "read_file", "arguments": { "file_id": file_id } }),
+        json!({ "name": "read_file", "arguments": { "path": "/notes.txt" } }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -229,6 +231,7 @@ async fn tools_call_read_file_returns_text_content() {
     let parsed: Value = serde_json::from_str(text).expect("inner json");
     assert_eq!(parsed["content"], "line one\nline two");
     assert_eq!(parsed["source"], "raw");
+    assert_eq!(parsed["file"]["path"], "/notes.txt");
 
     app.cleanup().await;
 }
@@ -237,15 +240,13 @@ async fn tools_call_read_file_returns_text_content() {
 async fn tools_call_read_file_refuses_binary_mime() {
     let app = TestApp::new().await;
     app.register_and_login("alice").await;
-    let uploaded = app
-        .upload("blob.bin", &[0u8, 1, 2, 3], "application/octet-stream")
+    app.upload("blob.bin", &[0u8, 1, 2, 3], "application/octet-stream")
         .await;
-    let file_id = uploaded["id"].as_str().unwrap().to_string();
 
     let (status, body, _) = rpc(
         &app,
         "tools/call",
-        json!({ "name": "read_file", "arguments": { "file_id": file_id } }),
+        json!({ "name": "read_file", "arguments": { "path": "/blob.bin" } }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -383,7 +384,7 @@ async fn oauth_token_with_files_read_can_call_list_files() {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": { "name": "list_files", "arguments": { "folder_id": "" } }
+            "params": { "name": "list_files", "arguments": { "path": "/" } }
         }))
         .await;
     assert_eq!(resp.status_code(), StatusCode::OK);
@@ -432,6 +433,74 @@ async fn oauth_token_without_files_read_is_blocked() {
     assert_eq!(list.status_code(), StatusCode::OK);
     let list_body: Value = list.json();
     assert!(list_body["result"]["tools"].is_array());
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn read_file_rejects_path_with_dotdot() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+
+    let (status, body, _) = rpc(
+        &app,
+        "tools/call",
+        json!({ "name": "read_file", "arguments": { "path": "/../etc/passwd" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["error"]["code"], -32602);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn read_file_rejects_path_with_backslash() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+
+    let (status, body, _) = rpc(
+        &app,
+        "tools/call",
+        json!({ "name": "read_file", "arguments": { "path": r"/foo\bar" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["error"]["code"], -32602);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn read_file_rejects_relative_path() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+
+    let (status, body, _) = rpc(
+        &app,
+        "tools/call",
+        json!({ "name": "read_file", "arguments": { "path": "notes.txt" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["error"]["code"], -32602);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn read_file_returns_is_error_when_path_does_not_exist() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+
+    let (status, body, _) = rpc(
+        &app,
+        "tools/call",
+        json!({ "name": "read_file", "arguments": { "path": "/missing.txt" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["result"]["isError"], true);
 
     app.cleanup().await;
 }

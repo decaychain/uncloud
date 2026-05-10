@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
-use mongodb::bson::{doc, oid::ObjectId, Bson};
+use mongodb::bson::Bson;
 use serde_json::{json, Value};
 
+use crate::mcp::path;
 use crate::middleware::auth::AuthUser;
 use crate::models::file::File;
 use crate::AppState;
@@ -15,11 +16,11 @@ const MAX_BYTES_DEFAULT: usize = 65_536; // 64 KiB
 pub fn input_schema() -> Value {
     json!({
         "type": "object",
-        "required": ["file_id"],
+        "required": ["path"],
         "properties": {
-            "file_id": {
+            "path": {
                 "type": "string",
-                "description": "File ObjectId hex."
+                "description": "Absolute, case-sensitive file path (e.g. \"/Documents/notes.txt\"). Must not contain '..' or backslashes."
             },
             "max_bytes": {
                 "type": "integer",
@@ -37,16 +38,11 @@ pub async fn call(
     state: &Arc<AppState>,
     user: &AuthUser,
 ) -> Result<Value, ToolError> {
-    let file_id_str = args
-        .get("file_id")
+    let path_str = args
+        .get("path")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| ToolError::invalid("file_id is required"))?
-        .trim();
-    if file_id_str.is_empty() {
-        return Err(ToolError::invalid("file_id is required"));
-    }
-    let file_id = ObjectId::parse_str(file_id_str)
-        .map_err(|_| ToolError::invalid("file_id is not a valid ObjectId"))?;
+        .ok_or_else(|| ToolError::invalid("path is required"))?;
+    let segments = path::parse(path_str)?;
 
     let max_bytes = args
         .get("max_bytes")
@@ -54,28 +50,15 @@ pub async fn call(
         .map(|n| (n.max(1) as usize).min(MAX_BYTES_HARD_CAP))
         .unwrap_or(MAX_BYTES_DEFAULT);
 
-    let files_coll = state.db.collection::<File>("files");
-    let file = files_coll
-        .find_one(doc! {
-            "_id": file_id,
-            "owner_id": user.id,
-            "deleted_at": Bson::Null,
-        })
-        .await
-        .map_err(|e| ToolError::exec(format!("file lookup failed: {}", e)))?
-        .ok_or_else(|| ToolError::exec("file not found"))?;
+    let file = path::resolve_file(state, user.id, &segments).await?;
+    let resolved_path = path::build_for_file(state, &file).await;
 
-    // PDFs: prefer the cached extracted text from the text-extract
-    // pipeline. Falling back to live extraction here would mean either
-    // running the subprocess on the request path (slow) or duplicating
-    // its plumbing — neither earns its keep until somebody hits a real
-    // gap. v1: cached or nothing.
     if file.mime_type == "application/pdf" {
         return match file.metadata.get("content_text") {
             Some(Bson::String(text)) => {
                 let truncated = truncate_on_char_boundary(text.clone(), max_bytes);
                 Ok(json!({
-                    "file": file_summary(&file),
+                    "file": file_summary(&file, &resolved_path),
                     "content": truncated,
                     "source": "cached_extract",
                     "truncated": text.len() > max_bytes,
@@ -109,16 +92,17 @@ pub async fn call(
     let truncated = truncate_on_char_boundary(text, max_bytes);
 
     Ok(json!({
-        "file": file_summary(&file),
+        "file": file_summary(&file, &resolved_path),
         "content": truncated,
         "source": "raw",
         "truncated": (bytes.len() as i64) > (max_bytes as i64),
     }))
 }
 
-fn file_summary(file: &File) -> Value {
+fn file_summary(file: &File, path: &str) -> Value {
     json!({
         "id": file.id.to_hex(),
+        "path": path,
         "name": file.name,
         "mime_type": file.mime_type,
         "size_bytes": file.size_bytes,
