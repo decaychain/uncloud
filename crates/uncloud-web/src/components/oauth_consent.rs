@@ -16,8 +16,16 @@ fn parse_query() -> HashMap<String, String> {
     for pair in trimmed.split('&') {
         let mut iter = pair.splitn(2, '=');
         let key = iter.next().unwrap_or("").to_string();
-        let val = iter.next().unwrap_or("").to_string();
-        let val = urlencoding::decode(&val).map(|c| c.into_owned()).unwrap_or(val);
+        let raw = iter.next().unwrap_or("");
+        // application/x-www-form-urlencoded: '+' encodes a literal space.
+        // Replace before percent-decoding so a real '+' (encoded as %2B)
+        // survives intact. MCP Inspector encodes the scope list with '+'
+        // separators; without this the server saw a single bogus scope
+        // string like "files:read+files:write+files:delete".
+        let space_decoded = raw.replace('+', " ");
+        let val = urlencoding::decode(&space_decoded)
+            .map(|c| c.into_owned())
+            .unwrap_or(space_decoded);
         out.insert(key, val);
     }
     out
