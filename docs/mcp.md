@@ -409,14 +409,128 @@ Three layers, mirroring Phase 0:
 No `scripts/mcp-smoke.sh` — Inspector is the equivalent and is already
 the recommended tool by the spec maintainers.
 
+## Phase 2 — write tools + REST scope enforcement
+
+Phase 1 shipped read-only tools. Phase 2 adds five write tools and
+turns on scope enforcement for the corresponding REST routes so an
+OAuth bearer issued with `files:read` only is rejected for writes
+through *either* surface.
+
+### New tools
+
+All five take absolute paths (same syntax as Phase 1) and return a
+JSON-encoded text block describing the resulting entry.
+
+#### `create_folder`
+
+Required scope: `files:write`. Inputs: `{ path }`. The parent folder
+must exist; we do not auto-`mkdir -p`. Trying to create a folder
+where a folder or file already exists is an `isError` result, not a
+JSON-RPC error — the model can react.
+
+```json
+{ "type": "object", "required": ["path"],
+  "properties": { "path": { "type": "string" } } }
+```
+
+#### `write_file`
+
+Required scope: `files:write`. Creates a new file at `path` with
+`content` (UTF-8 text). The parent folder must exist. By default
+the call fails (`isError`) if `path` already exists; pass
+`overwrite: true` to replace, in which case Uncloud's existing
+versioning records the previous content as a `FileVersion` —
+overwrite is non-destructive at the storage layer.
+
+```json
+{ "type": "object", "required": ["path", "content"],
+  "properties": {
+    "path":      { "type": "string" },
+    "content":   { "type": "string", "description": "UTF-8 text content. Max 1 MiB." },
+    "overwrite": { "type": "boolean", "default": false },
+    "mime_type": { "type": "string", "description": "Optional; defaults to mime_guess from filename." }
+  } }
+```
+
+Binary uploads (raw bytes, large files, multipart) stay on the REST
+side. v1 of `write_file` is text-only with a 1 MiB cap to match
+`read_file`'s read cap and to keep the JSON-RPC payload bounded.
+
+#### `move`
+
+Required scope: `files:write`. Inputs: `{ source_path,
+destination_path }`. Detects whether the source is a file or folder
+and dispatches to the corresponding existing handler. The destination's
+parent must exist; the destination itself must not (we don't clobber
+on move — the model can `delete` first if it really means to).
+
+#### `copy`
+
+Required scope: `files:write`. Same shape as `move`. Folders are
+copied recursively, reusing the existing `copy_folder_contents`
+helper. Identical destination rules: parent must exist, destination
+must not.
+
+#### `delete`
+
+Required scope: `files:delete`. Inputs: `{ path }`. Soft-delete (move
+to trash). Recursive for folders. Mirrors the existing
+`DELETE /api/files/{id}` and `DELETE /api/folders/{id}` semantics —
+trash retention and permanent-delete are out of scope for this tool.
+Restoring from trash is deferred (paths don't address trash items
+cleanly; will land later as a `list_trash` + id-based restore pair).
+
+### REST scope enforcement
+
+Existing routes start gating behaviour on `Scopes` when the request
+carries an OAuth bearer:
+
+| Route | Required scope |
+|---|---|
+| `POST /api/folders` | `files:write` |
+| `PUT /api/folders/{id}` | `files:write` |
+| `POST /api/folders/{id}/copy` | `files:write` |
+| `POST /api/uploads/*` | `files:write` |
+| `PUT /api/files/{id}` | `files:write` |
+| `POST /api/files/{id}/copy` | `files:write` |
+| `POST /api/files/{id}/content` | `files:write` |
+| `DELETE /api/folders/{id}` | `files:delete` |
+| `DELETE /api/files/{id}` | `files:delete` |
+| `DELETE /api/trash/{id}` | `files:delete` |
+| `DELETE /api/trash` (empty) | `files:delete` |
+| `POST /api/trash/{id}/restore` | `files:write` |
+
+Sessions and legacy PATs (`Scopes(None)`) bypass — the entire web UI
+keeps working unchanged. A single helper (`require_scope(&scopes,
+"files:write")?`) lives next to the existing extractors; handlers
+call it before any state mutation. Failure is `403 Forbidden` with
+the spec-mandated `WWW-Authenticate: Bearer scope="files:write"`
+challenge so well-behaved OAuth clients can request a stepped-up
+token.
+
+### Open questions
+
+- **Idempotency**. `create_folder` of an existing folder fails today.
+  Considered making it a no-op (POSIX `mkdir -p`-style) but decided
+  against — silent success hides bugs in the model's reasoning, and
+  retry-after-error is cheaper than retry-then-figure-out-state.
+- **`write_file` content size**. 1 MiB matches `read_file`'s cap.
+  If a model needs to write more, REST is still available with the
+  proper scoped bearer.
+- **Mime detection on `write_file`**. We lean on `mime_guess::from_path`
+  the same way the upload route does; the optional `mime_type`
+  parameter lets the model override when the filename is ambiguous
+  (e.g. `Makefile`, `.envrc`).
+
 ## Phasing
 
-- **Phase 1** (this PR): everything above — read-only tools, stateless
-  Streamable HTTP.
-- **Phase 2**: write tools (`upload_file`, `move_file`, `delete_file`,
-  `create_folder`, `restore_from_trash`) gated on `files:write` /
-  `files:delete`. Adds scope enforcement to the existing REST routes
-  for parity.
+- **Phase 1** (shipped, PR #50): read-only tools, stateless Streamable
+  HTTP.
+- **Phase 2** (this PR): write tools (`create_folder`, `write_file`,
+  `move`, `copy`, `delete`) gated on `files:write` / `files:delete`.
+  Adds matching scope enforcement to the existing REST routes.
+- **Phase 2.5** (deferred): trash exposure — `list_trash` + id-based
+  `restore_from_trash`. Lands when somebody hits the gap.
 - **Phase 3** (optional): MCP `resources` exposing folders as a tree,
   long-running tools with progress notifications via SSE, and
   `mcp_sessions` storage.
