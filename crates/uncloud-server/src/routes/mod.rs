@@ -308,12 +308,23 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             auth_middleware,
         ));
 
+    // MCP endpoint — JSON-RPC over Streamable HTTP. Lives at the root
+    // (not under /api/) per MCP convention. Auth via OAuth bearer or
+    // session; per-tool scope checks happen inside the handler.
+    let mcp_routes = Router::new()
+        .route("/mcp", post(crate::mcp::mcp_handler))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
+
     Router::new()
         .merge(public_routes)
         .merge(auth_routes)
         .merge(admin_routes)
         .merge(s3_routes)
         .merge(app_proxy_routes)
+        .merge(mcp_routes)
         .with_state(state)
 }
 
