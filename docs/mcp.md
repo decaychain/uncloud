@@ -278,8 +278,10 @@ Behaviour:
   `text`.
 - For `application/pdf`, return the cached `metadata.content_text` from
   the text-extract pipeline if present (already truncated to 1 MB at
-  ingest); otherwise extract on the fly. **Do not** stream raw PDF
-  bytes.
+  ingest). If no cached text is available yet, return an `isError`
+  result telling the model to retry later — the on-the-fly extractor
+  would put 60s of subprocess work on the request path, which the
+  model sees as a hang. **Do not** stream raw PDF bytes.
 - For other binary types, return an error. Phase 2 may add a
   `read_file_binary` that returns `image` content blocks; not now.
 
@@ -417,9 +419,12 @@ the recommended tool by the spec maintainers.
   A full JSON Schema validator pulls a heavy dep tree for marginal
   benefit on three tools. Re-evaluate if the tool count grows past
   ~10.
-- **Read-amplification on `read_file` for PDFs without cached text**.
-  The fallback path runs the text-extract subprocess synchronously;
-  worst case is the existing 60s timeout. Acceptable for v1.
+- **PDFs without cached text** return an `isError` retry message rather
+  than running the extract subprocess on the request path. Cost is one
+  failed tool call per PDF the user uploads while the pipeline is still
+  catching up; benefit is a bounded request latency. Phase 2 can plumb
+  the extractor synchronously if real usage shows the retry is too
+  awkward.
 - **No CORS on `/mcp`**. The MCP transport is server-to-server (Claude
   backend, not a browser), so we don't add CORS headers. Re-add if
   somebody builds a browser-based MCP client.
