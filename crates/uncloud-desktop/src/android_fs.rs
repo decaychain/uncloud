@@ -223,6 +223,31 @@ impl LocalFs for AndroidSafFs {
         }
     }
 
+    async fn remove_dir(&self, path: &str) -> Result<(), LocalFsError> {
+        let (root, rel) = Self::split(path);
+        if rel.is_empty() {
+            return Err(LocalFsError::other("remove_dir called on tree root"));
+        }
+        let api = self.app.android_fs_async();
+        let uri = match api.resolve_dir_uri(&Self::tree_uri(&root), &rel).await {
+            Ok(u) => u,
+            // Idempotent: dir is already gone.
+            Err(_) => return Ok(()),
+        };
+        let entries = api
+            .read_dir(&uri)
+            .await
+            .map_err(|e| LocalFsError::other(format!("read_dir({rel}): {e}")))?;
+        if !entries.is_empty() {
+            return Err(LocalFsError::other(format!(
+                "remove_dir({rel}): directory not empty"
+            )));
+        }
+        api.remove_dir_all(&uri)
+            .await
+            .map_err(|e| LocalFsError::other(format!("remove_dir({rel}): {e}")))
+    }
+
     async fn mtime(&self, path: &str) -> Result<Option<i64>, LocalFsError> {
         let (root, rel) = Self::split(path);
         if rel.is_empty() {

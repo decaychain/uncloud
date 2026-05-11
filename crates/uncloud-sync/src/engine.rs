@@ -951,6 +951,62 @@ impl SyncEngine {
             }
         }
 
+        // 6.1. Server folder deletions: folder rows in journal whose
+        //      server_id is no longer in `tree.folders`. Symmetric with
+        //      Phase 6 above for files. Without this phase, Phase 6.5
+        //      walks the still-present local directory, fails to find a
+        //      matching server folder in `bases`, and re-creates the
+        //      folder on the server — an infinite zombie loop after the
+        //      user deletes a folder via the web UI.
+        //
+        //      Two behaviours, both preserve data:
+        //       - Local dir empty (or already gone): `remove_dir`
+        //         succeeds, we mark the path as touched so Phase 6.5
+        //         skips it, and we log a local delete. This mirrors the
+        //         file case.
+        //       - Local dir non-empty (user has unsynced files inside):
+        //         `remove_dir` fails with NotEmpty. We still drop the
+        //         journal row to break the loop, but DON'T mark touched
+        //         — Phase 6.5 will re-create the folder so those
+        //         unsynced files have somewhere to upload to. The user
+        //         can re-delete on the server once the inner files are
+        //         dealt with.
+        //
+        //      Process deepest paths first so nested empty-dir chains
+        //      collapse: removing `Test/Sub` first leaves `Test` empty,
+        //      then `Test` can also `remove_dir` cleanly.
+        let server_folder_ids: std::collections::HashSet<&str> =
+            tree.folders.iter().map(|f| f.id.as_str()).collect();
+        let mut folder_deletion_echoes: Vec<&crate::journal::SyncStateRow> = journal_map
+            .iter()
+            .filter(|((_, item_type), _)| item_type == "folder")
+            .filter(|((server_id, _), _)| !server_folder_ids.contains(server_id.as_str()))
+            .map(|(_, row)| row)
+            .collect();
+        folder_deletion_echoes.sort_by_key(|r| std::cmp::Reverse(r.local_path.len()));
+
+        for j in folder_deletion_echoes {
+            let dir_exists = self.fs.is_dir(&j.local_path).await.unwrap_or(false);
+            let path_clear = if dir_exists {
+                match self.fs.remove_dir(&j.local_path).await {
+                    Ok(()) => {
+                        report.deleted_local.push(j.server_path.clone());
+                        self.log_delete_local(&j.local_path).await;
+                        true
+                    }
+                    // Non-empty (or other error): leave the dir for Phase
+                    // 6.5 to re-attach to the server tree.
+                    Err(_) => false,
+                }
+            } else {
+                true
+            };
+            if path_clear {
+                touched_paths.insert(j.local_path.clone());
+            }
+            let _ = self.journal.delete(&j.server_id, "folder").await;
+        }
+
         // 6a. Handle local deletions: rows in journal whose local file is
         //     gone but the server still has them. Two-phase to absorb
         //     transient absences (e.g. a watcher missed an edit so a tool
@@ -1193,6 +1249,7 @@ impl SyncEngine {
             attach_under: Option<(&str, &str, SyncStrategy)>,
             folder_info: &mut HashMap<String, ResolvedFolder>,
             report: &mut SyncReport,
+            touched_paths: &std::collections::HashSet<String>,
         ) {
             let mut local_dirs = match this.fs.walk_dirs(walk_root).await {
                 Ok(d) => d,
@@ -1225,6 +1282,12 @@ impl SyncEngine {
                 let full_path = this.fs.join(walk_root, &rel);
                 // Already a registered base → known server folder, skip.
                 if bases.iter().any(|(p, _, _)| p == &full_path) {
+                    continue;
+                }
+                // Server-side delete echo handled by Phase 6.1 — don't
+                // resurrect the folder we just acknowledged the server
+                // deleted.
+                if touched_paths.contains(&full_path) {
                     continue;
                 }
 
@@ -1307,7 +1370,15 @@ impl SyncEngine {
 
         // Pass (a): walk the global root.
         if let Some(root) = self.root_local_path.clone() {
-            create_remote_dirs(self, &root, None, &mut folder_info, &mut report).await;
+            create_remote_dirs(
+                self,
+                &root,
+                None,
+                &mut folder_info,
+                &mut report,
+                &touched_paths,
+            )
+            .await;
         }
 
         // Pass (b): walk per-folder override bases. Snapshot ids/paths so we
@@ -1345,6 +1416,7 @@ impl SyncEngine {
                 Some((&base, &fid, strat)),
                 &mut folder_info,
                 &mut report,
+                &touched_paths,
             )
             .await;
         }

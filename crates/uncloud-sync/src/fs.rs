@@ -72,6 +72,12 @@ pub trait LocalFs: Send + Sync {
     /// exist (idempotent).
     async fn remove_file(&self, path: &str) -> Result<(), LocalFsError>;
 
+    /// Delete an EMPTY directory at `path`. Returns an error if the directory
+    /// is non-empty, so the caller can fall back to a path that preserves
+    /// unsynced local contents. Idempotent for the missing case: returns
+    /// `Ok(())` if the directory does not exist.
+    async fn remove_dir(&self, path: &str) -> Result<(), LocalFsError>;
+
     /// Return the mtime of `path` in unix seconds, or `None` if unavailable.
     async fn mtime(&self, path: &str) -> Result<Option<i64>, LocalFsError>;
 
@@ -196,6 +202,14 @@ impl LocalFs for NativeFs {
 
     async fn remove_file(&self, path: &str) -> Result<(), LocalFsError> {
         match tokio::fs::remove_file(path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(LocalFsError::io(path, e)),
+        }
+    }
+
+    async fn remove_dir(&self, path: &str) -> Result<(), LocalFsError> {
+        match tokio::fs::remove_dir(path).await {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(LocalFsError::io(path, e)),
