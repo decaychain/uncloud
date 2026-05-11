@@ -4,7 +4,26 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="description" content="Uncloud - Personal Cloud Storage">
-
+    <script>
+    (function () {
+        if (!window.fetch || window.__uncloud_fetch_wrapped) return;
+        window.__uncloud_fetch_wrapped = true;
+        var orig = window.fetch.bind(window);
+        window.fetch = function (input, init) {
+            return orig(input, init).then(function (resp) {
+                if (resp && resp.status === 401) {
+                    var url = typeof input === 'string' ? input : (input && input.url) || '';
+                    // /api/auth/* covers login/register/etc. — those 401s are
+                    // "wrong password", not "session expired".
+                    if (url.indexOf('/api/auth/') === -1) {
+                        try { window.dispatchEvent(new CustomEvent('uncloud:session-expired')); } catch (_) {}
+                    }
+                }
+                return resp;
+            });
+        };
+    })();
+    </script>
 </head>
 <body>
     <div id="main"></div>

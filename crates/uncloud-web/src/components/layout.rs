@@ -211,6 +211,7 @@ pub fn Layout() -> Element {
                 }
             }
             crate::components::player::Player {}
+            crate::components::session_toast::SessionExpiredToast {}
         }
     }
 }
