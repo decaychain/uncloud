@@ -4,7 +4,7 @@ use uncloud_common::{AlbumResponse, MusicFolderResponse, PlaylistSummary, TaskPr
 use crate::hooks::tauri as tauri_hook;
 use crate::components::icons::{
     IconCheckSquare, IconFolder, IconHistory, IconImage, IconKey, IconLayoutGrid, IconLink, IconListMusic, IconMusic, IconPalette,
-    IconCopy, IconRefreshCw, IconSettings, IconShield, IconShoppingCart, IconTrash, IconUser, IconUsers,
+    IconCopy, IconRefreshCw, IconSettings, IconShield, IconShoppingCart, IconTrash, IconUser, IconUsers, IconWallet,
 };
 use crate::hooks::{use_apps, use_files, use_music, use_playlists, use_tasks};
 use crate::hooks::use_apps::AppEntry;
@@ -47,6 +47,8 @@ pub fn Sidebar() -> Element {
         "tasks"
     } else if matches!(route, Route::Shopping {} | Route::ShoppingList { .. }) {
         "shopping"
+    } else if matches!(route, Route::Finance {}) {
+        "finance"
     } else if matches!(route, Route::Passwords {}) {
         "passwords"
     } else if matches!(route, Route::Settings {} | Route::SettingsTab { .. }) {
@@ -60,6 +62,11 @@ pub fn Sidebar() -> Element {
         .user
         .as_ref()
         .map(|u| u.features_enabled.contains(&"shopping".to_string()))
+        .unwrap_or(false);
+    let finance_enabled = auth_state()
+        .user
+        .as_ref()
+        .map(|u| u.features_enabled.contains(&"finance".to_string()))
         .unwrap_or(false);
 
     rsx! {
@@ -128,6 +135,17 @@ pub fn Sidebar() -> Element {
                             onclick: move |_| close_drawer(),
                             IconShoppingCart {}
                             span { "Shopping" }
+                        }
+                    }
+                }
+                if finance_enabled {
+                    li {
+                        Link {
+                            to: Route::Finance {},
+                            class: if section == "finance" { "active" } else { "" },
+                            onclick: move |_| close_drawer(),
+                            IconWallet {}
+                            span { "Finance" }
                         }
                     }
                 }
@@ -214,6 +232,18 @@ pub fn Sidebar() -> Element {
                                     onclick: move |_| close_drawer(),
                                     IconShoppingCart {}
                                     span { "All Lists" }
+                                }
+                            }
+                        },
+                        "finance" => rsx! {
+                            li { class: "menu-title", span { "Finance" } }
+                            li {
+                                Link {
+                                    to: Route::Finance {},
+                                    class: "active",
+                                    onclick: move |_| close_drawer(),
+                                    IconWallet {}
+                                    span { "Overview" }
                                 }
                             }
                         },

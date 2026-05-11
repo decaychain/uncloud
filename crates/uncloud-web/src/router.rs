@@ -4,6 +4,7 @@ use crate::components::{
     auth::{Login, Register},
     dashboard::DashboardPage,
     duplicates::DuplicatesPage,
+    finance::FinancePage,
     file_browser::FileBrowser,
     layout::Layout,
     gallery::{Gallery, GalleryAlbum},
@@ -99,6 +100,9 @@ pub enum Route {
 
         #[route("/tasks/project/:id")]
         TasksProject { id: String },
+
+        #[route("/finance")]
+        Finance {},
 
         #[route("/shopping")]
         Shopping {},
@@ -282,6 +286,13 @@ fn TasksAssigned() -> Element {
 fn TasksProject(id: String) -> Element {
     rsx! {
         TasksProjectPage { key: "{id}", project_id: id }
+    }
+}
+
+#[component]
+fn Finance() -> Element {
+    rsx! {
+        FinancePage {}
     }
 }
 

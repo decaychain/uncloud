@@ -32,6 +32,9 @@ fn compute_features_enabled(config: &crate::config::Config, disabled: &[String])
     if config.features.shopping && !disabled.contains(&"shopping".to_string()) {
         enabled.push("shopping".to_string());
     }
+    if config.features.finance && !disabled.contains(&"finance".to_string()) {
+        enabled.push("finance".to_string());
+    }
     enabled
 }
 

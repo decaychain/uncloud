@@ -25,6 +25,7 @@ pub mod sync_events;
 pub mod audit;
 pub mod duplicates;
 pub mod oauth;
+pub mod finance;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -221,7 +222,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Sync audit log
         .route("/sync-events", get(sync_events::list_sync_events))
         // Duplicate detection
-        .route("/duplicates", get(duplicates::get_duplicate_report));
+        .route("/duplicates", get(duplicates::get_duplicate_report))
+        // Finance tracker
+        .route("/finance/accounts", get(finance::list_accounts).post(finance::create_account))
+        .route("/finance/accounts/{id}", put(finance::update_account).delete(finance::delete_account))
+        .route("/finance/accounts/{id}/balance", get(finance::get_account_balance))
+        .route("/finance/categories", get(finance::list_categories).post(finance::create_category))
+        .route("/finance/categories/{id}", put(finance::update_category).delete(finance::delete_category))
+        .route("/finance/transactions", get(finance::list_transactions).post(finance::create_transaction))
+        .route("/finance/transactions/{id}", put(finance::update_transaction).delete(finance::delete_transaction));
 
     // v1-only routes (API tokens, S3 credentials, apps)
     let v1_only = Router::new()

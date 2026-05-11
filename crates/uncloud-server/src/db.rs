@@ -632,6 +632,66 @@ pub async fn setup_sync_audit_indexes(db: &Database, cfg: &SyncAuditConfig) -> R
         )
         .await?;
 
+    // Finance tracker indexes
+    let finance_accounts = db.collection::<mongodb::bson::Document>("finance_accounts");
+    finance_accounts
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "name": 1 })
+                .build(),
+        )
+        .await?;
+
+    let finance_categories = db.collection::<mongodb::bson::Document>("finance_categories");
+    finance_categories
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "name": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    finance_categories
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "parent_id": 1 })
+                .build(),
+        )
+        .await?;
+
+    let finance_transactions = db.collection::<mongodb::bson::Document>("finance_transactions");
+    finance_transactions
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "account_id": 1, "date": -1 })
+                .build(),
+        )
+        .await?;
+    finance_transactions
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "date": -1 })
+                .build(),
+        )
+        .await?;
+    // Source-ref UPSERT key for future CSV import (one per (account, ref)).
+    // Partial filter so manual transactions with no source_ref coexist.
+    finance_transactions
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "account_id": 1, "source_ref": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(mongodb::bson::doc! {
+                            "source_ref": { "$type": "string" }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     // TTL index. The retention may change at runtime via config — MongoDB
     // rejects create_index on an existing TTL with different expireAfterSeconds,
     // so drop-and-recreate if needed.
