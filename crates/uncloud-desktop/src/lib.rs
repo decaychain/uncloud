@@ -678,7 +678,31 @@ async fn run_sync_once(
     *phase.lock().await = start_phase.clone();
     emit_stats(&app, start_phase, start_snapshot);
 
-    let result = engine.incremental_sync().await.map_err(|e| e.to_string());
+    // Attempt the sync. If it fails with a 401 (cookie expired mid-process
+    // — the in-memory session is older than `session_duration_hours`),
+    // re-login with stored credentials and retry once. The engine and
+    // its HTTP client share a cookie jar, so the fresh `Set-Cookie` from
+    // login lands automatically and the retry uses the new session.
+    // `Box<dyn Error>` from the engine is !Send — drop it before any
+    // `.await` by stringifying eagerly and capturing the 401 flag.
+    let first_attempt = match engine.incremental_sync().await {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            let unauthorized = is_unauthorized_error(&*e);
+            Err((e.to_string(), unauthorized))
+        }
+    };
+    let result = match first_attempt {
+        Ok(r) => Ok(r),
+        Err((msg, true)) => match try_reauth_with_stored_password(&app, &engine).await {
+            Ok(()) => engine
+                .incremental_sync()
+                .await
+                .map_err(|e| e.to_string()),
+            Err(reauth_err) => Err(format!("{msg} (re-auth failed: {reauth_err})")),
+        },
+        Err((msg, false)) => Err(msg),
+    };
     match result {
         Ok(report) => {
             // Hook already bumped uploaded/downloaded/deleted incrementally
@@ -705,6 +729,45 @@ async fn run_sync_once(
             Err(msg)
         }
     }
+}
+
+/// Walks an error chain looking for a `ClientError::Api` with HTTP 401 or
+/// the explicit `Unauthenticated` variant — both mean the engine's
+/// in-process session cookie has expired or been revoked.
+fn is_unauthorized_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    use uncloud_client::ClientError;
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = current {
+        if let Some(ce) = e.downcast_ref::<ClientError>() {
+            return matches!(
+                ce,
+                ClientError::Api { status: 401, .. } | ClientError::Unauthenticated
+            );
+        }
+        current = e.source();
+    }
+    false
+}
+
+/// Re-establish the session by pulling the password back out of secret
+/// storage and calling `Client::login` on the engine's existing client.
+/// Returns Err with a human-readable reason if any prerequisite is missing
+/// (no config, no stored password, server rejects the password) — the
+/// caller surfaces this as part of the sync error.
+async fn try_reauth_with_stored_password(
+    app: &AppHandle,
+    engine: &SyncEngine,
+) -> std::result::Result<(), String> {
+    let cfg = load_config_from(app).ok_or_else(|| "no saved config".to_string())?;
+    let secrets = secrets_dir(app).ok_or_else(|| "no data directory".to_string())?;
+    let password = secret_store::load_password(&secrets, &cfg.server_url, &cfg.username)
+        .ok_or_else(|| "no saved credentials".to_string())?;
+    engine
+        .client()
+        .login(&cfg.username, &password)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Clone, Serialize)]

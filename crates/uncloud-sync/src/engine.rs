@@ -196,6 +196,14 @@ impl SyncEngine {
         self.state_tx.subscribe()
     }
 
+    /// Borrow the underlying HTTP client. The desktop layer uses this to
+    /// re-login with stored credentials when a sync run fails with 401 —
+    /// the new session cookie lands in the same cookie jar the engine is
+    /// already using, so the retry transparently succeeds.
+    pub fn client(&self) -> Arc<Client> {
+        Arc::clone(&self.client)
+    }
+
     fn set_state(&self, next: SyncState) {
         // `send_if_modified` skips the notification if the value is
         // unchanged, so subscribers see one event per real transition.
