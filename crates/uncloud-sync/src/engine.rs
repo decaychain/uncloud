@@ -473,6 +473,28 @@ impl SyncEngine {
         .await;
     }
 
+    /// Record a run-level error in the local audit log so the desktop
+    /// activity view shows *why* the run failed. Without this, a sentinel
+    /// or directory failure would only bump `report.errors` (visible as
+    /// "1 errors" in the SyncEnd marker) without surfacing the actual
+    /// reason — see the Windows fresh-install regression where a missing
+    /// target directory produced an opaque error counter.
+    async fn log_sync_error_row(&self, path: &str, reason: &str) {
+        self.ensure_start_emitted().await;
+        self.log_row(SyncLogRow {
+            id: 0,
+            timestamp: Utc::now().to_rfc3339(),
+            operation: "Error".to_owned(),
+            direction: None,
+            resource_type: None,
+            path: path.to_owned(),
+            new_path: None,
+            reason: reason.to_owned(),
+            note: None,
+        })
+        .await;
+    }
+
     async fn log_sync_marker(
         &self,
         operation: &str,
@@ -604,11 +626,22 @@ impl SyncEngine {
                 | SentinelError::Corrupt { .. }
                 | SentinelError::Fs(_)
                 | SentinelError::Journal(_))) => {
+                    let reason = e.to_string();
                     report.errors.push(SyncError {
                         path: base.clone(),
-                        reason: e.to_string(),
+                        reason: reason.clone(),
                     });
                     warn!("Aborting sync: {e}");
+                    self.log_sync_error_row(base, &reason).await;
+                    let elapsed = started.elapsed();
+                    let note = format!(
+                        "0 up, 0 down, 0 deleted, 0 folders created, 0 conflicts, \
+                         {} errors, {:.1}s",
+                        report.errors.len(),
+                        elapsed.as_secs_f32(),
+                    );
+                    self.log_sync_marker("SyncEnd", end_reason, Some(note))
+                        .await;
                     return Ok(report);
                 }
             }

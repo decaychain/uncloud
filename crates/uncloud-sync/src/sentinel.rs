@@ -128,10 +128,15 @@ pub async fn verify_or_mint(
             expected: "<no journal row>".to_owned(),
             found: s.base_id,
         }),
-        // First sync of a fresh base. Mint atomically: write the sentinel
-        // first so an interrupted insert doesn't leave the journal with a
-        // base it can't verify, then record the row.
+        // First sync of a fresh base. Mint atomically: ensure the base
+        // directory exists (Windows fresh installs typically point at a
+        // path the installer never created), write the sentinel first so
+        // an interrupted insert doesn't leave the journal with a base it
+        // can't verify, then record the row. Auto-creation is gated on
+        // the no-journal-row branch so an unmounted volume (which lands
+        // in `Missing`) still fails loudly instead of silently re-minting.
         (None, None) => {
+            fs.create_dir_all(base_local_path).await?;
             let base_id = uuid::Uuid::new_v4().to_string();
             let now = chrono::Utc::now().to_rfc3339();
             let sentinel = Sentinel {
@@ -240,6 +245,28 @@ mod tests {
         let s: Sentinel = serde_json::from_slice(&sentinel_bytes).unwrap();
         assert_eq!(s.base_id, base.base_id);
         assert_eq!(s.instance_id, "instance-1");
+    }
+
+    #[tokio::test]
+    async fn first_sync_creates_missing_target_directory() {
+        // Windows fresh-install regression: installer points sync at a
+        // path that the user has never created. Without auto-mkdir, the
+        // sentinel write fails and the user sees an opaque error counter.
+        let (fs, journal, _db, root) = rig().await;
+        let nested = root.path().join("does").join("not").join("exist");
+        let path = nested.to_str().unwrap().to_owned();
+
+        let (status, base) = verify_or_mint(&fs, &journal, &path, "instance-1")
+            .await
+            .unwrap();
+
+        assert_eq!(status, SentinelStatus::Minted);
+        assert_eq!(base.local_path, path);
+        assert!(nested.is_dir(), "base directory should have been created");
+        assert!(
+            nested.join(SENTINEL_FILENAME).is_file(),
+            "sentinel file should exist at the freshly-minted base"
+        );
     }
 
     #[tokio::test]
