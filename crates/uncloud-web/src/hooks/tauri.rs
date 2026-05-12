@@ -79,11 +79,9 @@ pub enum SyncPhase {
 pub struct SyncStats {
     pub session_uploaded: u32,
     pub session_downloaded: u32,
-    pub session_deleted: u32,
     pub session_errors: u32,
     pub last_run_uploaded: u32,
     pub last_run_downloaded: u32,
-    pub last_run_deleted: u32,
     pub last_run_errors: u32,
     pub last_sync_at: Option<String>,
 }
@@ -96,16 +94,16 @@ pub struct SyncState {
 
 /// A single row from the desktop's local `sync_log` SQLite table, pushed over
 /// the `sync-log-appended` Tauri event and also returned by `get_local_sync_log`.
+/// `direction` / `resource_type` / `reason` exist in the underlying SQLite
+/// schema but are not surfaced in the activity view yet, so the WASM struct
+/// drops them rather than carrying dead fields.
 #[derive(Debug, Clone)]
 pub struct SyncLogRow {
     pub id: i64,
     pub timestamp: String,
     pub operation: String,
-    pub direction: Option<String>,
-    pub resource_type: Option<String>,
     pub path: String,
     pub new_path: Option<String>,
-    pub reason: String,
     pub note: Option<String>,
 }
 
@@ -140,11 +138,9 @@ fn parse_sync_state(result: JsValue) -> SyncState {
             SyncStats {
                 session_uploaded: num("session_uploaded"),
                 session_downloaded: num("session_downloaded"),
-                session_deleted: num("session_deleted"),
                 session_errors: num("session_errors"),
                 last_run_uploaded: num("last_run_uploaded"),
                 last_run_downloaded: num("last_run_downloaded"),
-                last_run_deleted: num("last_run_deleted"),
                 last_run_errors: num("last_run_errors"),
                 last_sync_at: Reflect::get(&s, &JsValue::from_str("last_sync_at"))
                     .ok()
@@ -175,11 +171,8 @@ fn parse_sync_log_row(v: &JsValue) -> Option<SyncLogRow> {
             .unwrap_or(0),
         timestamp: get_str("timestamp")?,
         operation: get_str("operation")?,
-        direction: get_opt_str("direction"),
-        resource_type: get_opt_str("resource_type"),
         path: get_str("path")?,
         new_path: get_opt_str("new_path"),
-        reason: get_str("reason")?,
         note: get_opt_str("note"),
     })
 }
@@ -411,13 +404,14 @@ pub async fn default_sync_folder() -> Option<String> {
 
 /// Per-folder effective sync config, resolved across all layers:
 /// per-device override, server effective strategy, inherited local base path.
+/// `effective_strategy` and `base_source_folder_id` are in the underlying
+/// command response but not consumed by the UI yet, so we drop them rather
+/// than carry dead fields.
 #[derive(Debug, Clone)]
 pub struct FolderEffectiveConfig {
     pub client_strategy: Option<String>,
-    pub effective_strategy: String,
     pub base_path: Option<String>,
     pub base_source: String,
-    pub base_source_folder_id: Option<String>,
 }
 
 /// Fetch the resolved per-folder sync config from the desktop journal + server.
@@ -431,9 +425,6 @@ pub async fn get_folder_effective_config(folder_id: &str) -> Option<FolderEffect
     let client_strategy = Reflect::get(&result, &JsValue::from_str("client_strategy"))
         .ok()
         .and_then(|v| v.as_string());
-    let effective_strategy = Reflect::get(&result, &JsValue::from_str("effective_strategy"))
-        .ok()?
-        .as_string()?;
     let base_path = Reflect::get(&result, &JsValue::from_str("base_path"))
         .ok()
         .and_then(|v| v.as_string());
@@ -441,15 +432,10 @@ pub async fn get_folder_effective_config(folder_id: &str) -> Option<FolderEffect
         .ok()
         .and_then(|v| v.as_string())
         .unwrap_or_else(|| "none".to_string());
-    let base_source_folder_id = Reflect::get(&result, &JsValue::from_str("base_source_folder_id"))
-        .ok()
-        .and_then(|v| v.as_string());
     Some(FolderEffectiveConfig {
         client_strategy,
-        effective_strategy,
         base_path,
         base_source,
-        base_source_folder_id,
     })
 }
 

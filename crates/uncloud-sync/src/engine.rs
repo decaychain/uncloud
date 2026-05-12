@@ -474,12 +474,11 @@ impl SyncEngine {
     }
 
     /// Record a run-level error in the local audit log so the desktop
-    /// activity view shows *why* the run failed. Without this, a sentinel
-    /// or directory failure would only bump `report.errors` (visible as
-    /// "1 errors" in the SyncEnd marker) without surfacing the actual
-    /// reason — see the Windows fresh-install regression where a missing
-    /// target directory produced an opaque error counter.
-    async fn log_sync_error_row(&self, path: &str, reason: &str) {
+    /// activity view shows *why* the run failed. The message lands in
+    /// `note` because that's the field the renderer reads as the row's
+    /// details; `reason` is reserved for the start/end-marker run tag
+    /// ("Sync" / "ManualSyncStart").
+    async fn log_sync_error_row(&self, path: &str, message: &str) {
         self.ensure_start_emitted().await;
         self.log_row(SyncLogRow {
             id: 0,
@@ -489,8 +488,8 @@ impl SyncEngine {
             resource_type: None,
             path: path.to_owned(),
             new_path: None,
-            reason: reason.to_owned(),
-            note: None,
+            reason: "Sync".to_owned(),
+            note: Some(message.to_owned()),
         })
         .await;
     }

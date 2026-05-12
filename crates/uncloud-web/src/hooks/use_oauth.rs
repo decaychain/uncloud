@@ -4,9 +4,7 @@ use super::api;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OAuthClient {
-    pub client_id: String,
     pub client_name: String,
-    pub allowed_scopes: Vec<String>,
 }
 
 pub async fn lookup_client(client_id: &str) -> Result<OAuthClient, String> {

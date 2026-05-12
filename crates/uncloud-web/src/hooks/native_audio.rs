@@ -50,16 +50,12 @@ pub struct NativeAudioState {
     pub current_time: f64,
     pub duration: f64,
     pub is_playing: bool,
-    pub buffering: bool,
-    pub rate: f64,
     /// Index of the currently-playing item in the native ExoPlayer playlist.
     /// `-1` if no queue has been set. When the player auto-advances under
     /// Doze (WebView suspended), this is how the WASM side discovers that
     /// the current track has changed — compare against the last-seen value
     /// and update Rust-side `PlayerState.current_index` on polling resume.
     pub current_index: i32,
-    pub queue_length: i32,
-    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,9 +88,6 @@ impl NativeAudioState {
                 .and_then(|b| b.as_bool())
                 .unwrap_or(false)
         };
-        let error = Reflect::get(v, &"error".into())
-            .ok()
-            .and_then(|e| e.as_string());
         let int = |k: &str| -> i32 {
             Reflect::get(v, &JsValue::from_str(k))
                 .ok()
@@ -102,21 +95,12 @@ impl NativeAudioState {
                 .map(|n| n as i32)
                 .unwrap_or(-1)
         };
-        let queue_len = Reflect::get(v, &"queueLength".into())
-            .ok()
-            .and_then(|n| n.as_f64())
-            .map(|n| n as i32)
-            .unwrap_or(0);
         Some(NativeAudioState {
             status,
             current_time: num("currentTime"),
             duration: num("duration"),
             is_playing: boolean("isPlaying"),
-            buffering: boolean("buffering"),
-            rate: num("rate").max(1.0),
             current_index: int("currentIndex"),
-            queue_length: queue_len,
-            error,
         })
     }
 }

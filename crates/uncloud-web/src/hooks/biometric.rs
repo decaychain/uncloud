@@ -20,13 +20,10 @@ use wasm_bindgen_futures::JsFuture;
 
 use super::tauri::{is_android, is_tauri};
 
-/// Reported by `status()`. `available` is the only field the UI reacts to;
-/// `reason` exists for diagnostics ("none_enrolled" → user hasn't set up
-/// any fingerprint, "no_hardware" → device has no sensor, etc.).
+/// Reported by `status()`. The UI only reacts to `available`.
 #[derive(Debug, Clone, Default)]
 pub struct BiometricStatus {
     pub available: bool,
-    pub reason: Option<String>,
 }
 
 fn supported() -> bool {
@@ -65,7 +62,7 @@ fn vault_args(user_id: &str, vault_id: &str) -> Object {
 
 pub async fn status() -> BiometricStatus {
     if !supported() {
-        return BiometricStatus { available: false, reason: Some("not_supported".into()) };
+        return BiometricStatus { available: false };
     }
     match call("status", &Object::new().into()).await {
         Ok(v) => {
@@ -73,12 +70,9 @@ pub async fn status() -> BiometricStatus {
                 .ok()
                 .and_then(|x| x.as_bool())
                 .unwrap_or(false);
-            let reason = Reflect::get(&v, &"reason".into())
-                .ok()
-                .and_then(|x| x.as_string());
-            BiometricStatus { available, reason }
+            BiometricStatus { available }
         }
-        Err(e) => BiometricStatus { available: false, reason: Some(e) },
+        Err(_) => BiometricStatus { available: false },
     }
 }
 
