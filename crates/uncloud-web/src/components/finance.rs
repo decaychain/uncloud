@@ -2,15 +2,15 @@
 //!
 //! Single page with three internal tabs: Transactions, Accounts, Categories.
 //! Deliberately primitive: DaisyUI tables + modal forms. Per-currency
-//! totals shown on Accounts. CSV import lives in a follow-up.
+//! totals shown on Accounts. CSV import wired through the Transactions tab.
 
 use std::collections::HashMap;
 
 use dioxus::prelude::*;
 use uncloud_common::{
     AccountResponse, CreateAccountRequest, CreateFinanceCategoryRequest, CreateTransactionRequest,
-    FinanceCategoryResponse, TransactionResponse, UpdateAccountRequest,
-    UpdateFinanceCategoryRequest, UpdateTransactionRequest,
+    FinanceCategoryResponse, ImportCsvResponse, ImportProfileInfo, TransactionResponse,
+    UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
 use crate::hooks::use_finance;
@@ -623,6 +623,7 @@ fn TransactionsTab() -> Element {
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut refresh = use_signal(|| 0u32);
     let mut show_create = use_signal(|| false);
+    let mut show_import = use_signal(|| false);
     let mut edit_target: Signal<Option<TransactionResponse>> = use_signal(|| None);
     let mut filter_account: Signal<String> = use_signal(String::new);
     let mut only_uncat = use_signal(|| false);
@@ -690,6 +691,12 @@ fn TransactionsTab() -> Element {
                         onchange: move |e| { only_uncat.set(e.checked()); skip.set(0); },
                     }
                     span { class: "label-text", "Uncategorized only" }
+                }
+                button {
+                    class: "btn btn-ghost btn-sm",
+                    disabled: no_accounts,
+                    onclick: move |_| show_import.set(true),
+                    "Import CSV"
                 }
                 button {
                     class: "btn btn-primary btn-sm",
@@ -810,6 +817,13 @@ fn TransactionsTab() -> Element {
                 categories: categories(),
                 on_close: move |_| edit_target.set(None),
                 on_saved: move |_| { edit_target.set(None); refresh += 1; },
+            }
+        }
+        if show_import() {
+            ImportCsvModal {
+                accounts: accounts_for_select.clone(),
+                on_close: move |_| show_import.set(false),
+                on_imported: move |_| { show_import.set(false); refresh += 1; },
             }
         }
     }
@@ -960,6 +974,169 @@ fn TransactionFormModal(
                             });
                         },
                         if saving() { "Saving…" } else { "Save" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ImportCsvModal(
+    accounts: Vec<AccountResponse>,
+    on_close: EventHandler<()>,
+    on_imported: EventHandler<()>,
+) -> Element {
+    let mut profiles: Signal<Vec<ImportProfileInfo>> = use_signal(Vec::new);
+    let mut account_id = use_signal(|| accounts.first().map(|a| a.id.clone()).unwrap_or_default());
+    let mut profile_id = use_signal(String::new);
+    let mut file_name: Signal<Option<String>> = use_signal(|| None);
+    let mut file_bytes: Signal<Option<Vec<u8>>> = use_signal(|| None);
+    let mut submitting = use_signal(|| false);
+    let mut result: Signal<Option<ImportCsvResponse>> = use_signal(|| None);
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+
+    use_effect(move || {
+        spawn(async move {
+            match use_finance::list_import_profiles().await {
+                Ok(p) => {
+                    if let Some(first) = p.first() {
+                        if profile_id.peek().is_empty() {
+                            profile_id.set(first.id.clone());
+                        }
+                    }
+                    profiles.set(p);
+                }
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    });
+
+    let on_file_change = move |evt: Event<FormData>| {
+        let files = evt.files();
+        let Some(file) = files.into_iter().next() else {
+            return;
+        };
+        file_name.set(Some(file.name()));
+        spawn(async move {
+            match file.read_bytes().await {
+                Ok(bytes) => file_bytes.set(Some(bytes.to_vec())),
+                Err(e) => error.set(Some(format!("Failed to read file: {e}"))),
+            }
+        });
+    };
+
+    let accounts_clone = accounts.clone();
+    let submit = move |_| {
+        if submitting() {
+            return;
+        }
+        let acc = account_id();
+        let prof = profile_id();
+        let Some(bytes) = file_bytes() else {
+            error.set(Some("Choose a CSV file first".into()));
+            return;
+        };
+        let name = file_name().unwrap_or_else(|| "import.csv".to_string());
+        if acc.is_empty() || prof.is_empty() {
+            error.set(Some("Select an account and a profile".into()));
+            return;
+        }
+        submitting.set(true);
+        error.set(None);
+        spawn(async move {
+            match use_finance::import_csv(&acc, &prof, &name, bytes).await {
+                Ok(resp) => result.set(Some(resp)),
+                Err(e) => error.set(Some(e)),
+            }
+            submitting.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "modal modal-open",
+            div { class: "modal-box max-w-lg",
+                h3 { class: "font-bold text-lg mb-3", "Import transactions from CSV" }
+
+                if let Some(r) = result() {
+                    div { class: "alert alert-success mb-3",
+                        div {
+                            div { class: "font-medium", "Import complete" }
+                            div { class: "text-sm opacity-80",
+                                "Imported: {r.imported} · Skipped (duplicates): {r.skipped} · Errors: {r.errors}"
+                            }
+                        }
+                    }
+                    if !r.error_details.is_empty() {
+                        div { class: "mb-3",
+                            div { class: "font-medium text-sm mb-1", "Row errors (first {r.error_details.len()}):" }
+                            ul { class: "text-xs opacity-80 max-h-32 overflow-y-auto",
+                                {r.error_details.iter().map(|e| rsx! {
+                                    li { "line {e.line}: {e.message}" }
+                                })}
+                            }
+                        }
+                    }
+                    div { class: "modal-action",
+                        button {
+                            class: "btn btn-primary",
+                            onclick: move |_| on_imported.call(()),
+                            "Done"
+                        }
+                    }
+                } else {
+                    if let Some(e) = error() {
+                        div { class: "alert alert-error mb-3", "{e}" }
+                    }
+                    div { class: "form-control mb-3",
+                        label { class: "label", span { class: "label-text", "Account" } }
+                        select {
+                            class: "select select-bordered",
+                            value: "{account_id}",
+                            onchange: move |e| account_id.set(e.value()),
+                            {accounts_clone.iter().map(|a| rsx! {
+                                option { key: "{a.id}", value: "{a.id}", "{a.name} ({a.currency})" }
+                            })}
+                        }
+                    }
+                    div { class: "form-control mb-3",
+                        label { class: "label", span { class: "label-text", "Format" } }
+                        select {
+                            class: "select select-bordered",
+                            value: "{profile_id}",
+                            disabled: profiles().is_empty(),
+                            onchange: move |e| profile_id.set(e.value()),
+                            {profiles().iter().map(|p| rsx! {
+                                option { key: "{p.id}", value: "{p.id}", "{p.name}" }
+                            })}
+                        }
+                    }
+                    div { class: "form-control mb-3",
+                        label { class: "label", span { class: "label-text", "CSV file" } }
+                        input {
+                            r#type: "file",
+                            class: "file-input file-input-bordered",
+                            accept: ".csv,text/csv",
+                            onchange: on_file_change,
+                        }
+                        if let Some(n) = file_name() {
+                            label { class: "label",
+                                span { class: "label-text-alt opacity-70", "Selected: {n}" }
+                            }
+                        }
+                    }
+                    div { class: "modal-action",
+                        button {
+                            class: "btn",
+                            onclick: move |_| on_close.call(()),
+                            "Cancel"
+                        }
+                        button {
+                            class: "btn btn-primary",
+                            disabled: submitting() || file_bytes().is_none(),
+                            onclick: submit,
+                            if submitting() { "Importing…" } else { "Import" }
+                        }
                     }
                 }
             }

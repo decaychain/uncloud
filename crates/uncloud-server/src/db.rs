@@ -600,38 +600,6 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         )
         .await?;
 
-    tracing::info!("Database indexes created successfully");
-    Ok(())
-}
-
-/// Creates / refreshes the `sync_events` collection indexes. The TTL expiry
-/// must match `SyncAuditConfig::retention_days`, so this is split out from
-/// `setup_indexes` and called separately after the config is loaded.
-pub async fn setup_sync_audit_indexes(db: &Database, cfg: &SyncAuditConfig) -> Result<()> {
-    let sync_events = db.collection::<mongodb::bson::Document>("sync_events");
-
-    sync_events
-        .create_index(
-            IndexModel::builder()
-                .keys(mongodb::bson::doc! { "owner_id": 1, "timestamp": -1 })
-                .build(),
-        )
-        .await?;
-    sync_events
-        .create_index(
-            IndexModel::builder()
-                .keys(mongodb::bson::doc! { "owner_id": 1, "path": 1 })
-                .build(),
-        )
-        .await?;
-    sync_events
-        .create_index(
-            IndexModel::builder()
-                .keys(mongodb::bson::doc! { "owner_id": 1, "client_id": 1, "timestamp": -1 })
-                .build(),
-        )
-        .await?;
-
     // Finance tracker indexes
     let finance_accounts = db.collection::<mongodb::bson::Document>("finance_accounts");
     finance_accounts
@@ -674,8 +642,9 @@ pub async fn setup_sync_audit_indexes(db: &Database, cfg: &SyncAuditConfig) -> R
                 .build(),
         )
         .await?;
-    // Source-ref UPSERT key for future CSV import (one per (account, ref)).
-    // Partial filter so manual transactions with no source_ref coexist.
+    // (account_id, source_ref) UPSERT key for CSV import. Partial filter
+    // so manual transactions with no source_ref coexist without colliding
+    // on `null`.
     finance_transactions
         .create_index(
             IndexModel::builder()
@@ -688,6 +657,38 @@ pub async fn setup_sync_audit_indexes(db: &Database, cfg: &SyncAuditConfig) -> R
                         })
                         .build(),
                 )
+                .build(),
+        )
+        .await?;
+
+    tracing::info!("Database indexes created successfully");
+    Ok(())
+}
+
+/// Creates / refreshes the `sync_events` collection indexes. The TTL expiry
+/// must match `SyncAuditConfig::retention_days`, so this is split out from
+/// `setup_indexes` and called separately after the config is loaded.
+pub async fn setup_sync_audit_indexes(db: &Database, cfg: &SyncAuditConfig) -> Result<()> {
+    let sync_events = db.collection::<mongodb::bson::Document>("sync_events");
+
+    sync_events
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "timestamp": -1 })
+                .build(),
+        )
+        .await?;
+    sync_events
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "path": 1 })
+                .build(),
+        )
+        .await?;
+    sync_events
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "client_id": 1, "timestamp": -1 })
                 .build(),
         )
         .await?;

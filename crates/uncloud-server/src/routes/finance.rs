@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use bson::doc;
@@ -17,6 +17,7 @@ use mongodb::bson::Bson;
 use mongodb::options::FindOptions;
 
 use crate::error::{AppError, Result};
+use crate::finance_import::{self, ParseError, ParsedRow};
 use crate::middleware::AuthUser;
 use crate::models::{
     CategorySource, FinanceAccount, FinanceCategory, FinanceTransaction, TransactionLeg,
@@ -24,9 +25,9 @@ use crate::models::{
 use crate::AppState;
 use uncloud_common::{
     AccountBalanceResponse, AccountResponse, CreateAccountRequest, CreateFinanceCategoryRequest,
-    CreateTransactionRequest, FinanceCategoryResponse, ListTransactionsQuery,
-    TransactionListResponse, TransactionResponse, UpdateAccountRequest,
-    UpdateFinanceCategoryRequest, UpdateTransactionRequest,
+    CreateTransactionRequest, FinanceCategoryResponse, ImportCsvResponse, ImportProfileInfo,
+    ImportRowError, ListTransactionsQuery, TransactionListResponse, TransactionResponse,
+    UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
 const ACCOUNTS: &str = "finance_accounts";
@@ -672,4 +673,206 @@ pub async fn delete_transaction(
         return Err(AppError::NotFound("Transaction not found".into()));
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── CSV import ───────────────────────────────────────────────────────────
+
+/// Max upload size for a CSV file (8 MiB). A typical Sparkasse annual
+/// export is well under 1 MiB; the cap is just to bound memory.
+const MAX_IMPORT_BYTES: usize = 8 * 1024 * 1024;
+
+pub async fn list_import_profiles(
+    State(state): State<Arc<AppState>>,
+    _user: AuthUser,
+) -> Result<Json<Vec<ImportProfileInfo>>> {
+    require_finance(&state)?;
+    let profiles = finance_import::available_profiles()
+        .into_iter()
+        .map(|p| {
+            let info = p.info();
+            ImportProfileInfo {
+                id: info.id.to_string(),
+                name: info.name.to_string(),
+            }
+        })
+        .collect();
+    Ok(Json(profiles))
+}
+
+pub async fn import_csv(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    mut multipart: Multipart,
+) -> Result<Json<ImportCsvResponse>> {
+    require_finance(&state)?;
+
+    let mut account_id_str: Option<String> = None;
+    let mut profile_id: Option<String> = None;
+    let mut csv_bytes: Option<Vec<u8>> = None;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Multipart error: {e}")))?
+    {
+        match field.name().unwrap_or("") {
+            "account_id" => {
+                account_id_str = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| AppError::BadRequest(format!("Bad account_id: {e}")))?,
+                );
+            }
+            "profile_id" => {
+                profile_id = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| AppError::BadRequest(format!("Bad profile_id: {e}")))?,
+                );
+            }
+            "csv" => {
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("Failed to read CSV: {e}")))?;
+                if bytes.len() > MAX_IMPORT_BYTES {
+                    return Err(AppError::BadRequest(format!(
+                        "CSV exceeds {MAX_IMPORT_BYTES}-byte limit"
+                    )));
+                }
+                csv_bytes = Some(bytes.to_vec());
+            }
+            _ => {}
+        }
+    }
+
+    let account_id_str = account_id_str
+        .ok_or_else(|| AppError::BadRequest("Missing account_id field".into()))?;
+    let profile_id = profile_id
+        .ok_or_else(|| AppError::BadRequest("Missing profile_id field".into()))?;
+    let csv_bytes = csv_bytes
+        .ok_or_else(|| AppError::BadRequest("Missing csv field".into()))?;
+
+    let account_oid = parse_oid(&account_id_str, "account_id")?;
+    let account = find_account(&state, user.id, account_oid).await?;
+
+    let profile = finance_import::profile_by_id(&profile_id)
+        .ok_or_else(|| AppError::BadRequest(format!("Unknown import profile `{profile_id}`")))?;
+
+    let parsed = profile.parse(&csv_bytes).map_err(|e| match e {
+        ParseError::Fatal(msg) => AppError::BadRequest(msg),
+        ParseError::Row { line, message } => {
+            // A row error at the top level shouldn't happen, but if it
+            // does, surface it as 400.
+            AppError::BadRequest(format!("line {line}: {message}"))
+        }
+    })?;
+
+    let txns = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
+    let mut imported = 0u32;
+    let mut skipped = 0u32;
+    let mut errors = 0u32;
+    let mut error_details: Vec<ImportRowError> = Vec::new();
+
+    for (idx, row) in parsed.into_iter().enumerate() {
+        let row: ParsedRow = match row {
+            Ok(r) => r,
+            Err(ParseError::Row { line, message }) => {
+                errors += 1;
+                if error_details.len() < 50 {
+                    error_details.push(ImportRowError { line, message });
+                }
+                continue;
+            }
+            Err(ParseError::Fatal(message)) => {
+                errors += 1;
+                if error_details.len() < 50 {
+                    error_details.push(ImportRowError {
+                        line: (idx as u32) + 2,
+                        message,
+                    });
+                }
+                continue;
+            }
+        };
+
+        match insert_imported_row(&txns, user.id, &account, row).await {
+            Ok(InsertOutcome::Inserted) => imported += 1,
+            Ok(InsertOutcome::Skipped) => skipped += 1,
+            Err(e) => {
+                errors += 1;
+                if error_details.len() < 50 {
+                    error_details.push(ImportRowError {
+                        line: (idx as u32) + 2,
+                        message: e.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(Json(ImportCsvResponse {
+        imported,
+        skipped,
+        errors,
+        error_details,
+    }))
+}
+
+enum InsertOutcome {
+    Inserted,
+    Skipped,
+}
+
+async fn insert_imported_row(
+    txns: &mongodb::Collection<FinanceTransaction>,
+    owner_id: ObjectId,
+    account: &FinanceAccount,
+    row: ParsedRow,
+) -> std::result::Result<InsertOutcome, AppError> {
+    let now = Utc::now();
+    let leg = TransactionLeg {
+        amount_minor: row.amount_minor,
+        category_id: None,
+        category_source: CategorySource::Unset,
+        rule_id: None,
+        note: None,
+    };
+    let txn = FinanceTransaction {
+        id: ObjectId::new(),
+        owner_id,
+        account_id: account.id,
+        currency: row.currency,
+        amount_minor: row.amount_minor,
+        description: row.description,
+        date: row.date,
+        source_ref: Some(row.source_ref),
+        raw_bank_category: row.raw_bank_category,
+        notes: None,
+        tags: vec![],
+        legs: vec![leg],
+        created_at: now,
+        updated_at: now,
+    };
+
+    match txns.insert_one(&txn).await {
+        Ok(_) => Ok(InsertOutcome::Inserted),
+        Err(e) => {
+            if is_duplicate_key_error(&e) {
+                Ok(InsertOutcome::Skipped)
+            } else {
+                Err(AppError::from(e))
+            }
+        }
+    }
+}
+
+fn is_duplicate_key_error(err: &mongodb::error::Error) -> bool {
+    use mongodb::error::{ErrorKind, WriteFailure};
+    match err.kind.as_ref() {
+        ErrorKind::Write(WriteFailure::WriteError(we)) => we.code == 11000,
+        _ => false,
+    }
 }

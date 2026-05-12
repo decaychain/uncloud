@@ -389,3 +389,19 @@ A lightweight shopping-list companion app that shares the Uncloud session. Users
 - **Feature flag**: `require_shopping` gate at the top of every handler checks `config.features.shopping` (server-wide) AND `user.disabled_features` (per-user opt-out via `PUT /api/auth/me/features` `{ "shopping": false }`). Disabled users get 404.
 - **Frontend**: `components/shopping.rs` provides `ShoppingPage` (list index + shops/categories/items management) and `ShoppingListView` (per-list view with check/uncheck, inline item inlet, drag-to-reorder, "remove purchased" bulk action); routes `/shopping` and `/shopping/list/:id`.
 - **Marking as purchased**: `PATCH /api/shopping/lists/{id}/items/{item_id}` with `{ "checked": true }`; bulk cleanup via `POST /api/shopping/lists/{id}/remove-purchased` which deletes all checked non-recurring rows.
+
+## Finance Tracker
+
+A self-hosted personal expense tracker — multi-account, multi-currency (per-currency totals, no FX conversion), with idempotent CSV import.
+
+- **Model** (MongoDB collections):
+  - `finance_accounts` — `FinanceAccount { owner_id, name, account_type, currency, opening_balance_minor, archived_at }`
+  - `finance_categories` — `FinanceCategory { owner_id, parent_id, name, colour }`
+  - `finance_transactions` — `FinanceTransaction { owner_id, account_id, currency, amount_minor, description, date, source_ref, raw_bank_category, notes, tags, legs }`
+- **Money**: stored as `i64` minor units; v0 assumes two-decimal currencies (EUR, USD, GBP, …). JPY-style zero-decimal currencies are unsupported.
+- **Splits**: each transaction embeds a `legs: Vec<TransactionLeg>` array — v0 has one leg per transaction, but the model accommodates future split UI without a schema migration.
+- **Provenance**: each leg carries `category_source: Unset | User | Rule` so future re-imports / a rules engine can leave manual categorisations alone.
+- **Feature flag**: `require_finance` gate checks `config.features.finance` server-wide.
+- **CSV import**: `POST /api/finance/import` accepts a multipart upload (`account_id`, `profile_id`, `csv`) and runs the bytes through an `ImportProfile`. Concrete profiles live in `crates/uncloud-server/src/finance_import/`; the only one shipped today is **Sparkasse CAMT V8** (German banks' CAMT export format — CP1252, semicolon-separated, German decimals, DD.MM.YY dates).
+- **Idempotent re-imports**: each parsed row produces a deterministic `source_ref` (SHA-256 prefix over the row's fields). The partial unique index on `(account_id, source_ref)` lets a duplicate insert fall through silently — re-uploading the same file imports zero new rows.
+- **Frontend**: `components/finance.rs` provides a single `FinancePage` with three tabs (Transactions, Accounts, Categories). The Transactions tab toolbar has an **Import CSV** modal: pick account, pick profile, upload file, see `{ imported, skipped, errors }` summary plus the first 50 row-level errors.

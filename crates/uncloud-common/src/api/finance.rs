@@ -120,3 +120,25 @@ pub struct TransactionListResponse {
     pub items: Vec<TransactionResponse>,
     pub total: u64,
 }
+
+// ── CSV import ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportProfileInfo {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportRowError {
+    pub line: u32,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportCsvResponse {
+    pub imported: u32,
+    pub skipped: u32,
+    pub errors: u32,
+    pub error_details: Vec<ImportRowError>,
+}

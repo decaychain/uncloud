@@ -2,11 +2,13 @@
 
 use uncloud_common::{
     AccountBalanceResponse, AccountResponse, CreateAccountRequest, CreateFinanceCategoryRequest,
-    CreateTransactionRequest, FinanceCategoryResponse, TransactionListResponse, TransactionResponse,
-    UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
+    CreateTransactionRequest, FinanceCategoryResponse, ImportCsvResponse, ImportProfileInfo,
+    TransactionListResponse, TransactionResponse, UpdateAccountRequest,
+    UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
 use super::api;
+use super::api::api_url;
 
 // ── Accounts ────────────────────────────────────────────────────────────
 
@@ -190,5 +192,60 @@ async fn extract_error(r: gloo_net::http::Response) -> String {
     match r.text().await {
         Ok(t) if !t.is_empty() => t,
         _ => format!("HTTP {}", status),
+    }
+}
+
+// ── CSV import ──────────────────────────────────────────────────────────
+
+pub async fn list_import_profiles() -> Result<Vec<ImportProfileInfo>, String> {
+    let r = api::get("/finance/import/profiles")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<Vec<ImportProfileInfo>>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn import_csv(
+    account_id: &str,
+    profile_id: &str,
+    file_name: &str,
+    csv_bytes: Vec<u8>,
+) -> Result<ImportCsvResponse, String> {
+    let blob_parts = js_sys::Array::new();
+    let bytes_array = js_sys::Uint8Array::from(csv_bytes.as_slice());
+    blob_parts.push(&bytes_array);
+    let opts = web_sys::BlobPropertyBag::new();
+    opts.set_type("text/csv");
+    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&blob_parts, &opts)
+        .map_err(|_| "Failed to create Blob".to_string())?;
+
+    let form = web_sys::FormData::new().map_err(|_| "Failed to create FormData".to_string())?;
+    form.append_with_str("account_id", account_id)
+        .map_err(|_| "Failed to append account_id".to_string())?;
+    form.append_with_str("profile_id", profile_id)
+        .map_err(|_| "Failed to append profile_id".to_string())?;
+    form.append_with_blob_and_filename("csv", &blob, file_name)
+        .map_err(|_| "Failed to append csv".to_string())?;
+
+    let url = api_url("/finance/import");
+    let resp = api::post_raw(&url)
+        .body(form)
+        .map_err(|e| format!("Request error: {:?}", e))?
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {}", e))?;
+
+    if resp.ok() {
+        resp.json::<ImportCsvResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(resp).await)
     }
 }

@@ -67,6 +67,9 @@ russh-sftp = "2"
 rustic_core = "0.11"
 rustic_backend = "0.6"
 tempfile = "3"
+# CSV import (Sparkasse CAMT V8 etc.)
+csv = "1"
+encoding_rs = "0.8"
 # Used only by `backup prune` to pass `jiff::Zoned::now()` through rustic's
 # `KeepOptions::apply`. Pinned to whatever rustic_core depends on transitively.
 jiff = "0.2"
