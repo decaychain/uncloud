@@ -533,6 +533,8 @@ pub async fn list_artists(
     user: AuthUser,
     Query(scope): Query<LibraryScopeQuery>,
 ) -> Result<Json<Vec<ArtistResponse>>> {
+    use futures::StreamExt;
+
     let mut parent_ids = music_included_parent_ids(&state, user.id).await?;
 
     if let Some(roots) =
@@ -546,42 +548,69 @@ pub async fn list_artists(
         return Ok(Json(Vec::new()));
     }
 
-    let files = fetch_audio_files(&state, user.id, &parent_ids).await?;
+    // Two-stage `$group` runs entirely in BSON inside Mongo, returning one
+    // row per artist regardless of track count. The previous implementation
+    // shipped every audio `File` document over the wire and grouped them
+    // in Rust — at ~1.7k artists that meant tens of megabytes of BSON and
+    // most of the wall-clock cost of the endpoint (~2 s in DevTools
+    // captures). The artist/album normalisation matches the old Rust
+    // behaviour: a missing field, a BSON null, or an empty string all
+    // collapse to "Unknown Artist" / "Unknown Album".
+    let files_coll = state.db.collection::<File>("files");
+    let normalise = |field: &str, default: &str| {
+        doc! {
+            "$let": {
+                "vars": { "v": { "$ifNull": [field, ""] } },
+                "in": { "$cond": [{ "$eq": ["$$v", ""] }, default, "$$v"] },
+            }
+        }
+    };
+    let pipeline = vec![
+        doc! {
+            "$match": {
+                "parent_id": { "$in": &parent_ids },
+                "mime_type": { "$regex": "^audio/" },
+                "deleted_at": bson::Bson::Null,
+            }
+        },
+        doc! {
+            "$group": {
+                "_id": {
+                    "artist": normalise("$metadata.audio.artist", "Unknown Artist"),
+                    "album":  normalise("$metadata.audio.album",  "Unknown Album"),
+                },
+                "tracks": { "$sum": 1 },
+            }
+        },
+        doc! {
+            "$group": {
+                "_id": "$_id.artist",
+                "album_count": { "$sum": 1 },
+                "track_count": { "$sum": "$tracks" },
+            }
+        },
+    ];
 
-    // artist → (set of album names, track count)
-    let mut artist_albums: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut artist_tracks: HashMap<String, i64> = HashMap::new();
-
-    for f in &files {
-        let audio = extract_audio_meta(f);
-        let artist = audio
-            .artist
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("Unknown Artist")
-            .to_string();
-        let album = audio
-            .album
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("Unknown Album")
-            .to_string();
-
-        artist_albums
-            .entry(artist.clone())
-            .or_default()
-            .insert(album);
-        *artist_tracks.entry(artist).or_default() += 1;
+    let mut cursor = files_coll.aggregate(pipeline).await?;
+    let mut result: Vec<ArtistResponse> = Vec::new();
+    while let Some(doc) = cursor.next().await {
+        let doc = doc?;
+        let name = doc
+            .get_str("_id")
+            .map_err(|e| AppError::Internal(format!("artist _id: {e}")))?
+            .to_owned();
+        let album_count = doc
+            .get_i32("album_count")
+            .map(|n| n as i64)
+            .or_else(|_| doc.get_i64("album_count"))
+            .unwrap_or(0);
+        let track_count = doc
+            .get_i32("track_count")
+            .map(|n| n as i64)
+            .or_else(|_| doc.get_i64("track_count"))
+            .unwrap_or(0);
+        result.push(ArtistResponse { name, album_count, track_count });
     }
-
-    let mut result: Vec<ArtistResponse> = artist_albums
-        .into_iter()
-        .map(|(name, albums)| ArtistResponse {
-            track_count: artist_tracks.get(&name).copied().unwrap_or(0),
-            album_count: albums.len() as i64,
-            name,
-        })
-        .collect();
 
     result.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
