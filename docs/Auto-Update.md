@@ -98,6 +98,68 @@ sudo dnf install uncloud
 For unattended updates: `sudo dnf install dnf-automatic && sudo systemctl
 enable --now dnf-automatic.timer`.
 
+### 3. APT publication (Ubuntu / Debian)
+
+The `publish-apt` job in `release-desktop.yml` pulls the `.deb` files
+already attached to the GitHub Release, signs them with a project GPG
+key, and pushes a `reprepro`-managed repository to the `gh-pages`
+branch — which GitHub Pages serves at
+`https://decaychain.github.io/uncloud/`. Users add the repo once and
+then track releases via `apt upgrade` (the COPR analogue).
+
+One-time setup:
+
+1. **Generate a signing key on a trusted machine** (not in CI). Pick a
+   passphrase-less key so the unattended `publish-apt` job can sign
+   without prompting — it lives in a GitHub Actions secret, which is
+   the security boundary.
+
+   ```bash
+   gpg --batch --gen-key <<EOF
+   %no-protection
+   Key-Type: EDDSA
+   Key-Curve: ed25519
+   Subkey-Type: ECDH
+   Subkey-Curve: cv25519
+   Name-Real: Uncloud APT
+   Name-Email: apt@decaychain.io
+   Expire-Date: 2y
+   EOF
+   ```
+
+2. **Export the secret key**:
+
+   ```bash
+   gpg --armor --export-secret-keys apt@decaychain.io > apt-private.asc
+   ```
+
+3. **Upload to GitHub Secrets** in the `decaychain/uncloud` repository:
+
+   - `APT_GPG_PRIVATE_KEY` — the entire contents of `apt-private.asc`.
+
+   No fingerprint secret is needed — the workflow extracts it from the
+   imported key. Wipe `apt-private.asc` once uploaded.
+
+4. **Enable GitHub Pages**:
+   <https://github.com/decaychain/uncloud/settings/pages> → Source:
+   *Deploy from a branch* → Branch: `gh-pages` / `(root)` → Save. Pages
+   takes a minute or two to first publish after the initial
+   `publish-apt` run creates the branch.
+
+End users then run (one-time):
+
+```bash
+curl -fsSL https://decaychain.github.io/uncloud/pubkey.gpg \
+  | sudo gpg --dearmor -o /usr/share/keyrings/uncloud.gpg
+echo "deb [signed-by=/usr/share/keyrings/uncloud.gpg] \
+  https://decaychain.github.io/uncloud stable main" \
+  | sudo tee /etc/apt/sources.list.d/uncloud.list
+sudo apt update
+sudo apt install uncloud
+```
+
+For unattended updates: `sudo apt install unattended-upgrades`.
+
 ## Fedora/COPR build notes
 
 Every entry below corresponds to a real failure we hit getting the COPR
@@ -239,7 +301,7 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-That triggers `release-desktop.yml` which fans out into four parallel
+That triggers `release-desktop.yml` which fans out into five parallel
 jobs:
 
 1. **`build-linux`** — bumps the workspace version, builds DEB + RPM,
@@ -257,6 +319,12 @@ jobs:
    --nowait`. COPR then rebuilds for each chroot and updates the user
    repo. (Build progress visible at
    <https://copr.fedorainfracloud.org/coprs/decaychain/uncloud/>.)
+5. **`publish-apt`** — waits for `build-linux` to finish, pulls the
+   `.deb` files back from the Release, signs them with the project GPG
+   key, and pushes a `reprepro`-managed APT repository to the
+   `gh-pages` branch. The job is `continue-on-error: true` — a failure
+   doesn't break the release, since the `.deb`s are already attached as
+   the escape-hatch download.
 
 The version bump is driven entirely by the tag — `Cargo.toml`'s
 `workspace.package.version` is rewritten in CI before any build runs, so
