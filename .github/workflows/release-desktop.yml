@@ -369,20 +369,20 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          mkdir -p /tmp/aptroot
           if git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
             git fetch origin gh-pages
             git worktree add /tmp/aptroot gh-pages
           else
-            # First publish: spawn an empty orphan branch.
+            # First publish: spawn an empty orphan branch. Use `git -C`
+            # so we don't leak CWD into the rest of the step — the next
+            # `sed` needs to resolve paths against the repo workspace.
             git worktree add --detach /tmp/aptroot
-            cd /tmp/aptroot
-            git checkout --orphan gh-pages
-            git rm -rf . >/dev/null 2>&1 || true
+            git -C /tmp/aptroot checkout --orphan gh-pages
+            git -C /tmp/aptroot rm -rf . >/dev/null 2>&1 || true
           fi
           mkdir -p /tmp/aptroot/conf
           sed "s/@@KEY_FINGERPRINT@@/${KEY_FPR}/" \
-            packaging/apt/conf/distributions.in \
+            "${GITHUB_WORKSPACE}/packaging/apt/conf/distributions.in" \
             > /tmp/aptroot/conf/distributions
           cp /tmp/pubkey.gpg /tmp/aptroot/pubkey.gpg
 
