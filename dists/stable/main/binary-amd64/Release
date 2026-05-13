@@ -1,0 +1,6 @@
+Archive: stable
+Component: main
+Origin: Uncloud
+Label: Uncloud
+Architecture: amd64
+Description: Uncloud desktop client APT repository
