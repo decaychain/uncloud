@@ -75,15 +75,3 @@ pub async fn update_category(
     }
 }
 
-pub async fn delete_category(id: &str) -> Result<(), String> {
-    let response = api::delete(&format!("/music/categories/{}", id))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if response.ok() || response.status() == 204 {
-        Ok(())
-    } else {
-        Err("Failed to delete category".to_string())
-    }
-}

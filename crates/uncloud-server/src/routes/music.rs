@@ -13,6 +13,7 @@ use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
 use crate::models::{File, Folder, FolderShare, MusicCategory};
 use crate::routes::files::{build_folder_path, file_to_response, resolve_included_folder_ids_by};
+use crate::services::sync_log::escape_regex;
 use crate::AppState;
 use uncloud_common::{
     ArtistResponse, AudioMeta, CreateMusicCategoryRequest, InheritableSetting, MusicAlbumResponse,
@@ -390,28 +391,6 @@ async fn music_included_parent_ids(
     Ok(result)
 }
 
-/// Helper: fetch all audio files in the given parent IDs.
-/// The parent_ids set is already access-validated (owned + shared folders),
-/// so no owner_id filter is needed.
-async fn fetch_audio_files(
-    state: &AppState,
-    _user_id: ObjectId,
-    parent_ids: &[mongodb::bson::Bson],
-) -> Result<Vec<File>> {
-    let files_coll = state.db.collection::<File>("files");
-    let filter = doc! {
-        "parent_id": { "$in": parent_ids },
-        "mime_type": { "$regex": "^audio/" },
-        "deleted_at": bson::Bson::Null,
-    };
-    let mut cursor = files_coll.find(filter).await?;
-    let mut files = Vec::new();
-    while cursor.advance().await? {
-        files.push(cursor.deserialize_current()?);
-    }
-    Ok(files)
-}
-
 /// Extract audio metadata from a File document.
 fn extract_audio_meta(f: &File) -> AudioMeta {
     let resp = file_to_response(f);
@@ -533,6 +512,8 @@ pub async fn list_artists(
     user: AuthUser,
     Query(scope): Query<LibraryScopeQuery>,
 ) -> Result<Json<Vec<ArtistResponse>>> {
+    use futures::StreamExt;
+
     let mut parent_ids = music_included_parent_ids(&state, user.id).await?;
 
     if let Some(roots) =
@@ -546,42 +527,69 @@ pub async fn list_artists(
         return Ok(Json(Vec::new()));
     }
 
-    let files = fetch_audio_files(&state, user.id, &parent_ids).await?;
+    // Two-stage `$group` runs entirely in BSON inside Mongo, returning one
+    // row per artist regardless of track count. The previous implementation
+    // shipped every audio `File` document over the wire and grouped them
+    // in Rust — at ~1.7k artists that meant tens of megabytes of BSON and
+    // most of the wall-clock cost of the endpoint (~2 s in DevTools
+    // captures). The artist/album normalisation matches the old Rust
+    // behaviour: a missing field, a BSON null, or an empty string all
+    // collapse to "Unknown Artist" / "Unknown Album".
+    let files_coll = state.db.collection::<File>("files");
+    let normalise = |field: &str, default: &str| {
+        doc! {
+            "$let": {
+                "vars": { "v": { "$ifNull": [field, ""] } },
+                "in": { "$cond": [{ "$eq": ["$$v", ""] }, default, "$$v"] },
+            }
+        }
+    };
+    let pipeline = vec![
+        doc! {
+            "$match": {
+                "parent_id": { "$in": &parent_ids },
+                "mime_type": { "$regex": "^audio/" },
+                "deleted_at": bson::Bson::Null,
+            }
+        },
+        doc! {
+            "$group": {
+                "_id": {
+                    "artist": normalise("$metadata.audio.artist", "Unknown Artist"),
+                    "album":  normalise("$metadata.audio.album",  "Unknown Album"),
+                },
+                "tracks": { "$sum": 1 },
+            }
+        },
+        doc! {
+            "$group": {
+                "_id": "$_id.artist",
+                "album_count": { "$sum": 1 },
+                "track_count": { "$sum": "$tracks" },
+            }
+        },
+    ];
 
-    // artist → (set of album names, track count)
-    let mut artist_albums: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut artist_tracks: HashMap<String, i64> = HashMap::new();
-
-    for f in &files {
-        let audio = extract_audio_meta(f);
-        let artist = audio
-            .artist
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("Unknown Artist")
-            .to_string();
-        let album = audio
-            .album
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("Unknown Album")
-            .to_string();
-
-        artist_albums
-            .entry(artist.clone())
-            .or_default()
-            .insert(album);
-        *artist_tracks.entry(artist).or_default() += 1;
+    let mut cursor = files_coll.aggregate(pipeline).await?;
+    let mut result: Vec<ArtistResponse> = Vec::new();
+    while let Some(doc) = cursor.next().await {
+        let doc = doc?;
+        let name = doc
+            .get_str("_id")
+            .map_err(|e| AppError::Internal(format!("artist _id: {e}")))?
+            .to_owned();
+        let album_count = doc
+            .get_i32("album_count")
+            .map(|n| n as i64)
+            .or_else(|_| doc.get_i64("album_count"))
+            .unwrap_or(0);
+        let track_count = doc
+            .get_i32("track_count")
+            .map(|n| n as i64)
+            .or_else(|_| doc.get_i64("track_count"))
+            .unwrap_or(0);
+        result.push(ArtistResponse { name, album_count, track_count });
     }
-
-    let mut result: Vec<ArtistResponse> = artist_albums
-        .into_iter()
-        .map(|(name, albums)| ArtistResponse {
-            track_count: artist_tracks.get(&name).copied().unwrap_or(0),
-            album_count: albums.len() as i64,
-            name,
-        })
-        .collect();
 
     result.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
@@ -819,6 +827,15 @@ fn parse_folder_ids(ids: &[String]) -> Result<Vec<ObjectId>> {
         .collect()
 }
 
+/// Read a numeric field that Mongo may have returned as either Int32 or
+/// Int64 depending on accumulator type and document size.
+fn get_int(d: &mongodb::bson::Document, key: &str) -> i64 {
+    d.get_i32(key)
+        .map(|n| n as i64)
+        .or_else(|_| d.get_i64(key))
+        .unwrap_or(0)
+}
+
 pub async fn list_categories(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -972,6 +989,8 @@ pub async fn search_music(
     user: AuthUser,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<MusicSearchResponse>> {
+    use futures::StreamExt;
+
     let q = query.q.unwrap_or_default().trim().to_lowercase();
     let limit = query
         .limit
@@ -1002,94 +1021,132 @@ pub async fn search_music(
         }));
     }
 
-    let files = fetch_audio_files(&state, user.id, &parent_ids).await?;
+    // Pushed-down search. Old impl loaded every audio File doc and walked
+    // them in Rust to build three separate aggregations, which on libraries
+    // of any size dominated the request time. Three pipelines run in
+    // parallel; tracks pipeline uses `$facet` to return the total alongside
+    // the limited page so we don't ship every match just to count them.
+    let files_coll = state.db.collection::<File>("files");
+    let q_rx = doc! { "$regex": escape_regex(&q), "$options": "i" };
 
-    // Aggregate artists + albums across the entire scope (so totals like
-    // track_count reflect reality, not just matching tracks).
-    let mut artist_albums: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut artist_tracks: HashMap<String, i64> = HashMap::new();
-    struct AlbumAgg {
-        year: Option<i32>,
-        track_count: i64,
-        cover_file_id: Option<String>,
-    }
-    let mut albums_agg: HashMap<(String, String), AlbumAgg> = HashMap::new();
-
-    let mut matching_track_files: Vec<&File> = Vec::new();
-
-    for f in &files {
-        let audio = extract_audio_meta(f);
-        let artist = audio
-            .artist
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("Unknown Artist")
-            .to_string();
-        let album = audio
-            .album
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or("Unknown Album")
-            .to_string();
-        let title = audio.title.clone().unwrap_or_default();
-        let album_artist = audio.album_artist.clone().unwrap_or_default();
-
-        artist_albums
-            .entry(artist.clone())
-            .or_default()
-            .insert(album.clone());
-        *artist_tracks.entry(artist.clone()).or_default() += 1;
-
-        let alb = albums_agg
-            .entry((artist.clone(), album.clone()))
-            .or_insert(AlbumAgg {
-                year: audio.year,
-                track_count: 0,
-                cover_file_id: None,
-            });
-        alb.track_count += 1;
-        if alb.year.is_none() {
-            alb.year = audio.year;
+    let base_match = doc! {
+        "$match": {
+            "parent_id": { "$in": &parent_ids },
+            "mime_type": { "$regex": "^audio/" },
+            "deleted_at": bson::Bson::Null,
         }
-        if audio.has_cover_art && alb.cover_file_id.is_none() {
-            alb.cover_file_id = Some(f.id.to_hex());
+    };
+    let artist_norm = doc! {
+        "$let": {
+            "vars": { "v": { "$ifNull": ["$metadata.audio.artist", ""] } },
+            "in": { "$cond": [{ "$eq": ["$$v", ""] }, "Unknown Artist", "$$v"] },
         }
-
-        // Track-level match: any of title/artist/album/album_artist contains q.
-        let track_match = title.to_lowercase().contains(&q)
-            || artist.to_lowercase().contains(&q)
-            || album.to_lowercase().contains(&q)
-            || album_artist.to_lowercase().contains(&q);
-        if track_match {
-            matching_track_files.push(f);
+    };
+    let album_norm = doc! {
+        "$let": {
+            "vars": { "v": { "$ifNull": ["$metadata.audio.album", ""] } },
+            "in": { "$cond": [{ "$eq": ["$$v", ""] }, "Unknown Album", "$$v"] },
         }
-    }
+    };
 
-    // Filter artists by name match.
-    let mut artists: Vec<ArtistResponse> = artist_albums
-        .iter()
-        .filter(|(name, _)| name.to_lowercase().contains(&q))
-        .map(|(name, albums)| ArtistResponse {
-            name: name.clone(),
-            album_count: albums.len() as i64,
-            track_count: artist_tracks.get(name).copied().unwrap_or(0),
+    let artists_pipeline = vec![
+        base_match.clone(),
+        doc! { "$group": {
+            "_id": { "artist": &artist_norm, "album": &album_norm },
+            "tracks": { "$sum": 1 },
+        }},
+        doc! { "$group": {
+            "_id": "$_id.artist",
+            "album_count": { "$sum": 1 },
+            "track_count": { "$sum": "$tracks" },
+        }},
+        doc! { "$match": { "_id": &q_rx } },
+    ];
+
+    let albums_pipeline = vec![
+        base_match.clone(),
+        doc! { "$group": {
+            "_id": { "artist": &artist_norm, "album": &album_norm },
+            "track_count": { "$sum": 1 },
+            "year": { "$first": "$metadata.audio.year" },
+            // Collect ids of tracks that carry embedded cover art; the
+            // first one (whatever order Mongo materialises) wins, matching
+            // the old "first walked with art" behaviour.
+            "cover_candidates": { "$push": { "$cond": [
+                { "$eq": ["$metadata.audio.has_cover_art", true] },
+                "$_id",
+                "$$REMOVE",
+            ]}},
+        }},
+        doc! { "$addFields": {
+            "cover_file_id": { "$arrayElemAt": ["$cover_candidates", 0] },
+        }},
+        doc! { "$match": { "$or": [
+            { "_id.artist": &q_rx },
+            { "_id.album":  &q_rx },
+        ]}},
+    ];
+
+    let tracks_pipeline = vec![
+        base_match,
+        doc! { "$match": { "$or": [
+            { "metadata.audio.title":        &q_rx },
+            { "metadata.audio.artist":       &q_rx },
+            { "metadata.audio.album":        &q_rx },
+            { "metadata.audio.album_artist": &q_rx },
+        ]}},
+        doc! { "$facet": {
+            "total": [{ "$count": "n" }],
+            "page": [
+                { "$sort": { "metadata.audio.title": 1, "created_at": -1 } },
+                { "$limit": limit as i64 },
+            ],
+        }},
+    ];
+
+    let run = |pipeline: Vec<mongodb::bson::Document>| {
+        let coll = files_coll.clone();
+        async move {
+            let mut cursor = coll.aggregate(pipeline).await?;
+            let mut docs = Vec::new();
+            while let Some(d) = cursor.next().await {
+                docs.push(d?);
+            }
+            Result::<Vec<mongodb::bson::Document>>::Ok(docs)
+        }
+    };
+
+    let (artists_docs, albums_docs, tracks_docs) = tokio::try_join!(
+        run(artists_pipeline),
+        run(albums_pipeline),
+        run(tracks_pipeline),
+    )?;
+
+    // Artists: { _id: artist_name, album_count, track_count }
+    let mut artists: Vec<ArtistResponse> = artists_docs
+        .into_iter()
+        .filter_map(|d| {
+            let name = d.get_str("_id").ok()?.to_owned();
+            let album_count = get_int(&d, "album_count");
+            let track_count = get_int(&d, "track_count");
+            Some(ArtistResponse { name, album_count, track_count })
         })
         .collect();
     artists.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     let total_artists = artists.len();
+    artists.truncate(limit);
 
-    // Filter albums by album name OR artist name match.
-    let mut albums: Vec<MusicAlbumResponse> = albums_agg
-        .iter()
-        .filter(|((artist, album), _)| {
-            album.to_lowercase().contains(&q) || artist.to_lowercase().contains(&q)
-        })
-        .map(|((artist, album), info)| MusicAlbumResponse {
-            name: album.clone(),
-            artist: artist.clone(),
-            year: info.year,
-            track_count: info.track_count,
-            cover_file_id: info.cover_file_id.clone(),
+    // Albums: { _id: { artist, album }, track_count, year, cover_file_id }
+    let mut albums: Vec<MusicAlbumResponse> = albums_docs
+        .into_iter()
+        .filter_map(|d| {
+            let id = d.get_document("_id").ok()?;
+            let artist = id.get_str("artist").ok()?.to_owned();
+            let name = id.get_str("album").ok()?.to_owned();
+            let track_count = get_int(&d, "track_count");
+            let year = d.get_i32("year").ok().or_else(|| d.get_i64("year").ok().map(|n| n as i32));
+            let cover_file_id = d.get_object_id("cover_file_id").ok().map(|oid| oid.to_hex());
+            Some(MusicAlbumResponse { name, artist, year, track_count, cover_file_id })
         })
         .collect();
     albums.sort_by(|a, b| {
@@ -1102,34 +1159,44 @@ pub async fn search_music(
         year_cmp.then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     let total_albums = albums.len();
-
-    // Tracks: build TrackResponse for each matching file, sorted by title then created_at.
-    matching_track_files.sort_by(|a, b| {
-        let title_a = extract_audio_meta(a).title.unwrap_or_default();
-        let title_b = extract_audio_meta(b).title.unwrap_or_default();
-        title_a
-            .to_lowercase()
-            .cmp(&title_b.to_lowercase())
-            .then_with(|| b.created_at.cmp(&a.created_at))
-    });
-    let total_tracks = matching_track_files.len();
-
-    let tracks: Vec<TrackResponse> = matching_track_files
-        .iter()
-        .take(limit)
-        .map(|f| {
-            let file_resp = file_to_response(f);
-            let audio: AudioMeta = file_resp
-                .metadata
-                .get("audio")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
-            TrackResponse { file: file_resp, audio }
-        })
-        .collect();
-
-    artists.truncate(limit);
     albums.truncate(limit);
+
+    // Tracks: single `$facet` doc with { total: [{ n }], page: [<files>] }.
+    let mut total_tracks: usize = 0;
+    let mut tracks: Vec<TrackResponse> = Vec::new();
+    if let Some(facet) = tracks_docs.into_iter().next() {
+        if let Ok(total_arr) = facet.get_array("total") {
+            if let Some(first) = total_arr.first().and_then(|b| b.as_document()) {
+                total_tracks = get_int(first, "n") as usize;
+            }
+        }
+        if let Ok(page) = facet.get_array("page") {
+            tracks.reserve(page.len());
+            for doc in page {
+                if let Some(doc) = doc.as_document() {
+                    let f: File = mongodb::bson::from_document(doc.clone())
+                        .map_err(|e| AppError::Internal(format!("track decode: {e}")))?;
+                    let file_resp = file_to_response(&f);
+                    let audio: AudioMeta = file_resp
+                        .metadata
+                        .get("audio")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
+                    tracks.push(TrackResponse { file: file_resp, audio });
+                }
+            }
+        }
+    }
+    // Re-sort the page case-insensitively. The Mongo sort is byte-order;
+    // for the small returned page this is cheap and matches the previous
+    // Rust behaviour exactly (title lowercased, then most-recent first).
+    tracks.sort_by(|a, b| {
+        let ta = a.audio.title.as_deref().unwrap_or("");
+        let tb = b.audio.title.as_deref().unwrap_or("");
+        ta.to_lowercase()
+            .cmp(&tb.to_lowercase())
+            .then_with(|| b.file.created_at.cmp(&a.file.created_at))
+    });
 
     Ok(Json(MusicSearchResponse {
         artists,

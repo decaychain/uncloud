@@ -1,5 +1,10 @@
 # Uncloud
 
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Latest Release](https://img.shields.io/github/v/release/decaychain/uncloud?include_prereleases&sort=semver)](https://github.com/decaychain/uncloud/releases)
+[![Fedora COPR](https://img.shields.io/badge/Fedora-COPR-294172?logo=fedora&logoColor=white)](https://copr.fedorainfracloud.org/coprs/decaychain/uncloud/)
+[![Ubuntu APT](https://img.shields.io/badge/Ubuntu-APT_repo-E95420?logo=ubuntu&logoColor=white)](https://decaychain.github.io/uncloud/)
+
 Self-hosted personal cloud storage. Manage your files, photos, and music from any device — all data stays on your server.
 
 ## Features
@@ -95,9 +100,38 @@ chmod +x uncloud-server-linux-amd64
 ./uncloud-server-linux-amd64
 ```
 
-### Desktop / Android
+### Desktop client
 
-Download from [Releases](https://github.com/decaychain/uncloud/releases). Linux desktop and Android packages ship for both `amd64` and `arm64`.
+The desktop client is published through three channels — pick the one
+that matches your distribution:
+
+**Fedora** (auto-updates via `dnf upgrade`):
+
+```bash
+sudo dnf copr enable decaychain/uncloud
+sudo dnf install uncloud
+```
+
+**Ubuntu / Debian** (auto-updates via `apt upgrade`):
+
+```bash
+curl -fsSL https://decaychain.github.io/uncloud/pubkey.gpg \
+  | sudo gpg --dearmor -o /usr/share/keyrings/uncloud.gpg
+echo "deb [signed-by=/usr/share/keyrings/uncloud.gpg] https://decaychain.github.io/uncloud stable main" \
+  | sudo tee /etc/apt/sources.list.d/uncloud.list
+sudo apt update
+sudo apt install uncloud
+```
+
+**Windows** (auto-updates via the in-app updater): download the signed
+NSIS installer from [Releases](https://github.com/decaychain/uncloud/releases).
+
+**Escape hatch** — raw `.deb` / `.rpm` / `.exe` for both `amd64` and
+`arm64` are also attached to every [release](https://github.com/decaychain/uncloud/releases).
+
+### Android
+
+Download the `.apk` from [Releases](https://github.com/decaychain/uncloud/releases) (both `amd64` and `arm64`).
 
 ## Building from Source
 

@@ -305,3 +305,107 @@ jobs:
           # 20-30 minutes waiting for Rust + node compilation across
           # multiple Fedora chroots.
           copr-cli build --nowait decaychain/uncloud "$SRPM"
+
+  # Mirror the `.deb` artifacts that `build-linux` already uploaded into
+  # an APT repository hosted on GitHub Pages, signed with a project GPG
+  # key. Ubuntu users add the repo once and then track releases via
+  # `apt upgrade` (the COPR analogue for Fedora). One-time setup for the
+  # secrets is documented in `docs/Auto-Update.md`.
+  publish-apt:
+    runs-on: ubuntu-24.04
+    needs: build-linux
+    # Don't fail the whole release if APT publishing trips — the .deb
+    # files are already on the Release page as the escape-hatch download.
+    continue-on-error: true
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install reprepro + gpg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y reprepro gnupg
+
+      - name: Wait for release assets, then download .deb files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/debs
+          # `build-linux` uploads via softprops/action-gh-release which
+          # is asynchronous; poll briefly until the .debs are listed.
+          for attempt in $(seq 1 30); do
+            count=$(gh release view "$GITHUB_REF_NAME" \
+              --json assets --jq '[.assets[] | select(.name | endswith(".deb"))] | length')
+            if [ "$count" -ge 2 ]; then break; fi
+            echo "Waiting for .deb assets (attempt $attempt, currently $count)..."
+            sleep 10
+          done
+          gh release download "$GITHUB_REF_NAME" --pattern '*.deb' --dir /tmp/debs
+          ls -la /tmp/debs
+
+      - name: Import GPG signing key
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          # Capture the long-form fingerprint of the imported secret key
+          # for use as reprepro's `SignWith` field.
+          KEY_FPR=$(gpg --list-secret-keys --with-colons \
+            | awk -F: '/^fpr:/ { print $10; exit }')
+          if [ -z "$KEY_FPR" ]; then
+            echo "Failed to extract GPG fingerprint" >&2
+            exit 1
+          fi
+          echo "KEY_FPR=$KEY_FPR" >> "$GITHUB_ENV"
+          gpg --batch --yes --armor --export "$KEY_FPR" > /tmp/pubkey.gpg
+
+      # Reprepro keeps its package index *and* its internal state under
+      # the same root, so the published `gh-pages` branch IS that root.
+      # We `worktree add` it, render the distributions config with the
+      # signing key fingerprint, then run reprepro against the worktree.
+      - name: Check out / create gh-pages worktree
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          mkdir -p /tmp/aptroot
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
+            git fetch origin gh-pages
+            git worktree add /tmp/aptroot gh-pages
+          else
+            # First publish: spawn an empty orphan branch.
+            git worktree add --detach /tmp/aptroot
+            cd /tmp/aptroot
+            git checkout --orphan gh-pages
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+          mkdir -p /tmp/aptroot/conf
+          sed "s/@@KEY_FINGERPRINT@@/${KEY_FPR}/" \
+            packaging/apt/conf/distributions.in \
+            > /tmp/aptroot/conf/distributions
+          cp /tmp/pubkey.gpg /tmp/aptroot/pubkey.gpg
+
+      - name: Add .deb files to repository
+        run: |
+          for deb in /tmp/debs/*.deb; do
+            reprepro -b /tmp/aptroot includedeb stable "$deb"
+          done
+          # reprepro's internal `db/` is binary-state we don't want
+          # cluttering the index, but it needs to persist across runs to
+          # avoid re-adding identical packages — keep it tracked.
+          ls -la /tmp/aptroot/
+
+      - name: Commit + push gh-pages
+        working-directory: /tmp/aptroot
+        run: |
+          # The pubkey is small and convenient to colocate with the repo
+          # so the install one-liner is `curl pubkey.gpg | gpg --dearmor`.
+          touch .nojekyll  # disable Jekyll so paths with underscores serve
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to publish"
+            exit 0
+          fi
+          git commit -m "Publish ${GITHUB_REF_NAME} to APT repository"
+          git push origin gh-pages

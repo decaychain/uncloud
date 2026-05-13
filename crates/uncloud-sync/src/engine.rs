@@ -473,6 +473,27 @@ impl SyncEngine {
         .await;
     }
 
+    /// Record a run-level error in the local audit log so the desktop
+    /// activity view shows *why* the run failed. The message lands in
+    /// `note` because that's the field the renderer reads as the row's
+    /// details; `reason` is reserved for the start/end-marker run tag
+    /// ("Sync" / "ManualSyncStart").
+    async fn log_sync_error_row(&self, path: &str, message: &str) {
+        self.ensure_start_emitted().await;
+        self.log_row(SyncLogRow {
+            id: 0,
+            timestamp: Utc::now().to_rfc3339(),
+            operation: "Error".to_owned(),
+            direction: None,
+            resource_type: None,
+            path: path.to_owned(),
+            new_path: None,
+            reason: "Sync".to_owned(),
+            note: Some(message.to_owned()),
+        })
+        .await;
+    }
+
     async fn log_sync_marker(
         &self,
         operation: &str,
@@ -604,11 +625,22 @@ impl SyncEngine {
                 | SentinelError::Corrupt { .. }
                 | SentinelError::Fs(_)
                 | SentinelError::Journal(_))) => {
+                    let reason = e.to_string();
                     report.errors.push(SyncError {
                         path: base.clone(),
-                        reason: e.to_string(),
+                        reason: reason.clone(),
                     });
                     warn!("Aborting sync: {e}");
+                    self.log_sync_error_row(base, &reason).await;
+                    let elapsed = started.elapsed();
+                    let note = format!(
+                        "0 up, 0 down, 0 deleted, 0 folders created, 0 conflicts, \
+                         {} errors, {:.1}s",
+                        report.errors.len(),
+                        elapsed.as_secs_f32(),
+                    );
+                    self.log_sync_marker("SyncEnd", end_reason, Some(note))
+                        .await;
                     return Ok(report);
                 }
             }

@@ -31,6 +31,12 @@ pub fn ArtistList(artists: Vec<ArtistResponse>, on_select: EventHandler<String>)
                     rsx! {
                         div {
                             class: "card bg-base-100 shadow-sm border border-base-300 cursor-pointer hover:shadow-md hover:ring-2 hover:ring-primary transition-all",
+                            // Hint the browser to skip layout/paint/style for cards
+                            // outside the viewport. `contain-intrinsic-size` is the
+                            // placeholder height it uses for skipped cards so the
+                            // scrollbar stays accurate; ~150px matches the actual
+                            // rendered card (avatar 64px + name + count + padding).
+                            style: "content-visibility: auto; contain-intrinsic-size: 150px;",
                             onclick: move |_| on_select.call(name_click.clone()),
                             div { class: "card-body items-center text-center p-4 gap-2",
                                 div { class: "avatar placeholder",

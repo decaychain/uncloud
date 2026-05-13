@@ -1,0 +1,8 @@
+Origin: Uncloud
+Label: Uncloud
+Suite: stable
+Codename: stable
+Architectures: amd64 arm64
+Components: main
+Description: Uncloud desktop client APT repository
+SignWith: @@KEY_FINGERPRINT@@

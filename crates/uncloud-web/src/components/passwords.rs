@@ -24,7 +24,6 @@ struct EntryView {
     title: String,
     username: String,
     url: String,
-    group_path: String,
 }
 
 /// A flattened view of a group for the sidebar.
@@ -50,7 +49,6 @@ fn collect_entries(group: &Group, path: &str) -> Vec<EntryView> {
             title: entry.get_title().unwrap_or("Untitled").to_string(),
             username: entry.get_username().unwrap_or("").to_string(),
             url: entry.get_url().unwrap_or("").to_string(),
-            group_path: current_path.clone(),
         });
     }
 
@@ -92,7 +90,6 @@ fn find_group_entries(group: &Group, group_uuid: uuid::Uuid) -> Vec<EntryView> {
             title: e.get_title().unwrap_or("Untitled").to_string(),
             username: e.get_username().unwrap_or("").to_string(),
             url: e.get_url().unwrap_or("").to_string(),
-            group_path: group.name.clone(),
         }).collect();
     }
     for child in &group.groups {

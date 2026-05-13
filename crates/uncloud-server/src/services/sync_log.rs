@@ -132,7 +132,7 @@ impl SyncLog {
 
 /// Escape the handful of regex metacharacters so user-supplied substrings
 /// are treated literally by MongoDB's `$regex`.
-fn escape_regex(s: &str) -> String {
+pub(crate) fn escape_regex(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {

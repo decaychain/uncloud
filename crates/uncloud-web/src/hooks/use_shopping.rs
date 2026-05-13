@@ -1,10 +1,9 @@
 use uncloud_common::{
     AddShoppingListItemRequest, CategoryResponse, CreateCategoryRequest, CreateShopRequest,
-    CreateShoppingItemRequest, CreateShoppingListRequest, PatchShoppingListItemRequest,
-    RenameShoppingListRequest, ShareListRequest, ShopResponse, ShoppingItemResponse,
-    ShoppingListItemResponse, ShoppingListResponse, ShoppingListSummary, UpdateCategoryRequest,
-    UpdateFeaturesRequest, UpdatePositionRequest, UpdateShopRequest, UpdateShoppingItemRequest,
-    UserResponse,
+    CreateShoppingListRequest, PatchShoppingListItemRequest, RenameShoppingListRequest,
+    ShareListRequest, ShopResponse, ShoppingItemResponse, ShoppingListItemResponse,
+    ShoppingListResponse, ShoppingListSummary, UpdateCategoryRequest, UpdateFeaturesRequest,
+    UpdatePositionRequest, UpdateShopRequest, UpdateShoppingItemRequest, UserResponse,
 };
 
 use super::api;
@@ -177,39 +176,6 @@ pub async fn list_items() -> Result<Vec<ShoppingItemResponse>, String> {
             .map_err(|e| e.to_string())
     } else {
         Err("Failed to load items".to_string())
-    }
-}
-
-pub async fn create_item(
-    req: CreateShoppingItemRequest,
-) -> Result<ShoppingItemResponse, String> {
-    let response = api::post("/shopping/items")
-        .json(&req)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if response.ok() || response.status() == 201 {
-        response
-            .json::<ShoppingItemResponse>()
-            .await
-            .map_err(|e| e.to_string())
-    } else {
-        Err("Failed to create item".to_string())
-    }
-}
-
-pub async fn delete_item(id: &str) -> Result<(), String> {
-    let response = api::delete(&format!("/shopping/items/{}", id))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if response.ok() || response.status() == 204 {
-        Ok(())
-    } else {
-        Err("Failed to delete item".to_string())
     }
 }
 
@@ -468,10 +434,6 @@ pub async fn remove_purchased(list_id: &str) -> Result<(), String> {
     } else {
         Err("Failed to remove purchased items".to_string())
     }
-}
-
-pub async fn clear_checked(list_id: &str) -> Result<(), String> {
-    remove_purchased(list_id).await
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
