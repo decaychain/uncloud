@@ -386,6 +386,25 @@ jobs:
             > /tmp/aptroot/conf/distributions
           cp /tmp/pubkey.gpg /tmp/aptroot/pubkey.gpg
 
+      # reprepro refuses any package whose Debian control file lacks a
+      # `Section:` field, bailing out with the cryptic "No section given
+      # for 'X', skipping. / There have been errors!". Tauri's bundler
+      # doesn't emit a Section, so we patch one in before reprepro sees
+      # the file. `utils` matches the intent of the existing Fedora
+      # `Group: Applications/System` in `packaging/fedora/uncloud.spec.in`.
+      - name: Backfill `Section:` on each .deb (Tauri doesn't set it)
+        run: |
+          for deb in /tmp/debs/*.deb; do
+            tmpdir=$(mktemp -d)
+            dpkg-deb -R "$deb" "$tmpdir"
+            if ! grep -q '^Section:' "$tmpdir/DEBIAN/control"; then
+              echo 'Section: utils' >> "$tmpdir/DEBIAN/control"
+            fi
+            dpkg-deb -b "$tmpdir" "${deb}.fixed"
+            mv "${deb}.fixed" "$deb"
+            rm -rf "$tmpdir"
+          done
+
       - name: Add .deb files to repository
         run: |
           for deb in /tmp/debs/*.deb; do
