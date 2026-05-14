@@ -44,6 +44,7 @@ uncloud-server backup create [--target <name>] [--dry-run] [--tag <tag>]
 uncloud-server backup list   [--target <name>]
 uncloud-server backup check  [--target <name>]
 uncloud-server backup prune  [--target <name>]
+uncloud-server backup unlock
 uncloud-server backup restore --target <name> --snapshot <id-or-latest> \
     [--default-storage <name>] [--conflict-policy abort|overwrite] [--dry-run]
 ```

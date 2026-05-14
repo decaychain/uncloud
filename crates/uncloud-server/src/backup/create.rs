@@ -217,6 +217,7 @@ async fn run_one_inner(
         .unwrap_or(8);
     let source = UncloudSource::new(handle, statics, all_files, max_concurrent);
     let failure_counter = source.failures();
+    let progress = source.progress();
 
     let host = std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
@@ -242,12 +243,15 @@ async fn run_one_inner(
     // it's complete." The cost is a single save+delete dance in the
     // common case (snapshots are content-addressed, so adding a tag
     // requires writing a new snapshot file and deleting the original).
+    let progress_stop = Arc::new(Notify::new());
+    let progress_task =
+        spawn_progress_logger(target.name.clone(), progress.clone(), progress_stop.clone());
+
     let failure_counter_for_close = failure_counter.clone();
-    let snap = tokio::task::spawn_blocking(move || -> rustic_core::RusticResult<_> {
+    let backup_join = tokio::task::spawn_blocking(move || -> rustic_core::RusticResult<_> {
         let indexed = repo_handle.to_indexed_ids()?;
         let snap = indexed.backup_with_source(&backup_opts, &source, &snapshot_path, snap)?;
-        let failures =
-            failure_counter_for_close.load(std::sync::atomic::Ordering::Relaxed);
+        let failures = failure_counter_for_close.load(std::sync::atomic::Ordering::Relaxed);
         if failures == 0 {
             let old_id = snap.id;
             let mut tagged = snap.clone();
@@ -258,10 +262,31 @@ async fn run_one_inner(
         }
         rustic_core::RusticResult::Ok(snap)
     })
-    .await?
-    .map_err(|e| format!("rustic backup failed: {e}"))?;
+    .await;
+
+    progress_stop.notify_waiters();
+    let _ = progress_task.await;
+
+    let backup_result = backup_join?;
+    let snap = backup_result.map_err(|e| {
+        let p = progress.snapshot();
+        format!(
+            "rustic backup failed: {e}. Progress before failure: {}/{} blob(s) completed, {} error(s).",
+            p.completed_blobs,
+            p.total_blobs,
+            p.failed_blobs,
+        )
+    })?;
 
     let failures = failure_counter.load(std::sync::atomic::Ordering::Relaxed);
+    let p = progress.snapshot();
+    tracing::info!(
+        "backup target `{}` finished source reads: {}/{} blob(s) completed, {} error(s)",
+        target.name,
+        p.completed_blobs,
+        p.total_blobs,
+        p.failed_blobs,
+    );
     let total_files = snap
         .summary
         .as_ref()
@@ -276,9 +301,7 @@ async fn run_one_inner(
         // The dance above tagged + replaced; `snap.id` is the now-deleted
         // original. We don't surface it because users would chase a
         // ghost. The new id lives in `backup list`.
-        println!(
-            "Snapshot written (uncloud:complete): {total_files} files, {total_bytes} bytes",
-        );
+        println!("Snapshot written (uncloud:complete): {total_files} files, {total_bytes} bytes",);
         println!(
             "Find the snapshot id with: backup list --target {}",
             target.name,
@@ -303,6 +326,31 @@ async fn run_one_inner(
     }
 
     Ok(())
+}
+
+fn spawn_progress_logger(
+    target_name: String,
+    progress: crate::backup::source::SourceProgress,
+    stop: Arc<Notify>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = stop.notified() => break,
+                _ = interval.tick() => {
+                    let p = progress.snapshot();
+                    tracing::info!(
+                        "backup target `{target_name}` progress: {}/{} blob(s) backed up, {} error(s)",
+                        p.completed_blobs,
+                        p.total_blobs,
+                        p.failed_blobs,
+                    );
+                }
+            }
+        }
+    })
 }
 
 async fn collect_file_entries(
@@ -489,4 +537,3 @@ async fn write_run_manifest(
     tokio::fs::write(&path, bytes).await?;
     Ok(())
 }
-

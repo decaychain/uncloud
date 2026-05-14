@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use rustic_core::{
     ErrorKind, Metadata, Node, NodeType, ReadSource, ReadSourceEntry, ReadSourceOpen, RusticError,
@@ -32,6 +33,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::runtime::Handle;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::storage::retry::RetryConfig;
 use crate::storage::StorageBackend;
 
 /// Static entry — DB jsonl, manifest, anything already on local disk.
@@ -51,6 +53,56 @@ pub struct FileEntry {
     pub storage_path: String,
     pub snapshot_path: PathBuf,
     pub size: u64,
+}
+
+#[derive(Default)]
+struct SourceProgressInner {
+    total_blobs: AtomicUsize,
+    completed_blobs: AtomicUsize,
+    failed_blobs: AtomicUsize,
+}
+
+/// Snapshot of backup-source progress for periodic CLI reporting.
+#[derive(Debug, Clone, Copy)]
+pub struct SourceProgressSnapshot {
+    pub total_blobs: usize,
+    pub completed_blobs: usize,
+    pub failed_blobs: usize,
+}
+
+/// Shared progress counters updated by rustic worker threads as blob
+/// readers reach EOF or terminal failure.
+#[derive(Clone, Default)]
+pub struct SourceProgress {
+    inner: Arc<SourceProgressInner>,
+}
+
+impl SourceProgress {
+    fn new(total_blobs: usize) -> Self {
+        Self {
+            inner: Arc::new(SourceProgressInner {
+                total_blobs: AtomicUsize::new(total_blobs),
+                completed_blobs: AtomicUsize::new(0),
+                failed_blobs: AtomicUsize::new(0),
+            }),
+        }
+    }
+
+    pub fn snapshot(&self) -> SourceProgressSnapshot {
+        SourceProgressSnapshot {
+            total_blobs: self.inner.total_blobs.load(Ordering::Relaxed),
+            completed_blobs: self.inner.completed_blobs.load(Ordering::Relaxed),
+            failed_blobs: self.inner.failed_blobs.load(Ordering::Relaxed),
+        }
+    }
+
+    fn record_completed_blob(&self) {
+        self.inner.completed_blobs.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_failed_blob(&self) {
+        self.inner.failed_blobs.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl std::fmt::Debug for FileEntry {
@@ -77,6 +129,7 @@ pub struct UncloudSource {
     entries: Arc<Vec<SourceEntry>>,
     total_bytes: u64,
     failures: Arc<AtomicUsize>,
+    progress: SourceProgress,
     /// Caps simultaneous backend `read()` calls so SFTP servers with tight
     /// per-session handle limits (Hetzner Storage Box etc.) don't reject
     /// opens once rayon's archiver reaches full parallelism. Each
@@ -117,6 +170,7 @@ impl UncloudSource {
         max_concurrent_reads: usize,
     ) -> Self {
         let mut entries: Vec<SourceEntry> = Vec::with_capacity(statics.len() + files.len());
+        let total_blobs = files.len();
         entries.extend(statics.into_iter().map(SourceEntry::Static));
         entries.extend(files.into_iter().map(SourceEntry::File));
         // Depth-first lexicographic order on paths.
@@ -127,6 +181,7 @@ impl UncloudSource {
             entries: Arc::new(entries),
             total_bytes,
             failures: Arc::new(AtomicUsize::new(0)),
+            progress: SourceProgress::new(total_blobs),
             concurrency: Arc::new(Semaphore::new(max_concurrent_reads.max(1))),
         }
     }
@@ -135,6 +190,10 @@ impl UncloudSource {
     /// rustic backup returns to detect partial snapshots.
     pub fn failures(&self) -> Arc<AtomicUsize> {
         self.failures.clone()
+    }
+
+    pub fn progress(&self) -> SourceProgress {
+        self.progress.clone()
     }
 }
 
@@ -151,6 +210,7 @@ impl ReadSource for UncloudSource {
             handle: self.handle.clone(),
             inner: self.entries.clone(),
             failures: self.failures.clone(),
+            progress: self.progress.clone(),
             concurrency: self.concurrency.clone(),
             idx: 0,
         }
@@ -161,6 +221,7 @@ pub struct UncloudIter {
     handle: Handle,
     inner: Arc<Vec<SourceEntry>>,
     failures: Arc<AtomicUsize>,
+    progress: SourceProgress,
     concurrency: Arc<Semaphore>,
     idx: usize,
 }
@@ -174,6 +235,7 @@ impl Iterator for UncloudIter {
         Some(make_entry(
             &self.handle,
             &self.failures,
+            &self.progress,
             &self.concurrency,
             entry.clone(),
         ))
@@ -183,6 +245,7 @@ impl Iterator for UncloudIter {
 fn make_entry(
     handle: &Handle,
     failures: &Arc<AtomicUsize>,
+    progress: &SourceProgress,
     concurrency: &Arc<Semaphore>,
     entry: SourceEntry,
 ) -> RusticResult<ReadSourceEntry<UncloudOpen>> {
@@ -206,12 +269,14 @@ fn make_entry(
         SourceEntry::Static(s) => UncloudOpen {
             handle: handle.clone(),
             failures: failures.clone(),
+            progress: progress.clone(),
             concurrency: concurrency.clone(),
             kind: OpenKind::Local(s.local_path),
         },
         SourceEntry::File(f) => UncloudOpen {
             handle: handle.clone(),
             failures: failures.clone(),
+            progress: progress.clone(),
             concurrency: concurrency.clone(),
             kind: OpenKind::Backend {
                 backend: f.backend,
@@ -229,6 +294,7 @@ fn make_entry(
 pub struct UncloudOpen {
     handle: Handle,
     failures: Arc<AtomicUsize>,
+    progress: SourceProgress,
     concurrency: Arc<Semaphore>,
     kind: OpenKind,
 }
@@ -249,6 +315,10 @@ impl ReadSourceOpen for UncloudOpen {
             OpenKind::Local(p) => {
                 let f = std::fs::File::open(&p).map_err(|e| {
                     self.failures.fetch_add(1, Ordering::Relaxed);
+                    tracing::error!(
+                        "backup staging file `{}` failed to open and will be missing from the snapshot: {e}",
+                        p.display(),
+                    );
                     RusticError::with_source(
                         ErrorKind::Backend,
                         "Failed to open backup staging file `{path}`",
@@ -271,6 +341,7 @@ impl ReadSourceOpen for UncloudOpen {
                 let storage_path_for_open = storage_path.clone();
                 let storage_path_for_err = storage_path.clone();
                 let storage_path_for_reader = storage_path;
+                let retry_config = backend_for_reader.source_read_retry_config();
                 let (permit, async_reader) = self
                     .handle
                     .block_on(async move {
@@ -286,6 +357,11 @@ impl ReadSourceOpen for UncloudOpen {
                     })
                     .map_err(|e| {
                         self.failures.fetch_add(1, Ordering::Relaxed);
+                        self.progress.record_failed_blob();
+                        tracing::error!(
+                            "backup blob `{storage_path_for_err}` failed to open after storage retry policy; \
+                             it will be missing from this snapshot: {e}",
+                        );
                         RusticError::with_source(
                             ErrorKind::Backend,
                             "Failed to open backup blob `{path}`",
@@ -301,7 +377,10 @@ impl ReadSourceOpen for UncloudOpen {
                     path: storage_path_for_reader,
                     offset: 0,
                     failures: self.failures,
+                    progress: self.progress,
                     failure_recorded: false,
+                    completion_recorded: false,
+                    retry_config,
                 }))
             }
         }
@@ -322,7 +401,8 @@ pub struct AsyncReadBridge {
 impl Read for AsyncReadBridge {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let reader = self.reader.as_mut();
-        self.handle.block_on(async { reader.get_mut().read(buf).await })
+        self.handle
+            .block_on(async { reader.get_mut().read(buf).await })
     }
 }
 
@@ -353,10 +433,13 @@ struct BackendSourceReader {
     /// reflect mid-stream errors, not just open-time ones. Open-side
     /// failures tick the counter from `UncloudOpen::open()` directly.
     failures: Arc<AtomicUsize>,
+    progress: SourceProgress,
     /// Guards against double-counting: rustic may call `read` again after
     /// a hard error before dropping the reader, and a single failed file
     /// should be one tick on the counter regardless.
     failure_recorded: bool,
+    completion_recorded: bool,
+    retry_config: RetryConfig,
 }
 
 impl BackendSourceReader {
@@ -368,50 +451,112 @@ impl BackendSourceReader {
     fn record_failure(&mut self) {
         if !self.failure_recorded {
             self.failures.fetch_add(1, Ordering::Relaxed);
+            self.progress.record_failed_blob();
             self.failure_recorded = true;
+        }
+    }
+
+    fn record_completed(&mut self) {
+        if !self.completion_recorded && !self.failure_recorded {
+            self.progress.record_completed_blob();
+            self.completion_recorded = true;
         }
     }
 }
 
 impl Read for BackendSourceReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        // Single fall-through retry: if the current reader fails, ask the
-        // backend for a fresh one at the current offset and try once more.
-        // The backend (SftpStorage) does its own pool-aware retry inside
-        // `read_range`, so additional looping here would just stack
-        // attempts on top of attempts.
         match self.try_read(buf) {
             Ok(n) => {
                 self.offset += n as u64;
+                if n == 0 {
+                    self.record_completed();
+                }
                 return Ok(n);
             }
-            Err(e) => {
-                tracing::warn!(
-                    "source read of `{}` at offset {} failed: {e}; reopening",
-                    self.path,
-                    self.offset,
-                );
-                if let Err(reopen_err) = self.try_reopen() {
-                    tracing::warn!(
-                        "source reopen of `{}` at offset {} failed: {reopen_err}",
+            Err(first_err) => {
+                let max = self.retry_config.effective_max_attempts().max(1);
+                if max == 1 {
+                    tracing::error!(
+                        "backup blob `{}` failed at offset {} after 1/1 source read attempt; \
+                         it will be missing from this snapshot: {first_err}",
                         self.path,
                         self.offset,
                     );
                     self.record_failure();
-                    return Err(std::io::Error::other(format!(
-                        "reopen failed: {reopen_err}",
-                    )));
+                    return Err(first_err);
                 }
-            }
-        }
-        match self.try_read(buf) {
-            Ok(n) => {
-                self.offset += n as u64;
-                Ok(n)
-            }
-            Err(e) => {
-                self.record_failure();
-                Err(e)
+
+                tracing::warn!(
+                    "source read of `{}` at offset {} failed on attempt 1/{max}: {first_err}; reopening",
+                    self.path,
+                    self.offset,
+                );
+
+                let mut delay = self.retry_config.base_delay();
+                let max_delay = self.retry_config.max_delay();
+                for attempt in 2..=max {
+                    if delay > Duration::ZERO {
+                        std::thread::sleep(delay);
+                    }
+                    if let Err(reopen_err) = self.try_reopen() {
+                        if attempt < max {
+                            tracing::warn!(
+                                "source reopen of `{}` at offset {} failed on attempt {attempt}/{max}: {reopen_err}; retrying",
+                                self.path,
+                                self.offset,
+                            );
+                            delay = (delay * 2).min(max_delay);
+                            continue;
+                        }
+                        tracing::error!(
+                            "backup blob `{}` failed to reopen at offset {} after {attempt}/{max} source read attempts; \
+                             it will be missing from this snapshot: {reopen_err}",
+                            self.path,
+                            self.offset,
+                        );
+                        self.record_failure();
+                        return Err(std::io::Error::other(format!(
+                            "reopen failed: {reopen_err}",
+                        )));
+                    }
+
+                    match self.try_read(buf) {
+                        Ok(n) => {
+                            self.offset += n as u64;
+                            if n == 0 {
+                                self.record_completed();
+                            }
+                            if attempt > 1 {
+                                tracing::info!(
+                                    "source read of `{}` recovered at offset {} on attempt {attempt}/{max}",
+                                    self.path,
+                                    self.offset,
+                                );
+                            }
+                            return Ok(n);
+                        }
+                        Err(e) if attempt < max => {
+                            tracing::warn!(
+                                "source read of `{}` at offset {} failed on attempt {attempt}/{max}: {e}; reopening",
+                                self.path,
+                                self.offset,
+                            );
+                            delay = (delay * 2).min(max_delay);
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "backup blob `{}` failed at offset {} after {attempt}/{max} source read attempts; \
+                                 it will be missing from this snapshot: {e}",
+                                self.path,
+                                self.offset,
+                            );
+                            self.record_failure();
+                            return Err(e);
+                        }
+                    }
+                }
+                unreachable!("source retry loop returns on every terminal state")
             }
         }
     }
@@ -420,7 +565,8 @@ impl Read for BackendSourceReader {
 impl BackendSourceReader {
     fn try_read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let reader = self.reader.as_mut();
-        self.handle.block_on(async { reader.get_mut().read(buf).await })
+        self.handle
+            .block_on(async { reader.get_mut().read(buf).await })
     }
 
     fn try_reopen(&mut self) -> Result<(), crate::error::AppError> {

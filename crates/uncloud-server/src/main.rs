@@ -199,6 +199,8 @@ enum BackupCmd {
         #[arg(long)]
         force_unlock: bool,
     },
+    /// Clear a stale backup lock left by a crashed backup command.
+    Unlock,
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────
@@ -306,6 +308,7 @@ async fn dispatch_backup(cmd: BackupCmd) -> Result<(), Box<dyn std::error::Error
         BackupCmd::List { target } => backup::run_list(target).await,
         BackupCmd::Check { target, read_data } => backup::run_check(target, read_data).await,
         BackupCmd::Prune { target, dry_run } => backup::run_prune(target, dry_run).await,
+        BackupCmd::Unlock => backup::run_unlock().await,
         BackupCmd::Restore {
             target,
             snapshot,

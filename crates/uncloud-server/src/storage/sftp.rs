@@ -496,6 +496,10 @@ where
 
 #[async_trait]
 impl StorageBackend for SftpStorage {
+    fn source_read_retry_config(&self) -> super::retry::RetryConfig {
+        self.retry.clone()
+    }
+
     async fn read(&self, path: &str) -> Result<BoxedAsyncRead> {
         retry_idempotent(self, "sftp.read", || self.read_once(path)).await
     }

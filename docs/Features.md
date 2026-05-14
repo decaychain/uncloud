@@ -326,7 +326,7 @@ mirrored backup folder shows as one card, not thousands.
 
 `uncloud-server backup` writes a single deduplicated, encrypted snapshot of the entire instance — database state plus all file blobs — to a [Restic](https://restic.net/)-format repository. Built on [`rustic_core`](https://docs.rs/rustic_core/) so repos are byte-compatible with the official `restic` CLI.
 
-- **Subcommands**: `backup init`, `backup create`, `backup list`, `backup check`, `backup prune`, `backup restore` (all under `uncloud-server backup`)
+- **Subcommands**: `backup init`, `backup create`, `backup list`, `backup check`, `backup prune`, `backup unlock`, `backup restore` (all under `uncloud-server backup`)
 - **Snapshot contents**: NDJSON dump per MongoDB collection (engine-neutral, not BSON wire format) plus all file blobs organised under `/files/{owner}/{logical path}`. Versions are included by default; trash is opt-in.
 - **Repo backends**: SFTP, S3 / B2 / R2, Azure, GCS, REST server (with append-only mode), rclone, or local. Configured per `target` in `config.yaml` under `backup.targets`.
 - **Restore is in-place**: writes DB documents back into MongoDB and blobs back into matching storage backends (matched by name; falls back to default storage). No "extract to a path" mode, since that doesn't model multi-backend installations.

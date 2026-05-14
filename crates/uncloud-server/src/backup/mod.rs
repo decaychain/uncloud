@@ -83,7 +83,10 @@ pub async fn run_init(target_name: String) -> Result<(), Box<dyn std::error::Err
         );
     }
 
-    println!("Initialising repository for target {:?} at {}", target.name, target.repo);
+    println!(
+        "Initialising repository for target {:?} at {}",
+        target.name, target.repo
+    );
     let target = target.clone();
     let _repo = tokio::task::spawn_blocking(move || repo::init(&target, &password)).await??;
     println!("Repository initialised successfully.");
@@ -117,12 +120,31 @@ pub async fn run_restore(args: RestoreArgs) -> Result<(), Box<dyn std::error::Er
     restore::run(args).await
 }
 
+pub async fn run_unlock() -> Result<(), Box<dyn std::error::Error>> {
+    init_logging();
+    let config = crate::config::Config::load_or_default();
+    let db = crate::db::connect(&config.database).await?;
+    let cleared = lock::force_unlock(&db).await?;
+    if cleared == 0 {
+        println!("No backup lock found.");
+    } else {
+        println!("Cleared {cleared} backup lock row(s).");
+    }
+    Ok(())
+}
+
 fn init_logging() {
+    // Keep backup CLI output focused on Uncloud progress/failure lines.
+    // The openssh wrapper and openssh-sftp-client emit INFO records for
+    // every session/subsystem setup; SFTP-heavy backup runs otherwise get
+    // flooded with per-connection implementation chatter.
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "info".into())
+        .add_directive("openssh_sftp_client=warn".parse().unwrap())
+        .add_directive("openssh=warn".parse().unwrap());
+
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
-        )
+        .with_env_filter(env_filter)
         .try_init()
         .ok();
 }
