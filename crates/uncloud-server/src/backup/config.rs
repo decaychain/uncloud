@@ -36,6 +36,12 @@ pub struct BackupOptions {
     /// cap fast under rayon's full parallelism. `None` falls back to 8 —
     /// conservative enough for shared-tenant SFTP, plenty for S3/local.
     pub max_concurrent_source_reads: Option<usize>,
+    /// Outer retry policy used only by `backup create` when a source stream
+    /// still fails after the storage backend's own read/reopen retry layer.
+    /// This is intentionally separate from `storage.retry`: keep storage
+    /// retries high for SFTP, and tune this fallback lower (or set
+    /// `max_attempts: 1`) if backup should fail blobs faster.
+    pub source_read_retry: crate::storage::retry::RetryConfig,
 }
 
 impl Default for BackupOptions {
@@ -46,6 +52,7 @@ impl Default for BackupOptions {
             include_thumbnails: false,
             staging_dir: None,
             max_concurrent_source_reads: None,
+            source_read_retry: Default::default(),
         }
     }
 }

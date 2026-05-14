@@ -580,6 +580,17 @@ storage:
     base_delay_ms: 200             # doubles per attempt, ±25 % jitter
     max_delay_ms: 5000             # cap on the exponential backoff
 
+backup:
+  options:
+    # Backup-only outer retry applied after a source backend's own read
+    # retry layer fails. Defaults mirror storage.retry; set max_attempts: 1
+    # to disable this outer fallback while keeping SFTP's inner stream
+    # recovery active for migration, sync downloads, and normal downloads.
+    source_read_retry:
+      max_attempts: 3
+      base_delay_ms: 200
+      max_delay_ms: 5000
+
 auth:
   session_duration_hours: 168      # 7 days
   # registration mode: open | approval | invite_only | disabled | demo

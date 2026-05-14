@@ -302,6 +302,16 @@ backup:
     # parallelism hits that cap fast. Default 8 — conservative for
     # shared-tenant SFTP, plenty for S3 / local.
     # max_concurrent_source_reads: 8
+    #
+    # Outer retry used by backup's source bridge after the storage backend's
+    # own read retry layer has already failed. This is separate from
+    # storage.retry: keep storage.retry high for SFTP stream recovery, and
+    # tune this fallback lower (or max_attempts: 1) if backup should fail
+    # blobs faster once the backend gives up. Defaults mirror storage.retry.
+    source_read_retry:
+      max_attempts: 3
+      base_delay_ms: 200
+      max_delay_ms: 5000
 
   targets:
     - name: nas

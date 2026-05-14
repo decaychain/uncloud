@@ -23,14 +23,6 @@ pub struct ScanEntry {
 
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
-    /// Retry policy used by backup's sync source bridge for mid-stream
-    /// read failures. Backends with their own configured network retry
-    /// policy should override this so source reads and normal reads share
-    /// the same operator-facing knobs.
-    fn source_read_retry_config(&self) -> retry::RetryConfig {
-        retry::RetryConfig::default()
-    }
-
     /// Read a file, returning an async reader
     async fn read(&self, path: &str) -> Result<BoxedAsyncRead>;
 

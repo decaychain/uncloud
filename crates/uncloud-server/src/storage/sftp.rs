@@ -7,10 +7,12 @@ use russh::Channel;
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
 use sha2::{Digest, Sha256};
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, ReadBuf};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -256,7 +258,7 @@ impl SftpStorage {
 /// out of the pool while bytes are still streaming over its SFTP channel.
 /// The wrapped reader (an `SftpFile`) holds an internal `Arc<SftpSession>`
 /// which is what actually drives the byte transfer; we just keep the
-/// pool slot occupied via `_pooled` until the reader is dropped.
+/// pool slot occupied via `pooled` until the reader is dropped.
 ///
 /// **Deadlock hazard.** The op_semaphore permit is held until this reader
 /// is dropped. Holding one across any subsequent `StorageBackend` op on
@@ -266,34 +268,267 @@ impl SftpStorage {
 /// prefer `StorageBackend::read_all` — it drops the reader before
 /// returning.
 struct PooledReader<R> {
-    _pooled: PooledConn,
+    pooled: Option<PooledConn>,
     inner: R,
 }
 
 impl<R: AsyncRead + Unpin> AsyncRead for PooledReader<R> {
     fn poll_read(
         mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_read(cx, buf)
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let poll = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if matches!(poll, Poll::Ready(Err(_))) {
+            if let Some(pooled) = self.pooled.take() {
+                pooled.discard();
+            }
+        }
+        poll
     }
+}
+
+type ReopenFuture = Pin<Box<dyn Future<Output = std::io::Result<BoxedAsyncRead>> + Send>>;
+
+struct ResumableSftpReader {
+    pool: Arc<ConnectionPool>,
+    full_path: String,
+    logical_path: String,
+    inner: Option<BoxedAsyncRead>,
+    offset: u64,
+    remaining: Option<u64>,
+    retry: super::retry::RetryConfig,
+    reopening: Option<ReopenFuture>,
+    failed_offset: Option<u64>,
+    failed_attempts_at_offset: u32,
+}
+
+impl ResumableSftpReader {
+    fn new(
+        pool: Arc<ConnectionPool>,
+        full_path: String,
+        logical_path: String,
+        inner: BoxedAsyncRead,
+        offset: u64,
+        remaining: Option<u64>,
+        retry: super::retry::RetryConfig,
+    ) -> Self {
+        Self {
+            pool,
+            full_path,
+            logical_path,
+            inner: Some(inner),
+            offset,
+            remaining,
+            retry,
+            reopening: None,
+            failed_offset: None,
+            failed_attempts_at_offset: 0,
+        }
+    }
+
+    fn start_reopen(&mut self, error: std::io::Error) -> std::io::Result<()> {
+        if self.failed_offset == Some(self.offset) {
+            self.failed_attempts_at_offset += 1;
+        } else {
+            self.failed_offset = Some(self.offset);
+            self.failed_attempts_at_offset = 1;
+        }
+
+        let max = self.retry.effective_max_attempts().max(1);
+        if self.failed_attempts_at_offset >= max {
+            tracing::error!(
+                "sftp stream read `{}` failed at offset {} after {}/{} attempts: {error}",
+                self.logical_path,
+                self.offset,
+                self.failed_attempts_at_offset,
+                max,
+            );
+            return Err(error);
+        }
+
+        self.inner = None;
+        let pool = self.pool.clone();
+        let full_path = self.full_path.clone();
+        let logical_path = self.logical_path.clone();
+        let offset = self.offset;
+        let remaining = self.remaining;
+        let retry = self.retry.clone();
+        let first_reopen_attempt = self.failed_attempts_at_offset + 1;
+        self.reopening = Some(Box::pin(async move {
+            reopen_sftp_reader(
+                pool,
+                full_path,
+                logical_path,
+                offset,
+                remaining,
+                retry,
+                first_reopen_attempt,
+                error,
+            )
+            .await
+        }));
+        Ok(())
+    }
+}
+
+impl AsyncRead for ResumableSftpReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if matches!(self.remaining, Some(0)) {
+            return Poll::Ready(Ok(()));
+        }
+
+        loop {
+            if let Some(reopening) = self.reopening.as_mut() {
+                match reopening.as_mut().poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok(reader)) => {
+                        self.inner = Some(reader);
+                        self.reopening = None;
+                    }
+                    Poll::Ready(Err(e)) => {
+                        self.reopening = None;
+                        return Poll::Ready(Err(e));
+                    }
+                }
+            }
+
+            let before = buf.filled().len();
+            let Some(inner) = self.inner.as_mut() else {
+                return Poll::Ready(Ok(()));
+            };
+            match inner.as_mut().poll_read(cx, buf) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(())) => {
+                    let read = (buf.filled().len() - before) as u64;
+                    self.offset += read;
+                    if read > 0 {
+                        self.failed_offset = None;
+                        self.failed_attempts_at_offset = 0;
+                    }
+                    if let Some(remaining) = self.remaining.as_mut() {
+                        *remaining = remaining.saturating_sub(read);
+                    }
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Ready(Err(e)) => {
+                    if let Err(e) = self.start_reopen(e) {
+                        return Poll::Ready(Err(e));
+                    }
+                    continue;
+                }
+            }
+        }
+    }
+}
+
+async fn open_sftp_reader(
+    pool: Arc<ConnectionPool>,
+    full_path: String,
+    offset: u64,
+    length: Option<u64>,
+) -> Result<BoxedAsyncRead> {
+    let pooled = pool.checkout().await?;
+    let body = async {
+        let mut file = pooled
+            .sftp
+            .open(full_path)
+            .await
+            .map_err(|e| AppError::Storage(format!("SFTP open failed: {e}")))?;
+        if offset > 0 {
+            file.seek(std::io::SeekFrom::Start(offset))
+                .await
+                .map_err(|e| AppError::Storage(format!("SFTP seek failed: {e}")))?;
+        }
+        Ok::<_, AppError>(file)
+    }
+    .await;
+    match body {
+        Ok(file) => {
+            if let Some(length) = length {
+                Ok(Box::pin(PooledReader {
+                    pooled: Some(pooled),
+                    inner: file.take(length),
+                }))
+            } else {
+                Ok(Box::pin(PooledReader {
+                    pooled: Some(pooled),
+                    inner: file,
+                }))
+            }
+        }
+        Err(e) => {
+            pooled.discard();
+            Err(e)
+        }
+    }
+}
+
+async fn reopen_sftp_reader(
+    pool: Arc<ConnectionPool>,
+    full_path: String,
+    logical_path: String,
+    offset: u64,
+    remaining: Option<u64>,
+    retry: super::retry::RetryConfig,
+    first_reopen_attempt: u32,
+    first_error: std::io::Error,
+) -> std::io::Result<BoxedAsyncRead> {
+    let max = retry.effective_max_attempts().max(1);
+    let mut delay = retry.base_delay();
+    let max_delay = retry.max_delay();
+
+    tracing::warn!(
+        "sftp stream read `{logical_path}` failed at offset {offset} on attempt {}/{max}: {first_error}; reopening",
+        first_reopen_attempt - 1,
+    );
+
+    for attempt in first_reopen_attempt..=max {
+        if delay > Duration::ZERO {
+            tokio::time::sleep(delay).await;
+        }
+        match open_sftp_reader(pool.clone(), full_path.clone(), offset, remaining).await {
+            Ok(reader) => {
+                tracing::info!(
+                    "sftp stream read `{logical_path}` recovered at offset {offset} on attempt {attempt}/{max}",
+                );
+                return Ok(reader);
+            }
+            Err(e) if attempt < max => {
+                tracing::warn!(
+                    "sftp stream reopen `{logical_path}` at offset {offset} failed on attempt {attempt}/{max}: {e}; retrying",
+                );
+                delay = (delay * 2).min(max_delay);
+            }
+            Err(e) => {
+                tracing::error!(
+                    "sftp stream reopen `{logical_path}` at offset {offset} failed after {attempt}/{max} attempts: {e}",
+                );
+                return Err(std::io::Error::other(format!("SFTP stream reopen failed: {e}")));
+            }
+        }
+    }
+
+    unreachable!("sftp stream retry loop returns on every terminal state")
 }
 
 impl SftpStorage {
     async fn read_once(&self, path: &str) -> Result<BoxedAsyncRead> {
-        let pooled = self.pool.checkout().await?;
         let full = self.resolve(path);
-        match pooled.sftp.open(full).await {
-            Ok(file) => Ok(Box::pin(PooledReader {
-                _pooled: pooled,
-                inner: file,
-            })),
-            Err(e) => {
-                pooled.discard();
-                Err(AppError::Storage(format!("SFTP open failed: {e}")))
-            }
-        }
+        let reader = open_sftp_reader(self.pool.clone(), full.clone(), 0, None).await?;
+        Ok(Box::pin(ResumableSftpReader::new(
+            self.pool.clone(),
+            full,
+            path.to_string(),
+            reader,
+            0,
+            None,
+            self.retry.clone(),
+        )))
     }
 
     async fn read_range_once(
@@ -302,30 +537,18 @@ impl SftpStorage {
         offset: u64,
         length: u64,
     ) -> Result<BoxedAsyncRead> {
-        let pooled = self.pool.checkout().await?;
         let full = self.resolve(path);
-        let body = async {
-            let mut file = pooled
-                .sftp
-                .open(full)
-                .await
-                .map_err(|e| AppError::Storage(format!("SFTP open failed: {e}")))?;
-            file.seek(std::io::SeekFrom::Start(offset))
-                .await
-                .map_err(|e| AppError::Storage(format!("SFTP seek failed: {e}")))?;
-            Ok::<_, AppError>(file)
-        }
-        .await;
-        match body {
-            Ok(file) => Ok(Box::pin(PooledReader {
-                _pooled: pooled,
-                inner: file.take(length),
-            })),
-            Err(e) => {
-                pooled.discard();
-                Err(e)
-            }
-        }
+        let reader =
+            open_sftp_reader(self.pool.clone(), full.clone(), offset, Some(length)).await?;
+        Ok(Box::pin(ResumableSftpReader::new(
+            self.pool.clone(),
+            full,
+            path.to_string(),
+            reader,
+            offset,
+            Some(length),
+            self.retry.clone(),
+        )))
     }
 
     async fn write_once(&self, path: &str, data: &[u8]) -> Result<()> {
@@ -496,10 +719,6 @@ where
 
 #[async_trait]
 impl StorageBackend for SftpStorage {
-    fn source_read_retry_config(&self) -> super::retry::RetryConfig {
-        self.retry.clone()
-    }
-
     async fn read(&self, path: &str) -> Result<BoxedAsyncRead> {
         retry_idempotent(self, "sftp.read", || self.read_once(path)).await
     }

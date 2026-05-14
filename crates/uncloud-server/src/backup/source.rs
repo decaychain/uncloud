@@ -130,6 +130,7 @@ pub struct UncloudSource {
     total_bytes: u64,
     failures: Arc<AtomicUsize>,
     progress: SourceProgress,
+    retry: RetryConfig,
     /// Caps simultaneous backend `read()` calls so SFTP servers with tight
     /// per-session handle limits (Hetzner Storage Box etc.) don't reject
     /// opens once rayon's archiver reaches full parallelism. Each
@@ -168,6 +169,7 @@ impl UncloudSource {
         statics: Vec<StaticEntry>,
         files: Vec<FileEntry>,
         max_concurrent_reads: usize,
+        retry: RetryConfig,
     ) -> Self {
         let mut entries: Vec<SourceEntry> = Vec::with_capacity(statics.len() + files.len());
         let total_blobs = files.len();
@@ -182,6 +184,7 @@ impl UncloudSource {
             total_bytes,
             failures: Arc::new(AtomicUsize::new(0)),
             progress: SourceProgress::new(total_blobs),
+            retry,
             concurrency: Arc::new(Semaphore::new(max_concurrent_reads.max(1))),
         }
     }
@@ -211,6 +214,7 @@ impl ReadSource for UncloudSource {
             inner: self.entries.clone(),
             failures: self.failures.clone(),
             progress: self.progress.clone(),
+            retry: self.retry.clone(),
             concurrency: self.concurrency.clone(),
             idx: 0,
         }
@@ -222,6 +226,7 @@ pub struct UncloudIter {
     inner: Arc<Vec<SourceEntry>>,
     failures: Arc<AtomicUsize>,
     progress: SourceProgress,
+    retry: RetryConfig,
     concurrency: Arc<Semaphore>,
     idx: usize,
 }
@@ -236,6 +241,7 @@ impl Iterator for UncloudIter {
             &self.handle,
             &self.failures,
             &self.progress,
+            &self.retry,
             &self.concurrency,
             entry.clone(),
         ))
@@ -246,6 +252,7 @@ fn make_entry(
     handle: &Handle,
     failures: &Arc<AtomicUsize>,
     progress: &SourceProgress,
+    retry: &RetryConfig,
     concurrency: &Arc<Semaphore>,
     entry: SourceEntry,
 ) -> RusticResult<ReadSourceEntry<UncloudOpen>> {
@@ -270,6 +277,7 @@ fn make_entry(
             handle: handle.clone(),
             failures: failures.clone(),
             progress: progress.clone(),
+            retry: retry.clone(),
             concurrency: concurrency.clone(),
             kind: OpenKind::Local(s.local_path),
         },
@@ -277,6 +285,7 @@ fn make_entry(
             handle: handle.clone(),
             failures: failures.clone(),
             progress: progress.clone(),
+            retry: retry.clone(),
             concurrency: concurrency.clone(),
             kind: OpenKind::Backend {
                 backend: f.backend,
@@ -295,6 +304,7 @@ pub struct UncloudOpen {
     handle: Handle,
     failures: Arc<AtomicUsize>,
     progress: SourceProgress,
+    retry: RetryConfig,
     concurrency: Arc<Semaphore>,
     kind: OpenKind,
 }
@@ -341,7 +351,6 @@ impl ReadSourceOpen for UncloudOpen {
                 let storage_path_for_open = storage_path.clone();
                 let storage_path_for_err = storage_path.clone();
                 let storage_path_for_reader = storage_path;
-                let retry_config = backend_for_reader.source_read_retry_config();
                 let (permit, async_reader) = self
                     .handle
                     .block_on(async move {
@@ -380,7 +389,7 @@ impl ReadSourceOpen for UncloudOpen {
                     progress: self.progress,
                     failure_recorded: false,
                     completion_recorded: false,
-                    retry_config,
+                    retry_config: self.retry,
                 }))
             }
         }
@@ -573,6 +582,12 @@ impl BackendSourceReader {
         let backend = self.backend.clone();
         let path = self.path.clone();
         let offset = self.offset;
+        // Drop the failed reader before opening the replacement. SFTP
+        // readers hold a pool/op-semaphore permit for their lifetime; if
+        // all retrying rustic workers keep their old readers while awaiting
+        // `read_range`, the pool can deadlock with every permit held by a
+        // reader that is itself waiting for a new permit.
+        self.reader = Box::pin(tokio::io::empty());
         let new_reader = self
             .handle
             .block_on(async move { backend.read_range(&path, offset, u64::MAX).await })?;
