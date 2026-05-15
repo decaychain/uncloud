@@ -99,3 +99,103 @@ pub struct FinanceTransaction {
     #[serde(with = "chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DecimalSeparator {
+    Dot,
+    Comma,
+}
+
+impl Default for DecimalSeparator {
+    fn default() -> Self {
+        Self::Dot
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AmountSignConvention {
+    /// Positive numbers are credits (money in), negatives are debits.
+    PositiveCredit,
+    /// Positive numbers are debits (money out); we negate to get the
+    /// signed amount. Common in invoice-style exports.
+    PositiveDebit,
+}
+
+impl Default for AmountSignConvention {
+    fn default() -> Self {
+        Self::PositiveCredit
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CurrencySource {
+    /// Currency lives in a CSV column (column index in `currency_column`).
+    Column,
+    /// Same currency for every row (in `fixed_currency`).
+    Fixed,
+}
+
+/// A user-editable CSV-import schema. One per bank format. Each user has
+/// their own set of schemas plus seeded builtin templates that they can
+/// clone but not edit in place.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportSchema {
+    #[serde(rename = "_id")]
+    pub id: ObjectId,
+    pub owner_id: ObjectId,
+    pub name: String,
+
+    pub delimiter: String,
+    pub encoding: String,
+    pub decimal_separator: DecimalSeparator,
+    #[serde(default)]
+    pub skip_header_rows: u32,
+    #[serde(default = "default_true")]
+    pub has_headers: bool,
+
+    pub date_column: u32,
+    pub date_format: String,
+
+    pub amount_column: u32,
+    pub amount_sign_convention: AmountSignConvention,
+
+    /// Joined with " / " when more than one column is selected. Empty
+    /// fields are dropped from the join.
+    pub description_columns: Vec<u32>,
+
+    pub currency_source: CurrencySource,
+    #[serde(default)]
+    pub currency_column: Option<u32>,
+    #[serde(default)]
+    pub fixed_currency: Option<String>,
+
+    /// Stable per-row identifier column (e.g. transaction reference).
+    /// When set, `source_ref` is derived from it; when None, source_ref
+    /// is a hash of the whole row.
+    #[serde(default)]
+    pub bank_ref_column: Option<u32>,
+    #[serde(default)]
+    pub iban_column: Option<u32>,
+    #[serde(default)]
+    pub raw_category_column: Option<u32>,
+
+    /// True for the seeded "Sparkasse CAMT V8" template. Builtin schemas
+    /// cannot be edited or deleted, only cloned.
+    #[serde(default)]
+    pub is_builtin: bool,
+    /// Stable identifier for seeded templates so we don't re-seed.
+    #[serde(default)]
+    pub builtin_id: Option<String>,
+
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
+    pub updated_at: DateTime<Utc>,
+}
+
+fn default_true() -> bool {
+    true
+}

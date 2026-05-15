@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use dioxus::prelude::*;
 use uncloud_common::{
     AccountResponse, CreateAccountRequest, CreateFinanceCategoryRequest, CreateTransactionRequest,
-    FinanceCategoryResponse, ImportCsvResponse, ImportProfileInfo, TransactionResponse,
+    FinanceCategoryResponse, ImportCsvResponse, ImportSchemaResponse, TransactionResponse,
     UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
@@ -20,6 +20,7 @@ enum Tab {
     Transactions,
     Accounts,
     Categories,
+    Schemas,
 }
 
 #[component]
@@ -47,12 +48,19 @@ pub fn FinancePage() -> Element {
                     onclick: move |_| tab.set(Tab::Categories),
                     "Categories"
                 }
+                button {
+                    role: "tab",
+                    class: if tab() == Tab::Schemas { "tab tab-active" } else { "tab" },
+                    onclick: move |_| tab.set(Tab::Schemas),
+                    "Import schemas"
+                }
             }
 
             match tab() {
                 Tab::Transactions => rsx! { TransactionsTab {} },
                 Tab::Accounts => rsx! { AccountsTab {} },
                 Tab::Categories => rsx! { CategoriesTab {} },
+                Tab::Schemas => rsx! { SchemasTab {} },
             }
         }
     }
@@ -987,9 +995,9 @@ fn ImportCsvModal(
     on_close: EventHandler<()>,
     on_imported: EventHandler<()>,
 ) -> Element {
-    let mut profiles: Signal<Vec<ImportProfileInfo>> = use_signal(Vec::new);
+    let mut schemas: Signal<Vec<ImportSchemaResponse>> = use_signal(Vec::new);
     let mut account_id = use_signal(|| accounts.first().map(|a| a.id.clone()).unwrap_or_default());
-    let mut profile_id = use_signal(String::new);
+    let mut schema_id = use_signal(String::new);
     let mut file_name: Signal<Option<String>> = use_signal(|| None);
     let mut file_bytes: Signal<Option<Vec<u8>>> = use_signal(|| None);
     let mut submitting = use_signal(|| false);
@@ -998,14 +1006,14 @@ fn ImportCsvModal(
 
     use_effect(move || {
         spawn(async move {
-            match use_finance::list_import_profiles().await {
-                Ok(p) => {
-                    if let Some(first) = p.first() {
-                        if profile_id.peek().is_empty() {
-                            profile_id.set(first.id.clone());
+            match use_finance::list_import_schemas().await {
+                Ok(s) => {
+                    if let Some(first) = s.first() {
+                        if schema_id.peek().is_empty() {
+                            schema_id.set(first.id.clone());
                         }
                     }
-                    profiles.set(p);
+                    schemas.set(s);
                 }
                 Err(e) => error.set(Some(e)),
             }
@@ -1032,20 +1040,20 @@ fn ImportCsvModal(
             return;
         }
         let acc = account_id();
-        let prof = profile_id();
+        let sch = schema_id();
         let Some(bytes) = file_bytes() else {
             error.set(Some("Choose a CSV file first".into()));
             return;
         };
         let name = file_name().unwrap_or_else(|| "import.csv".to_string());
-        if acc.is_empty() || prof.is_empty() {
-            error.set(Some("Select an account and a profile".into()));
+        if acc.is_empty() || sch.is_empty() {
+            error.set(Some("Select an account and a schema".into()));
             return;
         }
         submitting.set(true);
         error.set(None);
         spawn(async move {
-            match use_finance::import_csv(&acc, &prof, &name, bytes).await {
+            match use_finance::import_csv(&acc, &sch, &name, bytes).await {
                 Ok(resp) => result.set(Some(resp)),
                 Err(e) => error.set(Some(e)),
             }
@@ -1100,14 +1108,14 @@ fn ImportCsvModal(
                         }
                     }
                     div { class: "form-control mb-3",
-                        label { class: "label", span { class: "label-text", "Format" } }
+                        label { class: "label", span { class: "label-text", "Schema" } }
                         select {
                             class: "select select-bordered",
-                            value: "{profile_id}",
-                            disabled: profiles().is_empty(),
-                            onchange: move |e| profile_id.set(e.value()),
-                            {profiles().iter().map(|p| rsx! {
-                                option { key: "{p.id}", value: "{p.id}", "{p.name}" }
+                            value: "{schema_id}",
+                            disabled: schemas().is_empty(),
+                            onchange: move |e| schema_id.set(e.value()),
+                            {schemas().iter().map(|s| rsx! {
+                                option { key: "{s.id}", value: "{s.id}", "{s.name}" }
                             })}
                         }
                     }
@@ -1137,6 +1145,486 @@ fn ImportCsvModal(
                             onclick: submit,
                             if submitting() { "Importing…" } else { "Import" }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SchemasTab() -> Element {
+    let mut schemas: Signal<Vec<ImportSchemaResponse>> = use_signal(Vec::new);
+    let mut loading = use_signal(|| true);
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+    let mut refresh = use_signal(|| 0u32);
+    let mut show_create = use_signal(|| false);
+    let mut edit_target: Signal<Option<ImportSchemaResponse>> = use_signal(|| None);
+
+    use_effect(move || {
+        let _ = refresh();
+        spawn(async move {
+            loading.set(true);
+            match use_finance::list_import_schemas().await {
+                Ok(list) => { schemas.set(list); error.set(None); }
+                Err(e) => error.set(Some(e)),
+            }
+            loading.set(false);
+        });
+    });
+
+    rsx! {
+        div { class: "flex justify-between items-center mb-4",
+            h2 { class: "text-xl font-semibold", "Import schemas" }
+            button {
+                class: "btn btn-primary btn-sm",
+                onclick: move |_| show_create.set(true),
+                "New schema"
+            }
+        }
+        if let Some(e) = error() {
+            div { class: "alert alert-error mb-3", "{e}" }
+        }
+        if loading() && schemas().is_empty() {
+            div { class: "flex justify-center py-8", span { class: "loading loading-spinner loading-lg" } }
+        } else if schemas().is_empty() {
+            div { class: "text-center py-10 opacity-60",
+                p { "No schemas yet." }
+            }
+        } else {
+            div { class: "overflow-x-auto",
+                table { class: "table table-zebra",
+                    thead { tr {
+                        th { "Name" }
+                        th { "Encoding" }
+                        th { "Delimiter" }
+                        th { "Decimal" }
+                        th { "" }
+                    } }
+                    tbody {
+                        {schemas().iter().map(|s| {
+                            let s_edit = s.clone();
+                            let s_id_clone = s.id.clone();
+                            let s_id_delete = s.id.clone();
+                            let is_builtin = s.is_builtin;
+                            rsx! {
+                                tr { key: "{s.id}",
+                                    td {
+                                        span { "{s.name}" }
+                                        if is_builtin {
+                                            span { class: "badge badge-ghost badge-sm ml-2", "built-in" }
+                                        }
+                                    }
+                                    td { class: "opacity-60", "{s.encoding}" }
+                                    td { class: "opacity-60 font-mono text-xs", "{s.delimiter}" }
+                                    td { class: "opacity-60", "{s.decimal_separator}" }
+                                    td { class: "text-right whitespace-nowrap",
+                                        if !is_builtin {
+                                            button {
+                                                class: "btn btn-ghost btn-xs",
+                                                onclick: move |_| edit_target.set(Some(s_edit.clone())),
+                                                "Edit"
+                                            }
+                                        }
+                                        button {
+                                            class: "btn btn-ghost btn-xs",
+                                            onclick: move |_| {
+                                                let id = s_id_clone.clone();
+                                                spawn(async move {
+                                                    match use_finance::clone_import_schema(&id).await {
+                                                        Ok(_) => refresh += 1,
+                                                        Err(e) => error.set(Some(e)),
+                                                    }
+                                                });
+                                            },
+                                            "Clone"
+                                        }
+                                        if !is_builtin {
+                                            button {
+                                                class: "btn btn-ghost btn-xs text-error",
+                                                onclick: move |_| {
+                                                    let id = s_id_delete.clone();
+                                                    spawn(async move {
+                                                        match use_finance::delete_import_schema(&id).await {
+                                                            Ok(_) => refresh += 1,
+                                                            Err(e) => error.set(Some(e)),
+                                                        }
+                                                    });
+                                                },
+                                                "Delete"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        })}
+                    }
+                }
+            }
+        }
+        if show_create() {
+            SchemaFormModal {
+                initial: None,
+                on_close: move |_| show_create.set(false),
+                on_saved: move |_| { show_create.set(false); refresh += 1; },
+            }
+        }
+        if let Some(s) = edit_target() {
+            SchemaFormModal {
+                key: "{s.id}",
+                initial: Some(s.clone()),
+                on_close: move |_| edit_target.set(None),
+                on_saved: move |_| { edit_target.set(None); refresh += 1; },
+            }
+        }
+    }
+}
+
+#[component]
+fn SchemaFormModal(
+    initial: Option<ImportSchemaResponse>,
+    on_close: EventHandler<()>,
+    on_saved: EventHandler<()>,
+) -> Element {
+    let is_edit = initial.is_some();
+    let editing_id = initial.as_ref().map(|s| s.id.clone());
+
+    let mut name = use_signal(|| initial.as_ref().map(|s| s.name.clone()).unwrap_or_default());
+    let mut delimiter = use_signal(|| {
+        initial.as_ref().map(|s| s.delimiter.clone()).unwrap_or_else(|| ",".into())
+    });
+    let mut encoding = use_signal(|| {
+        initial.as_ref().map(|s| s.encoding.clone()).unwrap_or_else(|| "utf-8".into())
+    });
+    let mut decimal_separator = use_signal(|| {
+        initial.as_ref().map(|s| s.decimal_separator.clone()).unwrap_or_else(|| "dot".into())
+    });
+    let mut skip_header_rows = use_signal(|| {
+        initial.as_ref().map(|s| s.skip_header_rows).unwrap_or(0).to_string()
+    });
+    let mut has_headers = use_signal(|| {
+        initial.as_ref().map(|s| s.has_headers).unwrap_or(true)
+    });
+    let mut date_column = use_signal(|| {
+        initial.as_ref().map(|s| s.date_column).unwrap_or(0).to_string()
+    });
+    let mut date_format = use_signal(|| {
+        initial.as_ref().map(|s| s.date_format.clone()).unwrap_or_else(|| "YYYY-MM-DD".into())
+    });
+    let mut amount_column = use_signal(|| {
+        initial.as_ref().map(|s| s.amount_column).unwrap_or(0).to_string()
+    });
+    let mut amount_sign_convention = use_signal(|| {
+        initial.as_ref().map(|s| s.amount_sign_convention.clone()).unwrap_or_else(|| "positive_credit".into())
+    });
+    let mut description_columns = use_signal(|| {
+        initial.as_ref()
+            .map(|s| s.description_columns.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(","))
+            .unwrap_or_default()
+    });
+    let mut currency_source = use_signal(|| {
+        initial.as_ref().map(|s| s.currency_source.clone()).unwrap_or_else(|| "fixed".into())
+    });
+    let mut currency_column = use_signal(|| {
+        initial.as_ref().and_then(|s| s.currency_column).map(|c| c.to_string()).unwrap_or_default()
+    });
+    let mut fixed_currency = use_signal(|| {
+        initial.as_ref().and_then(|s| s.fixed_currency.clone()).unwrap_or_else(|| "EUR".into())
+    });
+    let mut bank_ref_column = use_signal(|| {
+        initial.as_ref().and_then(|s| s.bank_ref_column).map(|c| c.to_string()).unwrap_or_default()
+    });
+    let mut iban_column = use_signal(|| {
+        initial.as_ref().and_then(|s| s.iban_column).map(|c| c.to_string()).unwrap_or_default()
+    });
+    let mut raw_category_column = use_signal(|| {
+        initial.as_ref().and_then(|s| s.raw_category_column).map(|c| c.to_string()).unwrap_or_default()
+    });
+
+    let mut submitting = use_signal(|| false);
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+
+    let submit = move |_| {
+        if submitting() {
+            return;
+        }
+        let parse_u32 = |s: &str| -> Result<u32, String> {
+            s.trim().parse::<u32>().map_err(|_| format!("`{s}` must be a non-negative integer"))
+        };
+        let parse_opt_u32 = |s: &str| -> Result<Option<u32>, String> {
+            let trimmed = s.trim();
+            if trimmed.is_empty() { Ok(None) } else { parse_u32(trimmed).map(Some) }
+        };
+        let parse_desc = |s: &str| -> Result<Vec<u32>, String> {
+            s.split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(|p| p.parse::<u32>().map_err(|_| format!("`{p}` is not a column index")))
+                .collect()
+        };
+
+        let req = match (|| -> Result<uncloud_common::ImportSchemaRequest, String> {
+            Ok(uncloud_common::ImportSchemaRequest {
+                name: name(),
+                delimiter: delimiter(),
+                encoding: encoding(),
+                decimal_separator: decimal_separator(),
+                skip_header_rows: parse_u32(&skip_header_rows())?,
+                has_headers: has_headers(),
+                date_column: parse_u32(&date_column())?,
+                date_format: date_format(),
+                amount_column: parse_u32(&amount_column())?,
+                amount_sign_convention: amount_sign_convention(),
+                description_columns: parse_desc(&description_columns())?,
+                currency_source: currency_source(),
+                currency_column: parse_opt_u32(&currency_column())?,
+                fixed_currency: if fixed_currency().trim().is_empty() {
+                    None
+                } else {
+                    Some(fixed_currency().trim().to_string())
+                },
+                bank_ref_column: parse_opt_u32(&bank_ref_column())?,
+                iban_column: parse_opt_u32(&iban_column())?,
+                raw_category_column: parse_opt_u32(&raw_category_column())?,
+            })
+        })() {
+            Ok(r) => r,
+            Err(e) => {
+                error.set(Some(e));
+                return;
+            }
+        };
+
+        submitting.set(true);
+        error.set(None);
+        let editing_id = editing_id.clone();
+        spawn(async move {
+            let result = match editing_id {
+                Some(id) => use_finance::update_import_schema(&id, &req).await,
+                None => use_finance::create_import_schema(&req).await,
+            };
+            match result {
+                Ok(_) => on_saved.call(()),
+                Err(e) => error.set(Some(e)),
+            }
+            submitting.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "modal modal-open",
+            div { class: "modal-box max-w-2xl",
+                h3 { class: "font-bold text-lg mb-3",
+                    if is_edit { "Edit schema" } else { "New schema" }
+                }
+                if let Some(e) = error() {
+                    div { class: "alert alert-error mb-3", "{e}" }
+                }
+
+                div { class: "grid grid-cols-1 md:grid-cols-2 gap-3",
+                    div { class: "form-control md:col-span-2",
+                        label { class: "label", span { class: "label-text", "Name" } }
+                        input {
+                            class: "input input-bordered",
+                            r#type: "text",
+                            value: "{name}",
+                            oninput: move |e| name.set(e.value()),
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label", span { class: "label-text", "Encoding" } }
+                        input {
+                            class: "input input-bordered",
+                            r#type: "text",
+                            value: "{encoding}",
+                            placeholder: "utf-8, windows-1252, …",
+                            oninput: move |e| encoding.set(e.value()),
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label", span { class: "label-text", "Delimiter" } }
+                        input {
+                            class: "input input-bordered font-mono",
+                            r#type: "text",
+                            maxlength: "1",
+                            value: "{delimiter}",
+                            oninput: move |e| delimiter.set(e.value()),
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label", span { class: "label-text", "Decimal separator" } }
+                        select {
+                            class: "select select-bordered",
+                            value: "{decimal_separator}",
+                            onchange: move |e| decimal_separator.set(e.value()),
+                            option { value: "dot", "Dot (1,234.56)" }
+                            option { value: "comma", "Comma (1.234,56)" }
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label",
+                            span { class: "label-text", "Skip header rows" }
+                        }
+                        input {
+                            class: "input input-bordered",
+                            r#type: "number",
+                            min: "0",
+                            value: "{skip_header_rows}",
+                            oninput: move |e| skip_header_rows.set(e.value()),
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label cursor-pointer",
+                            span { class: "label-text", "First row is a header" }
+                            input {
+                                r#type: "checkbox",
+                                class: "checkbox",
+                                checked: "{has_headers}",
+                                oninput: move |e| has_headers.set(e.checked()),
+                            }
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label", span { class: "label-text", "Date column (0-based)" } }
+                        input {
+                            class: "input input-bordered",
+                            r#type: "number",
+                            min: "0",
+                            value: "{date_column}",
+                            oninput: move |e| date_column.set(e.value()),
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label", span { class: "label-text", "Date format" } }
+                        select {
+                            class: "select select-bordered",
+                            value: "{date_format}",
+                            onchange: move |e| date_format.set(e.value()),
+                            option { value: "DD.MM.YY", "DD.MM.YY (German)" }
+                            option { value: "DD.MM.YYYY", "DD.MM.YYYY" }
+                            option { value: "DD/MM/YYYY", "DD/MM/YYYY" }
+                            option { value: "MM/DD/YYYY", "MM/DD/YYYY (US)" }
+                            option { value: "YYYY-MM-DD", "YYYY-MM-DD (ISO)" }
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label", span { class: "label-text", "Amount column" } }
+                        input {
+                            class: "input input-bordered",
+                            r#type: "number",
+                            min: "0",
+                            value: "{amount_column}",
+                            oninput: move |e| amount_column.set(e.value()),
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label", span { class: "label-text", "Amount sign convention" } }
+                        select {
+                            class: "select select-bordered",
+                            value: "{amount_sign_convention}",
+                            onchange: move |e| amount_sign_convention.set(e.value()),
+                            option { value: "positive_credit", "Positive = credit (money in)" }
+                            option { value: "positive_debit", "Positive = debit (money out)" }
+                        }
+                    }
+                    div { class: "form-control md:col-span-2",
+                        label { class: "label",
+                            span { class: "label-text", "Description columns" }
+                            span { class: "label-text-alt opacity-60", "comma-separated, joined with \" / \"" }
+                        }
+                        input {
+                            class: "input input-bordered",
+                            r#type: "text",
+                            placeholder: "e.g. 11,4",
+                            value: "{description_columns}",
+                            oninput: move |e| description_columns.set(e.value()),
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label", span { class: "label-text", "Currency source" } }
+                        select {
+                            class: "select select-bordered",
+                            value: "{currency_source}",
+                            onchange: move |e| currency_source.set(e.value()),
+                            option { value: "column", "From column" }
+                            option { value: "fixed", "Fixed value" }
+                        }
+                    }
+                    if currency_source() == "column" {
+                        div { class: "form-control",
+                            label { class: "label", span { class: "label-text", "Currency column" } }
+                            input {
+                                class: "input input-bordered",
+                                r#type: "number",
+                                min: "0",
+                                value: "{currency_column}",
+                                oninput: move |e| currency_column.set(e.value()),
+                            }
+                        }
+                    } else {
+                        div { class: "form-control",
+                            label { class: "label", span { class: "label-text", "Fixed currency" } }
+                            input {
+                                class: "input input-bordered uppercase",
+                                r#type: "text",
+                                maxlength: "3",
+                                value: "{fixed_currency}",
+                                oninput: move |e| fixed_currency.set(e.value()),
+                            }
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label",
+                            span { class: "label-text", "Bank reference column" }
+                            span { class: "label-text-alt opacity-60", "optional" }
+                        }
+                        input {
+                            class: "input input-bordered",
+                            r#type: "text",
+                            placeholder: "leave blank to hash whole row",
+                            value: "{bank_ref_column}",
+                            oninput: move |e| bank_ref_column.set(e.value()),
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label",
+                            span { class: "label-text", "IBAN column" }
+                            span { class: "label-text-alt opacity-60", "optional" }
+                        }
+                        input {
+                            class: "input input-bordered",
+                            r#type: "text",
+                            placeholder: "for account auto-create",
+                            value: "{iban_column}",
+                            oninput: move |e| iban_column.set(e.value()),
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label",
+                            span { class: "label-text", "Raw category column" }
+                            span { class: "label-text-alt opacity-60", "optional" }
+                        }
+                        input {
+                            class: "input input-bordered",
+                            r#type: "text",
+                            placeholder: "bank-supplied transaction type",
+                            value: "{raw_category_column}",
+                            oninput: move |e| raw_category_column.set(e.value()),
+                        }
+                    }
+                }
+
+                div { class: "modal-action",
+                    button {
+                        class: "btn btn-ghost",
+                        onclick: move |_| on_close.call(()),
+                        "Cancel"
+                    }
+                    button {
+                        class: "btn btn-primary",
+                        disabled: submitting(),
+                        onclick: submit,
+                        if submitting() { "Saving…" } else if is_edit { "Save" } else { "Create" }
                     }
                 }
             }

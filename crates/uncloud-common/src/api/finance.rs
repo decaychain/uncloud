@@ -124,12 +124,6 @@ pub struct TransactionListResponse {
 // ── CSV import ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ImportProfileInfo {
-    pub id: String,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImportRowError {
     pub line: u32,
     pub message: String,
@@ -141,4 +135,66 @@ pub struct ImportCsvResponse {
     pub skipped: u32,
     pub errors: u32,
     pub error_details: Vec<ImportRowError>,
+}
+
+// ── Import schemas ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportSchemaResponse {
+    pub id: String,
+    pub name: String,
+    pub delimiter: String,
+    pub encoding: String,
+    pub decimal_separator: String,
+    pub skip_header_rows: u32,
+    pub has_headers: bool,
+    pub date_column: u32,
+    pub date_format: String,
+    pub amount_column: u32,
+    pub amount_sign_convention: String,
+    pub description_columns: Vec<u32>,
+    pub currency_source: String,
+    pub currency_column: Option<u32>,
+    pub fixed_currency: Option<String>,
+    pub bank_ref_column: Option<u32>,
+    pub iban_column: Option<u32>,
+    pub raw_category_column: Option<u32>,
+    pub is_builtin: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ImportSchemaRequest {
+    pub name: String,
+    pub delimiter: String,
+    pub encoding: String,
+    /// "dot" or "comma".
+    pub decimal_separator: String,
+    #[serde(default)]
+    pub skip_header_rows: u32,
+    #[serde(default = "default_true_serde")]
+    pub has_headers: bool,
+    pub date_column: u32,
+    pub date_format: String,
+    pub amount_column: u32,
+    /// "positive_credit" or "positive_debit".
+    pub amount_sign_convention: String,
+    pub description_columns: Vec<u32>,
+    /// "column" or "fixed".
+    pub currency_source: String,
+    #[serde(default)]
+    pub currency_column: Option<u32>,
+    #[serde(default)]
+    pub fixed_currency: Option<String>,
+    #[serde(default)]
+    pub bank_ref_column: Option<u32>,
+    #[serde(default)]
+    pub iban_column: Option<u32>,
+    #[serde(default)]
+    pub raw_category_column: Option<u32>,
+}
+
+fn default_true_serde() -> bool {
+    true
 }

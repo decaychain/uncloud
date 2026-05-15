@@ -1,4 +1,4 @@
-//! Integration tests for the finance CSV import endpoint.
+//! Integration tests for the finance CSV import endpoint and import schemas.
 
 mod common;
 
@@ -30,10 +30,23 @@ async fn create_account(app: &TestApp) -> String {
     resp["id"].as_str().unwrap().to_string()
 }
 
-fn import_form(account_id: &str, profile_id: &str, csv: &[u8]) -> MultipartForm {
+/// Fetch the seeded "Sparkasse CAMT V8" schema for the logged-in user.
+/// The first call to `GET /finance/import-schemas` seeds the builtin
+/// schema for that user.
+async fn sparkasse_schema_id(app: &TestApp) -> String {
+    let resp: Value = app.server.get("/api/finance/import-schemas").await.json();
+    let arr = resp.as_array().expect("schemas array");
+    let s = arr
+        .iter()
+        .find(|s| s["name"] == "Sparkasse CAMT V8")
+        .expect("builtin Sparkasse schema not seeded");
+    s["id"].as_str().unwrap().to_string()
+}
+
+fn import_form(account_id: &str, schema_id: &str, csv: &[u8]) -> MultipartForm {
     MultipartForm::new()
         .add_part("account_id", Part::text(account_id.to_string()))
-        .add_part("profile_id", Part::text(profile_id.to_string()))
+        .add_part("schema_id", Part::text(schema_id.to_string()))
         .add_part(
             "csv",
             Part::bytes(csv.to_vec())
@@ -47,11 +60,12 @@ async fn imports_two_rows_then_dedups_on_reimport() {
     let app = TestApp::new().await;
     app.register_and_login("alice").await;
     let account_id = create_account(&app).await;
+    let schema_id = sparkasse_schema_id(&app).await;
 
     let first: Value = app
         .server
         .post("/api/finance/import")
-        .multipart(import_form(&account_id, "sparkasse_camt_v8", fixture_csv()))
+        .multipart(import_form(&account_id, &schema_id, fixture_csv()))
         .await
         .json();
 
@@ -63,7 +77,7 @@ async fn imports_two_rows_then_dedups_on_reimport() {
     let second: Value = app
         .server
         .post("/api/finance/import")
-        .multipart(import_form(&account_id, "sparkasse_camt_v8", fixture_csv()))
+        .multipart(import_form(&account_id, &schema_id, fixture_csv()))
         .await
         .json();
 
@@ -71,7 +85,6 @@ async fn imports_two_rows_then_dedups_on_reimport() {
     assert_eq!(second["skipped"], 2);
     assert_eq!(second["errors"], 0);
 
-    // Transaction list shows exactly the 2 rows from the first import.
     let listing: Value = app
         .server
         .get("/api/finance/transactions")
@@ -84,27 +97,7 @@ async fn imports_two_rows_then_dedups_on_reimport() {
 }
 
 #[tokio::test]
-async fn rejects_non_sparkasse_csv_with_400() {
-    let app = TestApp::new().await;
-    app.register_and_login("bob").await;
-    let account_id = create_account(&app).await;
-
-    let resp = app
-        .server
-        .post("/api/finance/import")
-        .multipart(import_form(
-            &account_id,
-            "sparkasse_camt_v8",
-            b"a;b;c\n1;2;3\n",
-        ))
-        .await;
-
-    assert_eq!(resp.status_code(), 400);
-    app.cleanup().await;
-}
-
-#[tokio::test]
-async fn unknown_profile_id_is_400() {
+async fn unknown_schema_id_is_404() {
     let app = TestApp::new().await;
     app.register_and_login("carol").await;
     let account_id = create_account(&app).await;
@@ -112,21 +105,88 @@ async fn unknown_profile_id_is_400() {
     let resp = app
         .server
         .post("/api/finance/import")
-        .multipart(import_form(&account_id, "nope_v1", fixture_csv()))
+        .multipart(import_form(
+            &account_id,
+            "507f1f77bcf86cd799439099",
+            fixture_csv(),
+        ))
         .await;
 
-    assert_eq!(resp.status_code(), 400);
+    assert_eq!(resp.status_code(), 404);
     app.cleanup().await;
 }
 
 #[tokio::test]
-async fn lists_available_profiles() {
+async fn lists_and_seeds_builtin_schemas() {
     let app = TestApp::new().await;
     app.register_and_login("dave").await;
 
-    let resp: Value = app.server.get("/api/finance/import/profiles").await.json();
+    let resp: Value = app.server.get("/api/finance/import-schemas").await.json();
     let arr = resp.as_array().expect("array");
-    assert!(arr.iter().any(|p| p["id"] == "sparkasse_camt_v8"));
+    assert!(arr.iter().any(|s| s["name"] == "Sparkasse CAMT V8"
+        && s["is_builtin"] == true));
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn clone_makes_editable_copy() {
+    let app = TestApp::new().await;
+    app.register_and_login("eve").await;
+
+    let id = sparkasse_schema_id(&app).await;
+    let cloned: Value = app
+        .server
+        .post(&format!("/api/finance/import-schemas/{id}/clone"))
+        .await
+        .json();
+    assert_eq!(cloned["is_builtin"], false);
+    assert_eq!(cloned["name"], "Sparkasse CAMT V8 (copy)");
+
+    // Editing the builtin should be rejected.
+    let edit_builtin = app
+        .server
+        .put(&format!("/api/finance/import-schemas/{id}"))
+        .json(&serde_json::json!({
+            "name": "Mutated",
+            "delimiter": ";",
+            "encoding": "windows-1252",
+            "decimal_separator": "comma",
+            "skip_header_rows": 0,
+            "has_headers": true,
+            "date_column": 1,
+            "date_format": "DD.MM.YY",
+            "amount_column": 14,
+            "amount_sign_convention": "positive_credit",
+            "description_columns": [11, 4],
+            "currency_source": "column",
+            "currency_column": 15,
+        }))
+        .await;
+    assert_eq!(edit_builtin.status_code(), 400);
+
+    // Editing the clone should succeed.
+    let clone_id = cloned["id"].as_str().unwrap();
+    let edited: Value = app
+        .server
+        .put(&format!("/api/finance/import-schemas/{clone_id}"))
+        .json(&serde_json::json!({
+            "name": "Sparkasse, my edits",
+            "delimiter": ";",
+            "encoding": "windows-1252",
+            "decimal_separator": "comma",
+            "skip_header_rows": 0,
+            "has_headers": true,
+            "date_column": 1,
+            "date_format": "DD.MM.YY",
+            "amount_column": 14,
+            "amount_sign_convention": "positive_credit",
+            "description_columns": [11, 4],
+            "currency_source": "column",
+            "currency_column": 15,
+        }))
+        .await
+        .json();
+    assert_eq!(edited["name"], "Sparkasse, my edits");
 
     app.cleanup().await;
 }
@@ -140,7 +200,7 @@ async fn import_requires_auth() {
         .post("/api/finance/import")
         .multipart(import_form(
             "507f1f77bcf86cd799439011",
-            "sparkasse_camt_v8",
+            "507f1f77bcf86cd799439012",
             fixture_csv(),
         ))
         .await;

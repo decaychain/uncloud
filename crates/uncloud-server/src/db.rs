@@ -661,6 +661,31 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         )
         .await?;
 
+    let finance_import_schemas = db.collection::<mongodb::bson::Document>("finance_import_schemas");
+    finance_import_schemas
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "name": 1 })
+                .build(),
+        )
+        .await?;
+    // Partial unique key so we never seed the same builtin twice per user.
+    finance_import_schemas
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "builtin_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(mongodb::bson::doc! {
+                            "builtin_id": { "$type": "string" }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     tracing::info!("Database indexes created successfully");
     Ok(())
 }

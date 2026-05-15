@@ -17,22 +17,25 @@ use mongodb::bson::Bson;
 use mongodb::options::FindOptions;
 
 use crate::error::{AppError, Result};
-use crate::finance_import::{self, ParseError, ParsedRow};
+use crate::finance_import::{self, sparkasse_camt_v8, ParseError, ParsedRow};
 use crate::middleware::AuthUser;
 use crate::models::{
-    CategorySource, FinanceAccount, FinanceCategory, FinanceTransaction, TransactionLeg,
+    AmountSignConvention, CategorySource, CurrencySource, DecimalSeparator, FinanceAccount,
+    FinanceCategory, FinanceTransaction, ImportSchema, TransactionLeg,
 };
 use crate::AppState;
 use uncloud_common::{
     AccountBalanceResponse, AccountResponse, CreateAccountRequest, CreateFinanceCategoryRequest,
-    CreateTransactionRequest, FinanceCategoryResponse, ImportCsvResponse, ImportProfileInfo,
-    ImportRowError, ListTransactionsQuery, TransactionListResponse, TransactionResponse,
-    UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
+    CreateTransactionRequest, FinanceCategoryResponse, ImportCsvResponse, ImportRowError,
+    ImportSchemaRequest, ImportSchemaResponse, ListTransactionsQuery, TransactionListResponse,
+    TransactionResponse, UpdateAccountRequest, UpdateFinanceCategoryRequest,
+    UpdateTransactionRequest,
 };
 
 const ACCOUNTS: &str = "finance_accounts";
 const CATEGORIES: &str = "finance_categories";
 const TRANSACTIONS: &str = "finance_transactions";
+const IMPORT_SCHEMAS: &str = "finance_import_schemas";
 
 const ALLOWED_CURRENCY_LEN: usize = 3;
 
@@ -681,22 +684,290 @@ pub async fn delete_transaction(
 /// export is well under 1 MiB; the cap is just to bound memory.
 const MAX_IMPORT_BYTES: usize = 8 * 1024 * 1024;
 
-pub async fn list_import_profiles(
+fn schema_to_response(s: &ImportSchema) -> ImportSchemaResponse {
+    ImportSchemaResponse {
+        id: s.id.to_hex(),
+        name: s.name.clone(),
+        delimiter: s.delimiter.clone(),
+        encoding: s.encoding.clone(),
+        decimal_separator: match s.decimal_separator {
+            DecimalSeparator::Dot => "dot".into(),
+            DecimalSeparator::Comma => "comma".into(),
+        },
+        skip_header_rows: s.skip_header_rows,
+        has_headers: s.has_headers,
+        date_column: s.date_column,
+        date_format: s.date_format.clone(),
+        amount_column: s.amount_column,
+        amount_sign_convention: match s.amount_sign_convention {
+            AmountSignConvention::PositiveCredit => "positive_credit".into(),
+            AmountSignConvention::PositiveDebit => "positive_debit".into(),
+        },
+        description_columns: s.description_columns.clone(),
+        currency_source: match s.currency_source {
+            CurrencySource::Column => "column".into(),
+            CurrencySource::Fixed => "fixed".into(),
+        },
+        currency_column: s.currency_column,
+        fixed_currency: s.fixed_currency.clone(),
+        bank_ref_column: s.bank_ref_column,
+        iban_column: s.iban_column,
+        raw_category_column: s.raw_category_column,
+        is_builtin: s.is_builtin,
+        created_at: s.created_at.to_rfc3339(),
+        updated_at: s.updated_at.to_rfc3339(),
+    }
+}
+
+fn parse_decimal_separator(s: &str) -> Result<DecimalSeparator> {
+    match s {
+        "dot" => Ok(DecimalSeparator::Dot),
+        "comma" => Ok(DecimalSeparator::Comma),
+        other => Err(AppError::BadRequest(format!(
+            "Invalid decimal_separator `{other}` (expected `dot` or `comma`)"
+        ))),
+    }
+}
+
+fn parse_sign_convention(s: &str) -> Result<AmountSignConvention> {
+    match s {
+        "positive_credit" => Ok(AmountSignConvention::PositiveCredit),
+        "positive_debit" => Ok(AmountSignConvention::PositiveDebit),
+        other => Err(AppError::BadRequest(format!(
+            "Invalid amount_sign_convention `{other}`"
+        ))),
+    }
+}
+
+fn parse_currency_source(s: &str) -> Result<CurrencySource> {
+    match s {
+        "column" => Ok(CurrencySource::Column),
+        "fixed" => Ok(CurrencySource::Fixed),
+        other => Err(AppError::BadRequest(format!(
+            "Invalid currency_source `{other}` (expected `column` or `fixed`)"
+        ))),
+    }
+}
+
+fn validate_schema_request(req: &ImportSchemaRequest) -> Result<()> {
+    if req.name.trim().is_empty() {
+        return Err(AppError::BadRequest("Schema name cannot be empty".into()));
+    }
+    if req.delimiter.len() != 1 {
+        return Err(AppError::BadRequest(
+            "Delimiter must be a single character".into(),
+        ));
+    }
+    if req.description_columns.is_empty() {
+        return Err(AppError::BadRequest(
+            "At least one description column is required".into(),
+        ));
+    }
+    let cs = parse_currency_source(&req.currency_source)?;
+    match cs {
+        CurrencySource::Column if req.currency_column.is_none() => Err(AppError::BadRequest(
+            "currency_source=column requires currency_column".into(),
+        )),
+        CurrencySource::Fixed if req.fixed_currency.is_none() => Err(AppError::BadRequest(
+            "currency_source=fixed requires fixed_currency".into(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn apply_schema_request(
+    schema: &mut ImportSchema,
+    req: ImportSchemaRequest,
+) -> Result<()> {
+    schema.name = req.name.trim().to_string();
+    schema.delimiter = req.delimiter;
+    schema.encoding = req.encoding;
+    schema.decimal_separator = parse_decimal_separator(&req.decimal_separator)?;
+    schema.skip_header_rows = req.skip_header_rows;
+    schema.has_headers = req.has_headers;
+    schema.date_column = req.date_column;
+    schema.date_format = req.date_format;
+    schema.amount_column = req.amount_column;
+    schema.amount_sign_convention = parse_sign_convention(&req.amount_sign_convention)?;
+    schema.description_columns = req.description_columns;
+    schema.currency_source = parse_currency_source(&req.currency_source)?;
+    schema.currency_column = req.currency_column;
+    schema.fixed_currency = req
+        .fixed_currency
+        .map(|c| c.trim().to_ascii_uppercase());
+    schema.bank_ref_column = req.bank_ref_column;
+    schema.iban_column = req.iban_column;
+    schema.raw_category_column = req.raw_category_column;
+    schema.updated_at = Utc::now();
+    Ok(())
+}
+
+/// Ensures the user has all builtin schemas seeded. Idempotent: skips
+/// any builtin already present for the user.
+async fn ensure_builtin_schemas(state: &AppState, owner_id: ObjectId) -> Result<()> {
+    let coll = state.db.collection::<ImportSchema>(IMPORT_SCHEMAS);
+    for seed in [sparkasse_camt_v8::seed_for(owner_id)] {
+        let builtin_id = seed
+            .builtin_id
+            .as_ref()
+            .expect("builtin seed must set builtin_id");
+        let existing = coll
+            .find_one(doc! {
+                "owner_id": owner_id,
+                "builtin_id": builtin_id,
+            })
+            .await?;
+        if existing.is_none() {
+            coll.insert_one(&seed).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn find_schema(
+    state: &AppState,
+    owner_id: ObjectId,
+    schema_id: ObjectId,
+) -> Result<ImportSchema> {
+    let coll = state.db.collection::<ImportSchema>(IMPORT_SCHEMAS);
+    coll.find_one(doc! { "_id": schema_id, "owner_id": owner_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Import schema not found".into()))
+}
+
+pub async fn list_import_schemas(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
-) -> Result<Json<Vec<ImportProfileInfo>>> {
+    user: AuthUser,
+) -> Result<Json<Vec<ImportSchemaResponse>>> {
     require_finance(&state)?;
-    let profiles = finance_import::available_profiles()
-        .into_iter()
-        .map(|p| {
-            let info = p.info();
-            ImportProfileInfo {
-                id: info.id.to_string(),
-                name: info.name.to_string(),
-            }
-        })
-        .collect();
-    Ok(Json(profiles))
+    ensure_builtin_schemas(&state, user.id).await?;
+    let coll = state.db.collection::<ImportSchema>(IMPORT_SCHEMAS);
+    let mut cursor = coll
+        .find(doc! { "owner_id": user.id })
+        .sort(doc! { "is_builtin": -1, "name": 1 })
+        .await?;
+    let mut out = Vec::new();
+    while let Some(s) = cursor.try_next().await? {
+        out.push(schema_to_response(&s));
+    }
+    Ok(Json(out))
+}
+
+pub async fn create_import_schema(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(req): Json<ImportSchemaRequest>,
+) -> Result<(StatusCode, Json<ImportSchemaResponse>)> {
+    require_finance(&state)?;
+    validate_schema_request(&req)?;
+    let now = Utc::now();
+    let mut schema = ImportSchema {
+        id: ObjectId::new(),
+        owner_id: user.id,
+        name: String::new(),
+        delimiter: String::new(),
+        encoding: String::new(),
+        decimal_separator: DecimalSeparator::Dot,
+        skip_header_rows: 0,
+        has_headers: true,
+        date_column: 0,
+        date_format: String::new(),
+        amount_column: 0,
+        amount_sign_convention: AmountSignConvention::PositiveCredit,
+        description_columns: Vec::new(),
+        currency_source: CurrencySource::Fixed,
+        currency_column: None,
+        fixed_currency: None,
+        bank_ref_column: None,
+        iban_column: None,
+        raw_category_column: None,
+        is_builtin: false,
+        builtin_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    apply_schema_request(&mut schema, req)?;
+    let coll = state.db.collection::<ImportSchema>(IMPORT_SCHEMAS);
+    coll.insert_one(&schema).await?;
+    Ok((StatusCode::CREATED, Json(schema_to_response(&schema))))
+}
+
+pub async fn update_import_schema(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    Json(req): Json<ImportSchemaRequest>,
+) -> Result<Json<ImportSchemaResponse>> {
+    require_finance(&state)?;
+    let schema_oid = parse_oid(&id, "schema id")?;
+    let mut schema = find_schema(&state, user.id, schema_oid).await?;
+    if schema.is_builtin {
+        return Err(AppError::BadRequest(
+            "Built-in schemas cannot be edited; clone first".into(),
+        ));
+    }
+    validate_schema_request(&req)?;
+    apply_schema_request(&mut schema, req)?;
+    let coll = state.db.collection::<ImportSchema>(IMPORT_SCHEMAS);
+    coll.replace_one(doc! { "_id": schema.id }, &schema).await?;
+    Ok(Json(schema_to_response(&schema)))
+}
+
+pub async fn delete_import_schema(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    require_finance(&state)?;
+    let schema_oid = parse_oid(&id, "schema id")?;
+    let schema = find_schema(&state, user.id, schema_oid).await?;
+    if schema.is_builtin {
+        return Err(AppError::BadRequest(
+            "Built-in schemas cannot be deleted".into(),
+        ));
+    }
+    let coll = state.db.collection::<ImportSchema>(IMPORT_SCHEMAS);
+    coll.delete_one(doc! { "_id": schema.id }).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn clone_import_schema(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<ImportSchemaResponse>)> {
+    require_finance(&state)?;
+    let schema_oid = parse_oid(&id, "schema id")?;
+    let source = find_schema(&state, user.id, schema_oid).await?;
+    let now = Utc::now();
+    let clone = ImportSchema {
+        id: ObjectId::new(),
+        owner_id: user.id,
+        name: format!("{} (copy)", source.name),
+        delimiter: source.delimiter,
+        encoding: source.encoding,
+        decimal_separator: source.decimal_separator,
+        skip_header_rows: source.skip_header_rows,
+        has_headers: source.has_headers,
+        date_column: source.date_column,
+        date_format: source.date_format,
+        amount_column: source.amount_column,
+        amount_sign_convention: source.amount_sign_convention,
+        description_columns: source.description_columns,
+        currency_source: source.currency_source,
+        currency_column: source.currency_column,
+        fixed_currency: source.fixed_currency,
+        bank_ref_column: source.bank_ref_column,
+        iban_column: source.iban_column,
+        raw_category_column: source.raw_category_column,
+        is_builtin: false,
+        builtin_id: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let coll = state.db.collection::<ImportSchema>(IMPORT_SCHEMAS);
+    coll.insert_one(&clone).await?;
+    Ok((StatusCode::CREATED, Json(schema_to_response(&clone))))
 }
 
 pub async fn import_csv(
@@ -707,7 +978,7 @@ pub async fn import_csv(
     require_finance(&state)?;
 
     let mut account_id_str: Option<String> = None;
-    let mut profile_id: Option<String> = None;
+    let mut schema_id_str: Option<String> = None;
     let mut csv_bytes: Option<Vec<u8>> = None;
 
     while let Some(field) = multipart
@@ -724,12 +995,12 @@ pub async fn import_csv(
                         .map_err(|e| AppError::BadRequest(format!("Bad account_id: {e}")))?,
                 );
             }
-            "profile_id" => {
-                profile_id = Some(
+            "schema_id" => {
+                schema_id_str = Some(
                     field
                         .text()
                         .await
-                        .map_err(|e| AppError::BadRequest(format!("Bad profile_id: {e}")))?,
+                        .map_err(|e| AppError::BadRequest(format!("Bad schema_id: {e}")))?,
                 );
             }
             "csv" => {
@@ -750,18 +1021,18 @@ pub async fn import_csv(
 
     let account_id_str = account_id_str
         .ok_or_else(|| AppError::BadRequest("Missing account_id field".into()))?;
-    let profile_id = profile_id
-        .ok_or_else(|| AppError::BadRequest("Missing profile_id field".into()))?;
+    let schema_id_str = schema_id_str
+        .ok_or_else(|| AppError::BadRequest("Missing schema_id field".into()))?;
     let csv_bytes = csv_bytes
         .ok_or_else(|| AppError::BadRequest("Missing csv field".into()))?;
 
     let account_oid = parse_oid(&account_id_str, "account_id")?;
     let account = find_account(&state, user.id, account_oid).await?;
 
-    let profile = finance_import::profile_by_id(&profile_id)
-        .ok_or_else(|| AppError::BadRequest(format!("Unknown import profile `{profile_id}`")))?;
+    let schema_oid = parse_oid(&schema_id_str, "schema_id")?;
+    let schema = find_schema(&state, user.id, schema_oid).await?;
 
-    let parsed = profile.parse(&csv_bytes).map_err(|e| match e {
+    let parsed = finance_import::parse_csv(&csv_bytes, &schema).map_err(|e| match e {
         ParseError::Fatal(msg) => AppError::BadRequest(msg),
         ParseError::Row { line, message } => {
             // A row error at the top level shouldn't happen, but if it

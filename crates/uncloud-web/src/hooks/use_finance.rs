@@ -2,8 +2,8 @@
 
 use uncloud_common::{
     AccountBalanceResponse, AccountResponse, CreateAccountRequest, CreateFinanceCategoryRequest,
-    CreateTransactionRequest, FinanceCategoryResponse, ImportCsvResponse, ImportProfileInfo,
-    TransactionListResponse, TransactionResponse, UpdateAccountRequest,
+    CreateTransactionRequest, FinanceCategoryResponse, ImportCsvResponse, ImportSchemaRequest,
+    ImportSchemaResponse, TransactionListResponse, TransactionResponse, UpdateAccountRequest,
     UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
@@ -197,13 +197,76 @@ async fn extract_error(r: gloo_net::http::Response) -> String {
 
 // ── CSV import ──────────────────────────────────────────────────────────
 
-pub async fn list_import_profiles() -> Result<Vec<ImportProfileInfo>, String> {
-    let r = api::get("/finance/import/profiles")
+pub async fn list_import_schemas() -> Result<Vec<ImportSchemaResponse>, String> {
+    let r = api::get("/finance/import-schemas")
         .send()
         .await
         .map_err(|e| e.to_string())?;
     if r.ok() {
-        r.json::<Vec<ImportProfileInfo>>()
+        r.json::<Vec<ImportSchemaResponse>>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn create_import_schema(
+    req: &ImportSchemaRequest,
+) -> Result<ImportSchemaResponse, String> {
+    let r = api::post("/finance/import-schemas")
+        .json(req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<ImportSchemaResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn update_import_schema(
+    id: &str,
+    req: &ImportSchemaRequest,
+) -> Result<ImportSchemaResponse, String> {
+    let r = api::put(&format!("/finance/import-schemas/{id}"))
+        .json(req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<ImportSchemaResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn delete_import_schema(id: &str) -> Result<(), String> {
+    let r = api::delete(&format!("/finance/import-schemas/{id}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        Ok(())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn clone_import_schema(id: &str) -> Result<ImportSchemaResponse, String> {
+    let r = api::post(&format!("/finance/import-schemas/{id}/clone"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<ImportSchemaResponse>()
             .await
             .map_err(|e| e.to_string())
     } else {
@@ -213,7 +276,7 @@ pub async fn list_import_profiles() -> Result<Vec<ImportProfileInfo>, String> {
 
 pub async fn import_csv(
     account_id: &str,
-    profile_id: &str,
+    schema_id: &str,
     file_name: &str,
     csv_bytes: Vec<u8>,
 ) -> Result<ImportCsvResponse, String> {
@@ -228,8 +291,8 @@ pub async fn import_csv(
     let form = web_sys::FormData::new().map_err(|_| "Failed to create FormData".to_string())?;
     form.append_with_str("account_id", account_id)
         .map_err(|_| "Failed to append account_id".to_string())?;
-    form.append_with_str("profile_id", profile_id)
-        .map_err(|_| "Failed to append profile_id".to_string())?;
+    form.append_with_str("schema_id", schema_id)
+        .map_err(|_| "Failed to append schema_id".to_string())?;
     form.append_with_blob_and_filename("csv", &blob, file_name)
         .map_err(|_| "Failed to append csv".to_string())?;
 

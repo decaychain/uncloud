@@ -231,7 +231,18 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/finance/categories/{id}", put(finance::update_category).delete(finance::delete_category))
         .route("/finance/transactions", get(finance::list_transactions).post(finance::create_transaction))
         .route("/finance/transactions/{id}", put(finance::update_transaction).delete(finance::delete_transaction))
-        .route("/finance/import/profiles", get(finance::list_import_profiles))
+        .route(
+            "/finance/import-schemas",
+            get(finance::list_import_schemas).post(finance::create_import_schema),
+        )
+        .route(
+            "/finance/import-schemas/{id}",
+            put(finance::update_import_schema).delete(finance::delete_import_schema),
+        )
+        .route(
+            "/finance/import-schemas/{id}/clone",
+            post(finance::clone_import_schema),
+        )
         .route("/finance/import", post(finance::import_csv));
 
     // v1-only routes (API tokens, S3 credentials, apps)
