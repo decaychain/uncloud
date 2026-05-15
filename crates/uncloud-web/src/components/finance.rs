@@ -15,55 +15,32 @@ use uncloud_common::{
 
 use crate::hooks::use_finance;
 
-#[derive(Clone, Copy, PartialEq)]
-enum Tab {
-    Transactions,
-    Accounts,
-    Categories,
-    Schemas,
+fn finance_shell(body: Element) -> Element {
+    rsx! {
+        div { class: "p-4 lg:p-6 max-w-6xl mx-auto",
+            {body}
+        }
+    }
 }
 
 #[component]
-pub fn FinancePage() -> Element {
-    let mut tab = use_signal(|| Tab::Transactions);
+pub fn FinanceTransactionsPage() -> Element {
+    finance_shell(rsx! { TransactionsTab {} })
+}
 
-    rsx! {
-        div { class: "p-4 lg:p-6 max-w-6xl mx-auto",
-            div { role: "tablist", class: "tabs tabs-boxed mb-4 w-fit",
-                button {
-                    role: "tab",
-                    class: if tab() == Tab::Transactions { "tab tab-active" } else { "tab" },
-                    onclick: move |_| tab.set(Tab::Transactions),
-                    "Transactions"
-                }
-                button {
-                    role: "tab",
-                    class: if tab() == Tab::Accounts { "tab tab-active" } else { "tab" },
-                    onclick: move |_| tab.set(Tab::Accounts),
-                    "Accounts"
-                }
-                button {
-                    role: "tab",
-                    class: if tab() == Tab::Categories { "tab tab-active" } else { "tab" },
-                    onclick: move |_| tab.set(Tab::Categories),
-                    "Categories"
-                }
-                button {
-                    role: "tab",
-                    class: if tab() == Tab::Schemas { "tab tab-active" } else { "tab" },
-                    onclick: move |_| tab.set(Tab::Schemas),
-                    "Import schemas"
-                }
-            }
+#[component]
+pub fn FinanceAccountsPage() -> Element {
+    finance_shell(rsx! { AccountsTab {} })
+}
 
-            match tab() {
-                Tab::Transactions => rsx! { TransactionsTab {} },
-                Tab::Accounts => rsx! { AccountsTab {} },
-                Tab::Categories => rsx! { CategoriesTab {} },
-                Tab::Schemas => rsx! { SchemasTab {} },
-            }
-        }
-    }
+#[component]
+pub fn FinanceCategoriesPage() -> Element {
+    finance_shell(rsx! { CategoriesTab {} })
+}
+
+#[component]
+pub fn FinanceSchemasPage() -> Element {
+    finance_shell(rsx! { SchemasTab {} })
 }
 
 // ─────────────────────────────────────────────────────────────────────────

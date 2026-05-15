@@ -3,8 +3,9 @@ use wasm_bindgen::JsCast;
 use uncloud_common::{AlbumResponse, MusicFolderResponse, PlaylistSummary, TaskProjectResponse};
 use crate::hooks::tauri as tauri_hook;
 use crate::components::icons::{
-    IconCheckSquare, IconFolder, IconHistory, IconImage, IconKey, IconLayoutGrid, IconLink, IconListMusic, IconMusic, IconPalette,
-    IconCopy, IconRefreshCw, IconSettings, IconShield, IconShoppingCart, IconTrash, IconUser, IconUsers, IconWallet,
+    IconCheckSquare, IconFileText, IconFolder, IconHistory, IconImage, IconKey, IconLayoutGrid,
+    IconLink, IconList, IconListMusic, IconMusic, IconPalette, IconCopy, IconRefreshCw,
+    IconSettings, IconShield, IconShoppingCart, IconTrash, IconUser, IconUsers, IconWallet,
 };
 use crate::hooks::{use_apps, use_files, use_music, use_playlists, use_tasks};
 use crate::hooks::use_apps::AppEntry;
@@ -47,7 +48,13 @@ pub fn Sidebar() -> Element {
         "tasks"
     } else if matches!(route, Route::Shopping {} | Route::ShoppingList { .. }) {
         "shopping"
-    } else if matches!(route, Route::Finance {}) {
+    } else if matches!(
+        route,
+        Route::Finance {}
+            | Route::FinanceAccounts {}
+            | Route::FinanceCategories {}
+            | Route::FinanceSchemas {},
+    ) {
         "finance"
     } else if matches!(route, Route::Passwords {}) {
         "passwords"
@@ -240,10 +247,37 @@ pub fn Sidebar() -> Element {
                             li {
                                 Link {
                                     to: Route::Finance {},
-                                    class: "active",
+                                    class: if matches!(route, Route::Finance {}) { "active" } else { "" },
+                                    onclick: move |_| close_drawer(),
+                                    IconList {}
+                                    span { "Transactions" }
+                                }
+                            }
+                            li {
+                                Link {
+                                    to: Route::FinanceAccounts {},
+                                    class: if matches!(route, Route::FinanceAccounts {}) { "active" } else { "" },
                                     onclick: move |_| close_drawer(),
                                     IconWallet {}
-                                    span { "Overview" }
+                                    span { "Accounts" }
+                                }
+                            }
+                            li {
+                                Link {
+                                    to: Route::FinanceCategories {},
+                                    class: if matches!(route, Route::FinanceCategories {}) { "active" } else { "" },
+                                    onclick: move |_| close_drawer(),
+                                    IconLayoutGrid {}
+                                    span { "Categories" }
+                                }
+                            }
+                            li {
+                                Link {
+                                    to: Route::FinanceSchemas {},
+                                    class: if matches!(route, Route::FinanceSchemas {}) { "active" } else { "" },
+                                    onclick: move |_| close_drawer(),
+                                    IconFileText {}
+                                    span { "Import schemas" }
                                 }
                             }
                         },

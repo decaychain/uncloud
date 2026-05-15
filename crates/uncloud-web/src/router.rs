@@ -4,7 +4,9 @@ use crate::components::{
     auth::{Login, Register},
     dashboard::DashboardPage,
     duplicates::DuplicatesPage,
-    finance::FinancePage,
+    finance::{
+        FinanceAccountsPage, FinanceCategoriesPage, FinanceSchemasPage, FinanceTransactionsPage,
+    },
     file_browser::FileBrowser,
     layout::Layout,
     gallery::{Gallery, GalleryAlbum},
@@ -103,6 +105,15 @@ pub enum Route {
 
         #[route("/finance")]
         Finance {},
+
+        #[route("/finance/accounts")]
+        FinanceAccounts {},
+
+        #[route("/finance/categories")]
+        FinanceCategories {},
+
+        #[route("/finance/schemas")]
+        FinanceSchemas {},
 
         #[route("/shopping")]
         Shopping {},
@@ -291,9 +302,22 @@ fn TasksProject(id: String) -> Element {
 
 #[component]
 fn Finance() -> Element {
-    rsx! {
-        FinancePage {}
-    }
+    rsx! { FinanceTransactionsPage {} }
+}
+
+#[component]
+fn FinanceAccounts() -> Element {
+    rsx! { FinanceAccountsPage {} }
+}
+
+#[component]
+fn FinanceCategories() -> Element {
+    rsx! { FinanceCategoriesPage {} }
+}
+
+#[component]
+fn FinanceSchemas() -> Element {
+    rsx! { FinanceSchemasPage {} }
 }
 
 #[component]
