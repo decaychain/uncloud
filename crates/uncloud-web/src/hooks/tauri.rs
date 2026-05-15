@@ -59,6 +59,62 @@ pub fn set_android_theme(dark: bool) {
     let _ = js_sys::eval(&code);
 }
 
+pub fn open_android_file(url: &str, filename: &str, mime_type: &str) -> bool {
+    if !is_android() {
+        return false;
+    }
+
+    let url = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_string());
+    let filename = serde_json::to_string(filename).unwrap_or_else(|_| "\"\"".to_string());
+    let mime_type = serde_json::to_string(mime_type).unwrap_or_else(|_| "\"\"".to_string());
+    let code = format!(
+        "(() => {{ \
+         try {{ \
+             if (window.UncloudAndroid && window.UncloudAndroid.openFile) {{ \
+                 window.UncloudAndroid.openFile({url}, {filename}, {mime_type}); \
+                 return true; \
+             }} \
+             return false; \
+         }} catch (e) {{ \
+             console.error('UncloudAndroid.openFile failed', e); \
+             return false; \
+         }} \
+         }})()"
+    );
+    js_sys::eval(&code)
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+pub fn download_android_file(url: &str, filename: &str, mime_type: &str) -> bool {
+    if !is_android() {
+        return false;
+    }
+
+    let url = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_string());
+    let filename = serde_json::to_string(filename).unwrap_or_else(|_| "\"\"".to_string());
+    let mime_type = serde_json::to_string(mime_type).unwrap_or_else(|_| "\"\"".to_string());
+    let code = format!(
+        "(() => {{ \
+         try {{ \
+             if (window.UncloudAndroid && window.UncloudAndroid.downloadFile) {{ \
+                 window.UncloudAndroid.downloadFile({url}, {filename}, {mime_type}); \
+                 return true; \
+             }} \
+             return false; \
+         }} catch (e) {{ \
+             console.error('UncloudAndroid.downloadFile failed', e); \
+             return false; \
+         }} \
+         }})()"
+    );
+    js_sys::eval(&code)
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 // ── DTOs ──────────────────────────────────────────────────────────────────────
 
 pub struct DesktopConfig {

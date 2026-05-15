@@ -87,4 +87,7 @@ dx serve                                                        # Terminal 2
 # Desktop (requires webkit2gtk4.1-devel, libsoup3-devel on Fedora)
 ./build-desktop.sh   # dx build → copy to src-frontend → cargo build desktop
 cargo run -p uncloud-desktop
+
+# Android (bundles the web frontend; Gradle requires JDK 21 or older)
+./build-android.sh
 ```

@@ -119,6 +119,24 @@ pub fn authenticated_media_url(path: &str) -> String {
     }
 }
 
+pub fn open_external_file(url: &str, filename: &str, mime_type: &str) {
+    if crate::hooks::tauri::open_android_file(url, filename, mime_type) {
+        return;
+    }
+    let _ = web_sys::window()
+        .and_then(|w| w.open_with_url(url).ok())
+        .flatten();
+}
+
+pub fn download_external_file(url: &str, filename: &str, mime_type: &str) {
+    if crate::hooks::tauri::download_android_file(url, filename, mime_type) {
+        return;
+    }
+    let _ = web_sys::window()
+        .and_then(|w| w.open_with_url(url).ok())
+        .flatten();
+}
+
 // ---------------------------------------------------------------------------
 // Request builder helpers
 //

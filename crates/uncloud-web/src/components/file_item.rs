@@ -339,10 +339,12 @@ fn FileContextMenu(
         .unwrap_or(false);
     let on_download = {
         let id = id.clone();
+        let name = name.clone();
+        let mime_type = mime_type.clone().unwrap_or_default();
         move |_| {
             if !is_folder {
                 let url = api::authenticated_media_url(&format!("/files/{}/download", id));
-                let _ = web_sys::window().and_then(|w| w.open_with_url(&url).ok());
+                api::download_external_file(&url, &name, &mime_type);
             }
             on_close.call(());
         }

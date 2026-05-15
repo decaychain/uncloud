@@ -68,6 +68,7 @@ pub fn VersionHistoryModal(
                                         let vid_download = ver.id.clone();
                                         let fid_restore = file_id_sig().clone();
                                         let fid_download = file_id_sig().clone();
+                                        let name_download = file_name.clone();
                                         let size_str = uncloud_common::validation::format_bytes(ver.size_bytes);
                                         let date_str = format_version_date(&ver.created_at);
                                         let is_restoring = restoring() == Some(ver.id.clone());
@@ -82,7 +83,7 @@ pub fn VersionHistoryModal(
                                                         title: "Download this version",
                                                         onclick: move |_| {
                                                             let url = crate::hooks::api::authenticated_media_url(&format!("/files/{}/versions/{}", fid_download, vid_download));
-                                                            let _ = web_sys::window().and_then(|w| w.open_with_url(&url).ok());
+                                                            crate::hooks::api::download_external_file(&url, &name_download, "");
                                                         },
                                                         "Download"
                                                     }

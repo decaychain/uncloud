@@ -73,7 +73,7 @@ pub fn use_file_opener(
             // application/pdf and everything else: open in a new tab so the
             // browser handles native preview / download as appropriate.
             let url = api::authenticated_media_url(&format!("/files/{}/download", file.id));
-            let _ = web_sys::window().and_then(|w| w.open_with_url(&url).ok());
+            api::open_external_file(&url, &file.name, &file.mime_type);
         }
     }
 }
