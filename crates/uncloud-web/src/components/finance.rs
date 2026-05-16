@@ -704,7 +704,6 @@ fn TransactionsTab() -> Element {
                 }
                 button {
                     class: "btn btn-ghost btn-sm",
-                    disabled: no_accounts,
                     onclick: move |_| show_import.set(true),
                     "Import CSV"
                 }
@@ -718,7 +717,7 @@ fn TransactionsTab() -> Element {
         }
         if no_accounts {
             div { class: "alert alert-info mb-3",
-                "Add an account on the Accounts tab before recording transactions."
+                "No accounts yet — add one from the Accounts page, or import a CSV with an IBAN-aware schema to auto-create one."
             }
         }
         if let Some(e) = error() {
