@@ -108,9 +108,9 @@ pub fn FileItem(
             div {
                 id: "{dom_id}",
                 class: if selected {
-                    "card bg-base-100 shadow-sm border border-base-300 ring-2 ring-primary cursor-pointer hover:shadow-md transition-all relative group"
+                    "card bg-base-100 shadow-sm border border-base-300 ring-2 ring-primary cursor-pointer hover:shadow-md transition-all relative group select-none"
                 } else {
-                    "card bg-base-100 shadow-sm border border-base-300 cursor-pointer hover:shadow-md hover:ring-2 hover:ring-primary transition-all relative group"
+                    "card bg-base-100 shadow-sm border border-base-300 cursor-pointer hover:shadow-md hover:ring-2 hover:ring-primary transition-all relative group select-none"
                 },
                 onclick: on_click,
                 ondoubleclick: move |e| {
@@ -221,9 +221,9 @@ pub fn FileItem(
             tr {
                 id: "{dom_id}",
                 class: if selected {
-                    "cursor-pointer bg-primary/5"
+                    "cursor-pointer bg-primary/5 select-none"
                 } else {
-                    "hover cursor-pointer"
+                    "hover cursor-pointer select-none"
                 },
                 onclick: on_click,
                 ondoubleclick: move |e| {

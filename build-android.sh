@@ -67,10 +67,14 @@ cd crates/uncloud-desktop
 if [ "$BUILD_MODE" = "release" ]; then
     cargo tauri android build
 else
-    cargo tauri android build --debug
+    cargo tauri android build --debug --apk
 fi
 
 echo "==> Done. APK is at:"
 find gen/android -name '*.apk' -type f 2>/dev/null
-echo "==> AAB is at:"
-find gen/android -name '*.aab' -type f 2>/dev/null
+if [ "$BUILD_MODE" = "release" ]; then
+    echo "==> AAB is at:"
+    find gen/android -name '*.aab' -type f 2>/dev/null
+else
+    echo "==> AAB skipped for debug builds"
+fi
