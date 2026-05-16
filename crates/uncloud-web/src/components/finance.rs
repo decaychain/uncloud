@@ -275,6 +275,9 @@ fn AccountFormModal(
         initial.as_ref().map(|a| format_amount_input(a.opening_balance_minor)).unwrap_or_else(|| "0.00".to_string())
     });
     let mut archived = use_signal(|| initial.as_ref().map(|a| a.archived_at.is_some()).unwrap_or(false));
+    let mut iban = use_signal(|| {
+        initial.as_ref().and_then(|a| a.iban.clone()).unwrap_or_default()
+    });
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut saving = use_signal(|| false);
     let initial_id = initial.as_ref().map(|a| a.id.clone());
@@ -336,6 +339,18 @@ fn AccountFormModal(
                         oninput: move |e| opening.set(e.value()),
                     }
                 }
+                div { class: "form-control mt-2",
+                    label { class: "label",
+                        span { class: "label-text", "IBAN" }
+                        span { class: "label-text-alt opacity-60", "optional, drives CSV auto-match" }
+                    }
+                    input {
+                        class: "input input-bordered uppercase",
+                        value: "{iban}",
+                        placeholder: "DE12 …",
+                        oninput: move |e| iban.set(e.value().to_uppercase()),
+                    }
+                }
                 if editing {
                     div { class: "form-control mt-3",
                         label { class: "label cursor-pointer justify-start gap-2",
@@ -363,12 +378,15 @@ fn AccountFormModal(
                                     Ok(v) => v,
                                     Err(e) => { error.set(Some(e)); saving.set(false); return; }
                                 };
+                                let iban_clean = iban().trim().to_string();
+                                let iban_opt = if iban_clean.is_empty() { None } else { Some(iban_clean) };
                                 let result = if let Some(id) = id_opt {
                                     let req = UpdateAccountRequest {
                                         name: Some(name()),
                                         account_type: Some(account_type()),
                                         opening_balance_minor: Some(opening_minor),
                                         archived: Some(archived()),
+                                        iban: Some(iban_opt),
                                     };
                                     use_finance::update_account(&id, &req).await.map(|_| ())
                                 } else {
@@ -377,6 +395,7 @@ fn AccountFormModal(
                                         account_type: account_type(),
                                         currency: currency(),
                                         opening_balance_minor: opening_minor,
+                                        iban: iban_opt,
                                     };
                                     use_finance::create_account(&req).await.map(|_| ())
                                 };
@@ -1029,8 +1048,8 @@ fn ImportCsvModal(
             return;
         };
         let name = file_name().unwrap_or_else(|| "import.csv".to_string());
-        if acc.is_empty() || sch.is_empty() {
-            error.set(Some("Select an account and a schema".into()));
+        if sch.is_empty() {
+            error.set(Some("Pick a schema".into()));
             return;
         }
         submitting.set(true);
@@ -1056,6 +1075,13 @@ fn ImportCsvModal(
                             div { class: "text-sm opacity-80",
                                 "Imported: {r.imported} · Skipped (duplicates): {r.skipped} · Errors: {r.errors}"
                             }
+                            if let Some(acc) = r.auto_created_account.as_ref() {
+                                div { class: "text-sm mt-1",
+                                    "Auto-created account "
+                                    span { class: "font-medium", "{acc.name}" }
+                                    " ({acc.currency})"
+                                }
+                            }
                         }
                     }
                     if !r.error_details.is_empty() {
@@ -1080,17 +1106,6 @@ fn ImportCsvModal(
                         div { class: "alert alert-error mb-3", "{e}" }
                     }
                     div { class: "form-control mb-3",
-                        label { class: "label", span { class: "label-text", "Account" } }
-                        select {
-                            class: "select select-bordered",
-                            value: "{account_id}",
-                            onchange: move |e| account_id.set(e.value()),
-                            {accounts_clone.iter().map(|a| rsx! {
-                                option { key: "{a.id}", value: "{a.id}", "{a.name} ({a.currency})" }
-                            })}
-                        }
-                    }
-                    div { class: "form-control mb-3",
                         label { class: "label", span { class: "label-text", "Schema" } }
                         select {
                             class: "select select-bordered",
@@ -1100,6 +1115,31 @@ fn ImportCsvModal(
                             {schemas().iter().map(|s| rsx! {
                                 option { key: "{s.id}", value: "{s.id}", "{s.name}" }
                             })}
+                        }
+                    }
+                    {
+                        let selected = schemas().iter().find(|s| s.id == schema_id()).cloned();
+                        let supports_auto = selected.as_ref().map(|s| s.iban_column.is_some()).unwrap_or(false);
+                        rsx! {
+                            div { class: "form-control mb-3",
+                                label { class: "label",
+                                    span { class: "label-text", "Account" }
+                                    if supports_auto {
+                                        span { class: "label-text-alt opacity-60", "optional — auto-matched by IBAN" }
+                                    }
+                                }
+                                select {
+                                    class: "select select-bordered",
+                                    value: "{account_id}",
+                                    onchange: move |e| account_id.set(e.value()),
+                                    if supports_auto {
+                                        option { value: "", "Auto (match by IBAN, or create)" }
+                                    }
+                                    {accounts_clone.iter().map(|a| rsx! {
+                                        option { key: "{a.id}", value: "{a.id}", "{a.name} ({a.currency})" }
+                                    })}
+                                }
+                            }
                         }
                     }
                     div { class: "form-control mb-3",

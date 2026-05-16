@@ -609,6 +609,24 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
                 .build(),
         )
         .await?;
+    // Partial unique index: at most one account per (owner, IBAN) so the
+    // CSV importer can use IBAN as a stable account key. Accounts without
+    // an IBAN are unaffected.
+    finance_accounts
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "iban": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(mongodb::bson::doc! {
+                            "iban": { "$type": "string" }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     let finance_categories = db.collection::<mongodb::bson::Document>("finance_categories");
     finance_categories

@@ -24,6 +24,11 @@ pub struct FinanceAccount {
     pub currency: String,
     #[serde(default)]
     pub opening_balance_minor: i64,
+    /// Normalized IBAN (whitespace stripped, uppercased). Used by the
+    /// CSV importer to find or auto-create the target account when the
+    /// schema marks an `iban_column`.
+    #[serde(default)]
+    pub iban: Option<String>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]

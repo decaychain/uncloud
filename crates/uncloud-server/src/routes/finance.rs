@@ -90,9 +90,19 @@ fn account_to_response(a: &FinanceAccount) -> AccountResponse {
         account_type: a.account_type.clone(),
         currency: a.currency.clone(),
         opening_balance_minor: a.opening_balance_minor,
+        iban: a.iban.clone(),
         created_at: a.created_at.to_rfc3339(),
         updated_at: a.updated_at.to_rfc3339(),
         archived_at: a.archived_at.map(|d| d.to_rfc3339()),
+    }
+}
+
+fn normalize_iban(raw: &str) -> Option<String> {
+    let cleaned: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned.to_ascii_uppercase())
     }
 }
 
@@ -172,6 +182,7 @@ pub async fn create_account(
         return Err(AppError::BadRequest("Account name is required".into()));
     }
     let currency = validate_currency(&req.currency)?;
+    let iban = req.iban.as_deref().and_then(normalize_iban);
     let now = Utc::now();
     let account = FinanceAccount {
         id: ObjectId::new(),
@@ -180,6 +191,7 @@ pub async fn create_account(
         account_type: req.account_type.trim().to_string(),
         currency,
         opening_balance_minor: req.opening_balance_minor,
+        iban,
         created_at: now,
         updated_at: now,
         archived_at: None,
@@ -188,7 +200,16 @@ pub async fn create_account(
         .db
         .collection::<FinanceAccount>(ACCOUNTS)
         .insert_one(&account)
-        .await?;
+        .await
+        .map_err(|e| {
+            if is_duplicate_key_error(&e) {
+                AppError::BadRequest(
+                    "Another account already uses this IBAN".into(),
+                )
+            } else {
+                AppError::from(e)
+            }
+        })?;
     Ok((StatusCode::CREATED, Json(account_to_response(&account))))
 }
 
@@ -217,6 +238,12 @@ pub async fn update_account(
         set.insert("opening_balance_minor", b);
     }
     let mut unset = doc! {};
+    if let Some(iban_opt) = req.iban {
+        match iban_opt.as_deref().and_then(normalize_iban) {
+            Some(norm) => { set.insert("iban", norm); }
+            None => { unset.insert("iban", ""); }
+        }
+    }
     match req.archived {
         Some(true) if existing.archived_at.is_none() => {
             set.insert("archived_at", bson::DateTime::from_chrono(Utc::now()));
@@ -1027,15 +1054,10 @@ pub async fn import_csv(
         }
     }
 
-    let account_id_str = account_id_str
-        .ok_or_else(|| AppError::BadRequest("Missing account_id field".into()))?;
     let schema_id_str = schema_id_str
         .ok_or_else(|| AppError::BadRequest("Missing schema_id field".into()))?;
     let csv_bytes = csv_bytes
         .ok_or_else(|| AppError::BadRequest("Missing csv field".into()))?;
-
-    let account_oid = parse_oid(&account_id_str, "account_id")?;
-    let account = find_account(&state, user.id, account_oid).await?;
 
     let schema_oid = parse_oid(&schema_id_str, "schema_id")?;
     let schema = find_schema(&state, user.id, schema_oid).await?;
@@ -1048,6 +1070,14 @@ pub async fn import_csv(
             AppError::BadRequest(format!("line {line}: {message}"))
         }
     })?;
+
+    // First successful parse — used both for IBAN-based account lookup
+    // and for picking the auto-created account's currency. Done with a
+    // shallow scan rather than collecting all rows into memory.
+    let first_ok = parsed.iter().find_map(|r| r.as_ref().ok());
+
+    let (account, auto_created) =
+        resolve_import_account(&state, &user, account_id_str.as_deref(), &schema, first_ok).await?;
 
     let run_id = ObjectId::new();
     let txns = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
@@ -1134,6 +1164,12 @@ pub async fn import_csv(
 
     Ok(Json(ImportCsvResponse {
         run_id: run_id.to_hex(),
+        account_id: account.id.to_hex(),
+        auto_created_account: if auto_created {
+            Some(account_to_response(&account))
+        } else {
+            None
+        },
         imported,
         skipped,
         errors,
@@ -1197,6 +1233,78 @@ fn is_duplicate_key_error(err: &mongodb::error::Error) -> bool {
         ErrorKind::Write(WriteFailure::WriteError(we)) => we.code == 11000,
         _ => false,
     }
+}
+
+/// Picks the target account for an import:
+///   1. `account_id` field wins if provided (manual override).
+///   2. Otherwise, if the schema has `iban_column` and the first row
+///      carries an IBAN, look up an existing account by IBAN.
+///   3. Otherwise create one. Currency comes from the first row.
+///
+/// Returns `(account, was_auto_created)`.
+async fn resolve_import_account(
+    state: &AppState,
+    user: &AuthUser,
+    account_id_str: Option<&str>,
+    schema: &ImportSchema,
+    first_row: Option<&ParsedRow>,
+) -> Result<(FinanceAccount, bool)> {
+    if let Some(id) = account_id_str.filter(|s| !s.is_empty()) {
+        let oid = parse_oid(id, "account_id")?;
+        return Ok((find_account(state, user.id, oid).await?, false));
+    }
+
+    if schema.iban_column.is_none() {
+        return Err(AppError::BadRequest(
+            "account_id is required when the schema does not declare an IBAN column".into(),
+        ));
+    }
+    let Some(row) = first_row else {
+        return Err(AppError::BadRequest(
+            "CSV has no parseable rows — cannot auto-create an account".into(),
+        ));
+    };
+    let Some(raw_iban) = row.iban.as_deref().and_then(normalize_iban) else {
+        return Err(AppError::BadRequest(
+            "First row has no IBAN; cannot auto-create an account. \
+             Either fix the IBAN column in the schema or pick an account manually."
+                .into(),
+        ));
+    };
+
+    let coll = state.db.collection::<FinanceAccount>(ACCOUNTS);
+    if let Some(existing) = coll
+        .find_one(doc! { "owner_id": user.id, "iban": &raw_iban })
+        .await?
+    {
+        return Ok((existing, false));
+    }
+
+    let display_iban = raw_iban
+        .get(raw_iban.len().saturating_sub(4)..)
+        .unwrap_or(raw_iban.as_str());
+    let now = Utc::now();
+    let account = FinanceAccount {
+        id: ObjectId::new(),
+        owner_id: user.id,
+        name: format!("Account •••{display_iban}"),
+        account_type: "checking".into(),
+        currency: row.currency.clone(),
+        opening_balance_minor: 0,
+        iban: Some(raw_iban),
+        created_at: now,
+        updated_at: now,
+        archived_at: None,
+    };
+    coll.insert_one(&account).await.map_err(|e| {
+        if is_duplicate_key_error(&e) {
+            // A concurrent import just won the race — best-effort: refetch.
+            AppError::Internal("Account auto-create raced; please retry".into())
+        } else {
+            AppError::from(e)
+        }
+    })?;
+    Ok((account, true))
 }
 
 fn run_to_response(r: &ImportRun) -> ImportRunResponse {

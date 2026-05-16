@@ -55,6 +55,17 @@ fn import_form(account_id: &str, schema_id: &str, csv: &[u8]) -> MultipartForm {
         )
 }
 
+fn import_form_no_account(schema_id: &str, csv: &[u8]) -> MultipartForm {
+    MultipartForm::new()
+        .add_part("schema_id", Part::text(schema_id.to_string()))
+        .add_part(
+            "csv",
+            Part::bytes(csv.to_vec())
+                .file_name("test.csv")
+                .mime_type("text/csv"),
+        )
+}
+
 #[tokio::test]
 async fn imports_two_rows_then_dedups_on_reimport() {
     let app = TestApp::new().await;
@@ -288,6 +299,94 @@ async fn revert_does_not_touch_other_users_transactions() {
         .post(&format!("/api/finance/imports/{run_id}/revert"))
         .await;
     assert_eq!(resp.status_code(), 404);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn import_without_account_auto_creates_from_iban() {
+    let app = TestApp::new().await;
+    app.register_and_login("ivy").await;
+    let schema_id = sparkasse_schema_id(&app).await;
+
+    // No account exists yet — the importer must conjure one from the IBAN.
+    let resp: Value = app
+        .server
+        .post("/api/finance/import")
+        .multipart(import_form_no_account(&schema_id, fixture_csv()))
+        .await
+        .json();
+
+    assert_eq!(resp["imported"], 2);
+    let auto = &resp["auto_created_account"];
+    assert!(auto.is_object(), "auto_created_account should be populated");
+    let created_id = auto["id"].as_str().unwrap().to_string();
+    assert_eq!(auto["iban"], "SE12345");
+    assert_eq!(auto["currency"], "EUR");
+    assert_eq!(resp["account_id"], created_id);
+
+    // A second import with the same CSV must reuse the existing account.
+    let resp2: Value = app
+        .server
+        .post("/api/finance/import")
+        .multipart(import_form_no_account(&schema_id, fixture_csv()))
+        .await
+        .json();
+    assert_eq!(resp2["account_id"], created_id);
+    assert!(
+        resp2["auto_created_account"].is_null(),
+        "second import should not auto-create"
+    );
+
+    // Listing accounts shows the single auto-created account.
+    let accounts: Value = app.server.get("/api/finance/accounts").await.json();
+    let arr = accounts.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"], created_id);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn import_without_account_rejects_schema_without_iban_column() {
+    let app = TestApp::new().await;
+    app.register_and_login("jack").await;
+
+    // Clone Sparkasse → drop IBAN column → import without account_id.
+    let sparkasse_id = sparkasse_schema_id(&app).await;
+    let clone: Value = app
+        .server
+        .post(&format!("/api/finance/import-schemas/{sparkasse_id}/clone"))
+        .await
+        .json();
+    let clone_id = clone["id"].as_str().unwrap().to_string();
+    let _ = app
+        .server
+        .put(&format!("/api/finance/import-schemas/{clone_id}"))
+        .json(&serde_json::json!({
+            "name": "Sparkasse no-IBAN",
+            "delimiter": ";",
+            "encoding": "windows-1252",
+            "decimal_separator": "comma",
+            "skip_header_rows": 0,
+            "has_headers": true,
+            "date_column": 1,
+            "date_format": "DD.MM.YY",
+            "amount_column": 14,
+            "amount_sign_convention": "positive_credit",
+            "description_columns": [11, 4],
+            "currency_source": "column",
+            "currency_column": 15,
+            // iban_column intentionally omitted
+        }))
+        .await;
+
+    let resp = app
+        .server
+        .post("/api/finance/import")
+        .multipart(import_form_no_account(&clone_id, fixture_csv()))
+        .await;
+    assert_eq!(resp.status_code(), 400);
 
     app.cleanup().await;
 }

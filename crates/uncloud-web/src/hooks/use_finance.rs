@@ -289,8 +289,10 @@ pub async fn import_csv(
         .map_err(|_| "Failed to create Blob".to_string())?;
 
     let form = web_sys::FormData::new().map_err(|_| "Failed to create FormData".to_string())?;
-    form.append_with_str("account_id", account_id)
-        .map_err(|_| "Failed to append account_id".to_string())?;
+    if !account_id.is_empty() {
+        form.append_with_str("account_id", account_id)
+            .map_err(|_| "Failed to append account_id".to_string())?;
+    }
     form.append_with_str("schema_id", schema_id)
         .map_err(|_| "Failed to append schema_id".to_string())?;
     form.append_with_blob_and_filename("csv", &blob, file_name)

@@ -9,6 +9,7 @@ pub struct AccountResponse {
     pub account_type: String,
     pub currency: String,
     pub opening_balance_minor: i64,
+    pub iban: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub archived_at: Option<String>,
@@ -31,6 +32,8 @@ pub struct CreateAccountRequest {
     pub currency: String,
     #[serde(default)]
     pub opening_balance_minor: i64,
+    #[serde(default)]
+    pub iban: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,6 +42,9 @@ pub struct UpdateAccountRequest {
     pub account_type: Option<String>,
     pub opening_balance_minor: Option<i64>,
     pub archived: Option<bool>,
+    /// Two-level Option so PATCH can either leave IBAN alone (`None`),
+    /// clear it (`Some(None)`), or set a new value (`Some(Some(_))`).
+    pub iban: Option<Option<String>>,
 }
 
 // ── Categories ───────────────────────────────────────────────────────────
@@ -132,6 +138,10 @@ pub struct ImportRowError {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImportCsvResponse {
     pub run_id: String,
+    pub account_id: String,
+    /// Populated when the import auto-created its target account from
+    /// the CSV's IBAN column.
+    pub auto_created_account: Option<AccountResponse>,
     pub imported: u32,
     pub skipped: u32,
     pub errors: u32,
