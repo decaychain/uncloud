@@ -7,6 +7,7 @@ pub mod middleware;
 pub mod models;
 pub mod processing;
 pub mod finance_import;
+pub mod finance_rules;
 pub mod routes;
 pub mod services;
 pub mod storage;

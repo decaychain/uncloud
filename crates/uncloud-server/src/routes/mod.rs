@@ -268,7 +268,17 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/finance/snapshots/{id}",
             delete(finance::delete_snapshot),
-        );
+        )
+        .route(
+            "/finance/rules",
+            get(finance::list_rules).post(finance::create_rule),
+        )
+        .route(
+            "/finance/rules/{id}",
+            put(finance::update_rule).delete(finance::delete_rule),
+        )
+        .route("/finance/rules/apply", post(finance::apply_rules))
+        .route("/finance/rules/test", post(finance::test_rule));
 
     // v1-only routes (API tokens, S3 credentials, apps)
     let v1_only = Router::new()

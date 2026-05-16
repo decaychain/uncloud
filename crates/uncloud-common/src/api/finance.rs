@@ -243,6 +243,65 @@ fn default_true_serde() -> bool {
     true
 }
 
+// ── Categorization rules ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FinanceRuleResponse {
+    pub id: String,
+    pub name: String,
+    pub pattern: String,
+    /// "substring", "starts_with", "regex".
+    pub pattern_kind: String,
+    pub case_insensitive: bool,
+    pub category_id: String,
+    pub priority: i32,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct FinanceRuleRequest {
+    pub name: String,
+    pub pattern: String,
+    pub pattern_kind: String,
+    #[serde(default = "default_true_serde")]
+    pub case_insensitive: bool,
+    pub category_id: String,
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(default = "default_true_serde")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApplyRulesResponse {
+    pub updated: u32,
+    pub still_unmatched: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TestRuleRequest {
+    pub pattern: String,
+    pub pattern_kind: String,
+    #[serde(default = "default_true_serde")]
+    pub case_insensitive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TestRuleMatch {
+    pub transaction_id: String,
+    pub date: String,
+    pub description: String,
+    pub amount_minor: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TestRuleResponse {
+    pub sampled: u32,
+    pub matches: Vec<TestRuleMatch>,
+}
+
 // ── Reconciliation ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

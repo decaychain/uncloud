@@ -9,8 +9,9 @@ use std::collections::HashMap;
 use dioxus::prelude::*;
 use uncloud_common::{
     AccountResponse, BalanceSnapshotResponse, CreateAccountRequest, CreateFinanceCategoryRequest,
-    CreateTransactionRequest, FinanceCategoryResponse, ImportCsvResponse, ImportRunResponse,
-    ImportSchemaResponse, ReconcilePreviewResponse, ReconcileRequest, TransactionResponse,
+    CreateTransactionRequest, FinanceCategoryResponse, FinanceRuleRequest, FinanceRuleResponse,
+    ImportCsvResponse, ImportRunResponse, ImportSchemaResponse, ReconcilePreviewResponse,
+    ReconcileRequest, TestRuleMatch, TestRuleRequest, TestRuleResponse, TransactionResponse,
     UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
@@ -47,6 +48,11 @@ pub fn FinanceSchemasPage() -> Element {
 #[component]
 pub fn FinanceImportsPage() -> Element {
     finance_shell(rsx! { ImportsTab {} })
+}
+
+#[component]
+pub fn FinanceRulesPage() -> Element {
+    finance_shell(rsx! { RulesTab {} })
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -2008,6 +2014,368 @@ fn ReconcileModal(
                         disabled: busy() || preview().is_none(),
                         onclick: do_apply,
                         if busy() { "Applying…" } else { "Apply" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn RulesTab() -> Element {
+    let mut rules: Signal<Vec<FinanceRuleResponse>> = use_signal(Vec::new);
+    let mut categories: Signal<HashMap<String, String>> = use_signal(HashMap::new);
+    let mut loading = use_signal(|| true);
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+    let mut refresh = use_signal(|| 0u32);
+    let mut show_create = use_signal(|| false);
+    let mut edit_target: Signal<Option<FinanceRuleResponse>> = use_signal(|| None);
+    let mut applying = use_signal(|| false);
+    let mut apply_summary: Signal<Option<(u32, u32)>> = use_signal(|| None);
+
+    use_effect(move || {
+        let _ = refresh();
+        spawn(async move {
+            loading.set(true);
+            match use_finance::list_rules().await {
+                Ok(list) => { rules.set(list); error.set(None); }
+                Err(e) => error.set(Some(e)),
+            }
+            if let Ok(cats) = use_finance::list_categories().await {
+                categories.set(cats.into_iter().map(|c| (c.id, c.name)).collect());
+            }
+            loading.set(false);
+        });
+    });
+
+    let run_apply = move |_| {
+        if applying() { return; }
+        applying.set(true);
+        apply_summary.set(None);
+        error.set(None);
+        spawn(async move {
+            match use_finance::apply_rules().await {
+                Ok(s) => apply_summary.set(Some((s.updated, s.still_unmatched))),
+                Err(e) => error.set(Some(e)),
+            }
+            applying.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "flex justify-between items-center mb-4",
+            h2 { class: "text-xl font-semibold", "Categorization rules" }
+            div { class: "flex gap-2",
+                button {
+                    class: "btn btn-ghost btn-sm",
+                    disabled: applying() || rules().is_empty(),
+                    onclick: run_apply,
+                    if applying() { "Applying…" } else { "Apply to existing" }
+                }
+                button {
+                    class: "btn btn-primary btn-sm",
+                    onclick: move |_| show_create.set(true),
+                    "New rule"
+                }
+            }
+        }
+        if let Some((updated, unmatched)) = apply_summary() {
+            div { class: "alert alert-success mb-3",
+                "Updated {updated} transaction(s). Still uncategorized: {unmatched}."
+            }
+        }
+        if let Some(e) = error() {
+            div { class: "alert alert-error mb-3", "{e}" }
+        }
+        if loading() && rules().is_empty() {
+            div { class: "flex justify-center py-8",
+                span { class: "loading loading-spinner loading-lg" }
+            }
+        } else if rules().is_empty() {
+            div { class: "text-center py-10 opacity-60",
+                p { "No rules yet." }
+                p { class: "text-sm mt-2", "Rules auto-categorize transactions whose description matches a pattern. They apply during CSV import and via the \"Apply to existing\" button." }
+            }
+        } else {
+            div { class: "overflow-x-auto",
+                table { class: "table table-zebra",
+                    thead { tr {
+                        th { class: "text-right", "Priority" }
+                        th { "Name" }
+                        th { "Pattern" }
+                        th { "Match" }
+                        th { "Category" }
+                        th { "" }
+                    } }
+                    tbody {
+                        {rules().iter().map(|r| {
+                            let r_edit = r.clone();
+                            let r_id = r.id.clone();
+                            let category_name = categories().get(&r.category_id).cloned().unwrap_or_else(|| "—".into());
+                            let kind = r.pattern_kind.clone();
+                            let enabled = r.enabled;
+                            rsx! {
+                                tr { key: "{r.id}", class: if enabled { "" } else { "opacity-50" },
+                                    td { class: "text-right opacity-70", "{r.priority}" }
+                                    td {
+                                        "{r.name}"
+                                        if !enabled { span { class: "badge badge-ghost ml-2 text-xs", "disabled" } }
+                                    }
+                                    td { class: "font-mono text-xs", "{r.pattern}" }
+                                    td { class: "opacity-70 text-xs", "{kind}" }
+                                    td { "{category_name}" }
+                                    td { class: "text-right whitespace-nowrap",
+                                        button {
+                                            class: "btn btn-ghost btn-xs",
+                                            onclick: move |_| edit_target.set(Some(r_edit.clone())),
+                                            "Edit"
+                                        }
+                                        button {
+                                            class: "btn btn-ghost btn-xs text-error",
+                                            onclick: move |_| {
+                                                let id = r_id.clone();
+                                                spawn(async move {
+                                                    match use_finance::delete_rule(&id).await {
+                                                        Ok(_) => refresh += 1,
+                                                        Err(e) => error.set(Some(e)),
+                                                    }
+                                                });
+                                            },
+                                            "Delete"
+                                        }
+                                    }
+                                }
+                            }
+                        })}
+                    }
+                }
+            }
+        }
+        if show_create() {
+            RuleFormModal {
+                initial: None,
+                categories: categories(),
+                on_close: move |_| show_create.set(false),
+                on_saved: move |_| { show_create.set(false); refresh += 1; },
+            }
+        }
+        if let Some(r) = edit_target() {
+            RuleFormModal {
+                key: "{r.id}",
+                initial: Some(r.clone()),
+                categories: categories(),
+                on_close: move |_| edit_target.set(None),
+                on_saved: move |_| { edit_target.set(None); refresh += 1; },
+            }
+        }
+    }
+}
+
+#[component]
+fn RuleFormModal(
+    initial: Option<FinanceRuleResponse>,
+    categories: HashMap<String, String>,
+    on_close: EventHandler<()>,
+    on_saved: EventHandler<()>,
+) -> Element {
+    let is_edit = initial.is_some();
+    let editing_id = initial.as_ref().map(|r| r.id.clone());
+
+    let mut name = use_signal(|| initial.as_ref().map(|r| r.name.clone()).unwrap_or_default());
+    let mut pattern = use_signal(|| initial.as_ref().map(|r| r.pattern.clone()).unwrap_or_default());
+    let mut pattern_kind = use_signal(|| {
+        initial.as_ref().map(|r| r.pattern_kind.clone()).unwrap_or_else(|| "substring".into())
+    });
+    let mut case_insensitive = use_signal(|| {
+        initial.as_ref().map(|r| r.case_insensitive).unwrap_or(true)
+    });
+    let mut category_id = use_signal(|| {
+        initial.as_ref().map(|r| r.category_id.clone())
+            .or_else(|| categories.iter().next().map(|(k, _)| k.clone()))
+            .unwrap_or_default()
+    });
+    let mut priority = use_signal(|| {
+        initial.as_ref().map(|r| r.priority.to_string()).unwrap_or_else(|| "0".into())
+    });
+    let mut enabled = use_signal(|| initial.as_ref().map(|r| r.enabled).unwrap_or(true));
+
+    let mut test_results: Signal<Option<TestRuleResponse>> = use_signal(|| None);
+    let mut submitting = use_signal(|| false);
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+
+    let cat_options: Vec<(String, String)> = {
+        let mut v: Vec<(String, String)> = categories.into_iter().collect();
+        v.sort_by(|a, b| a.1.cmp(&b.1));
+        v
+    };
+
+    let run_test = move |_| {
+        let req = TestRuleRequest {
+            pattern: pattern(),
+            pattern_kind: pattern_kind(),
+            case_insensitive: case_insensitive(),
+        };
+        spawn(async move {
+            match use_finance::test_rule(&req).await {
+                Ok(r) => test_results.set(Some(r)),
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    };
+
+    let submit = move |_| {
+        if submitting() { return; }
+        let parsed_priority = match priority().trim().parse::<i32>() {
+            Ok(p) => p,
+            Err(_) => { error.set(Some("Priority must be a whole number".into())); return; }
+        };
+        let req = FinanceRuleRequest {
+            name: name(),
+            pattern: pattern(),
+            pattern_kind: pattern_kind(),
+            case_insensitive: case_insensitive(),
+            category_id: category_id(),
+            priority: parsed_priority,
+            enabled: enabled(),
+        };
+        submitting.set(true);
+        error.set(None);
+        let editing_id = editing_id.clone();
+        spawn(async move {
+            let result = match editing_id {
+                Some(id) => use_finance::update_rule(&id, &req).await,
+                None => use_finance::create_rule(&req).await,
+            };
+            match result {
+                Ok(_) => on_saved.call(()),
+                Err(e) => { error.set(Some(e)); submitting.set(false); }
+            }
+        });
+    };
+
+    rsx! {
+        div { class: "modal modal-open",
+            div { class: "modal-box max-w-xl",
+                h3 { class: "font-bold text-lg mb-3",
+                    if is_edit { "Edit rule" } else { "New rule" }
+                }
+                if let Some(e) = error() {
+                    div { class: "alert alert-error mb-3", "{e}" }
+                }
+                div { class: "grid grid-cols-1 md:grid-cols-2 gap-3",
+                    div { class: "form-control md:col-span-2",
+                        label { class: "label", span { class: "label-text", "Name" } }
+                        input {
+                            class: "input input-bordered",
+                            value: "{name}",
+                            oninput: move |e| name.set(e.value()),
+                        }
+                    }
+                    div { class: "form-control md:col-span-2",
+                        label { class: "label",
+                            span { class: "label-text", "Pattern" }
+                        }
+                        input {
+                            class: "input input-bordered font-mono",
+                            value: "{pattern}",
+                            placeholder: "e.g. spotify, ^Miete, Uber Eats",
+                            oninput: move |e| pattern.set(e.value()),
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label", span { class: "label-text", "Match" } }
+                        select {
+                            class: "select select-bordered",
+                            value: "{pattern_kind}",
+                            onchange: move |e| pattern_kind.set(e.value()),
+                            option { value: "substring", "Contains" }
+                            option { value: "starts_with", "Starts with" }
+                            option { value: "regex", "Regex" }
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label cursor-pointer justify-start gap-2",
+                            input {
+                                r#type: "checkbox",
+                                class: "checkbox",
+                                checked: case_insensitive(),
+                                oninput: move |e| case_insensitive.set(e.checked()),
+                            }
+                            span { class: "label-text", "Case-insensitive" }
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label", span { class: "label-text", "Category" } }
+                        select {
+                            class: "select select-bordered",
+                            value: "{category_id}",
+                            onchange: move |e| category_id.set(e.value()),
+                            {cat_options.iter().map(|(id, n)| rsx! {
+                                option { key: "{id}", value: "{id}", "{n}" }
+                            })}
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label",
+                            span { class: "label-text", "Priority" }
+                            span { class: "label-text-alt opacity-60", "lower = applied first" }
+                        }
+                        input {
+                            class: "input input-bordered",
+                            r#type: "number",
+                            value: "{priority}",
+                            oninput: move |e| priority.set(e.value()),
+                        }
+                    }
+                    div { class: "form-control md:col-span-2",
+                        label { class: "label cursor-pointer justify-start gap-2",
+                            input {
+                                r#type: "checkbox",
+                                class: "checkbox",
+                                checked: enabled(),
+                                oninput: move |e| enabled.set(e.checked()),
+                            }
+                            span { class: "label-text", "Enabled" }
+                        }
+                    }
+                }
+                div { class: "divider my-2" }
+                div { class: "flex items-center justify-between mb-2",
+                    div { class: "font-medium text-sm", "Test against recent transactions" }
+                    button {
+                        class: "btn btn-ghost btn-sm",
+                        onclick: run_test,
+                        "Run test"
+                    }
+                }
+                if let Some(r) = test_results() {
+                    if r.matches.is_empty() {
+                        div { class: "opacity-60 text-sm", "No matches in the last {r.sampled} transactions." }
+                    } else {
+                        div { class: "text-sm",
+                            div { class: "mb-1 opacity-70", "{r.matches.len()} match(es) in the last {r.sampled}:" }
+                            ul { class: "max-h-40 overflow-y-auto text-xs",
+                                {r.matches.iter().map(|m: &TestRuleMatch| {
+                                    let date = m.date.get(..10).unwrap_or(&m.date).to_string();
+                                    rsx! {
+                                        li { key: "{m.transaction_id}", class: "py-0.5",
+                                            span { class: "opacity-60 mr-2", "{date}" }
+                                            "{m.description}"
+                                        }
+                                    }
+                                })}
+                            }
+                        }
+                    }
+                }
+
+                div { class: "modal-action",
+                    button { class: "btn btn-ghost", onclick: move |_| on_close.call(()), "Cancel" }
+                    button {
+                        class: "btn btn-primary",
+                        disabled: submitting(),
+                        onclick: submit,
+                        if submitting() { "Saving…" } else if is_edit { "Save" } else { "Create" }
                     }
                 }
             }

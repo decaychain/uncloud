@@ -21,20 +21,22 @@ use sha2::{Digest, Sha256};
 use crate::error::{AppError, Result};
 use crate::finance_import::{self, sparkasse_camt_v8, ParseError, ParsedRow};
 use crate::middleware::AuthUser;
+use crate::finance_rules::{self, RuleEngine};
 use crate::models::{
     AmountSignConvention, BalanceSnapshot, CategorySource, CurrencySource, DecimalSeparator,
-    FinanceAccount, FinanceCategory, FinanceTransaction, ImportRun,
+    FinanceAccount, FinanceCategory, FinanceRule, FinanceTransaction, ImportRun,
     ImportRunError as ModelImportRunError, ImportRunStatus, ImportRunSummary, ImportSchema,
-    ImportSource, ImportSourceKind, TransactionLeg,
+    ImportSource, ImportSourceKind, RulePatternKind, TransactionLeg,
 };
 use crate::AppState;
 use uncloud_common::{
-    AccountBalanceResponse, AccountResponse, BalanceSnapshotResponse, CreateAccountRequest,
-    CreateFinanceCategoryRequest, CreateTransactionRequest, FinanceCategoryResponse,
-    ImportCsvResponse, ImportRowError, ImportRunResponse, ImportRunSourceDto, ImportRunSummaryDto,
-    ImportSchemaRequest, ImportSchemaResponse, ListTransactionsQuery, ReconcilePreviewResponse,
-    ReconcileRequest, TransactionListResponse, TransactionResponse, UpdateAccountRequest,
-    UpdateFinanceCategoryRequest, UpdateTransactionRequest,
+    AccountBalanceResponse, AccountResponse, ApplyRulesResponse, BalanceSnapshotResponse,
+    CreateAccountRequest, CreateFinanceCategoryRequest, CreateTransactionRequest,
+    FinanceCategoryResponse, FinanceRuleRequest, FinanceRuleResponse, ImportCsvResponse,
+    ImportRowError, ImportRunResponse, ImportRunSourceDto, ImportRunSummaryDto, ImportSchemaRequest,
+    ImportSchemaResponse, ListTransactionsQuery, ReconcilePreviewResponse, ReconcileRequest,
+    TestRuleMatch, TestRuleRequest, TestRuleResponse, TransactionListResponse, TransactionResponse,
+    UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
 const ACCOUNTS: &str = "finance_accounts";
@@ -43,6 +45,7 @@ const TRANSACTIONS: &str = "finance_transactions";
 const IMPORT_SCHEMAS: &str = "finance_import_schemas";
 const IMPORT_RUNS: &str = "finance_import_runs";
 const BALANCE_SNAPSHOTS: &str = "finance_balance_snapshots";
+const RULES: &str = "finance_rules";
 const RECONCILIATION_CATEGORY: &str = "Reconciliation";
 
 const ALLOWED_CURRENCY_LEN: usize = 3;
@@ -1083,6 +1086,9 @@ pub async fn import_csv(
     let (account, auto_created) =
         resolve_import_account(&state, &user, account_id_str.as_deref(), &schema, first_ok).await?;
 
+    let rules = load_user_rules(&state, user.id).await?;
+    let (rule_engine, _rule_errs) = RuleEngine::build(&rules);
+
     let run_id = ObjectId::new();
     let txns = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
     let mut imported = 0u32;
@@ -1112,7 +1118,10 @@ pub async fn import_csv(
             }
         };
 
-        match insert_imported_row(&txns, user.id, &account, row, run_id).await {
+        let rule_match = rule_engine
+            .match_first(&row.description)
+            .map(|idx| (rules[idx].id, rules[idx].category_id));
+        match insert_imported_row(&txns, user.id, &account, row, run_id, rule_match).await {
             Ok(InsertOutcome::Inserted) => imported += 1,
             Ok(InsertOutcome::Skipped) => skipped += 1,
             Err(e) => {
@@ -1192,13 +1201,18 @@ async fn insert_imported_row(
     account: &FinanceAccount,
     row: ParsedRow,
     run_id: ObjectId,
+    rule_match: Option<(ObjectId, ObjectId)>,
 ) -> std::result::Result<InsertOutcome, AppError> {
     let now = Utc::now();
+    let (cat_id, cat_source, rule_id) = match rule_match {
+        Some((rid, cid)) => (Some(cid), CategorySource::Rule, Some(rid)),
+        None => (None, CategorySource::Unset, None),
+    };
     let leg = TransactionLeg {
         amount_minor: row.amount_minor,
-        category_id: None,
-        category_source: CategorySource::Unset,
-        rule_id: None,
+        category_id: cat_id,
+        category_source: cat_source,
+        rule_id,
         note: None,
     };
     let txn = FinanceTransaction {
@@ -1693,4 +1707,281 @@ pub async fn delete_snapshot(
         .await?;
     snapshots.delete_one(doc! { "_id": snap_oid }).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Categorization rules ────────────────────────────────────────────────
+
+fn parse_rule_pattern_kind(s: &str) -> Result<RulePatternKind> {
+    match s {
+        "substring" => Ok(RulePatternKind::Substring),
+        "starts_with" => Ok(RulePatternKind::StartsWith),
+        "regex" => Ok(RulePatternKind::Regex),
+        other => Err(AppError::BadRequest(format!(
+            "Invalid pattern_kind `{other}` (expected substring | starts_with | regex)"
+        ))),
+    }
+}
+
+fn rule_kind_str(k: RulePatternKind) -> &'static str {
+    match k {
+        RulePatternKind::Substring => "substring",
+        RulePatternKind::StartsWith => "starts_with",
+        RulePatternKind::Regex => "regex",
+    }
+}
+
+fn rule_to_response(r: &FinanceRule) -> FinanceRuleResponse {
+    FinanceRuleResponse {
+        id: r.id.to_hex(),
+        name: r.name.clone(),
+        pattern: r.pattern.clone(),
+        pattern_kind: rule_kind_str(r.pattern_kind).to_string(),
+        case_insensitive: r.case_insensitive,
+        category_id: r.category_id.to_hex(),
+        priority: r.priority,
+        enabled: r.enabled,
+        created_at: r.created_at.to_rfc3339(),
+        updated_at: r.updated_at.to_rfc3339(),
+    }
+}
+
+fn validate_rule_request(req: &FinanceRuleRequest) -> Result<()> {
+    if req.name.trim().is_empty() {
+        return Err(AppError::BadRequest("Rule name is required".into()));
+    }
+    if req.pattern.trim().is_empty() {
+        return Err(AppError::BadRequest("Rule pattern is required".into()));
+    }
+    let kind = parse_rule_pattern_kind(&req.pattern_kind)?;
+    // Compile-validate to reject bad regexes at write time.
+    finance_rules::compile_pattern(&req.pattern, kind, req.case_insensitive)
+        .map_err(|e| AppError::BadRequest(format!("Invalid pattern: {e}")))?;
+    Ok(())
+}
+
+pub async fn list_rules(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Vec<FinanceRuleResponse>>> {
+    require_finance(&state)?;
+    let coll = state.db.collection::<FinanceRule>(RULES);
+    let mut cursor = coll
+        .find(doc! { "owner_id": user.id })
+        .sort(doc! { "priority": 1, "_id": 1 })
+        .await?;
+    let mut out = Vec::new();
+    while let Some(r) = cursor.try_next().await? {
+        out.push(rule_to_response(&r));
+    }
+    Ok(Json(out))
+}
+
+async fn validate_rule_category(
+    state: &AppState,
+    owner_id: ObjectId,
+    category_id_str: &str,
+) -> Result<ObjectId> {
+    let oid = parse_oid(category_id_str, "category_id")?;
+    let exists = state
+        .db
+        .collection::<FinanceCategory>(CATEGORIES)
+        .find_one(doc! { "_id": oid, "owner_id": owner_id })
+        .await?
+        .is_some();
+    if !exists {
+        return Err(AppError::BadRequest("Category not found".into()));
+    }
+    Ok(oid)
+}
+
+pub async fn create_rule(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(req): Json<FinanceRuleRequest>,
+) -> Result<(StatusCode, Json<FinanceRuleResponse>)> {
+    require_finance(&state)?;
+    validate_rule_request(&req)?;
+    let kind = parse_rule_pattern_kind(&req.pattern_kind)?;
+    let category_id = validate_rule_category(&state, user.id, &req.category_id).await?;
+    let now = Utc::now();
+    let rule = FinanceRule {
+        id: ObjectId::new(),
+        owner_id: user.id,
+        name: req.name.trim().to_string(),
+        pattern: req.pattern,
+        pattern_kind: kind,
+        case_insensitive: req.case_insensitive,
+        category_id,
+        priority: req.priority,
+        enabled: req.enabled,
+        created_at: now,
+        updated_at: now,
+    };
+    state.db.collection::<FinanceRule>(RULES).insert_one(&rule).await?;
+    Ok((StatusCode::CREATED, Json(rule_to_response(&rule))))
+}
+
+pub async fn update_rule(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    Json(req): Json<FinanceRuleRequest>,
+) -> Result<Json<FinanceRuleResponse>> {
+    require_finance(&state)?;
+    validate_rule_request(&req)?;
+    let kind = parse_rule_pattern_kind(&req.pattern_kind)?;
+    let oid = parse_oid(&id, "rule id")?;
+    let category_id = validate_rule_category(&state, user.id, &req.category_id).await?;
+
+    let coll = state.db.collection::<FinanceRule>(RULES);
+    let mut existing = coll
+        .find_one(doc! { "_id": oid, "owner_id": user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Rule not found".into()))?;
+
+    existing.name = req.name.trim().to_string();
+    existing.pattern = req.pattern;
+    existing.pattern_kind = kind;
+    existing.case_insensitive = req.case_insensitive;
+    existing.category_id = category_id;
+    existing.priority = req.priority;
+    existing.enabled = req.enabled;
+    existing.updated_at = Utc::now();
+
+    coll.replace_one(doc! { "_id": oid }, &existing).await?;
+    Ok(Json(rule_to_response(&existing)))
+}
+
+pub async fn delete_rule(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    require_finance(&state)?;
+    let oid = parse_oid(&id, "rule id")?;
+    let r = state
+        .db
+        .collection::<FinanceRule>(RULES)
+        .delete_one(doc! { "_id": oid, "owner_id": user.id })
+        .await?;
+    if r.deleted_count == 0 {
+        return Err(AppError::NotFound("Rule not found".into()));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn load_user_rules(state: &AppState, owner_id: ObjectId) -> Result<Vec<FinanceRule>> {
+    let coll = state.db.collection::<FinanceRule>(RULES);
+    let mut cursor = coll
+        .find(doc! { "owner_id": owner_id })
+        .sort(doc! { "priority": 1, "_id": 1 })
+        .await?;
+    let mut out = Vec::new();
+    while let Some(r) = cursor.try_next().await? {
+        out.push(r);
+    }
+    Ok(out)
+}
+
+pub async fn apply_rules(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<ApplyRulesResponse>> {
+    require_finance(&state)?;
+    let rules = load_user_rules(&state, user.id).await?;
+    let (engine, _errs) = RuleEngine::build(&rules);
+
+    let txns = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
+    // Only legs[0] is currently set by the importer; split transactions
+    // are deferred. We touch legs[0] only when its category_source is
+    // not 'user' (i.e. unset or previously rule-set).
+    let mut cursor = txns
+        .find(doc! {
+            "owner_id": user.id,
+            "$or": [
+                { "legs.0.category_source": "unset" },
+                { "legs.0.category_source": "rule" },
+            ],
+        })
+        .await?;
+
+    let mut updated = 0u32;
+    let mut still_unmatched = 0u32;
+    while let Some(t) = cursor.try_next().await? {
+        match engine.match_first(&t.description) {
+            Some(idx) => {
+                let rule = &rules[idx];
+                txns.update_one(
+                    doc! { "_id": t.id },
+                    doc! { "$set": {
+                        "legs.0.category_id": rule.category_id,
+                        "legs.0.category_source": "rule",
+                        "legs.0.rule_id": rule.id,
+                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                    } },
+                )
+                .await?;
+                updated += 1;
+            }
+            None => {
+                // No match — if we previously rule-tagged this leg,
+                // clear the tag so it doesn't pretend a rule still owns it.
+                if matches!(t.legs.first().map(|l| l.category_source), Some(CategorySource::Rule)) {
+                    txns.update_one(
+                        doc! { "_id": t.id },
+                        doc! { "$set": {
+                            "legs.0.category_id": Bson::Null,
+                            "legs.0.category_source": "unset",
+                            "legs.0.rule_id": Bson::Null,
+                            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                        } },
+                    )
+                    .await?;
+                }
+                still_unmatched += 1;
+            }
+        }
+    }
+
+    Ok(Json(ApplyRulesResponse {
+        updated,
+        still_unmatched,
+    }))
+}
+
+pub async fn test_rule(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(req): Json<TestRuleRequest>,
+) -> Result<Json<TestRuleResponse>> {
+    require_finance(&state)?;
+    let kind = parse_rule_pattern_kind(&req.pattern_kind)?;
+    let matcher = finance_rules::compile_pattern(&req.pattern, kind, req.case_insensitive)
+        .map_err(|e| AppError::BadRequest(format!("Invalid pattern: {e}")))?;
+
+    let txns = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
+    let opts = FindOptions::builder()
+        .sort(doc! { "date": -1 })
+        .limit(200i64)
+        .build();
+    let mut cursor = txns
+        .find(doc! { "owner_id": user.id })
+        .with_options(opts)
+        .await?;
+
+    let mut matches = Vec::new();
+    let mut sampled = 0u32;
+    while let Some(t) = cursor.try_next().await? {
+        sampled += 1;
+        if matcher.matches(&t.description) && matches.len() < 50 {
+            matches.push(TestRuleMatch {
+                transaction_id: t.id.to_hex(),
+                date: t.date.to_rfc3339(),
+                description: t.description.clone(),
+                amount_minor: t.amount_minor,
+            });
+        }
+    }
+
+    Ok(Json(TestRuleResponse { sampled, matches }))
 }

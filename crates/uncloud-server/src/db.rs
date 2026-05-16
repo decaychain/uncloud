@@ -695,6 +695,15 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         )
         .await?;
 
+    let finance_rules = db.collection::<mongodb::bson::Document>("finance_rules");
+    finance_rules
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "priority": 1, "_id": 1 })
+                .build(),
+        )
+        .await?;
+
     let finance_balance_snapshots =
         db.collection::<mongodb::bson::Document>("finance_balance_snapshots");
     finance_balance_snapshots

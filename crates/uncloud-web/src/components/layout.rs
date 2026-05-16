@@ -168,7 +168,8 @@ pub fn Layout() -> Element {
         | Route::FinanceAccounts {}
         | Route::FinanceCategories {}
         | Route::FinanceSchemas {}
-        | Route::FinanceImports {} => "Uncloud - Finance",
+        | Route::FinanceImports {}
+        | Route::FinanceRules {} => "Uncloud - Finance",
         Route::Tasks {} | Route::TasksAssigned {} | Route::TasksProject { .. } => "Uncloud - Tasks",
         Route::Passwords {} => "Uncloud - Passwords",
         Route::Settings {} | Route::SettingsTab { .. } => "Uncloud - Settings",
@@ -257,7 +258,8 @@ fn Navbar() -> Element {
             | Route::FinanceAccounts {}
             | Route::FinanceCategories {}
             | Route::FinanceSchemas {}
-            | Route::FinanceImports {},
+            | Route::FinanceImports {}
+            | Route::FinanceRules {},
     ) {
         "Finance"
     } else if matches!(route, Route::Tasks {} | Route::TasksAssigned {} | Route::TasksProject { .. }) {

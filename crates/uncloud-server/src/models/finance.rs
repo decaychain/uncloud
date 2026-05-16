@@ -197,6 +197,49 @@ pub struct BalanceSnapshot {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum RulePatternKind {
+    Substring,
+    StartsWith,
+    Regex,
+}
+
+impl Default for RulePatternKind {
+    fn default() -> Self {
+        Self::Substring
+    }
+}
+
+/// A user-defined categorization rule. Applied on import (first match
+/// wins, ordered by priority asc) and on demand via the "apply rules"
+/// endpoint. User-set categories are never overwritten.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FinanceRule {
+    #[serde(rename = "_id")]
+    pub id: ObjectId,
+    pub owner_id: ObjectId,
+    pub name: String,
+    pub pattern: String,
+    pub pattern_kind: RulePatternKind,
+    #[serde(default = "default_case_insensitive")]
+    pub case_insensitive: bool,
+    pub category_id: ObjectId,
+    /// Lower numbers run first. Ties broken by insertion order (mongo _id).
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
+    pub updated_at: DateTime<Utc>,
+}
+
+fn default_case_insensitive() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum DecimalSeparator {
     Dot,
     Comma,

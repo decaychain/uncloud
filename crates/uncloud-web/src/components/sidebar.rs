@@ -54,7 +54,8 @@ pub fn Sidebar() -> Element {
             | Route::FinanceAccounts {}
             | Route::FinanceCategories {}
             | Route::FinanceSchemas {}
-            | Route::FinanceImports {},
+            | Route::FinanceImports {}
+            | Route::FinanceRules {},
     ) {
         "finance"
     } else if matches!(route, Route::Passwords {}) {
@@ -288,6 +289,15 @@ pub fn Sidebar() -> Element {
                                     onclick: move |_| close_drawer(),
                                     IconHistory {}
                                     span { "Import history" }
+                                }
+                            }
+                            li {
+                                Link {
+                                    to: Route::FinanceRules {},
+                                    class: if matches!(route, Route::FinanceRules {}) { "active" } else { "" },
+                                    onclick: move |_| close_drawer(),
+                                    IconShield {}
+                                    span { "Rules" }
                                 }
                             }
                         },

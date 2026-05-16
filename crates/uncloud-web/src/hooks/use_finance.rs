@@ -1,11 +1,13 @@
 //! HTTP wrappers for the finance tracker REST surface.
 
 use uncloud_common::{
-    AccountBalanceResponse, AccountResponse, BalanceSnapshotResponse, CreateAccountRequest,
-    CreateFinanceCategoryRequest, CreateTransactionRequest, FinanceCategoryResponse,
-    ImportCsvResponse, ImportRunResponse, ImportSchemaRequest, ImportSchemaResponse,
-    ReconcilePreviewResponse, ReconcileRequest, TransactionListResponse, TransactionResponse,
-    UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
+    AccountBalanceResponse, AccountResponse, ApplyRulesResponse, BalanceSnapshotResponse,
+    CreateAccountRequest, CreateFinanceCategoryRequest, CreateTransactionRequest,
+    FinanceCategoryResponse, FinanceRuleRequest, FinanceRuleResponse, ImportCsvResponse,
+    ImportRunResponse, ImportSchemaRequest, ImportSchemaResponse, ReconcilePreviewResponse,
+    ReconcileRequest, TestRuleRequest, TestRuleResponse, TransactionListResponse,
+    TransactionResponse, UpdateAccountRequest, UpdateFinanceCategoryRequest,
+    UpdateTransactionRequest,
 };
 
 use super::api;
@@ -418,4 +420,61 @@ pub async fn delete_snapshot(id: &str) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     if r.ok() { Ok(()) } else { Err(extract_error(r).await) }
+}
+
+pub async fn list_rules() -> Result<Vec<FinanceRuleResponse>, String> {
+    let r = api::get("/finance/rules").send().await.map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<Vec<FinanceRuleResponse>>().await.map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn create_rule(req: &FinanceRuleRequest) -> Result<FinanceRuleResponse, String> {
+    let r = api::post("/finance/rules")
+        .json(req).map_err(|e| e.to_string())?
+        .send().await.map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<FinanceRuleResponse>().await.map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn update_rule(id: &str, req: &FinanceRuleRequest) -> Result<FinanceRuleResponse, String> {
+    let r = api::put(&format!("/finance/rules/{id}"))
+        .json(req).map_err(|e| e.to_string())?
+        .send().await.map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<FinanceRuleResponse>().await.map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn delete_rule(id: &str) -> Result<(), String> {
+    let r = api::delete(&format!("/finance/rules/{id}"))
+        .send().await.map_err(|e| e.to_string())?;
+    if r.ok() { Ok(()) } else { Err(extract_error(r).await) }
+}
+
+pub async fn apply_rules() -> Result<ApplyRulesResponse, String> {
+    let r = api::post("/finance/rules/apply").send().await.map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<ApplyRulesResponse>().await.map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn test_rule(req: &TestRuleRequest) -> Result<TestRuleResponse, String> {
+    let r = api::post("/finance/rules/test")
+        .json(req).map_err(|e| e.to_string())?
+        .send().await.map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<TestRuleResponse>().await.map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
 }
