@@ -131,10 +131,44 @@ pub struct ImportRowError {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImportCsvResponse {
+    pub run_id: String,
     pub imported: u32,
     pub skipped: u32,
     pub errors: u32,
     pub error_details: Vec<ImportRowError>,
+}
+
+// ── Import runs (history) ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportRunSummaryDto {
+    pub created: u32,
+    pub skipped_duplicate: u32,
+    pub errored: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportRunSourceDto {
+    /// "upload" or "uncloud_file".
+    pub kind: String,
+    pub filename: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub uncloud_file_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportRunResponse {
+    pub id: String,
+    pub account_id: String,
+    pub schema_id: String,
+    pub source: ImportRunSourceDto,
+    /// "applied" or "reverted".
+    pub status: String,
+    pub summary: ImportRunSummaryDto,
+    pub errors: Vec<ImportRowError>,
+    pub created_at: String,
+    pub reverted_at: Option<String>,
 }
 
 // ── Import schemas ───────────────────────────────────────────────────────

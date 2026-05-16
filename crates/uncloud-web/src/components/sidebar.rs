@@ -53,7 +53,8 @@ pub fn Sidebar() -> Element {
         Route::Finance {}
             | Route::FinanceAccounts {}
             | Route::FinanceCategories {}
-            | Route::FinanceSchemas {},
+            | Route::FinanceSchemas {}
+            | Route::FinanceImports {},
     ) {
         "finance"
     } else if matches!(route, Route::Passwords {}) {
@@ -278,6 +279,15 @@ pub fn Sidebar() -> Element {
                                     onclick: move |_| close_drawer(),
                                     IconFileText {}
                                     span { "Import schemas" }
+                                }
+                            }
+                            li {
+                                Link {
+                                    to: Route::FinanceImports {},
+                                    class: if matches!(route, Route::FinanceImports {}) { "active" } else { "" },
+                                    onclick: move |_| close_drawer(),
+                                    IconHistory {}
+                                    span { "Import history" }
                                 }
                             }
                         },

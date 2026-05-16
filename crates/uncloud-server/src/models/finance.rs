@@ -94,10 +94,74 @@ pub struct FinanceTransaction {
     pub tags: Vec<String>,
     #[serde(default)]
     pub legs: Vec<TransactionLeg>,
+    /// Tags the run that created this row. `None` for manually-created
+    /// transactions and for rows imported before runs existed. Reverting
+    /// an `ImportRun` deletes every transaction with this id.
+    #[serde(default)]
+    pub import_run_id: Option<ObjectId>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportRunStatus {
+    Applied,
+    Reverted,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportSourceKind {
+    Upload,
+    UncloudFile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportSource {
+    pub kind: ImportSourceKind,
+    pub filename: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    #[serde(default)]
+    pub uncloud_file_id: Option<ObjectId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportRunSummary {
+    pub created: u32,
+    pub skipped_duplicate: u32,
+    pub errored: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportRunError {
+    pub line: u32,
+    pub message: String,
+}
+
+/// One CSV import attempt. Created at commit time (single-phase for v1
+/// — preview/apply two-phase is deferred). Reverting deletes all
+/// transactions whose `import_run_id` matches this run; the run row
+/// stays as an audit trail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportRun {
+    #[serde(rename = "_id")]
+    pub id: ObjectId,
+    pub owner_id: ObjectId,
+    pub account_id: ObjectId,
+    pub schema_id: ObjectId,
+    pub source: ImportSource,
+    pub status: ImportRunStatus,
+    pub summary: ImportRunSummary,
+    #[serde(default)]
+    pub errors: Vec<ImportRunError>,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+    #[serde(default, with = "crate::models::opt_dt")]
+    pub reverted_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

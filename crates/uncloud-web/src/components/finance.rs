@@ -9,8 +9,9 @@ use std::collections::HashMap;
 use dioxus::prelude::*;
 use uncloud_common::{
     AccountResponse, CreateAccountRequest, CreateFinanceCategoryRequest, CreateTransactionRequest,
-    FinanceCategoryResponse, ImportCsvResponse, ImportSchemaResponse, TransactionResponse,
-    UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
+    FinanceCategoryResponse, ImportCsvResponse, ImportRunResponse, ImportSchemaResponse,
+    TransactionResponse, UpdateAccountRequest, UpdateFinanceCategoryRequest,
+    UpdateTransactionRequest,
 };
 
 use crate::hooks::use_finance;
@@ -41,6 +42,11 @@ pub fn FinanceCategoriesPage() -> Element {
 #[component]
 pub fn FinanceSchemasPage() -> Element {
     finance_shell(rsx! { SchemasTab {} })
+}
+
+#[component]
+pub fn FinanceImportsPage() -> Element {
+    finance_shell(rsx! { ImportsTab {} })
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1602,6 +1608,124 @@ fn SchemaFormModal(
                         disabled: submitting(),
                         onclick: submit,
                         if submitting() { "Saving…" } else if is_edit { "Save" } else { "Create" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ImportsTab() -> Element {
+    let mut runs: Signal<Vec<ImportRunResponse>> = use_signal(Vec::new);
+    let mut schemas: Signal<HashMap<String, String>> = use_signal(HashMap::new);
+    let mut accounts: Signal<HashMap<String, String>> = use_signal(HashMap::new);
+    let mut loading = use_signal(|| true);
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+    let mut refresh = use_signal(|| 0u32);
+    let mut reverting: Signal<Option<String>> = use_signal(|| None);
+
+    use_effect(move || {
+        let _ = refresh();
+        spawn(async move {
+            loading.set(true);
+            error.set(None);
+
+            match use_finance::list_import_runs().await {
+                Ok(list) => runs.set(list),
+                Err(e) => error.set(Some(e)),
+            }
+            if let Ok(list) = use_finance::list_import_schemas().await {
+                schemas.set(list.into_iter().map(|s| (s.id, s.name)).collect());
+            }
+            if let Ok(list) = use_finance::list_accounts().await {
+                accounts.set(list.into_iter().map(|a| (a.id, a.name)).collect());
+            }
+            loading.set(false);
+        });
+    });
+
+    rsx! {
+        div { class: "flex justify-between items-center mb-4",
+            h2 { class: "text-xl font-semibold", "Import history" }
+        }
+        if let Some(e) = error() {
+            div { class: "alert alert-error mb-3", "{e}" }
+        }
+        if loading() && runs().is_empty() {
+            div { class: "flex justify-center py-8",
+                span { class: "loading loading-spinner loading-lg" }
+            }
+        } else if runs().is_empty() {
+            div { class: "text-center py-10 opacity-60",
+                p { "No imports yet." }
+                p { class: "text-sm mt-2", "Imported CSV files will appear here so you can revert any run that turned out to be a mistake." }
+            }
+        } else {
+            div { class: "overflow-x-auto",
+                table { class: "table table-zebra",
+                    thead { tr {
+                        th { "When" }
+                        th { "File" }
+                        th { "Account" }
+                        th { "Schema" }
+                        th { class: "text-right", "Created" }
+                        th { class: "text-right", "Skipped" }
+                        th { class: "text-right", "Errors" }
+                        th { "Status" }
+                        th { "" }
+                    } }
+                    tbody {
+                        {runs().iter().map(|r| {
+                            let when = r.created_at.get(..10).unwrap_or(&r.created_at).to_string();
+                            let account_name = accounts().get(&r.account_id).cloned().unwrap_or_else(|| "—".into());
+                            let schema_name = schemas().get(&r.schema_id).cloned().unwrap_or_else(|| "—".into());
+                            let status = r.status.clone();
+                            let run_id = r.id.clone();
+                            let is_applied = status == "applied";
+                            let busy = reverting().as_deref() == Some(run_id.as_str());
+                            rsx! {
+                                tr { key: "{r.id}",
+                                    td { class: "whitespace-nowrap", "{when}" }
+                                    td { class: "max-w-xs truncate", title: "{r.source.filename}", "{r.source.filename}" }
+                                    td { "{account_name}" }
+                                    td { class: "opacity-70", "{schema_name}" }
+                                    td { class: "text-right", "{r.summary.created}" }
+                                    td { class: "text-right opacity-70", "{r.summary.skipped_duplicate}" }
+                                    td {
+                                        class: if r.summary.errored > 0 { "text-right text-error" } else { "text-right opacity-70" },
+                                        "{r.summary.errored}"
+                                    }
+                                    td {
+                                        if is_applied {
+                                            span { class: "badge badge-success badge-sm", "applied" }
+                                        } else {
+                                            span { class: "badge badge-ghost badge-sm", "reverted" }
+                                        }
+                                    }
+                                    td { class: "text-right whitespace-nowrap",
+                                        if is_applied {
+                                            button {
+                                                class: "btn btn-ghost btn-xs text-error",
+                                                disabled: busy,
+                                                onclick: move |_| {
+                                                    let id = run_id.clone();
+                                                    reverting.set(Some(id.clone()));
+                                                    spawn(async move {
+                                                        match use_finance::revert_import_run(&id).await {
+                                                            Ok(_) => refresh += 1,
+                                                            Err(e) => error.set(Some(e)),
+                                                        }
+                                                        reverting.set(None);
+                                                    });
+                                                },
+                                                if busy { "Reverting…" } else { "Revert" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        })}
                     }
                 }
             }

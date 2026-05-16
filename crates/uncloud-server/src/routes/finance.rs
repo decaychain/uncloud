@@ -16,26 +16,31 @@ use mongodb::bson::oid::ObjectId;
 use mongodb::bson::Bson;
 use mongodb::options::FindOptions;
 
+use sha2::{Digest, Sha256};
+
 use crate::error::{AppError, Result};
 use crate::finance_import::{self, sparkasse_camt_v8, ParseError, ParsedRow};
 use crate::middleware::AuthUser;
 use crate::models::{
     AmountSignConvention, CategorySource, CurrencySource, DecimalSeparator, FinanceAccount,
-    FinanceCategory, FinanceTransaction, ImportSchema, TransactionLeg,
+    FinanceCategory, FinanceTransaction, ImportRun, ImportRunError as ModelImportRunError,
+    ImportRunStatus, ImportRunSummary, ImportSchema, ImportSource, ImportSourceKind,
+    TransactionLeg,
 };
 use crate::AppState;
 use uncloud_common::{
     AccountBalanceResponse, AccountResponse, CreateAccountRequest, CreateFinanceCategoryRequest,
     CreateTransactionRequest, FinanceCategoryResponse, ImportCsvResponse, ImportRowError,
-    ImportSchemaRequest, ImportSchemaResponse, ListTransactionsQuery, TransactionListResponse,
-    TransactionResponse, UpdateAccountRequest, UpdateFinanceCategoryRequest,
-    UpdateTransactionRequest,
+    ImportRunResponse, ImportRunSourceDto, ImportRunSummaryDto, ImportSchemaRequest,
+    ImportSchemaResponse, ListTransactionsQuery, TransactionListResponse, TransactionResponse,
+    UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
 const ACCOUNTS: &str = "finance_accounts";
 const CATEGORIES: &str = "finance_categories";
 const TRANSACTIONS: &str = "finance_transactions";
 const IMPORT_SCHEMAS: &str = "finance_import_schemas";
+const IMPORT_RUNS: &str = "finance_import_runs";
 
 const ALLOWED_CURRENCY_LEN: usize = 3;
 
@@ -569,6 +574,7 @@ pub async fn create_transaction(
         }),
         tags: vec![],
         legs: vec![leg],
+        import_run_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -980,6 +986,7 @@ pub async fn import_csv(
     let mut account_id_str: Option<String> = None;
     let mut schema_id_str: Option<String> = None;
     let mut csv_bytes: Option<Vec<u8>> = None;
+    let mut csv_filename: Option<String> = None;
 
     while let Some(field) = multipart
         .next_field()
@@ -1004,6 +1011,7 @@ pub async fn import_csv(
                 );
             }
             "csv" => {
+                csv_filename = field.file_name().map(|s| s.to_string());
                 let bytes = field
                     .bytes()
                     .await
@@ -1041,6 +1049,7 @@ pub async fn import_csv(
         }
     })?;
 
+    let run_id = ObjectId::new();
     let txns = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
     let mut imported = 0u32;
     let mut skipped = 0u32;
@@ -1069,7 +1078,7 @@ pub async fn import_csv(
             }
         };
 
-        match insert_imported_row(&txns, user.id, &account, row).await {
+        match insert_imported_row(&txns, user.id, &account, row, run_id).await {
             Ok(InsertOutcome::Inserted) => imported += 1,
             Ok(InsertOutcome::Skipped) => skipped += 1,
             Err(e) => {
@@ -1084,7 +1093,47 @@ pub async fn import_csv(
         }
     }
 
+    let mut hasher = Sha256::new();
+    hasher.update(&csv_bytes);
+    let sha256 = hex::encode(hasher.finalize());
+
+    let now = Utc::now();
+    let run = ImportRun {
+        id: run_id,
+        owner_id: user.id,
+        account_id: account.id,
+        schema_id: schema.id,
+        source: ImportSource {
+            kind: ImportSourceKind::Upload,
+            filename: csv_filename.unwrap_or_else(|| "import.csv".to_string()),
+            size_bytes: csv_bytes.len() as u64,
+            sha256,
+            uncloud_file_id: None,
+        },
+        status: ImportRunStatus::Applied,
+        summary: ImportRunSummary {
+            created: imported,
+            skipped_duplicate: skipped,
+            errored: errors,
+        },
+        errors: error_details
+            .iter()
+            .map(|e| ModelImportRunError {
+                line: e.line,
+                message: e.message.clone(),
+            })
+            .collect(),
+        created_at: now,
+        reverted_at: None,
+    };
+    state
+        .db
+        .collection::<ImportRun>(IMPORT_RUNS)
+        .insert_one(&run)
+        .await?;
+
     Ok(Json(ImportCsvResponse {
+        run_id: run_id.to_hex(),
         imported,
         skipped,
         errors,
@@ -1102,6 +1151,7 @@ async fn insert_imported_row(
     owner_id: ObjectId,
     account: &FinanceAccount,
     row: ParsedRow,
+    run_id: ObjectId,
 ) -> std::result::Result<InsertOutcome, AppError> {
     let now = Utc::now();
     let leg = TransactionLeg {
@@ -1124,6 +1174,7 @@ async fn insert_imported_row(
         notes: None,
         tags: vec![],
         legs: vec![leg],
+        import_run_id: Some(run_id),
         created_at: now,
         updated_at: now,
     };
@@ -1146,4 +1197,90 @@ fn is_duplicate_key_error(err: &mongodb::error::Error) -> bool {
         ErrorKind::Write(WriteFailure::WriteError(we)) => we.code == 11000,
         _ => false,
     }
+}
+
+fn run_to_response(r: &ImportRun) -> ImportRunResponse {
+    ImportRunResponse {
+        id: r.id.to_hex(),
+        account_id: r.account_id.to_hex(),
+        schema_id: r.schema_id.to_hex(),
+        source: ImportRunSourceDto {
+            kind: match r.source.kind {
+                ImportSourceKind::Upload => "upload".into(),
+                ImportSourceKind::UncloudFile => "uncloud_file".into(),
+            },
+            filename: r.source.filename.clone(),
+            size_bytes: r.source.size_bytes,
+            sha256: r.source.sha256.clone(),
+            uncloud_file_id: r.source.uncloud_file_id.map(|id| id.to_hex()),
+        },
+        status: match r.status {
+            ImportRunStatus::Applied => "applied".into(),
+            ImportRunStatus::Reverted => "reverted".into(),
+        },
+        summary: ImportRunSummaryDto {
+            created: r.summary.created,
+            skipped_duplicate: r.summary.skipped_duplicate,
+            errored: r.summary.errored,
+        },
+        errors: r
+            .errors
+            .iter()
+            .map(|e| ImportRowError {
+                line: e.line,
+                message: e.message.clone(),
+            })
+            .collect(),
+        created_at: r.created_at.to_rfc3339(),
+        reverted_at: r.reverted_at.map(|d| d.to_rfc3339()),
+    }
+}
+
+pub async fn list_import_runs(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Vec<ImportRunResponse>>> {
+    require_finance(&state)?;
+    let coll = state.db.collection::<ImportRun>(IMPORT_RUNS);
+    let mut cursor = coll
+        .find(doc! { "owner_id": user.id })
+        .sort(doc! { "created_at": -1 })
+        .await?;
+    let mut out = Vec::new();
+    while let Some(r) = cursor.try_next().await? {
+        out.push(run_to_response(&r));
+    }
+    Ok(Json(out))
+}
+
+pub async fn revert_import_run(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<ImportRunResponse>> {
+    require_finance(&state)?;
+    let run_oid = parse_oid(&id, "run id")?;
+    let runs = state.db.collection::<ImportRun>(IMPORT_RUNS);
+    let mut run = runs
+        .find_one(doc! { "_id": run_oid, "owner_id": user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Import run not found".into()))?;
+
+    if matches!(run.status, ImportRunStatus::Reverted) {
+        return Err(AppError::BadRequest("Run already reverted".into()));
+    }
+
+    let txns = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
+    txns.delete_many(doc! {
+        "owner_id": user.id,
+        "import_run_id": run_oid,
+    })
+    .await?;
+
+    let now = Utc::now();
+    run.status = ImportRunStatus::Reverted;
+    run.reverted_at = Some(now);
+    runs.replace_one(doc! { "_id": run_oid }, &run).await?;
+
+    Ok(Json(run_to_response(&run)))
 }

@@ -661,6 +661,38 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         )
         .await?;
 
+    // Lets revert delete every transaction tied to a run in one pass.
+    finance_transactions
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "import_run_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(mongodb::bson::doc! {
+                            "import_run_id": { "$type": "objectId" }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    let finance_import_runs = db.collection::<mongodb::bson::Document>("finance_import_runs");
+    finance_import_runs
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    finance_import_runs
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "account_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+
     let finance_import_schemas = db.collection::<mongodb::bson::Document>("finance_import_schemas");
     finance_import_schemas
         .create_index(

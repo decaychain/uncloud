@@ -2,9 +2,9 @@
 
 use uncloud_common::{
     AccountBalanceResponse, AccountResponse, CreateAccountRequest, CreateFinanceCategoryRequest,
-    CreateTransactionRequest, FinanceCategoryResponse, ImportCsvResponse, ImportSchemaRequest,
-    ImportSchemaResponse, TransactionListResponse, TransactionResponse, UpdateAccountRequest,
-    UpdateFinanceCategoryRequest, UpdateTransactionRequest,
+    CreateTransactionRequest, FinanceCategoryResponse, ImportCsvResponse, ImportRunResponse,
+    ImportSchemaRequest, ImportSchemaResponse, TransactionListResponse, TransactionResponse,
+    UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
 use super::api;
@@ -310,5 +310,33 @@ pub async fn import_csv(
             .map_err(|e| e.to_string())
     } else {
         Err(extract_error(resp).await)
+    }
+}
+
+pub async fn list_import_runs() -> Result<Vec<ImportRunResponse>, String> {
+    let r = api::get("/finance/imports")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<Vec<ImportRunResponse>>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn revert_import_run(id: &str) -> Result<ImportRunResponse, String> {
+    let r = api::post(&format!("/finance/imports/{id}/revert"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<ImportRunResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
     }
 }

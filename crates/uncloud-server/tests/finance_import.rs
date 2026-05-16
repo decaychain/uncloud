@@ -72,6 +72,7 @@ async fn imports_two_rows_then_dedups_on_reimport() {
     assert_eq!(first["imported"], 2);
     assert_eq!(first["skipped"], 0);
     assert_eq!(first["errors"], 0);
+    assert!(first["run_id"].as_str().is_some(), "run_id should be returned");
 
     // Same CSV re-uploaded: every row is a duplicate now.
     let second: Value = app
@@ -206,5 +207,87 @@ async fn import_requires_auth() {
         .await;
 
     assert_eq!(resp.status_code(), 401);
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn import_creates_run_and_revert_deletes_transactions() {
+    let app = TestApp::new().await;
+    app.register_and_login("frank").await;
+    let account_id = create_account(&app).await;
+    let schema_id = sparkasse_schema_id(&app).await;
+
+    let import: Value = app
+        .server
+        .post("/api/finance/import")
+        .multipart(import_form(&account_id, &schema_id, fixture_csv()))
+        .await
+        .json();
+    let run_id = import["run_id"].as_str().expect("run_id").to_string();
+
+    let runs: Value = app.server.get("/api/finance/imports").await.json();
+    let arr = runs.as_array().expect("runs array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"], run_id);
+    assert_eq!(arr[0]["status"], "applied");
+    assert_eq!(arr[0]["summary"]["created"], 2);
+    assert_eq!(arr[0]["source"]["kind"], "upload");
+
+    let listing_before: Value = app
+        .server
+        .get("/api/finance/transactions")
+        .add_query_param("account_id", &account_id)
+        .await
+        .json();
+    assert_eq!(listing_before["total"], 2);
+
+    let reverted: Value = app
+        .server
+        .post(&format!("/api/finance/imports/{run_id}/revert"))
+        .await
+        .json();
+    assert_eq!(reverted["status"], "reverted");
+    assert!(reverted["reverted_at"].as_str().is_some());
+
+    let listing_after: Value = app
+        .server
+        .get("/api/finance/transactions")
+        .add_query_param("account_id", &account_id)
+        .await
+        .json();
+    assert_eq!(listing_after["total"], 0);
+
+    // Reverting a run twice is rejected.
+    let twice = app
+        .server
+        .post(&format!("/api/finance/imports/{run_id}/revert"))
+        .await;
+    assert_eq!(twice.status_code(), 400);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn revert_does_not_touch_other_users_transactions() {
+    let app = TestApp::new().await;
+    app.register_and_login("grace").await;
+    let account_id = create_account(&app).await;
+    let schema_id = sparkasse_schema_id(&app).await;
+    let import: Value = app
+        .server
+        .post("/api/finance/import")
+        .multipart(import_form(&account_id, &schema_id, fixture_csv()))
+        .await
+        .json();
+    let run_id = import["run_id"].as_str().unwrap().to_string();
+
+    // Different user can't revert someone else's run — should 404.
+    app.register_and_login("heidi").await;
+    let resp = app
+        .server
+        .post(&format!("/api/finance/imports/{run_id}/revert"))
+        .await;
+    assert_eq!(resp.status_code(), 404);
+
     app.cleanup().await;
 }

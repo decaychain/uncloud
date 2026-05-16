@@ -5,7 +5,8 @@ use crate::components::{
     dashboard::DashboardPage,
     duplicates::DuplicatesPage,
     finance::{
-        FinanceAccountsPage, FinanceCategoriesPage, FinanceSchemasPage, FinanceTransactionsPage,
+        FinanceAccountsPage, FinanceCategoriesPage, FinanceImportsPage, FinanceSchemasPage,
+        FinanceTransactionsPage,
     },
     file_browser::FileBrowser,
     layout::Layout,
@@ -114,6 +115,9 @@ pub enum Route {
 
         #[route("/finance/schemas")]
         FinanceSchemas {},
+
+        #[route("/finance/imports")]
+        FinanceImports {},
 
         #[route("/shopping")]
         Shopping {},
@@ -318,6 +322,11 @@ fn FinanceCategories() -> Element {
 #[component]
 fn FinanceSchemas() -> Element {
     rsx! { FinanceSchemasPage {} }
+}
+
+#[component]
+fn FinanceImports() -> Element {
+    rsx! { FinanceImportsPage {} }
 }
 
 #[component]

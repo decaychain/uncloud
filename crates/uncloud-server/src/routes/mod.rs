@@ -243,7 +243,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/finance/import-schemas/{id}/clone",
             post(finance::clone_import_schema),
         )
-        .route("/finance/import", post(finance::import_csv));
+        .route("/finance/import", post(finance::import_csv))
+        .route("/finance/imports", get(finance::list_import_runs))
+        .route(
+            "/finance/imports/{id}/revert",
+            post(finance::revert_import_run),
+        );
 
     // v1-only routes (API tokens, S3 credentials, apps)
     let v1_only = Router::new()
