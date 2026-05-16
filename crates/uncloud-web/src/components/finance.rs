@@ -8,10 +8,10 @@ use std::collections::HashMap;
 
 use dioxus::prelude::*;
 use uncloud_common::{
-    AccountResponse, CreateAccountRequest, CreateFinanceCategoryRequest, CreateTransactionRequest,
-    FinanceCategoryResponse, ImportCsvResponse, ImportRunResponse, ImportSchemaResponse,
-    TransactionResponse, UpdateAccountRequest, UpdateFinanceCategoryRequest,
-    UpdateTransactionRequest,
+    AccountResponse, BalanceSnapshotResponse, CreateAccountRequest, CreateFinanceCategoryRequest,
+    CreateTransactionRequest, FinanceCategoryResponse, ImportCsvResponse, ImportRunResponse,
+    ImportSchemaResponse, ReconcilePreviewResponse, ReconcileRequest, TransactionResponse,
+    UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
 use crate::hooks::use_finance;
@@ -113,6 +113,7 @@ fn AccountsTab() -> Element {
     let mut refresh = use_signal(|| 0u32);
     let mut show_create = use_signal(|| false);
     let mut edit_target: Signal<Option<AccountResponse>> = use_signal(|| None);
+    let mut reconcile_target: Signal<Option<AccountResponse>> = use_signal(|| None);
 
     use_effect(move || {
         let _ = refresh();
@@ -199,6 +200,7 @@ fn AccountsTab() -> Element {
                     tbody {
                         {accounts().iter().map(|a| {
                             let a_edit = a.clone();
+                            let a_recon = a.clone();
                             let a_id = a.id.clone();
                             let bal = balances().get(&a.id).copied().unwrap_or(a.opening_balance_minor);
                             let archived = a.archived_at.is_some();
@@ -211,7 +213,14 @@ fn AccountsTab() -> Element {
                                     td { "{a.account_type}" }
                                     td { "{a.currency}" }
                                     td { class: "text-right font-mono", "{format_money(bal, &a.currency)}" }
-                                    td { class: "text-right",
+                                    td { class: "text-right whitespace-nowrap",
+                                        if !archived {
+                                            button {
+                                                class: "btn btn-ghost btn-xs",
+                                                onclick: move |_| reconcile_target.set(Some(a_recon.clone())),
+                                                "Reconcile"
+                                            }
+                                        }
                                         button {
                                             class: "btn btn-ghost btn-xs",
                                             onclick: move |_| edit_target.set(Some(a_edit.clone())),
@@ -252,6 +261,14 @@ fn AccountsTab() -> Element {
                 initial: Some(a.clone()),
                 on_close: move |_| edit_target.set(None),
                 on_saved: move |_| { edit_target.set(None); refresh += 1; },
+            }
+        }
+        if let Some(a) = reconcile_target() {
+            ReconcileModal {
+                key: "{a.id}",
+                account: a.clone(),
+                on_close: move |_| reconcile_target.set(None),
+                on_done: move |_| { reconcile_target.set(None); refresh += 1; },
             }
         }
     }
@@ -1771,3 +1788,230 @@ fn ImportsTab() -> Element {
         }
     }
 }
+
+#[component]
+fn ReconcileModal(
+    account: AccountResponse,
+    on_close: EventHandler<()>,
+    on_done: EventHandler<()>,
+) -> Element {
+    let today = today_iso();
+    let mut on_date = use_signal(|| today.clone());
+    let mut actual = use_signal(String::new);
+    let mut note = use_signal(String::new);
+    let mut preview: Signal<Option<ReconcilePreviewResponse>> = use_signal(|| None);
+    let mut snapshots: Signal<Vec<BalanceSnapshotResponse>> = use_signal(Vec::new);
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+    let mut busy = use_signal(|| false);
+    let mut refresh = use_signal(|| 0u32);
+
+    let acc_id = account.id.clone();
+    let currency = account.currency.clone();
+
+    let acc_id_for_snaps = acc_id.clone();
+    use_effect(move || {
+        let _ = refresh();
+        let id = acc_id_for_snaps.clone();
+        spawn(async move {
+            if let Ok(list) = use_finance::list_account_snapshots(&id).await {
+                snapshots.set(list);
+            }
+        });
+    });
+
+    let acc_id_preview = acc_id.clone();
+    let do_preview = move |_| {
+        let id = acc_id_preview.clone();
+        if busy() { return; }
+        let actual_minor = match parse_money(&actual()) {
+            Ok(v) => v,
+            Err(e) => { error.set(Some(e)); return; }
+        };
+        let req = ReconcileRequest {
+            on_date: on_date(),
+            actual_balance_minor: actual_minor,
+            note: None,
+        };
+        busy.set(true);
+        error.set(None);
+        spawn(async move {
+            match use_finance::reconcile_preview(&id, &req).await {
+                Ok(p) => preview.set(Some(p)),
+                Err(e) => error.set(Some(e)),
+            }
+            busy.set(false);
+        });
+    };
+
+    let acc_id_apply = acc_id.clone();
+    let do_apply = move |_| {
+        let id = acc_id_apply.clone();
+        if busy() { return; }
+        let actual_minor = match parse_money(&actual()) {
+            Ok(v) => v,
+            Err(e) => { error.set(Some(e)); return; }
+        };
+        let note_str = note().trim().to_string();
+        let req = ReconcileRequest {
+            on_date: on_date(),
+            actual_balance_minor: actual_minor,
+            note: if note_str.is_empty() { None } else { Some(note_str) },
+        };
+        busy.set(true);
+        error.set(None);
+        spawn(async move {
+            match use_finance::reconcile_apply(&id, &req).await {
+                Ok(_) => on_done.call(()),
+                Err(e) => { error.set(Some(e)); busy.set(false); }
+            }
+        });
+    };
+
+    rsx! {
+        div { class: "modal modal-open",
+            div { class: "modal-box max-w-lg",
+                h3 { class: "font-bold text-lg mb-1", "Reconcile {account.name}" }
+                p { class: "text-sm opacity-70 mb-3",
+                    "Enter the balance your bank statement shows on a given date. Uncloud creates an adjustment transaction to bridge any difference."
+                }
+
+                if let Some(e) = error() {
+                    div { class: "alert alert-error mb-3", "{e}" }
+                }
+
+                div { class: "grid grid-cols-2 gap-3 mb-3",
+                    div { class: "form-control",
+                        label { class: "label", span { class: "label-text", "Statement date" } }
+                        input {
+                            r#type: "date",
+                            class: "input input-bordered",
+                            value: "{on_date}",
+                            oninput: move |e| on_date.set(e.value()),
+                        }
+                    }
+                    div { class: "form-control",
+                        label { class: "label",
+                            span { class: "label-text", "Statement balance" }
+                            span { class: "label-text-alt opacity-60", "{currency}" }
+                        }
+                        input {
+                            r#type: "text",
+                            class: "input input-bordered text-right font-mono",
+                            placeholder: "0.00",
+                            value: "{actual}",
+                            oninput: move |e| actual.set(e.value()),
+                        }
+                    }
+                }
+                div { class: "form-control mb-3",
+                    label { class: "label", span { class: "label-text", "Note (optional)" } }
+                    input {
+                        class: "input input-bordered",
+                        placeholder: "e.g. fee not yet booked",
+                        value: "{note}",
+                        oninput: move |e| note.set(e.value()),
+                    }
+                }
+
+                if let Some(p) = preview() {
+                    div { class: "stats shadow w-full mb-3 text-sm",
+                        div { class: "stat py-2",
+                            div { class: "stat-title text-xs", "Computed" }
+                            div { class: "stat-value text-base font-mono", "{format_money(p.computed_minor, &currency)}" }
+                        }
+                        div { class: "stat py-2",
+                            div { class: "stat-title text-xs", "Statement" }
+                            div { class: "stat-value text-base font-mono", "{format_money(p.actual_minor, &currency)}" }
+                        }
+                        div { class: "stat py-2",
+                            div { class: "stat-title text-xs", "Adjustment" }
+                            div {
+                                class: if p.delta_minor == 0 {
+                                    "stat-value text-base font-mono"
+                                } else if p.delta_minor > 0 {
+                                    "stat-value text-base font-mono text-success"
+                                } else {
+                                    "stat-value text-base font-mono text-error"
+                                },
+                                "{format_money(p.delta_minor, &currency)}"
+                            }
+                        }
+                    }
+                }
+
+                if !snapshots().is_empty() {
+                    div { class: "mb-3",
+                        div { class: "font-medium text-sm mb-1", "Past reconciliations" }
+                        ul { class: "text-xs",
+                            {snapshots().iter().map(|s| {
+                                let s_id = s.id.clone();
+                                let s_id_del = s.id.clone();
+                                let drift = s.drift_minor;
+                                let date = s.on_date.clone();
+                                rsx! {
+                                    li { key: "{s.id}", class: "flex items-center justify-between py-1 border-b border-base-200",
+                                        span {
+                                            "{date} → {format_money(s.actual_balance_minor, &currency)}"
+                                            if drift != 0 {
+                                                span { class: "badge badge-warning badge-xs ml-2",
+                                                    "drift {format_money(drift, &currency)}"
+                                                }
+                                            }
+                                        }
+                                        span {
+                                            if drift != 0 {
+                                                button {
+                                                    class: "btn btn-ghost btn-xs",
+                                                    onclick: move |_| {
+                                                        let id = s_id.clone();
+                                                        spawn(async move {
+                                                            match use_finance::recompute_snapshot(&id).await {
+                                                                Ok(_) => refresh += 1,
+                                                                Err(e) => error.set(Some(e)),
+                                                            }
+                                                        });
+                                                    },
+                                                    "Recompute"
+                                                }
+                                            }
+                                            button {
+                                                class: "btn btn-ghost btn-xs text-error",
+                                                onclick: move |_| {
+                                                    let id = s_id_del.clone();
+                                                    spawn(async move {
+                                                        match use_finance::delete_snapshot(&id).await {
+                                                            Ok(_) => refresh += 1,
+                                                            Err(e) => error.set(Some(e)),
+                                                        }
+                                                    });
+                                                },
+                                                "Delete"
+                                            }
+                                        }
+                                    }
+                                }
+                            })}
+                        }
+                    }
+                }
+
+                div { class: "modal-action",
+                    button { class: "btn btn-ghost", onclick: move |_| on_close.call(()), "Close" }
+                    button {
+                        class: "btn btn-outline",
+                        disabled: busy(),
+                        onclick: do_preview,
+                        "Preview"
+                    }
+                    button {
+                        class: "btn btn-primary",
+                        disabled: busy() || preview().is_none(),
+                        onclick: do_apply,
+                        if busy() { "Applying…" } else { "Apply" }
+                    }
+                }
+            }
+        }
+    }
+}
+

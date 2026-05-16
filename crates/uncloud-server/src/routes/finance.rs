@@ -22,18 +22,19 @@ use crate::error::{AppError, Result};
 use crate::finance_import::{self, sparkasse_camt_v8, ParseError, ParsedRow};
 use crate::middleware::AuthUser;
 use crate::models::{
-    AmountSignConvention, CategorySource, CurrencySource, DecimalSeparator, FinanceAccount,
-    FinanceCategory, FinanceTransaction, ImportRun, ImportRunError as ModelImportRunError,
-    ImportRunStatus, ImportRunSummary, ImportSchema, ImportSource, ImportSourceKind,
-    TransactionLeg,
+    AmountSignConvention, BalanceSnapshot, CategorySource, CurrencySource, DecimalSeparator,
+    FinanceAccount, FinanceCategory, FinanceTransaction, ImportRun,
+    ImportRunError as ModelImportRunError, ImportRunStatus, ImportRunSummary, ImportSchema,
+    ImportSource, ImportSourceKind, TransactionLeg,
 };
 use crate::AppState;
 use uncloud_common::{
-    AccountBalanceResponse, AccountResponse, CreateAccountRequest, CreateFinanceCategoryRequest,
-    CreateTransactionRequest, FinanceCategoryResponse, ImportCsvResponse, ImportRowError,
-    ImportRunResponse, ImportRunSourceDto, ImportRunSummaryDto, ImportSchemaRequest,
-    ImportSchemaResponse, ListTransactionsQuery, TransactionListResponse, TransactionResponse,
-    UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
+    AccountBalanceResponse, AccountResponse, BalanceSnapshotResponse, CreateAccountRequest,
+    CreateFinanceCategoryRequest, CreateTransactionRequest, FinanceCategoryResponse,
+    ImportCsvResponse, ImportRowError, ImportRunResponse, ImportRunSourceDto, ImportRunSummaryDto,
+    ImportSchemaRequest, ImportSchemaResponse, ListTransactionsQuery, ReconcilePreviewResponse,
+    ReconcileRequest, TransactionListResponse, TransactionResponse, UpdateAccountRequest,
+    UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
 const ACCOUNTS: &str = "finance_accounts";
@@ -41,6 +42,8 @@ const CATEGORIES: &str = "finance_categories";
 const TRANSACTIONS: &str = "finance_transactions";
 const IMPORT_SCHEMAS: &str = "finance_import_schemas";
 const IMPORT_RUNS: &str = "finance_import_runs";
+const BALANCE_SNAPSHOTS: &str = "finance_balance_snapshots";
+const RECONCILIATION_CATEGORY: &str = "Reconciliation";
 
 const ALLOWED_CURRENCY_LEN: usize = 3;
 
@@ -602,6 +605,7 @@ pub async fn create_transaction(
         tags: vec![],
         legs: vec![leg],
         import_run_id: None,
+        source_snapshot_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -1211,6 +1215,7 @@ async fn insert_imported_row(
         tags: vec![],
         legs: vec![leg],
         import_run_id: Some(run_id),
+        source_snapshot_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -1391,4 +1396,301 @@ pub async fn revert_import_run(
     runs.replace_one(doc! { "_id": run_oid }, &run).await?;
 
     Ok(Json(run_to_response(&run)))
+}
+
+// ── Reconciliation ───────────────────────────────────────────────────────
+
+fn parse_iso_date(s: &str) -> Result<DateTime<Utc>> {
+    let nd = chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
+        .map_err(|_| AppError::BadRequest(format!("Invalid date `{s}`, expected YYYY-MM-DD")))?;
+    Ok(Utc.from_utc_datetime(&nd.and_hms_opt(0, 0, 0).unwrap()))
+}
+
+/// Sum of `amount_minor` for the account's transactions on or before
+/// `on_date`, optionally excluding one transaction id (used when
+/// recomputing a snapshot's own adjustment).
+async fn sum_transactions_through(
+    state: &AppState,
+    owner_id: ObjectId,
+    account_id: ObjectId,
+    on_date: DateTime<Utc>,
+    exclude_id: Option<ObjectId>,
+) -> Result<i64> {
+    let txns = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
+    let mut match_doc = doc! {
+        "owner_id": owner_id,
+        "account_id": account_id,
+        // End-of-day is captured by the strict < next-day bound below;
+        // we store dates at UTC midnight, so this catches everything
+        // booked on `on_date` itself too.
+        "date": { "$lte": bson::DateTime::from_chrono(on_date + chrono::Duration::days(1) - chrono::Duration::milliseconds(1)) },
+    };
+    if let Some(skip) = exclude_id {
+        match_doc.insert("_id", doc! { "$ne": skip });
+    }
+    let pipeline = vec![
+        doc! { "$match": match_doc },
+        doc! { "$group": { "_id": null, "sum": { "$sum": "$amount_minor" } } },
+    ];
+    let mut cursor = txns.aggregate(pipeline).await?;
+    let sum = if let Some(d) = cursor.try_next().await? {
+        d.get_i64("sum").unwrap_or(0)
+    } else {
+        0
+    };
+    Ok(sum)
+}
+
+async fn ensure_reconciliation_category(
+    state: &AppState,
+    owner_id: ObjectId,
+) -> Result<ObjectId> {
+    let cats = state.db.collection::<FinanceCategory>(CATEGORIES);
+    if let Some(existing) = cats
+        .find_one(doc! { "owner_id": owner_id, "name": RECONCILIATION_CATEGORY })
+        .await?
+    {
+        return Ok(existing.id);
+    }
+    let now = Utc::now();
+    let cat = FinanceCategory {
+        id: ObjectId::new(),
+        owner_id,
+        parent_id: None,
+        name: RECONCILIATION_CATEGORY.into(),
+        colour: Some("#888888".into()),
+        created_at: now,
+    };
+    match cats.insert_one(&cat).await {
+        Ok(_) => Ok(cat.id),
+        Err(e) if is_duplicate_key_error(&e) => {
+            // Lost the race with a concurrent reconcile; refetch.
+            cats.find_one(doc! { "owner_id": owner_id, "name": RECONCILIATION_CATEGORY })
+                .await?
+                .map(|c| c.id)
+                .ok_or_else(|| AppError::Internal("Reconciliation category vanished".into()))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub async fn reconcile_preview(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    Json(req): Json<ReconcileRequest>,
+) -> Result<Json<ReconcilePreviewResponse>> {
+    require_finance(&state)?;
+    let account_oid = parse_oid(&id, "account id")?;
+    let account = find_account(&state, user.id, account_oid).await?;
+    let on_date = parse_iso_date(&req.on_date)?;
+
+    let txn_sum = sum_transactions_through(&state, user.id, account.id, on_date, None).await?;
+    let computed = account.opening_balance_minor + txn_sum;
+
+    Ok(Json(ReconcilePreviewResponse {
+        on_date: req.on_date,
+        computed_minor: computed,
+        actual_minor: req.actual_balance_minor,
+        delta_minor: req.actual_balance_minor - computed,
+    }))
+}
+
+pub async fn reconcile_apply(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    Json(req): Json<ReconcileRequest>,
+) -> Result<(StatusCode, Json<BalanceSnapshotResponse>)> {
+    require_finance(&state)?;
+    let account_oid = parse_oid(&id, "account id")?;
+    let account = find_account(&state, user.id, account_oid).await?;
+    let on_date = parse_iso_date(&req.on_date)?;
+
+    let txn_sum = sum_transactions_through(&state, user.id, account.id, on_date, None).await?;
+    let computed = account.opening_balance_minor + txn_sum;
+    let delta = req.actual_balance_minor - computed;
+
+    let note = req.note.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    let category_id = ensure_reconciliation_category(&state, user.id).await?;
+
+    let now = Utc::now();
+    let snapshot_id = ObjectId::new();
+    let adj_id = ObjectId::new();
+    let description = match note.as_deref() {
+        Some(n) => format!("Reconciliation — {n}"),
+        None => "Reconciliation".to_string(),
+    };
+
+    let leg = TransactionLeg {
+        amount_minor: delta,
+        category_id: Some(category_id),
+        category_source: CategorySource::User,
+        rule_id: None,
+        note: None,
+    };
+    let adjustment = FinanceTransaction {
+        id: adj_id,
+        owner_id: user.id,
+        account_id: account.id,
+        currency: account.currency.clone(),
+        amount_minor: delta,
+        description,
+        date: on_date,
+        source_ref: None,
+        raw_bank_category: None,
+        notes: note.clone(),
+        tags: vec![],
+        legs: vec![leg],
+        import_run_id: None,
+        source_snapshot_id: Some(snapshot_id),
+        created_at: now,
+        updated_at: now,
+    };
+
+    let snapshot = BalanceSnapshot {
+        id: snapshot_id,
+        owner_id: user.id,
+        account_id: account.id,
+        on_date,
+        actual_balance_minor: req.actual_balance_minor,
+        note,
+        adjustment_transaction_id: adj_id,
+        created_at: now,
+    };
+
+    state
+        .db
+        .collection::<FinanceTransaction>(TRANSACTIONS)
+        .insert_one(&adjustment)
+        .await?;
+    state
+        .db
+        .collection::<BalanceSnapshot>(BALANCE_SNAPSHOTS)
+        .insert_one(&snapshot)
+        .await?;
+
+    Ok((StatusCode::CREATED, Json(snapshot_to_response(&snapshot, 0))))
+}
+
+fn snapshot_to_response(s: &BalanceSnapshot, drift_minor: i64) -> BalanceSnapshotResponse {
+    BalanceSnapshotResponse {
+        id: s.id.to_hex(),
+        account_id: s.account_id.to_hex(),
+        on_date: s.on_date.format("%Y-%m-%d").to_string(),
+        actual_balance_minor: s.actual_balance_minor,
+        note: s.note.clone(),
+        adjustment_transaction_id: s.adjustment_transaction_id.to_hex(),
+        created_at: s.created_at.to_rfc3339(),
+        drift_minor,
+    }
+}
+
+async fn snapshot_drift(state: &AppState, snapshot: &BalanceSnapshot) -> Result<i64> {
+    let account = find_account(&state, snapshot.owner_id, snapshot.account_id).await?;
+    let txn_sum = sum_transactions_through(
+        &state,
+        snapshot.owner_id,
+        snapshot.account_id,
+        snapshot.on_date,
+        Some(snapshot.adjustment_transaction_id),
+    )
+    .await?;
+    let computed_without_adj = account.opening_balance_minor + txn_sum;
+    // If the linked adjustment had value `actual - computed_without_adj`,
+    // then drift = actual - (computed_without_adj + current_adj). We
+    // expect that to be 0; non-zero means late activity changed history.
+    let txns = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
+    let adj = txns
+        .find_one(doc! { "_id": snapshot.adjustment_transaction_id })
+        .await?
+        .map(|t| t.amount_minor)
+        .unwrap_or(0);
+    Ok(snapshot.actual_balance_minor - (computed_without_adj + adj))
+}
+
+pub async fn list_account_snapshots(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<BalanceSnapshotResponse>>> {
+    require_finance(&state)?;
+    let account_oid = parse_oid(&id, "account id")?;
+    let _ = find_account(&state, user.id, account_oid).await?;
+    let coll = state.db.collection::<BalanceSnapshot>(BALANCE_SNAPSHOTS);
+    let mut cursor = coll
+        .find(doc! { "owner_id": user.id, "account_id": account_oid })
+        .sort(doc! { "on_date": -1 })
+        .await?;
+    let mut out = Vec::new();
+    while let Some(s) = cursor.try_next().await? {
+        let drift = snapshot_drift(&state, &s).await?;
+        out.push(snapshot_to_response(&s, drift));
+    }
+    Ok(Json(out))
+}
+
+pub async fn recompute_snapshot(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<BalanceSnapshotResponse>> {
+    require_finance(&state)?;
+    let snap_oid = parse_oid(&id, "snapshot id")?;
+    let snapshots = state.db.collection::<BalanceSnapshot>(BALANCE_SNAPSHOTS);
+    let snapshot = snapshots
+        .find_one(doc! { "_id": snap_oid, "owner_id": user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Snapshot not found".into()))?;
+    let account = find_account(&state, user.id, snapshot.account_id).await?;
+
+    let txn_sum = sum_transactions_through(
+        &state,
+        user.id,
+        snapshot.account_id,
+        snapshot.on_date,
+        Some(snapshot.adjustment_transaction_id),
+    )
+    .await?;
+    let new_delta = snapshot.actual_balance_minor - (account.opening_balance_minor + txn_sum);
+    let now = Utc::now();
+
+    let txns = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
+    // Adjustment's first leg follows the new delta; user-set category stays.
+    txns.update_one(
+        doc! { "_id": snapshot.adjustment_transaction_id, "owner_id": user.id },
+        doc! { "$set": {
+            "amount_minor": new_delta,
+            "legs.0.amount_minor": new_delta,
+            "updated_at": bson::DateTime::from_chrono(now),
+        } },
+    )
+    .await?;
+
+    Ok(Json(snapshot_to_response(&snapshot, 0)))
+}
+
+pub async fn delete_snapshot(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    require_finance(&state)?;
+    let snap_oid = parse_oid(&id, "snapshot id")?;
+    let snapshots = state.db.collection::<BalanceSnapshot>(BALANCE_SNAPSHOTS);
+    let snapshot = snapshots
+        .find_one(doc! { "_id": snap_oid, "owner_id": user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Snapshot not found".into()))?;
+
+    state
+        .db
+        .collection::<FinanceTransaction>(TRANSACTIONS)
+        .delete_one(doc! {
+            "_id": snapshot.adjustment_transaction_id,
+            "owner_id": user.id,
+        })
+        .await?;
+    snapshots.delete_one(doc! { "_id": snap_oid }).await?;
+    Ok(StatusCode::NO_CONTENT)
 }

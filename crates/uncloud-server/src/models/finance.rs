@@ -104,6 +104,11 @@ pub struct FinanceTransaction {
     /// an `ImportRun` deletes every transaction with this id.
     #[serde(default)]
     pub import_run_id: Option<ObjectId>,
+    /// Set on the auto-generated adjustment that backs a `BalanceSnapshot`.
+    /// Such rows are not editable directly; they regenerate from the
+    /// snapshot via `POST /finance/snapshots/{id}/recompute`.
+    #[serde(default)]
+    pub source_snapshot_id: Option<ObjectId>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]
@@ -167,6 +172,27 @@ pub struct ImportRun {
     pub created_at: DateTime<Utc>,
     #[serde(default, with = "crate::models::opt_dt")]
     pub reverted_at: Option<DateTime<Utc>>,
+}
+
+/// A bank-statement reconciliation checkpoint. Storing the actual
+/// balance separately from the adjustment transaction lets us detect
+/// drift after late imports and regenerate the adjustment to match
+/// the statement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BalanceSnapshot {
+    #[serde(rename = "_id")]
+    pub id: ObjectId,
+    pub owner_id: ObjectId,
+    pub account_id: ObjectId,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
+    pub on_date: DateTime<Utc>,
+    pub actual_balance_minor: i64,
+    #[serde(default)]
+    pub note: Option<String>,
+    /// The adjustment transaction generated to bridge computed→actual.
+    pub adjustment_transaction_id: ObjectId,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -242,3 +242,37 @@ pub struct ImportSchemaRequest {
 fn default_true_serde() -> bool {
     true
 }
+
+// ── Reconciliation ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReconcileRequest {
+    /// ISO date (YYYY-MM-DD).
+    pub on_date: String,
+    pub actual_balance_minor: i64,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReconcilePreviewResponse {
+    pub on_date: String,
+    pub computed_minor: i64,
+    pub actual_minor: i64,
+    pub delta_minor: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BalanceSnapshotResponse {
+    pub id: String,
+    pub account_id: String,
+    pub on_date: String,
+    pub actual_balance_minor: i64,
+    pub note: Option<String>,
+    pub adjustment_transaction_id: String,
+    pub created_at: String,
+    /// Re-derived at read time: actual_balance - (balance recomputed
+    /// from history excluding this adjustment). `0` means in-sync;
+    /// non-zero means the adjustment no longer matches reality.
+    pub drift_minor: i64,
+}

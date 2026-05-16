@@ -248,6 +248,26 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/finance/imports/{id}/revert",
             post(finance::revert_import_run),
+        )
+        .route(
+            "/finance/accounts/{id}/reconcile/preview",
+            post(finance::reconcile_preview),
+        )
+        .route(
+            "/finance/accounts/{id}/reconcile/apply",
+            post(finance::reconcile_apply),
+        )
+        .route(
+            "/finance/accounts/{id}/snapshots",
+            get(finance::list_account_snapshots),
+        )
+        .route(
+            "/finance/snapshots/{id}/recompute",
+            post(finance::recompute_snapshot),
+        )
+        .route(
+            "/finance/snapshots/{id}",
+            delete(finance::delete_snapshot),
         );
 
     // v1-only routes (API tokens, S3 credentials, apps)

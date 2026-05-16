@@ -1,9 +1,10 @@
 //! HTTP wrappers for the finance tracker REST surface.
 
 use uncloud_common::{
-    AccountBalanceResponse, AccountResponse, CreateAccountRequest, CreateFinanceCategoryRequest,
-    CreateTransactionRequest, FinanceCategoryResponse, ImportCsvResponse, ImportRunResponse,
-    ImportSchemaRequest, ImportSchemaResponse, TransactionListResponse, TransactionResponse,
+    AccountBalanceResponse, AccountResponse, BalanceSnapshotResponse, CreateAccountRequest,
+    CreateFinanceCategoryRequest, CreateTransactionRequest, FinanceCategoryResponse,
+    ImportCsvResponse, ImportRunResponse, ImportSchemaRequest, ImportSchemaResponse,
+    ReconcilePreviewResponse, ReconcileRequest, TransactionListResponse, TransactionResponse,
     UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
@@ -341,4 +342,80 @@ pub async fn revert_import_run(id: &str) -> Result<ImportRunResponse, String> {
     } else {
         Err(extract_error(r).await)
     }
+}
+
+pub async fn reconcile_preview(
+    account_id: &str,
+    req: &ReconcileRequest,
+) -> Result<ReconcilePreviewResponse, String> {
+    let r = api::post(&format!("/finance/accounts/{account_id}/reconcile/preview"))
+        .json(req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<ReconcilePreviewResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn reconcile_apply(
+    account_id: &str,
+    req: &ReconcileRequest,
+) -> Result<BalanceSnapshotResponse, String> {
+    let r = api::post(&format!("/finance/accounts/{account_id}/reconcile/apply"))
+        .json(req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<BalanceSnapshotResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn list_account_snapshots(
+    account_id: &str,
+) -> Result<Vec<BalanceSnapshotResponse>, String> {
+    let r = api::get(&format!("/finance/accounts/{account_id}/snapshots"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<Vec<BalanceSnapshotResponse>>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn recompute_snapshot(id: &str) -> Result<BalanceSnapshotResponse, String> {
+    let r = api::post(&format!("/finance/snapshots/{id}/recompute"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<BalanceSnapshotResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn delete_snapshot(id: &str) -> Result<(), String> {
+    let r = api::delete(&format!("/finance/snapshots/{id}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() { Ok(()) } else { Err(extract_error(r).await) }
 }
