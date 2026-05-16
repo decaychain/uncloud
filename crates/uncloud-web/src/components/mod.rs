@@ -29,5 +29,6 @@ pub mod file_properties;
 pub mod tasks;
 pub mod activity;
 pub mod duplicates;
+pub mod download_toast;
 pub mod oauth_consent;
 pub mod session_toast;

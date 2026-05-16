@@ -82,8 +82,8 @@ pub fn VersionHistoryModal(
                                                         class: "btn btn-ghost btn-xs mr-1",
                                                         title: "Download this version",
                                                         onclick: move |_| {
-                                                            let url = crate::hooks::api::authenticated_media_url(&format!("/files/{}/versions/{}", fid_download, vid_download));
-                                                            crate::hooks::api::download_external_file(&url, &name_download, "");
+                                                            let path = format!("/files/{}/versions/{}", fid_download, vid_download);
+                                                            crate::hooks::api::download_external_file(&path, &name_download, "");
                                                         },
                                                         "Download"
                                                     }

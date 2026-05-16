@@ -82,6 +82,15 @@ impl Client {
         format!("{}{}", self.base_url, path)
     }
 
+    fn api_path_url(&self, path: &str) -> String {
+        let path = path.trim_start_matches('/');
+        if path.starts_with("api/") {
+            self.url(&format!("/{path}"))
+        } else {
+            self.url(&format!("/api/{path}"))
+        }
+    }
+
     // ── Auth ──────────────────────────────────────────────────────────────────
 
     #[instrument(skip(self, password))]
@@ -127,12 +136,17 @@ impl Client {
 
     /// Download a file by ID to `dest` on the local filesystem.
     pub async fn download_file(&self, id: &str, dest: &Path) -> Result<()> {
+        self.download_api_path(&format!("/files/{id}/download"), dest).await
+    }
+
+    /// Download an authenticated API path to `dest` on the local filesystem.
+    pub async fn download_api_path(&self, path: &str, dest: &Path) -> Result<()> {
         use futures::StreamExt;
         use tokio::io::AsyncWriteExt;
 
         let resp = self
             .http
-            .get(self.url(&format!("/api/files/{}/download", id)))
+            .get(self.api_path_url(path))
             .send()
             .await?;
 

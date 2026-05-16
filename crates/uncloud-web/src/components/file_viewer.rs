@@ -106,10 +106,11 @@ pub fn TextViewer(file: FileResponse, #[props(default = false)] start_editing: b
         });
     }
 
-    let download_url = api::authenticated_media_url(&format!("/files/{}/download", file.id));
-    let android_download_url = download_url.clone();
-    let android_download_name = file.name.clone();
-    let android_download_mime = file.mime_type.clone();
+    let download_path = format!("/files/{}/download", file.id);
+    let download_url = api::authenticated_media_url(&download_path);
+    let native_download_path = download_path.clone();
+    let native_download_name = file.name.clone();
+    let native_download_mime = file.mime_type.clone();
     let file_id_save = file.id.clone();
 
     // Save handler
@@ -330,7 +331,7 @@ pub fn TextViewer(file: FileResponse, #[props(default = false)] start_editing: b
                         href: "{download_url}",
                         download: "{file.name}",
                         onclick: move |e| {
-                            if crate::hooks::tauri::download_android_file(&android_download_url, &android_download_name, &android_download_mime) {
+                            if api::download_external_file_native(&native_download_path, &native_download_name, &native_download_mime) {
                                 e.prevent_default();
                             }
                         },

@@ -115,6 +115,93 @@ pub fn download_android_file(url: &str, filename: &str, mime_type: &str) -> bool
         .unwrap_or(false)
 }
 
+pub fn open_desktop_file(path: &str, filename: &str) -> bool {
+    if !is_tauri() || is_android() {
+        return false;
+    }
+
+    let path = path.to_string();
+    let filename = filename.to_string();
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(err) = invoke_remote_file_command("open_remote_file", path, filename).await {
+            web_sys::console::error_1(&JsValue::from_str(&format!(
+                "open_remote_file failed: {err}"
+            )));
+        }
+    });
+    true
+}
+
+pub fn download_desktop_file(path: &str, filename: &str) -> bool {
+    if !is_tauri() || is_android() {
+        return false;
+    }
+
+    let path = path.to_string();
+    let filename = filename.to_string();
+    wasm_bindgen_futures::spawn_local(async move {
+        dispatch_download_event("started", &filename, None, None);
+        match invoke_remote_file_command("download_remote_file", path, filename.clone()).await {
+            Ok(result) => {
+                let saved_path = result.as_string();
+                dispatch_download_event("completed", &filename, saved_path.as_deref(), None);
+            }
+            Err(err) => {
+                web_sys::console::error_1(&JsValue::from_str(&format!(
+                    "download_remote_file failed: {err}"
+                )));
+                dispatch_download_event("failed", &filename, None, Some(&err));
+            }
+        }
+    });
+    true
+}
+
+pub fn open_downloaded_file(path: &str) -> bool {
+    if !is_tauri() || is_android() || path.is_empty() {
+        return false;
+    }
+
+    let path = path.to_string();
+    wasm_bindgen_futures::spawn_local(async move {
+        let args = Object::new();
+        let _ = Reflect::set(&args, &JsValue::from_str("path"), &JsValue::from_str(&path));
+        if let Err(err) = invoke_raw("open_downloaded_file", &args).await {
+            web_sys::console::error_1(&JsValue::from_str(&format!(
+                "open_downloaded_file failed: {err}"
+            )));
+        }
+    });
+    true
+}
+
+fn dispatch_download_event(
+    status: &str,
+    filename: &str,
+    saved_path: Option<&str>,
+    error: Option<&str>,
+) {
+    let Some(window) = web_sys::window() else { return };
+    let detail = Object::new();
+    let _ = Reflect::set(&detail, &JsValue::from_str("status"), &JsValue::from_str(status));
+    let _ = Reflect::set(
+        &detail,
+        &JsValue::from_str("filename"),
+        &JsValue::from_str(filename),
+    );
+    if let Some(path) = saved_path {
+        let _ = Reflect::set(&detail, &JsValue::from_str("path"), &JsValue::from_str(path));
+    }
+    if let Some(error) = error {
+        let _ = Reflect::set(&detail, &JsValue::from_str("error"), &JsValue::from_str(error));
+    }
+    let init = web_sys::CustomEventInit::new();
+    init.set_detail(&detail);
+    if let Ok(event) = web_sys::CustomEvent::new_with_event_init_dict("uncloud:download", &init) {
+        let _ = window.dispatch_event(&event);
+    }
+}
+
 // ── DTOs ──────────────────────────────────────────────────────────────────────
 
 pub struct DesktopConfig {
@@ -255,6 +342,21 @@ async fn invoke_raw(cmd: &str, args: &JsValue) -> Result<JsValue, String> {
     JsFuture::from(promise)
         .await
         .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))
+}
+
+async fn invoke_remote_file_command(
+    cmd: &str,
+    path: String,
+    filename: String,
+) -> Result<JsValue, String> {
+    let args = Object::new();
+    let _ = Reflect::set(&args, &JsValue::from_str("path"), &JsValue::from_str(&path));
+    let _ = Reflect::set(
+        &args,
+        &JsValue::from_str("filename"),
+        &JsValue::from_str(&filename),
+    );
+    invoke_raw(cmd, &args).await
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────────

@@ -1071,6 +1071,249 @@ fn default_sync_folder() -> Option<String> {
     None
 }
 
+#[cfg(desktop)]
+async fn ensure_client(
+    app: &AppHandle,
+    state: &State<'_, DesktopState>,
+) -> Result<Arc<Client>, String> {
+    if let Some(client) = state.client.read().await.as_ref().map(Arc::clone) {
+        return Ok(client);
+    }
+    let _ = ensure_engine(app, state).await?;
+    state
+        .client
+        .read()
+        .await
+        .as_ref()
+        .map(Arc::clone)
+        .ok_or_else(|| "Not configured".to_string())
+}
+
+#[cfg(desktop)]
+fn validate_remote_file_path(path: &str) -> Result<String, String> {
+    let path = path.trim();
+    let is_file_download = path.starts_with("/files/") && path.ends_with("/download");
+    let is_version_download = path.starts_with("/files/") && path.contains("/versions/");
+    if (!is_file_download && !is_version_download)
+        || path.contains("://")
+        || path.contains("..")
+        || path.contains('\\')
+    {
+        return Err("Unsupported download path".to_string());
+    }
+    Ok(path.to_string())
+}
+
+#[cfg(desktop)]
+fn safe_download_filename(filename: &str) -> String {
+    let mut safe: String = filename
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            ch if ch.is_control() => '_',
+            ch => ch,
+        })
+        .collect();
+    safe = safe.trim_matches(|ch| ch == ' ' || ch == '.').to_string();
+    if safe.is_empty() {
+        safe = "download".to_string();
+    }
+
+    let stem = safe.split('.').next().unwrap_or(&safe).to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    ) {
+        safe.insert(0, '_');
+    }
+    safe
+}
+
+#[cfg(desktop)]
+fn unique_download_path(dir: &Path, filename: &str) -> PathBuf {
+    let first = dir.join(filename);
+    if !first.exists() {
+        return first;
+    }
+
+    let filename_path = Path::new(filename);
+    let stem = filename_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("download");
+    let ext = filename_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty());
+
+    for n in 1..1000 {
+        let candidate = match ext {
+            Some(ext) => dir.join(format!("{stem} ({n}).{ext}")),
+            None => dir.join(format!("{stem} ({n})")),
+        };
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    dir.join(format!("{}-{filename}", Utc::now().timestamp_millis()))
+}
+
+#[cfg(desktop)]
+fn remote_open_path(app: &AppHandle, filename: &str) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("remote-open");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join(format!(
+        "{}-{}",
+        Utc::now().timestamp_millis(),
+        safe_download_filename(filename)
+    )))
+}
+
+#[cfg(desktop)]
+fn remote_download_path(filename: &str) -> Result<PathBuf, String> {
+    let dir = dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .ok_or_else(|| "Cannot determine downloads directory".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(unique_download_path(
+        &dir,
+        &safe_download_filename(filename),
+    ))
+}
+
+#[cfg(desktop)]
+fn open_local_file(path: &Path) -> Result<(), String> {
+    let opener = if cfg!(target_os = "windows") {
+        "explorer.exe"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener)
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Open {} with {}: {}", path.display(), opener, e))
+}
+
+#[cfg(desktop)]
+fn validate_downloaded_file_path(path: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(path.trim());
+    if path.as_os_str().is_empty() || !path.is_absolute() {
+        return Err("Invalid downloaded file path".to_string());
+    }
+
+    let downloads_dir = dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .ok_or_else(|| "Cannot determine downloads directory".to_string())?;
+    let downloads_dir = std::fs::canonicalize(downloads_dir).map_err(|e| e.to_string())?;
+    let path = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
+    if !path.starts_with(&downloads_dir) {
+        return Err("Downloaded file is outside the downloads directory".to_string());
+    }
+
+    Ok(path)
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+async fn open_remote_file(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    path: String,
+    filename: String,
+) -> Result<(), String> {
+    let path = validate_remote_file_path(&path)?;
+    let client = ensure_client(&app, &state).await?;
+    let dest = remote_open_path(&app, &filename)?;
+    client
+        .download_api_path(&path, &dest)
+        .await
+        .map_err(|e| e.to_string())?;
+    open_local_file(&dest)
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+async fn open_remote_file(
+    _app: AppHandle,
+    _state: State<'_, DesktopState>,
+    _path: String,
+    _filename: String,
+) -> Result<(), String> {
+    Err("Native desktop file open is unavailable on mobile".to_string())
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+async fn download_remote_file(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    path: String,
+    filename: String,
+) -> Result<String, String> {
+    let path = validate_remote_file_path(&path)?;
+    let client = ensure_client(&app, &state).await?;
+    let dest = remote_download_path(&filename)?;
+    client
+        .download_api_path(&path, &dest)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(dest.to_string_lossy().to_string())
+}
+
+#[cfg(desktop)]
+#[tauri::command]
+fn open_downloaded_file(path: String) -> Result<(), String> {
+    let path = validate_downloaded_file_path(&path)?;
+    open_local_file(&path)
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn open_downloaded_file(_path: String) -> Result<(), String> {
+    Err("Native desktop file open is unavailable on mobile".to_string())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+async fn download_remote_file(
+    _app: AppHandle,
+    _state: State<'_, DesktopState>,
+    _path: String,
+    _filename: String,
+) -> Result<String, String> {
+    Err("Native desktop file download is unavailable on mobile".to_string())
+}
+
 // ── Polling scheduler ─────────────────────────────────────────────────────────
 
 fn start_poll_loop(
@@ -1419,6 +1662,9 @@ pub fn run() {
             get_folder_effective_config,
             pick_folder,
             default_sync_folder,
+            open_remote_file,
+            download_remote_file,
+            open_downloaded_file,
             get_autostart,
             set_autostart,
         ])

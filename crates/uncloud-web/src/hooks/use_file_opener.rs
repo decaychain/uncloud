@@ -70,10 +70,10 @@ pub fn use_file_opener(
         {
             viewer.set(Some(FileOpenTarget::Text(file)));
         } else {
-            // application/pdf and everything else: open in a new tab so the
-            // browser handles native preview / download as appropriate.
-            let url = api::authenticated_media_url(&format!("/files/{}/download", file.id));
-            api::open_external_file(&url, &file.name, &file.mime_type);
+            // application/pdf and everything else: hand off to the native shell
+            // when available, with browser open/download as the fallback.
+            let path = format!("/files/{}/download", file.id);
+            api::open_external_file(&path, &file.name, &file.mime_type);
         }
     }
 }

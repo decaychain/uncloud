@@ -119,21 +119,34 @@ pub fn authenticated_media_url(path: &str) -> String {
     }
 }
 
-pub fn open_external_file(url: &str, filename: &str, mime_type: &str) {
-    if crate::hooks::tauri::open_android_file(url, filename, mime_type) {
+pub fn open_external_file(path: &str, filename: &str, mime_type: &str) {
+    let url = authenticated_media_url(path);
+    if crate::hooks::tauri::open_android_file(&url, filename, mime_type) {
+        return;
+    }
+    if crate::hooks::tauri::open_desktop_file(path, filename) {
         return;
     }
     let _ = web_sys::window()
-        .and_then(|w| w.open_with_url(url).ok())
+        .and_then(|w| w.open_with_url(&url).ok())
         .flatten();
 }
 
-pub fn download_external_file(url: &str, filename: &str, mime_type: &str) {
-    if crate::hooks::tauri::download_android_file(url, filename, mime_type) {
+pub fn download_external_file_native(path: &str, filename: &str, mime_type: &str) -> bool {
+    let url = authenticated_media_url(path);
+    if crate::hooks::tauri::download_android_file(&url, filename, mime_type) {
+        return true;
+    }
+    crate::hooks::tauri::download_desktop_file(path, filename)
+}
+
+pub fn download_external_file(path: &str, filename: &str, mime_type: &str) {
+    if download_external_file_native(path, filename, mime_type) {
         return;
     }
+    let url = authenticated_media_url(path);
     let _ = web_sys::window()
-        .and_then(|w| w.open_with_url(url).ok())
+        .and_then(|w| w.open_with_url(&url).ok())
         .flatten();
 }
 

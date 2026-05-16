@@ -343,8 +343,8 @@ fn FileContextMenu(
         let mime_type = mime_type.clone().unwrap_or_default();
         move |_| {
             if !is_folder {
-                let url = api::authenticated_media_url(&format!("/files/{}/download", id));
-                api::download_external_file(&url, &name, &mime_type);
+                let path = format!("/files/{}/download", id);
+                api::download_external_file(&path, &name, &mime_type);
             }
             on_close.call(());
         }

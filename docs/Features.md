@@ -5,7 +5,7 @@ Detailed feature inventory. For the route table see [Architecture.md](Architectu
 ## File Management
 
 - **Upload**: drag-and-drop zone (shown only when folder is empty) + toolbar Upload button; hidden `<input>` always present for the button; supports simple upload and chunked upload for large files; `POST /api/uploads/init`, `POST /api/uploads/{id}/chunk`, `POST /api/uploads/{id}/complete`; also `POST /api/uploads/simple` for small files
-- **Download**: `GET /api/files/{id}/download` with range request support
+- **Download**: `GET /api/files/{id}/download` with range request support; desktop-native downloads show a toast while saving, then a shortened Downloads location with Open and Copy path actions
 - **Update content**: `POST /api/files/{id}/content` replaces file content (creates a new version)
 - **Rename**: file and folder, via context menu -> modal
 - **Move**: file and folder (single and bulk), via context menu or selection toolbar -> folder-picker dialog; recursive storage-path sync on folder move
@@ -111,7 +111,7 @@ Music library with artist/album aggregation, folder browsing, playlist managemen
 
 In-browser file viewing for multiple content types.
 
-- **`file_viewer.rs`**: image lightbox (via `lightbox.rs`), plain text viewer, PDF viewer, audio playback, password-vault opener (KeePass `.kdbx`)
+- **`file_viewer.rs`**: image lightbox (via `lightbox.rs`), plain text viewer, native external opener for PDFs/unsupported types, audio playback, password-vault opener (KeePass `.kdbx`)
 - Accessed from file item click or context menu
 
 ## Public Share Links

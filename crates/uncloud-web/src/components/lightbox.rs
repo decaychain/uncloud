@@ -57,10 +57,11 @@ pub fn Lightbox(
     }
 
     let current = &images[index()];
-    let src = api::authenticated_media_url(&format!("/files/{}/download", current.id));
-    let android_download_src = src.clone();
-    let android_download_name = current.name.clone();
-    let android_download_mime = current.mime_type.clone();
+    let download_path = format!("/files/{}/download", current.id);
+    let src = api::authenticated_media_url(&download_path);
+    let native_download_path = download_path.clone();
+    let native_download_name = current.name.clone();
+    let native_download_mime = current.mime_type.clone();
     let can_prev = index() > 0;
     let can_next = index() < total - 1;
     let current_num = index() + 1;
@@ -126,7 +127,7 @@ pub fn Lightbox(
                     download: "{current.name}",
                     onclick: move |e| {
                         e.stop_propagation();
-                        if crate::hooks::tauri::download_android_file(&android_download_src, &android_download_name, &android_download_mime) {
+                        if api::download_external_file_native(&native_download_path, &native_download_name, &native_download_mime) {
                             e.prevent_default();
                         }
                     },
