@@ -658,6 +658,7 @@ fn TransactionsTab() -> Element {
     let mut show_create = use_signal(|| false);
     let mut show_import = use_signal(|| false);
     let mut edit_target: Signal<Option<TransactionResponse>> = use_signal(|| None);
+    let mut rule_from_tx: Signal<Option<TransactionResponse>> = use_signal(|| None);
     let mut filter_account: Signal<String> = use_signal(String::new);
     let mut only_uncat = use_signal(|| false);
     let mut skip = use_signal(|| 0u32);
@@ -768,6 +769,7 @@ fn TransactionsTab() -> Element {
                     tbody {
                         {transactions().iter().map(|t| {
                             let t_edit = t.clone();
+                            let t_rule = t.clone();
                             let t_id = t.id.clone();
                             let date_short = t.date.split('T').next().unwrap_or(&t.date).to_string();
                             let cat = t.category_id.as_deref().map(|id| category_name(id));
@@ -786,12 +788,18 @@ fn TransactionsTab() -> Element {
                                         class: if t.amount_minor < 0 { "text-right font-mono text-error" } else { "text-right font-mono text-success" },
                                         "{format_money(t.amount_minor, &t.currency)}"
                                     }
-                                    td { class: "text-right",
+                                    td { class: "text-right whitespace-nowrap",
                                         button {
                                             class: "btn btn-ghost btn-xs",
                                             disabled: t.is_split,
                                             onclick: move |_| edit_target.set(Some(t_edit.clone())),
                                             "Edit"
+                                        }
+                                        button {
+                                            class: "btn btn-ghost btn-xs",
+                                            title: "Create a categorization rule from this transaction",
+                                            onclick: move |_| rule_from_tx.set(Some(t_rule.clone())),
+                                            "Rule"
                                         }
                                         button {
                                             class: "btn btn-ghost btn-xs text-error",
@@ -856,6 +864,29 @@ fn TransactionsTab() -> Element {
                 accounts: accounts_for_select.clone(),
                 on_close: move |_| show_import.set(false),
                 on_imported: move |_| { show_import.set(false); refresh += 1; },
+            }
+        }
+        if let Some(t) = rule_from_tx() {
+            {
+                let cat_map: HashMap<String, String> = categories()
+                    .iter()
+                    .map(|c| (c.id.clone(), c.name.clone()))
+                    .collect();
+                let prefill = RulePrefill {
+                    pattern: t.description.clone(),
+                    category_id: t.category_id.clone(),
+                    name: t.description.clone(),
+                };
+                rsx! {
+                    RuleFormModal {
+                        key: "{t.id}",
+                        initial: None,
+                        prefill: Some(prefill),
+                        categories: cat_map,
+                        on_close: move |_| rule_from_tx.set(None),
+                        on_saved: move |_| { rule_from_tx.set(None); refresh += 1; },
+                    }
+                }
             }
         }
     }
@@ -2171,9 +2202,20 @@ fn RulesTab() -> Element {
     }
 }
 
+#[derive(Clone, PartialEq)]
+pub struct RulePrefill {
+    pub pattern: String,
+    /// Pre-selected category, falls back to "first category" when None.
+    pub category_id: Option<String>,
+    /// Used as a starting name (typically derived from the transaction
+    /// description), but the user can change it before saving.
+    pub name: String,
+}
+
 #[component]
 fn RuleFormModal(
     initial: Option<FinanceRuleResponse>,
+    #[props(default)] prefill: Option<RulePrefill>,
     categories: HashMap<String, String>,
     on_close: EventHandler<()>,
     on_saved: EventHandler<()>,
@@ -2181,8 +2223,16 @@ fn RuleFormModal(
     let is_edit = initial.is_some();
     let editing_id = initial.as_ref().map(|r| r.id.clone());
 
-    let mut name = use_signal(|| initial.as_ref().map(|r| r.name.clone()).unwrap_or_default());
-    let mut pattern = use_signal(|| initial.as_ref().map(|r| r.pattern.clone()).unwrap_or_default());
+    let mut name = use_signal(|| {
+        initial.as_ref().map(|r| r.name.clone())
+            .or_else(|| prefill.as_ref().map(|p| p.name.clone()))
+            .unwrap_or_default()
+    });
+    let mut pattern = use_signal(|| {
+        initial.as_ref().map(|r| r.pattern.clone())
+            .or_else(|| prefill.as_ref().map(|p| p.pattern.clone()))
+            .unwrap_or_default()
+    });
     let mut pattern_kind = use_signal(|| {
         initial.as_ref().map(|r| r.pattern_kind.clone()).unwrap_or_else(|| "substring".into())
     });
@@ -2191,6 +2241,7 @@ fn RuleFormModal(
     });
     let mut category_id = use_signal(|| {
         initial.as_ref().map(|r| r.category_id.clone())
+            .or_else(|| prefill.as_ref().and_then(|p| p.category_id.clone()))
             .or_else(|| categories.iter().next().map(|(k, _)| k.clone()))
             .unwrap_or_default()
     });
