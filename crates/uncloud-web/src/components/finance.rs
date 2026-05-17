@@ -28,7 +28,14 @@ fn finance_shell(body: Element) -> Element {
 
 #[component]
 pub fn FinanceTransactionsPage() -> Element {
-    finance_shell(rsx! { TransactionsTab {} })
+    // Transactions span the full available width — the table benefits
+    // from horizontal real estate; the other finance views keep the
+    // narrower max-w-6xl from `finance_shell`.
+    rsx! {
+        div { class: "p-4 lg:p-6",
+            TransactionsTab {}
+        }
+    }
 }
 
 #[component]
@@ -662,14 +669,16 @@ fn TransactionsTab() -> Element {
     let mut rule_from_tx: Signal<Option<TransactionResponse>> = use_signal(|| None);
     let mut filter_account: Signal<String> = use_signal(String::new);
     let mut only_uncat = use_signal(|| false);
-    let mut skip = use_signal(|| 0u32);
+    let mut loading_more = use_signal(|| false);
     let page_size: u32 = 50;
 
+    // First-page fetch — runs on mount, when filters change, and when
+    // the refresh nonce is bumped (after edit/delete/import/etc.).
+    // Always replaces `transactions`.
     use_effect(move || {
         let _ = refresh();
         let _ = filter_account();
         let _ = only_uncat();
-        let _ = skip();
         spawn(async move {
             loading.set(true);
             if accounts().is_empty() {
@@ -684,7 +693,7 @@ fn TransactionsTab() -> Element {
             }
             let acc_filter = filter_account();
             let acc_opt = if acc_filter.is_empty() { None } else { Some(acc_filter.as_str()) };
-            match use_finance::list_transactions(acc_opt, only_uncat(), page_size, skip()).await {
+            match use_finance::list_transactions(acc_opt, only_uncat(), page_size, 0).await {
                 Ok(resp) => {
                     transactions.set(resp.items);
                     total.set(resp.total);
@@ -695,6 +704,25 @@ fn TransactionsTab() -> Element {
             loading.set(false);
         });
     });
+
+    let load_more = move |_| {
+        if loading_more() { return; }
+        let skip_val = transactions().len() as u32;
+        let acc = filter_account();
+        let only_un = only_uncat();
+        loading_more.set(true);
+        spawn(async move {
+            let acc_opt = if acc.is_empty() { None } else { Some(acc.as_str()) };
+            match use_finance::list_transactions(acc_opt, only_un, page_size, skip_val).await {
+                Ok(resp) => {
+                    transactions.with_mut(|v| v.extend(resp.items));
+                    total.set(resp.total);
+                }
+                Err(e) => error.set(Some(e)),
+            }
+            loading_more.set(false);
+        });
+    };
 
     let account_name = |id: &str| {
         accounts().iter().find(|a| a.id == id).map(|a| a.name.clone()).unwrap_or_else(|| "?".into())
@@ -712,7 +740,7 @@ fn TransactionsTab() -> Element {
                 select {
                     class: "select select-bordered select-sm",
                     value: "{filter_account}",
-                    onchange: move |e| { filter_account.set(e.value()); skip.set(0); },
+                    onchange: move |e| filter_account.set(e.value()),
                     option { value: "", "All accounts" }
                     {accounts().iter().map(|a| rsx! {
                         option { key: "{a.id}", value: "{a.id}", "{a.name}" }
@@ -723,7 +751,7 @@ fn TransactionsTab() -> Element {
                         r#type: "checkbox",
                         class: "checkbox checkbox-sm",
                         checked: only_uncat(),
-                        onchange: move |e| { only_uncat.set(e.checked()); skip.set(0); },
+                        onchange: move |e| only_uncat.set(e.checked()),
                     }
                     span { class: "label-text", "Uncategorized only" }
                 }
@@ -838,22 +866,16 @@ fn TransactionsTab() -> Element {
                     }
                 }
             }
-            div { class: "flex justify-between items-center mt-3 text-sm opacity-70",
-                span { "{transactions().len()} of {total()}" }
-                div { class: "join",
+            div { class: "flex justify-center items-center gap-3 mt-3 text-sm opacity-70",
+                if (transactions().len() as u64) < total() {
                     button {
-                        class: "join-item btn btn-sm",
-                        disabled: skip() == 0,
-                        onclick: move |_| skip.set(skip().saturating_sub(page_size)),
-                        "Prev"
-                    }
-                    button {
-                        class: "join-item btn btn-sm",
-                        disabled: (skip() + page_size) as u64 >= total(),
-                        onclick: move |_| skip.set(skip() + page_size),
-                        "Next"
+                        class: "btn btn-sm",
+                        disabled: loading_more(),
+                        onclick: load_more,
+                        if loading_more() { "Loading…" } else { "Load more" }
                     }
                 }
+                span { "{transactions().len()} of {total()}" }
             }
         }
 
@@ -2604,7 +2626,16 @@ fn RuleFormModal(
                 div { class: "modal-action",
                     button {
                         class: "btn btn-ghost",
-                        onclick: move |_| on_close.call(()),
+                        onclick: move |_| {
+                            if apply_result().is_some() {
+                                // An apply already wrote new categories;
+                                // the parent must refresh — route through
+                                // on_saved (which both refreshes and closes).
+                                on_saved.call(());
+                            } else {
+                                on_close.call(());
+                            }
+                        },
                         if apply_result().is_some() { "Close" } else { "Cancel" }
                     }
                     if apply_result().is_none() {
