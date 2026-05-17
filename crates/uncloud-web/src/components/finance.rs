@@ -681,15 +681,16 @@ fn TransactionsTab() -> Element {
         let _ = only_uncat();
         spawn(async move {
             loading.set(true);
-            if accounts().is_empty() {
-                if let Ok(a) = use_finance::list_accounts().await {
-                    accounts.set(a);
-                }
+            // Always refresh — CSV import can auto-create a new account
+            // whose id then needs to resolve to a name in the table.
+            if let Ok(a) = use_finance::list_accounts().await {
+                accounts.set(a);
             }
-            if categories().is_empty() {
-                if let Ok(c) = use_finance::list_categories().await {
-                    categories.set(c);
-                }
+            // Refetch every refresh — the rule modal may have minted a
+            // fresh category whose id then shows up in the transaction
+            // list before this map knows the name (renders as "?").
+            if let Ok(c) = use_finance::list_categories().await {
+                categories.set(c);
             }
             let acc_filter = filter_account();
             let acc_opt = if acc_filter.is_empty() { None } else { Some(acc_filter.as_str()) };
