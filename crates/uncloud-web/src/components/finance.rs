@@ -15,6 +15,7 @@ use uncloud_common::{
     UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
+use crate::components::icons::IconMoreVertical;
 use crate::hooks::use_finance;
 
 fn finance_shell(body: Element) -> Element {
@@ -788,31 +789,47 @@ fn TransactionsTab() -> Element {
                                         class: if t.amount_minor < 0 { "text-right font-mono text-error" } else { "text-right font-mono text-success" },
                                         "{format_money(t.amount_minor, &t.currency)}"
                                     }
-                                    td { class: "text-right whitespace-nowrap",
-                                        button {
-                                            class: "btn btn-ghost btn-xs",
-                                            disabled: t.is_split,
-                                            onclick: move |_| edit_target.set(Some(t_edit.clone())),
-                                            "Edit"
-                                        }
-                                        button {
-                                            class: "btn btn-ghost btn-xs",
-                                            title: "Create a categorization rule from this transaction",
-                                            onclick: move |_| rule_from_tx.set(Some(t_rule.clone())),
-                                            "Rule"
-                                        }
-                                        button {
-                                            class: "btn btn-ghost btn-xs text-error",
-                                            onclick: move |_| {
-                                                let id = t_id.clone();
-                                                spawn(async move {
-                                                    match use_finance::delete_transaction(&id).await {
-                                                        Ok(_) => refresh += 1,
-                                                        Err(e) => error.set(Some(e)),
+                                    td { class: "text-right",
+                                        div { class: "dropdown dropdown-end",
+                                            div {
+                                                tabindex: "0",
+                                                role: "button",
+                                                class: "btn btn-ghost btn-xs btn-circle",
+                                                IconMoreVertical {}
+                                            }
+                                            ul {
+                                                tabindex: "0",
+                                                class: "menu dropdown-content bg-base-100 rounded-box shadow z-10 w-36 p-1",
+                                                if !t.is_split {
+                                                    li {
+                                                        a {
+                                                            onclick: move |_| edit_target.set(Some(t_edit.clone())),
+                                                            "Edit"
+                                                        }
                                                     }
-                                                });
-                                            },
-                                            "Delete"
+                                                }
+                                                li {
+                                                    a {
+                                                        onclick: move |_| rule_from_tx.set(Some(t_rule.clone())),
+                                                        "Create rule…"
+                                                    }
+                                                }
+                                                li {
+                                                    a {
+                                                        class: "text-error",
+                                                        onclick: move |_| {
+                                                            let id = t_id.clone();
+                                                            spawn(async move {
+                                                                match use_finance::delete_transaction(&id).await {
+                                                                    Ok(_) => refresh += 1,
+                                                                    Err(e) => error.set(Some(e)),
+                                                                }
+                                                            });
+                                                        },
+                                                        "Delete"
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -901,6 +918,10 @@ fn TransactionFormModal(
     on_saved: EventHandler<()>,
 ) -> Element {
     let editing = initial.is_some();
+    let mut local_cats: Signal<Vec<FinanceCategoryResponse>> = use_signal(|| categories.clone());
+    let mut show_new_cat = use_signal(|| false);
+    let mut new_cat_name = use_signal(String::new);
+    let mut new_cat_busy = use_signal(|| false);
     let mut date = use_signal(|| {
         initial.as_ref()
             .map(|t| t.date.split('T').next().unwrap_or(&t.date).to_string())
@@ -972,15 +993,69 @@ fn TransactionFormModal(
                     }
                 }
                 div { class: "form-control mt-2",
-                    label { class: "label", span { class: "label-text", "Category" } }
-                    select {
-                        class: "select select-bordered",
-                        value: "{category_id}",
-                        onchange: move |e| category_id.set(e.value()),
-                        option { value: "", "(uncategorized)" }
-                        {categories.iter().map(|c| rsx! {
-                            option { key: "{c.id}", value: "{c.id}", "{c.name}" }
-                        })}
+                    label { class: "label",
+                        span { class: "label-text", "Category" }
+                        if !show_new_cat() {
+                            button {
+                                r#type: "button",
+                                class: "label-text-alt link link-primary",
+                                onclick: move |_| { new_cat_name.set(String::new()); show_new_cat.set(true); },
+                                "+ New category"
+                            }
+                        }
+                    }
+                    if show_new_cat() {
+                        div { class: "join w-full",
+                            input {
+                                class: "input input-bordered join-item flex-1",
+                                placeholder: "Category name",
+                                value: "{new_cat_name}",
+                                oninput: move |e| new_cat_name.set(e.value()),
+                            }
+                            button {
+                                r#type: "button",
+                                class: "btn join-item",
+                                disabled: new_cat_busy() || new_cat_name().trim().is_empty(),
+                                onclick: move |_| {
+                                    new_cat_busy.set(true);
+                                    let name = new_cat_name().trim().to_string();
+                                    spawn(async move {
+                                        let req = CreateFinanceCategoryRequest {
+                                            name,
+                                            parent_id: None,
+                                            colour: None,
+                                        };
+                                        match use_finance::create_category(&req).await {
+                                            Ok(c) => {
+                                                let new_id = c.id.clone();
+                                                local_cats.with_mut(|v| v.push(c));
+                                                category_id.set(new_id);
+                                                show_new_cat.set(false);
+                                            }
+                                            Err(e) => error.set(Some(e)),
+                                        }
+                                        new_cat_busy.set(false);
+                                    });
+                                },
+                                if new_cat_busy() { "…" } else { "Create" }
+                            }
+                            button {
+                                r#type: "button",
+                                class: "btn btn-ghost join-item",
+                                onclick: move |_| show_new_cat.set(false),
+                                "Cancel"
+                            }
+                        }
+                    } else {
+                        select {
+                            class: "select select-bordered",
+                            value: "{category_id}",
+                            onchange: move |e| category_id.set(e.value()),
+                            option { value: "", "(uncategorized)" }
+                            {local_cats().iter().map(|c| rsx! {
+                                option { key: "{c.id}", value: "{c.id}", "{c.name}" }
+                            })}
+                        }
                     }
                 }
                 div { class: "form-control mt-2",
@@ -2250,15 +2325,22 @@ fn RuleFormModal(
     });
     let mut enabled = use_signal(|| initial.as_ref().map(|r| r.enabled).unwrap_or(true));
 
+    let mut local_cats: Signal<HashMap<String, String>> = use_signal(|| categories);
+    let mut show_new_cat = use_signal(|| false);
+    let mut new_cat_name = use_signal(String::new);
+    let mut new_cat_busy = use_signal(|| false);
+
     let mut test_results: Signal<Option<TestRuleResponse>> = use_signal(|| None);
     let mut submitting = use_signal(|| false);
+    let mut applying = use_signal(|| false);
+    let mut apply_result: Signal<Option<(u32, u32)>> = use_signal(|| None);
     let mut error: Signal<Option<String>> = use_signal(|| None);
 
-    let cat_options: Vec<(String, String)> = {
-        let mut v: Vec<(String, String)> = categories.into_iter().collect();
+    let cat_options = use_memo(move || {
+        let mut v: Vec<(String, String)> = local_cats().into_iter().collect();
         v.sort_by(|a, b| a.1.cmp(&b.1));
         v
-    };
+    });
 
     let run_test = move |_| {
         let req = TestRuleRequest {
@@ -2274,24 +2356,32 @@ fn RuleFormModal(
         });
     };
 
-    let submit = move |_| {
-        if submitting() { return; }
-        let parsed_priority = match priority().trim().parse::<i32>() {
-            Ok(p) => p,
-            Err(_) => { error.set(Some("Priority must be a whole number".into())); return; }
-        };
-        let req = FinanceRuleRequest {
+    let build_req = move || -> std::result::Result<FinanceRuleRequest, String> {
+        let p = priority()
+            .trim()
+            .parse::<i32>()
+            .map_err(|_| "Priority must be a whole number".to_string())?;
+        Ok(FinanceRuleRequest {
             name: name(),
             pattern: pattern(),
             pattern_kind: pattern_kind(),
             case_insensitive: case_insensitive(),
             category_id: category_id(),
-            priority: parsed_priority,
+            priority: p,
             enabled: enabled(),
+        })
+    };
+
+    let editing_id_a = editing_id.clone();
+    let submit = move |_| {
+        if submitting() || applying() { return; }
+        let req = match build_req() {
+            Ok(r) => r,
+            Err(e) => { error.set(Some(e)); return; }
         };
         submitting.set(true);
         error.set(None);
-        let editing_id = editing_id.clone();
+        let editing_id = editing_id_a.clone();
         spawn(async move {
             let result = match editing_id {
                 Some(id) => use_finance::update_rule(&id, &req).await,
@@ -2299,6 +2389,37 @@ fn RuleFormModal(
             };
             match result {
                 Ok(_) => on_saved.call(()),
+                Err(e) => { error.set(Some(e)); submitting.set(false); }
+            }
+        });
+    };
+
+    let editing_id_b = editing_id.clone();
+    let submit_and_apply = move |_| {
+        if submitting() || applying() { return; }
+        let req = match build_req() {
+            Ok(r) => r,
+            Err(e) => { error.set(Some(e)); return; }
+        };
+        submitting.set(true);
+        error.set(None);
+        apply_result.set(None);
+        let editing_id = editing_id_b.clone();
+        spawn(async move {
+            let saved = match editing_id {
+                Some(id) => use_finance::update_rule(&id, &req).await,
+                None => use_finance::create_rule(&req).await,
+            };
+            match saved {
+                Ok(_) => {
+                    submitting.set(false);
+                    applying.set(true);
+                    match use_finance::apply_rules().await {
+                        Ok(s) => apply_result.set(Some((s.updated, s.still_unmatched))),
+                        Err(e) => error.set(Some(e)),
+                    }
+                    applying.set(false);
+                }
                 Err(e) => { error.set(Some(e)); submitting.set(false); }
             }
         });
@@ -2356,14 +2477,68 @@ fn RuleFormModal(
                         }
                     }
                     div { class: "form-control",
-                        label { class: "label", span { class: "label-text", "Category" } }
-                        select {
-                            class: "select select-bordered",
-                            value: "{category_id}",
-                            onchange: move |e| category_id.set(e.value()),
-                            {cat_options.iter().map(|(id, n)| rsx! {
-                                option { key: "{id}", value: "{id}", "{n}" }
-                            })}
+                        label { class: "label",
+                            span { class: "label-text", "Category" }
+                            if !show_new_cat() {
+                                button {
+                                    r#type: "button",
+                                    class: "label-text-alt link link-primary",
+                                    onclick: move |_| { new_cat_name.set(String::new()); show_new_cat.set(true); },
+                                    "+ New"
+                                }
+                            }
+                        }
+                        if show_new_cat() {
+                            div { class: "join w-full",
+                                input {
+                                    class: "input input-bordered input-sm join-item flex-1",
+                                    placeholder: "Category name",
+                                    value: "{new_cat_name}",
+                                    oninput: move |e| new_cat_name.set(e.value()),
+                                }
+                                button {
+                                    r#type: "button",
+                                    class: "btn btn-sm join-item",
+                                    disabled: new_cat_busy() || new_cat_name().trim().is_empty(),
+                                    onclick: move |_| {
+                                        new_cat_busy.set(true);
+                                        let name = new_cat_name().trim().to_string();
+                                        spawn(async move {
+                                            let req = CreateFinanceCategoryRequest {
+                                                name: name.clone(),
+                                                parent_id: None,
+                                                colour: None,
+                                            };
+                                            match use_finance::create_category(&req).await {
+                                                Ok(c) => {
+                                                    let new_id = c.id.clone();
+                                                    local_cats.with_mut(|m| { m.insert(c.id, c.name); });
+                                                    category_id.set(new_id);
+                                                    show_new_cat.set(false);
+                                                }
+                                                Err(e) => error.set(Some(e)),
+                                            }
+                                            new_cat_busy.set(false);
+                                        });
+                                    },
+                                    if new_cat_busy() { "…" } else { "Add" }
+                                }
+                                button {
+                                    r#type: "button",
+                                    class: "btn btn-ghost btn-sm join-item",
+                                    onclick: move |_| show_new_cat.set(false),
+                                    "Cancel"
+                                }
+                            }
+                        } else {
+                            select {
+                                class: "select select-bordered",
+                                value: "{category_id}",
+                                onchange: move |e| category_id.set(e.value()),
+                                {cat_options().into_iter().map(|(id, n)| rsx! {
+                                    option { key: "{id}", value: "{id}", "{n}" }
+                                })}
+                            }
                         }
                     }
                     div { class: "form-control",
@@ -2420,13 +2595,31 @@ fn RuleFormModal(
                     }
                 }
 
+                if let Some((updated, unmatched)) = apply_result() {
+                    div { class: "alert alert-success mb-2",
+                        "Saved & applied. Updated {updated} transaction(s); still uncategorized: {unmatched}."
+                    }
+                }
+
                 div { class: "modal-action",
-                    button { class: "btn btn-ghost", onclick: move |_| on_close.call(()), "Cancel" }
                     button {
-                        class: "btn btn-primary",
-                        disabled: submitting(),
-                        onclick: submit,
-                        if submitting() { "Saving…" } else if is_edit { "Save" } else { "Create" }
+                        class: "btn btn-ghost",
+                        onclick: move |_| on_close.call(()),
+                        if apply_result().is_some() { "Close" } else { "Cancel" }
+                    }
+                    if apply_result().is_none() {
+                        button {
+                            class: "btn",
+                            disabled: submitting() || applying(),
+                            onclick: submit_and_apply,
+                            if applying() { "Applying…" } else { "Save & apply rules" }
+                        }
+                        button {
+                            class: "btn btn-primary",
+                            disabled: submitting() || applying(),
+                            onclick: submit,
+                            if submitting() { "Saving…" } else if is_edit { "Save" } else { "Create" }
+                        }
                     }
                 }
             }
