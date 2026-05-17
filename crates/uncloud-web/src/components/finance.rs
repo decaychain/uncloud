@@ -16,6 +16,7 @@ use uncloud_common::{
 };
 
 use crate::components::icons::IconMoreVertical;
+use crate::components::scroll_sentinel::ScrollSentinel;
 use crate::hooks::use_finance;
 
 fn finance_shell(body: Element) -> Element {
@@ -706,17 +707,21 @@ fn TransactionsTab() -> Element {
         });
     });
 
-    let load_more = move |_| {
-        if loading_more() { return; }
-        let skip_val = transactions().len() as u32;
-        let acc = filter_account();
-        let only_un = only_uncat();
-        loading_more.set(true);
+    // No-arg `Fn` trigger, called from both the visible Load-more
+    // button and the IntersectionObserver sentinel. Reads via `.peek()`
+    // and moves mutations into the spawned future so the closure stays
+    // Fn (and thus Copy, since it only captures Signals + u32).
+    let trigger_load_more = move || {
+        if *loading_more.peek() { return; }
+        let skip_val = transactions.peek().len() as u32;
+        let acc = filter_account.peek().clone();
+        let only_un = *only_uncat.peek();
         spawn(async move {
+            loading_more.set(true);
             let acc_opt = if acc.is_empty() { None } else { Some(acc.as_str()) };
             match use_finance::list_transactions(acc_opt, only_un, page_size, skip_val).await {
                 Ok(resp) => {
-                    transactions.with_mut(|v| v.extend(resp.items));
+                    transactions.write().extend(resp.items);
                     total.set(resp.total);
                 }
                 Err(e) => error.set(Some(e)),
@@ -784,7 +789,14 @@ fn TransactionsTab() -> Element {
                 p { "No transactions match the current filters." }
             }
         } else {
-            div { class: "overflow-x-auto",
+            // Plain wrapper (no `overflow-x-auto`) so the table flows
+            // with the page rather than creating a nested scroll
+            // container — that container's overflow-y computes to auto
+            // and produces a phantom inner scrollbar even on wide
+            // screens. The transactions table is full-width and its
+            // columns fit comfortably on desktop; on mobile the user
+            // gets horizontal page scroll, which is fine.
+            div {
                 table { class: "table table-zebra",
                     thead {
                         tr {
@@ -868,15 +880,22 @@ fn TransactionsTab() -> Element {
                 }
             }
             div { class: "flex justify-center items-center gap-3 mt-3 text-sm opacity-70",
-                if (transactions().len() as u64) < total() {
+                span { "{transactions().len()} of {total()}" }
+            }
+            // Auto-load-more sentinel — fires when the bottom of the
+            // list (plus a 400 px lead-in) scrolls into view. Manual
+            // "Load more" button is kept as a visible affordance and
+            // for browsers where IntersectionObserver glitches.
+            if (transactions().len() as u64) < total() && !loading() {
+                ScrollSentinel { on_visible: move |_| trigger_load_more() }
+                div { class: "flex justify-center mt-2",
                     button {
-                        class: "btn btn-sm",
+                        class: "btn btn-sm btn-ghost",
                         disabled: loading_more(),
-                        onclick: load_more,
+                        onclick: move |_| trigger_load_more(),
                         if loading_more() { "Loading…" } else { "Load more" }
                     }
                 }
-                span { "{transactions().len()} of {total()}" }
             }
         }
 

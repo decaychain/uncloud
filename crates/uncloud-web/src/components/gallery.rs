@@ -1,66 +1,11 @@
 use std::collections::HashMap;
 use dioxus::prelude::*;
 use uncloud_common::{AlbumResponse, FileResponse, ServerEvent};
-use wasm_bindgen::closure::Closure;
-use wasm_bindgen::JsCast;
 use crate::components::icons::{IconAlertTriangle, IconImage};
 use crate::components::lightbox::Lightbox;
+use crate::components::scroll_sentinel::ScrollSentinel;
 use crate::hooks::{api, use_files};
 use crate::router::Route;
-
-// ── Infinite-scroll sentinel ─────────────────────────────────────────────────
-
-/// Renders an invisible sentinel at the end of a list. When it enters the
-/// viewport (with 400px lead-in), `on_visible` fires. The parent uses that to
-/// fetch the next page.
-#[component]
-fn ScrollSentinel(on_visible: EventHandler<()>) -> Element {
-    // Stable id per mount so IntersectionObserver attaches once.
-    let id = use_hook(|| {
-        let r = js_sys::Math::random().to_bits();
-        format!("scroll-sentinel-{:x}", r)
-    });
-
-    let id_effect = id.clone();
-    use_effect(move || {
-        let Some(doc) = web_sys::window().and_then(|w| w.document()) else { return; };
-        let Some(sentinel) = doc.get_element_by_id(&id_effect) else { return; };
-
-        let callback = Closure::wrap(Box::new(
-            move |entries: js_sys::Array, _: web_sys::IntersectionObserver| {
-                for i in 0..entries.length() {
-                    if let Some(entry) = entries
-                        .get(i)
-                        .dyn_ref::<web_sys::IntersectionObserverEntry>()
-                    {
-                        if entry.is_intersecting() {
-                            on_visible.call(());
-                            break;
-                        }
-                    }
-                }
-            },
-        )
-            as Box<dyn FnMut(js_sys::Array, web_sys::IntersectionObserver)>);
-
-        let options = web_sys::IntersectionObserverInit::new();
-        options.set_root_margin("400px");
-
-        if let Ok(observer) = web_sys::IntersectionObserver::new_with_options(
-            callback.as_ref().unchecked_ref(),
-            &options,
-        ) {
-            observer.observe(&sentinel);
-            // Leak the JS handles — the observer is kept alive by the browser
-            // as long as it's observing a live element. When the sentinel is
-            // removed from the DOM (component unmount), observation ends.
-            callback.forget();
-            std::mem::forget(observer);
-        }
-    });
-
-    rsx! { div { id: "{id}", class: "h-px" } }
-}
 
 // ── Date grouping ────────────────────────────────────────────────────────────
 

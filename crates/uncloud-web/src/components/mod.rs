@@ -13,6 +13,7 @@ pub mod lightbox;
 pub mod search;
 pub mod sidebar;
 pub mod gallery;
+pub mod scroll_sentinel;
 pub mod music;
 pub mod player;
 pub mod settings;
