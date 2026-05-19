@@ -75,6 +75,12 @@ lucide_icon!(IconShoppingCart,
     path { d: "M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57l1.65-7.43H5.12" }
 );
 
+lucide_icon!(IconWallet,
+    path { d: "M19 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a2 2 0 0 1-2-2V5" }
+    path { d: "M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4" }
+    path { d: "M18 12a.5.5 0 0 0 0 1" }
+);
+
 lucide_icon!(IconKey,
     path { d: "m21 2-9.6 9.6" }
     circle { cx: "7.5", cy: "15.5", r: "5.5" }

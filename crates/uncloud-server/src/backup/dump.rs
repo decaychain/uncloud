@@ -55,6 +55,13 @@ pub const COLLECTION_ALLOWLIST: &[&str] = &[
     "tasks",
     "task_comments",
     "task_labels",
+    "finance_accounts",
+    "finance_categories",
+    "finance_transactions",
+    "finance_import_schemas",
+    "finance_import_runs",
+    "finance_balance_snapshots",
+    "finance_rules",
 ];
 
 /// Top-level schema version stamped into `/database/manifest.json`.

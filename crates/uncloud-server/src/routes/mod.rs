@@ -25,6 +25,7 @@ pub mod sync_events;
 pub mod audit;
 pub mod duplicates;
 pub mod oauth;
+pub mod finance;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -221,7 +222,67 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Sync audit log
         .route("/sync-events", get(sync_events::list_sync_events))
         // Duplicate detection
-        .route("/duplicates", get(duplicates::get_duplicate_report));
+        .route("/duplicates", get(duplicates::get_duplicate_report))
+        // Finance tracker
+        .route("/finance/accounts", get(finance::list_accounts).post(finance::create_account))
+        .route("/finance/accounts/{id}", put(finance::update_account).delete(finance::delete_account))
+        .route("/finance/accounts/{id}/balance", get(finance::get_account_balance))
+        .route("/finance/categories", get(finance::list_categories).post(finance::create_category))
+        .route("/finance/categories/{id}", put(finance::update_category).delete(finance::delete_category))
+        .route("/finance/transactions", get(finance::list_transactions).post(finance::create_transaction))
+        .route(
+            "/finance/transactions/category-summary",
+            get(finance::transaction_category_summary),
+        )
+        .route("/finance/transactions/{id}", put(finance::update_transaction).delete(finance::delete_transaction))
+        .route(
+            "/finance/import-schemas",
+            get(finance::list_import_schemas).post(finance::create_import_schema),
+        )
+        .route(
+            "/finance/import-schemas/{id}",
+            put(finance::update_import_schema).delete(finance::delete_import_schema),
+        )
+        .route(
+            "/finance/import-schemas/{id}/clone",
+            post(finance::clone_import_schema),
+        )
+        .route("/finance/import", post(finance::import_csv))
+        .route("/finance/imports", get(finance::list_import_runs))
+        .route(
+            "/finance/imports/{id}/revert",
+            post(finance::revert_import_run),
+        )
+        .route(
+            "/finance/accounts/{id}/reconcile/preview",
+            post(finance::reconcile_preview),
+        )
+        .route(
+            "/finance/accounts/{id}/reconcile/apply",
+            post(finance::reconcile_apply),
+        )
+        .route(
+            "/finance/accounts/{id}/snapshots",
+            get(finance::list_account_snapshots),
+        )
+        .route(
+            "/finance/snapshots/{id}/recompute",
+            post(finance::recompute_snapshot),
+        )
+        .route(
+            "/finance/snapshots/{id}",
+            delete(finance::delete_snapshot),
+        )
+        .route(
+            "/finance/rules",
+            get(finance::list_rules).post(finance::create_rule),
+        )
+        .route(
+            "/finance/rules/{id}",
+            put(finance::update_rule).delete(finance::delete_rule),
+        )
+        .route("/finance/rules/apply", post(finance::apply_rules))
+        .route("/finance/rules/test", post(finance::test_rule));
 
     // v1-only routes (API tokens, S3 credentials, apps)
     let v1_only = Router::new()

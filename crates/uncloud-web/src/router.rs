@@ -4,6 +4,10 @@ use crate::components::{
     auth::{Login, Register},
     dashboard::DashboardPage,
     duplicates::DuplicatesPage,
+    finance::{
+        FinanceAccountsPage, FinanceCategoriesPage, FinanceImportsPage, FinanceRulesPage,
+        FinanceSchemasPage, FinanceTransactionsPage,
+    },
     file_browser::FileBrowser,
     layout::Layout,
     gallery::{Gallery, GalleryAlbum},
@@ -99,6 +103,24 @@ pub enum Route {
 
         #[route("/tasks/project/:id")]
         TasksProject { id: String },
+
+        #[route("/finance")]
+        Finance {},
+
+        #[route("/finance/accounts")]
+        FinanceAccounts {},
+
+        #[route("/finance/categories")]
+        FinanceCategories {},
+
+        #[route("/finance/schemas")]
+        FinanceSchemas {},
+
+        #[route("/finance/imports")]
+        FinanceImports {},
+
+        #[route("/finance/rules")]
+        FinanceRules {},
 
         #[route("/shopping")]
         Shopping {},
@@ -283,6 +305,36 @@ fn TasksProject(id: String) -> Element {
     rsx! {
         TasksProjectPage { key: "{id}", project_id: id }
     }
+}
+
+#[component]
+fn Finance() -> Element {
+    rsx! { FinanceTransactionsPage {} }
+}
+
+#[component]
+fn FinanceAccounts() -> Element {
+    rsx! { FinanceAccountsPage {} }
+}
+
+#[component]
+fn FinanceCategories() -> Element {
+    rsx! { FinanceCategoriesPage {} }
+}
+
+#[component]
+fn FinanceSchemas() -> Element {
+    rsx! { FinanceSchemasPage {} }
+}
+
+#[component]
+fn FinanceImports() -> Element {
+    rsx! { FinanceImportsPage {} }
+}
+
+#[component]
+fn FinanceRules() -> Element {
+    rsx! { FinanceRulesPage {} }
 }
 
 #[component]

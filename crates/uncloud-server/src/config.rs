@@ -373,6 +373,8 @@ pub struct ManagedApp {
 pub struct FeaturesConfig {
     #[serde(default = "default_true")]
     pub shopping: bool,
+    #[serde(default = "default_true")]
+    pub finance: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -409,7 +411,7 @@ fn default_true() -> bool {
 
 impl Default for FeaturesConfig {
     fn default() -> Self {
-        Self { shopping: true }
+        Self { shopping: true, finance: true }
     }
 }
 

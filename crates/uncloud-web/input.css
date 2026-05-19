@@ -33,3 +33,20 @@
     padding-bottom: calc(3.5rem + max(env(safe-area-inset-bottom), 0.5rem));
   }
 }
+
+/* DaisyUI's `.drawer-side` uses `overflow-y: auto`, so once the sidebar's
+   nav items push past the viewport height (which happens easily once a
+   user enables Finance + its sub-items, Music + Playlists, Tasks +
+   projects, etc.) the platform draws a permanent scrollbar at the
+   sidebar's right edge — visually a second scrollbar sitting just left
+   of the browser's own. Hide the gutter; mouse wheel and keyboard nav
+   still work. Falls back to the default behaviour where the browser
+   ignores these properties. */
+.drawer-side {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.drawer-side::-webkit-scrollbar {
+  display: none;
+  width: 0;
+}

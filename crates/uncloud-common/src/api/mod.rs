@@ -14,6 +14,7 @@ pub mod tasks;
 pub mod preferences;
 pub mod sync_events;
 pub mod duplicates;
+pub mod finance;
 
 pub use auth::*;
 pub use files::*;
@@ -31,3 +32,4 @@ pub use tasks::*;
 pub use preferences::*;
 pub use sync_events::*;
 pub use duplicates::*;
+pub use finance::*;

@@ -600,6 +600,161 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         )
         .await?;
 
+    // Finance tracker indexes
+    let finance_accounts = db.collection::<mongodb::bson::Document>("finance_accounts");
+    finance_accounts
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "name": 1 })
+                .build(),
+        )
+        .await?;
+    // Partial unique index: at most one account per (owner, IBAN) so the
+    // CSV importer can use IBAN as a stable account key. Accounts without
+    // an IBAN are unaffected.
+    finance_accounts
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "iban": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(mongodb::bson::doc! {
+                            "iban": { "$type": "string" }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    let finance_categories = db.collection::<mongodb::bson::Document>("finance_categories");
+    finance_categories
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "name": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    finance_categories
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "parent_id": 1 })
+                .build(),
+        )
+        .await?;
+
+    let finance_transactions = db.collection::<mongodb::bson::Document>("finance_transactions");
+    finance_transactions
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "account_id": 1, "date": -1 })
+                .build(),
+        )
+        .await?;
+    finance_transactions
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "date": -1 })
+                .build(),
+        )
+        .await?;
+    // (account_id, source_ref) UPSERT key for CSV import. Partial filter
+    // so manual transactions with no source_ref coexist without colliding
+    // on `null`.
+    finance_transactions
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "account_id": 1, "source_ref": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(mongodb::bson::doc! {
+                            "source_ref": { "$type": "string" }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    // Lets revert delete every transaction tied to a run in one pass.
+    finance_transactions
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "import_run_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(mongodb::bson::doc! {
+                            "import_run_id": { "$type": "objectId" }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    let finance_rules = db.collection::<mongodb::bson::Document>("finance_rules");
+    finance_rules
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "priority": 1, "_id": 1 })
+                .build(),
+        )
+        .await?;
+
+    let finance_balance_snapshots =
+        db.collection::<mongodb::bson::Document>("finance_balance_snapshots");
+    finance_balance_snapshots
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "account_id": 1, "on_date": -1 })
+                .build(),
+        )
+        .await?;
+
+    let finance_import_runs = db.collection::<mongodb::bson::Document>("finance_import_runs");
+    finance_import_runs
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    finance_import_runs
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "account_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+
+    let finance_import_schemas = db.collection::<mongodb::bson::Document>("finance_import_schemas");
+    finance_import_schemas
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "name": 1 })
+                .build(),
+        )
+        .await?;
+    // Partial unique key so we never seed the same builtin twice per user.
+    finance_import_schemas
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "builtin_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(mongodb::bson::doc! {
+                            "builtin_id": { "$type": "string" }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     tracing::info!("Database indexes created successfully");
     Ok(())
 }
