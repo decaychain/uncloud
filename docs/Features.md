@@ -425,5 +425,5 @@ Experimental backend-only foundation for a future IMAP/SMTP mail client.
 - **Accounts and identities**: supports multiple external accounts per user and multiple sender identities per account from the start.
 - **Folders**: stores IMAP folder paths, hierarchy delimiters, parent paths, selectable state, and attributes so subfolders can be represented without flattening.
 - **Provider layer**: `MailService` currently uses `async-imap` for implicit-TLS IMAP connection tests and folder refresh. `lettre`, `mail-parser`, and `ammonia` are included as the planned SMTP, MIME, and HTML-sanitization foundation.
-- **Credentials**: provider passwords/OAuth refresh tokens are not persisted yet. IMAP connection checks and folder refresh accept a transient password body until encrypted server-side secret storage is designed.
-- **API surface**: `/api/mail/accounts`, `/api/mail/accounts/{id}/test-imap`, `/api/mail/accounts/{account_id}/folders`, `/api/mail/accounts/{account_id}/folders/refresh`, and `/api/mail/identities`.
+- **Credentials**: IMAP app passwords can be stored encrypted-at-rest with `secrets.master_key`. IMAP connection checks and folder refresh accept either a transient password body or the stored account credential. OAuth refresh tokens and SMTP-specific credential splits are still future work.
+- **API surface**: `/api/mail/accounts`, `/api/mail/accounts/{id}/credential`, `/api/mail/accounts/{id}/test-imap`, `/api/mail/accounts/{account_id}/folders`, `/api/mail/accounts/{account_id}/folders/refresh`, and `/api/mail/identities`.

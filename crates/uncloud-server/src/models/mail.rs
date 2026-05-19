@@ -13,6 +13,14 @@ pub struct MailServerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptedMailCredential {
+    pub version: u8,
+    pub algorithm: String,
+    pub nonce: String,
+    pub ciphertext: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MailAccount {
     #[serde(rename = "_id")]
     pub id: ObjectId,
@@ -27,6 +35,8 @@ pub struct MailAccount {
     pub sync_enabled: bool,
     #[serde(default)]
     pub credential_configured: bool,
+    #[serde(default)]
+    pub credential: Option<EncryptedMailCredential>,
     #[serde(default, with = "crate::models::opt_dt")]
     pub last_sync_at: Option<DateTime<Utc>>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]

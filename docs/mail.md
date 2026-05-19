@@ -21,10 +21,10 @@ The foundation supports:
 - SMTP/MIME/sanitization dependencies selected for later send and render work:
   `lettre`, `mail-parser`, and `ammonia`.
 
-The first implementation deliberately does not persist provider passwords or
-OAuth refresh tokens. Endpoints that need provider access accept the password
-transiently. Persistent background sync needs encrypted server-side secrets
-before it is enabled.
+The first implementation now supports encrypted-at-rest IMAP password storage
+behind a deployment master key. Endpoints that need provider access still accept
+a transient password for manual testing, but can also use the stored account
+credential when the request body omits `password`.
 
 ## Backend Layout
 
@@ -49,6 +49,9 @@ Authenticated routes are mounted under both `/api` and `/api/v1`:
 - `POST /mail/accounts`
 - `PUT /mail/accounts/{id}`
 - `DELETE /mail/accounts/{id}`
+- `GET /mail/accounts/{id}/credential`
+- `PUT /mail/accounts/{id}/credential`
+- `DELETE /mail/accounts/{id}/credential`
 - `POST /mail/accounts/{id}/test-imap`
 - `GET /mail/accounts/{account_id}/folders`
 - `POST /mail/accounts/{account_id}/folders/refresh`
@@ -65,7 +68,10 @@ and plaintext ports are represented in the data model but not wired yet.
 - Creating, listing, updating, and deleting mail account metadata.
 - Creating, listing, updating, and deleting sender identities.
 - Multiple accounts per user and multiple identities per account.
+- Encrypted-at-rest IMAP password storage using `secrets.master_key`.
+- Credential status is exposed only as `credential_configured: true/false`.
 - IMAP implicit TLS login with a transient password.
+- IMAP implicit TLS login with a stored account credential.
 - IMAP capability retrieval through `POST /mail/accounts/{id}/test-imap`.
 - IMAP folder discovery through `POST /mail/accounts/{account_id}/folders/refresh`.
 - Folder/subfolder persistence using remote path, hierarchy delimiter, parent
@@ -76,8 +82,8 @@ and plaintext ports are represented in the data model but not wired yet.
 
 ## Known Limits
 
-- No persistent provider credentials yet. The server cannot run background mail
-  sync until we add encrypted-at-rest secret storage.
+- Stored credentials currently cover IMAP app passwords only. OAuth refresh
+  tokens and SMTP credential handling still need a credential type model.
 - Only implicit TLS IMAP is wired. STARTTLS and plaintext are represented in the
   API/model but return a validation error in the provider layer.
 - SMTP is not wired beyond selecting `lettre` as the planned foundation.
@@ -94,10 +100,11 @@ and plaintext ports are represented in the data model but not wired yet.
 1. Start `uncloud-server` with MongoDB available.
 2. Log in and save the session cookie.
 3. `POST /api/mail/accounts` with IMAP/SMTP settings.
-4. `POST /api/mail/accounts/{id}/test-imap` with a transient app password.
-5. `POST /api/mail/accounts/{id}/folders/refresh` with the same transient
-   password.
-6. `GET /api/mail/accounts/{id}/folders` and verify folders/subfolders are
+4. Optionally `PUT /api/mail/accounts/{id}/credential` with an app password.
+5. `POST /api/mail/accounts/{id}/test-imap` with either a transient app
+   password or `{}` to use the stored credential.
+6. `POST /api/mail/accounts/{id}/folders/refresh` the same way.
+7. `GET /api/mail/accounts/{id}/folders` and verify folders/subfolders are
    persisted with expected paths and delimiters.
 
 This is enough to validate the current protocol foundation before building UI.
@@ -106,15 +113,22 @@ This is enough to validate the current protocol foundation before building UI.
 
 ### 1. Credential Storage
 
-Design encrypted server-side secret storage before any background sync:
+Initial encrypted server-side secret storage is in place:
 
-- Add a `secrets.master_key` or equivalent deployment secret.
-- Encrypt IMAP passwords / OAuth refresh tokens before writing to MongoDB.
-- Return only `credential_configured: true/false` to clients.
-- Add routes to set, replace, and clear account credentials.
-- Avoid logging provider usernames together with credential errors.
+- `secrets.master_key` is a base64-encoded 32-byte deployment secret.
+- IMAP passwords are encrypted with AES-256-GCM before writing to MongoDB.
+- Account responses return only `credential_configured: true/false`.
+- Routes exist to inspect status, set/replace, and clear account credentials.
+- `test-imap` and `folders/refresh` use a transient password when provided, or
+  the stored credential when `password` is omitted.
 
-This should land before scheduler/background sync.
+Remaining credential work before scheduler/background sync:
+
+- Add credential types for OAuth refresh tokens and any SMTP-specific password
+  split if providers need separate IMAP/SMTP secrets.
+- Decide the rotation story for `secrets.master_key`.
+- Consider a small admin/health check that reports whether mail credential
+  storage is configured without exposing the key.
 
 ### 2. Provider Capability
 

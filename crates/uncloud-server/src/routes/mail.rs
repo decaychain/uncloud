@@ -11,13 +11,15 @@ use futures::TryStreamExt;
 use mongodb::bson::{self, oid::ObjectId};
 use uncloud_common::{
     CreateMailAccountRequest, CreateMailIdentityRequest, MailAccountResponse,
-    MailConnectionTestResponse, MailFolderResponse, MailIdentityResponse, MailPasswordAuthRequest,
-    MailServerSettings, UpdateMailAccountRequest, UpdateMailIdentityRequest,
+    MailConnectionTestResponse, MailCredentialStatusResponse, MailFolderResponse,
+    MailIdentityResponse, MailPasswordAuthRequest, MailServerSettings, SetMailCredentialRequest,
+    UpdateMailAccountRequest, UpdateMailIdentityRequest,
 };
 
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
 use crate::models::{MailAccount, MailFolder, MailIdentity, MailServerConfig};
+use crate::services::SecretCipher;
 use crate::AppState;
 
 const ACCOUNTS: &str = "mail_accounts";
@@ -103,7 +105,7 @@ fn account_to_response(account: &MailAccount) -> MailAccountResponse {
         smtp: server_to_response(&account.smtp),
         enabled: account.enabled,
         sync_enabled: account.sync_enabled,
-        credential_configured: account.credential_configured,
+        credential_configured: account.credential_configured || account.credential.is_some(),
         created_at: account.created_at.to_rfc3339(),
         updated_at: account.updated_at.to_rfc3339(),
         last_sync_at: account.last_sync_at.map(|dt| dt.to_rfc3339()),
@@ -153,6 +155,30 @@ async fn find_account(state: &AppState, owner_id: ObjectId, id: ObjectId) -> Res
         .ok_or_else(|| AppError::NotFound("Mail account".into()))
 }
 
+fn credential_status(account: &MailAccount) -> MailCredentialStatusResponse {
+    MailCredentialStatusResponse {
+        account_id: account.id.to_hex(),
+        credential_configured: account.credential_configured || account.credential.is_some(),
+    }
+}
+
+fn resolve_imap_password(
+    state: &AppState,
+    account: &MailAccount,
+    password: Option<&str>,
+) -> Result<String> {
+    if let Some(password) = password.map(str::trim).filter(|value| !value.is_empty()) {
+        return Ok(password.to_string());
+    }
+    let Some(credential) = account.credential.as_ref() else {
+        return Err(AppError::BadRequest(
+            "mail account has no stored credential; provide a password or set the credential"
+                .into(),
+        ));
+    };
+    SecretCipher::from_config(&state.config.secrets)?.decrypt_mail_credential(credential)
+}
+
 pub async fn list_accounts(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -188,6 +214,7 @@ pub async fn create_account(
         enabled: req.enabled,
         sync_enabled: req.sync_enabled,
         credential_configured: false,
+        credential: None,
         last_sync_at: None,
         created_at: now,
         updated_at: now,
@@ -297,6 +324,80 @@ pub async fn delete_account(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn get_account_credential(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<MailCredentialStatusResponse>> {
+    require_mail(&state)?;
+    let id = parse_oid(&id, "mail account id")?;
+    let account = find_account(&state, user.id, id).await?;
+    Ok(Json(credential_status(&account)))
+}
+
+pub async fn set_account_credential(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    Json(req): Json<SetMailCredentialRequest>,
+) -> Result<Json<MailCredentialStatusResponse>> {
+    require_mail(&state)?;
+    let id = parse_oid(&id, "mail account id")?;
+    let _ = find_account(&state, user.id, id).await?;
+    let password = req.password.trim();
+    if password.is_empty() {
+        return Err(AppError::BadRequest(
+            "mail credential cannot be empty".into(),
+        ));
+    }
+    let credential =
+        SecretCipher::from_config(&state.config.secrets)?.encrypt_mail_credential(password)?;
+    let credential_bson =
+        bson::to_bson(&credential).map_err(|e| AppError::Internal(e.to_string()))?;
+    state
+        .db
+        .collection::<MailAccount>(ACCOUNTS)
+        .update_one(
+            doc! { "_id": id, "owner_id": user.id },
+            doc! {
+                "$set": {
+                    "credential": credential_bson,
+                    "credential_configured": true,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }
+            },
+        )
+        .await?;
+    let account = find_account(&state, user.id, id).await?;
+    Ok(Json(credential_status(&account)))
+}
+
+pub async fn clear_account_credential(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<MailCredentialStatusResponse>> {
+    require_mail(&state)?;
+    let id = parse_oid(&id, "mail account id")?;
+    let _ = find_account(&state, user.id, id).await?;
+    state
+        .db
+        .collection::<MailAccount>(ACCOUNTS)
+        .update_one(
+            doc! { "_id": id, "owner_id": user.id },
+            doc! {
+                "$set": {
+                    "credential_configured": false,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                },
+                "$unset": { "credential": "" },
+            },
+        )
+        .await?;
+    let account = find_account(&state, user.id, id).await?;
+    Ok(Json(credential_status(&account)))
+}
+
 pub async fn test_account_imap(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -306,10 +407,11 @@ pub async fn test_account_imap(
     require_mail(&state)?;
     let id = parse_oid(&id, "mail account id")?;
     let account = find_account(&state, user.id, id).await?;
+    let password = resolve_imap_password(&state, &account, req.password.as_deref())?;
     Ok(Json(
         state
             .mail
-            .test_imap_password(&account.imap, &req.password)
+            .test_imap_password(&account.imap, &password)
             .await?,
     ))
 }
@@ -506,9 +608,10 @@ pub async fn refresh_folders(
     require_mail(&state)?;
     let account_id = parse_oid(&account_id, "mail account id")?;
     let account = find_account(&state, user.id, account_id).await?;
+    let password = resolve_imap_password(&state, &account, req.password.as_deref())?;
     let remote = state
         .mail
-        .list_imap_mailboxes(&account.imap, &req.password)
+        .list_imap_mailboxes(&account.imap, &password)
         .await?;
 
     let coll = state.db.collection::<MailFolder>(FOLDERS);

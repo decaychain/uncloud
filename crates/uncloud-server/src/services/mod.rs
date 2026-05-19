@@ -6,6 +6,7 @@ pub mod sharing;
 pub mod rescan;
 pub mod sync_log;
 pub mod mail;
+pub mod secrets;
 
 pub use auth::AuthService;
 pub use storage::StorageService;
@@ -14,3 +15,4 @@ pub use search::SearchService;
 pub use rescan::RescanService;
 pub use sync_log::SyncLog;
 pub use mail::MailService;
+pub use secrets::SecretCipher;

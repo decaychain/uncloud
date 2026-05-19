@@ -147,7 +147,19 @@ pub struct MailAttachmentResponse {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MailPasswordAuthRequest {
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetMailCredentialRequest {
     pub password: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailCredentialStatusResponse {
+    pub account_id: String,
+    pub credential_configured: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
