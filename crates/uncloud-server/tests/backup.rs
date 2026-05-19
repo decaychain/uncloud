@@ -154,3 +154,45 @@ async fn dump_all_writes_manifest_with_counts() {
     let folders_count = counts.iter().find(|(n, _)| n == "folders").unwrap().1;
     assert_eq!(folders_count, 2);
 }
+
+/// Regression guard for "forgot to add a new collection to the backup
+/// allowlist". Without an assertion like this, a new feature (Finance,
+/// Tasks, …) can ship its collection and a backup will silently drop
+/// it on restore. We dump into an empty database — `dump_all` is
+/// expected to still produce a manifest entry + an empty `.jsonl` file
+/// for every name in `COLLECTION_ALLOWLIST`.
+#[tokio::test]
+#[ignore]
+async fn dump_all_produces_jsonl_and_manifest_for_every_allowlisted_collection() {
+    let db = fresh_db("uncloud_backup_allowlist_coverage").await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let counts = dump::dump_all(&db, dir.path()).await.unwrap();
+
+    let manifest_bytes = tokio::fs::read(dir.path().join("manifest.json")).await.unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    let manifest_names: std::collections::HashSet<&str> = manifest["collections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    let counts_names: std::collections::HashSet<&str> =
+        counts.iter().map(|(n, _)| n.as_str()).collect();
+
+    for &name in dump::COLLECTION_ALLOWLIST {
+        assert!(
+            manifest_names.contains(name),
+            "manifest is missing allowlisted collection `{name}` \
+             — new collection added without updating dump::COLLECTION_ALLOWLIST?"
+        );
+        assert!(
+            counts_names.contains(name),
+            "dump_all returned no count entry for `{name}`"
+        );
+        let path = dir.path().join(format!("{name}.jsonl"));
+        assert!(
+            tokio::fs::metadata(&path).await.is_ok(),
+            "missing per-collection jsonl for `{name}` at {path:?}"
+        );
+    }
+}
