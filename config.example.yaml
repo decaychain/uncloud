@@ -112,6 +112,11 @@ features:
   finance: true
   mail: true
 
+# Server-side encrypted secrets. Mail credential storage requires a stable
+# 32-byte master key. Generate one with: openssl rand -base64 32
+secrets:
+  # master_key: ${UNCLOUD_SECRETS_MASTER_KEY}
+
 # Logging
 logging:
   # tracing_subscriber EnvFilter directive. `RUST_LOG` env var, when set,

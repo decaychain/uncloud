@@ -24,6 +24,8 @@ pub struct Config {
     #[serde(default)]
     pub logging: LoggingConfig,
     #[serde(default)]
+    pub secrets: SecretsConfig,
+    #[serde(default)]
     pub sync_audit: SyncAuditConfig,
     #[serde(default)]
     pub backup: crate::backup::config::BackupConfig,
@@ -379,6 +381,14 @@ pub struct FeaturesConfig {
     pub mail: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SecretsConfig {
+    /// Base64-encoded 32-byte key used for encrypted-at-rest server secrets.
+    /// Generate with `openssl rand -base64 32` and inject through an env var.
+    #[serde(default)]
+    pub master_key: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SyncAuditConfig {
     #[serde(default = "default_true")]
@@ -554,6 +564,7 @@ impl Default for Config {
             apps: AppsConfig::default(),
             features: FeaturesConfig::default(),
             logging: LoggingConfig::default(),
+            secrets: SecretsConfig::default(),
             sync_audit: SyncAuditConfig::default(),
             backup: crate::backup::config::BackupConfig::default(),
         }

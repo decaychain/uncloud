@@ -125,6 +125,7 @@ impl TestApp {
             apps: AppsConfig::default(),
             features: FeaturesConfig::default(),
             logging: uncloud_server::config::LoggingConfig::default(),
+            secrets: uncloud_server::config::SecretsConfig::default(),
             sync_audit: uncloud_server::config::SyncAuditConfig::default(),
             backup: uncloud_server::backup::config::BackupConfig::default(),
         };
@@ -339,6 +340,7 @@ impl BoundTestApp {
             apps: AppsConfig::default(),
             features: FeaturesConfig::default(),
             logging: uncloud_server::config::LoggingConfig::default(),
+            secrets: uncloud_server::config::SecretsConfig::default(),
             sync_audit: uncloud_server::config::SyncAuditConfig::default(),
             backup: uncloud_server::backup::config::BackupConfig::default(),
         };

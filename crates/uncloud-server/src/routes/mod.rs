@@ -288,6 +288,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Mail client foundation
         .route("/mail/accounts", get(mail::list_accounts).post(mail::create_account))
         .route("/mail/accounts/{id}", put(mail::update_account).delete(mail::delete_account))
+        .route(
+            "/mail/accounts/{id}/credential",
+            get(mail::get_account_credential)
+                .put(mail::set_account_credential)
+                .delete(mail::clear_account_credential),
+        )
         .route("/mail/accounts/{id}/test-imap", post(mail::test_account_imap))
         .route("/mail/accounts/{account_id}/folders", get(mail::list_folders))
         .route("/mail/accounts/{account_id}/folders/refresh", post(mail::refresh_folders))
