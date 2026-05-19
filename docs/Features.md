@@ -416,3 +416,14 @@ A self-hosted personal expense tracker — multi-account, multi-currency (per-cu
   - `accounts/{id}/reconcile/{preview,apply}`, `accounts/{id}/snapshots`, `snapshots/{id}` (delete + `/recompute`),
   - `rules` (CRUD), `rules/apply`, `rules/test`.
 - **Frontend**: `components/finance.rs`. The sidebar shows six sub-routes under Finance — **Transactions**, **Accounts**, **Categories**, **Import** (with nested **Schemas**), and **Rules**. The Transactions view spans full width, supports a date range with presets (this/last month, last 30 days, this/last year, all time), a "Show reconciliations" toggle, optional desktop-only income/expenses split, IntersectionObserver-driven auto-load-more, and a collapsible summary strip above the table (per-account balance cards + Income/Expenses/Net totals for the range + per-category horizontal bars). The Rules editor has a live "Run test" preview and a "Save & apply rules" button that runs the engine over existing transactions and reports the count before closing. Each transaction row exposes a `⋮` menu with Edit / Create rule / Delete; "Create rule" pre-fills the editor with the transaction's description and category.
+
+## Mail Client Foundation
+
+Experimental backend-only foundation for a future IMAP/SMTP mail client.
+
+- **Model**: `mail_accounts`, `mail_identities`, `mail_folders`, `mail_messages`, and `mail_attachments`.
+- **Accounts and identities**: supports multiple external accounts per user and multiple sender identities per account from the start.
+- **Folders**: stores IMAP folder paths, hierarchy delimiters, parent paths, selectable state, and attributes so subfolders can be represented without flattening.
+- **Provider layer**: `MailService` currently uses `async-imap` for implicit-TLS IMAP connection tests and folder refresh. `lettre`, `mail-parser`, and `ammonia` are included as the planned SMTP, MIME, and HTML-sanitization foundation.
+- **Credentials**: provider passwords/OAuth refresh tokens are not persisted yet. IMAP connection checks and folder refresh accept a transient password body until encrypted server-side secret storage is designed.
+- **API surface**: `/api/mail/accounts`, `/api/mail/accounts/{id}/test-imap`, `/api/mail/accounts/{account_id}/folders`, `/api/mail/accounts/{account_id}/folders/refresh`, and `/api/mail/identities`.

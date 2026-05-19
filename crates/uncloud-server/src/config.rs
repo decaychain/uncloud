@@ -375,6 +375,8 @@ pub struct FeaturesConfig {
     pub shopping: bool,
     #[serde(default = "default_true")]
     pub finance: bool,
+    #[serde(default = "default_true")]
+    pub mail: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -411,7 +413,11 @@ fn default_true() -> bool {
 
 impl Default for FeaturesConfig {
     fn default() -> Self {
-        Self { shopping: true, finance: true }
+        Self {
+            shopping: true,
+            finance: true,
+            mail: true,
+        }
     }
 }
 

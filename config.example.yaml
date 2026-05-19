@@ -105,6 +105,13 @@ sync_audit:
   # Hard cap on events per user (prune task trims older rows past this)
   max_records_per_user: 10000
 
+# Feature toggles. Users can opt out of some features via preferences; these
+# are server-wide availability switches.
+features:
+  shopping: true
+  finance: true
+  mail: true
+
 # Logging
 logging:
   # tracing_subscriber EnvFilter directive. `RUST_LOG` env var, when set,

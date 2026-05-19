@@ -26,6 +26,7 @@ pub mod audit;
 pub mod duplicates;
 pub mod oauth;
 pub mod finance;
+pub mod mail;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -282,7 +283,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             put(finance::update_rule).delete(finance::delete_rule),
         )
         .route("/finance/rules/apply", post(finance::apply_rules))
-        .route("/finance/rules/test", post(finance::test_rule));
+        .route("/finance/rules/test", post(finance::test_rule))
+        // Mail client foundation
+        .route("/mail/accounts", get(mail::list_accounts).post(mail::create_account))
+        .route("/mail/accounts/{id}", put(mail::update_account).delete(mail::delete_account))
+        .route("/mail/accounts/{id}/test-imap", post(mail::test_account_imap))
+        .route("/mail/accounts/{account_id}/folders", get(mail::list_folders))
+        .route("/mail/accounts/{account_id}/folders/refresh", post(mail::refresh_folders))
+        .route("/mail/identities", get(mail::list_identities).post(mail::create_identity))
+        .route("/mail/identities/{id}", put(mail::update_identity).delete(mail::delete_identity));
 
     // v1-only routes (API tokens, S3 credentials, apps)
     let v1_only = Router::new()

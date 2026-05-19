@@ -18,7 +18,7 @@ pub mod backup;
 use mongodb::Database;
 
 use config::Config;
-use services::{AuthService, EventService, RescanService, SearchService, StorageService, SyncLog};
+use services::{AuthService, EventService, MailService, RescanService, SearchService, StorageService, SyncLog};
 
 pub struct AppState {
     pub config: Config,
@@ -31,4 +31,5 @@ pub struct AppState {
     pub rescan: RescanService,
     pub sync_log: SyncLog,
     pub http_client: reqwest::Client,
+    pub mail: MailService,
 }

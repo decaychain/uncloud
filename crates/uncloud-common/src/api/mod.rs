@@ -15,6 +15,7 @@ pub mod preferences;
 pub mod sync_events;
 pub mod duplicates;
 pub mod finance;
+pub mod mail;
 
 pub use auth::*;
 pub use files::*;
@@ -33,3 +34,4 @@ pub use preferences::*;
 pub use sync_events::*;
 pub use duplicates::*;
 pub use finance::*;
+pub use mail::*;

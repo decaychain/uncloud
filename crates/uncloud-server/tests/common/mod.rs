@@ -162,6 +162,7 @@ impl TestApp {
             rescan: RescanService::new(),
             sync_log,
             http_client: reqwest::Client::new(),
+            mail: uncloud_server::services::MailService::new(),
         });
 
         let router = routes::create_router(state);
@@ -371,6 +372,7 @@ impl BoundTestApp {
             rescan: RescanService::new(),
             sync_log,
             http_client: reqwest::Client::new(),
+            mail: uncloud_server::services::MailService::new(),
         });
 
         let router = uncloud_server::routes::create_router(state);
