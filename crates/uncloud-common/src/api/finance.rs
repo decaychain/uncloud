@@ -87,6 +87,9 @@ pub struct TransactionResponse {
     pub source_ref: Option<String>,
     pub raw_bank_category: Option<String>,
     pub is_split: bool,
+    /// Set on auto-generated reconciliation adjustments; the UI can
+    /// flag them with a badge and filter them out by default.
+    pub source_snapshot_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -117,6 +120,9 @@ pub struct ListTransactionsQuery {
     pub uncategorized: Option<bool>,
     pub from: Option<String>,
     pub to: Option<String>,
+    /// When false (default), reconciliation-adjustment rows are
+    /// filtered out — they're not real spending and clutter the list.
+    pub include_reconciliations: Option<bool>,
     pub limit: Option<u32>,
     pub skip: Option<u32>,
 }

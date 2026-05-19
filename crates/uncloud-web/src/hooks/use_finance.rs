@@ -132,6 +132,9 @@ pub async fn delete_category(id: &str) -> Result<(), String> {
 pub async fn list_transactions(
     account_id: Option<&str>,
     uncategorized: bool,
+    from: Option<&str>,
+    to: Option<&str>,
+    include_reconciliations: bool,
     limit: u32,
     skip: u32,
 ) -> Result<TransactionListResponse, String> {
@@ -141,6 +144,15 @@ pub async fn list_transactions(
     }
     if uncategorized {
         url.push_str("&uncategorized=true");
+    }
+    if let Some(f) = from {
+        url.push_str(&format!("&from={}", f));
+    }
+    if let Some(t) = to {
+        url.push_str(&format!("&to={}", t));
+    }
+    if include_reconciliations {
+        url.push_str("&include_reconciliations=true");
     }
     let r = api::get(&url).send().await.map_err(|e| e.to_string())?;
     if r.ok() {

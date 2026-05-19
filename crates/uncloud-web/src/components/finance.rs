@@ -115,6 +115,50 @@ fn today_iso() -> String {
         .split('T').next().unwrap_or("").to_string()
 }
 
+fn ymd(y: i32, m_zero_based: u32, d: u32) -> String {
+    format!("{:04}-{:02}-{:02}", y, m_zero_based + 1, d)
+}
+
+fn last_day_of_month(year: i32, m_zero_based: u32) -> u32 {
+    match m_zero_based {
+        0 | 2 | 4 | 6 | 7 | 9 | 11 => 31,
+        3 | 5 | 8 | 10 => 30,
+        1 => {
+            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            if leap { 29 } else { 28 }
+        }
+        _ => 30,
+    }
+}
+
+/// Returns (from, to) ISO YYYY-MM-DD strings for the named preset.
+/// `""` means "no bound on that side" (used for "all time").
+fn date_range_for_preset(preset: &str) -> (String, String) {
+    let d = js_sys::Date::new_0();
+    let y = d.get_full_year() as i32;
+    let m = d.get_month();
+    let day = d.get_date();
+    match preset {
+        "this_month" => (ymd(y, m, 1), ymd(y, m, last_day_of_month(y, m))),
+        "last_month" => {
+            let (ly, lm) = if m == 0 { (y - 1, 11) } else { (y, m - 1) };
+            (ymd(ly, lm, 1), ymd(ly, lm, last_day_of_month(ly, lm)))
+        }
+        "this_year" => (ymd(y, 0, 1), ymd(y, 11, 31)),
+        "last_year" => (ymd(y - 1, 0, 1), ymd(y - 1, 11, 31)),
+        "last_30_days" => {
+            let now_ms = js_sys::Date::now();
+            let past = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
+                now_ms - 30.0 * 86_400_000.0,
+            ));
+            let pf = past.to_iso_string().as_string().unwrap_or_default();
+            let from = pf.split('T').next().unwrap_or("").to_string();
+            (from, ymd(y, m, day))
+        }
+        _ => (String::new(), String::new()),
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Accounts tab
 // ─────────────────────────────────────────────────────────────────────────
@@ -669,6 +713,10 @@ fn TransactionsTab() -> Element {
     let mut rule_from_tx: Signal<Option<TransactionResponse>> = use_signal(|| None);
     let mut filter_account: Signal<String> = use_signal(String::new);
     let mut only_uncat = use_signal(|| false);
+    let mut date_from: Signal<String> = use_signal(String::new);
+    let mut date_to: Signal<String> = use_signal(String::new);
+    let mut include_recon = use_signal(|| false);
+    let mut split_view = use_signal(|| false);
     let mut loading_more = use_signal(|| false);
     let page_size: u32 = 50;
 
@@ -679,6 +727,9 @@ fn TransactionsTab() -> Element {
         let _ = refresh();
         let _ = filter_account();
         let _ = only_uncat();
+        let _ = date_from();
+        let _ = date_to();
+        let _ = include_recon();
         spawn(async move {
             loading.set(true);
             // Always refresh — CSV import can auto-create a new account
@@ -694,7 +745,11 @@ fn TransactionsTab() -> Element {
             }
             let acc_filter = filter_account();
             let acc_opt = if acc_filter.is_empty() { None } else { Some(acc_filter.as_str()) };
-            match use_finance::list_transactions(acc_opt, only_uncat(), page_size, 0).await {
+            let from_val = date_from();
+            let from_opt = if from_val.is_empty() { None } else { Some(from_val.as_str()) };
+            let to_val = date_to();
+            let to_opt = if to_val.is_empty() { None } else { Some(to_val.as_str()) };
+            match use_finance::list_transactions(acc_opt, only_uncat(), from_opt, to_opt, include_recon(), page_size, 0).await {
                 Ok(resp) => {
                     transactions.set(resp.items);
                     total.set(resp.total);
@@ -715,10 +770,15 @@ fn TransactionsTab() -> Element {
         let skip_val = transactions.peek().len() as u32;
         let acc = filter_account.peek().clone();
         let only_un = *only_uncat.peek();
+        let from_val = date_from.peek().clone();
+        let to_val = date_to.peek().clone();
+        let inc_recon = *include_recon.peek();
         spawn(async move {
             loading_more.set(true);
             let acc_opt = if acc.is_empty() { None } else { Some(acc.as_str()) };
-            match use_finance::list_transactions(acc_opt, only_un, page_size, skip_val).await {
+            let from_opt = if from_val.is_empty() { None } else { Some(from_val.as_str()) };
+            let to_opt = if to_val.is_empty() { None } else { Some(to_val.as_str()) };
+            match use_finance::list_transactions(acc_opt, only_un, from_opt, to_opt, inc_recon, page_size, skip_val).await {
                 Ok(resp) => {
                     transactions.write().extend(resp.items);
                     total.set(resp.total);
@@ -737,6 +797,77 @@ fn TransactionsTab() -> Element {
     };
     let accounts_for_select = accounts();
     let no_accounts = accounts_for_select.is_empty();
+
+    let render_row = move |t: &TransactionResponse| -> Element {
+        let t_edit = t.clone();
+        let t_rule = t.clone();
+        let t_id = t.id.clone();
+        let date_short = t.date.split('T').next().unwrap_or(&t.date).to_string();
+        let cat = t.category_id.as_deref().map(|id| category_name(id));
+        rsx! {
+            tr { key: "{t.id}",
+                td { class: "whitespace-nowrap font-mono text-sm", "{date_short}" }
+                td { "{account_name(&t.account_id)}" }
+                td {
+                    "{t.description}"
+                    if t.is_split { span { class: "badge badge-ghost ml-2 text-xs", "split" } }
+                    if t.source_snapshot_id.is_some() {
+                        span { class: "badge badge-warning ml-2 text-xs", "reconciliation" }
+                    }
+                }
+                td { class: "opacity-80",
+                    if let Some(name) = cat { "{name}" } else { span { class: "opacity-50 italic", "—" } }
+                }
+                td {
+                    class: if t.amount_minor < 0 { "text-right font-mono text-error" } else { "text-right font-mono text-success" },
+                    "{format_money(t.amount_minor, &t.currency)}"
+                }
+                td { class: "text-right",
+                    div { class: "dropdown dropdown-end",
+                        div {
+                            tabindex: "0",
+                            role: "button",
+                            class: "btn btn-ghost btn-xs btn-circle",
+                            IconMoreVertical {}
+                        }
+                        ul {
+                            tabindex: "0",
+                            class: "menu dropdown-content bg-base-100 rounded-box shadow z-10 w-36 p-1",
+                            if !t.is_split {
+                                li {
+                                    a {
+                                        onclick: move |_| edit_target.set(Some(t_edit.clone())),
+                                        "Edit"
+                                    }
+                                }
+                            }
+                            li {
+                                a {
+                                    onclick: move |_| rule_from_tx.set(Some(t_rule.clone())),
+                                    "Create rule…"
+                                }
+                            }
+                            li {
+                                a {
+                                    class: "text-error",
+                                    onclick: move |_| {
+                                        let id = t_id.clone();
+                                        spawn(async move {
+                                            match use_finance::delete_transaction(&id).await {
+                                                Ok(_) => refresh += 1,
+                                                Err(e) => error.set(Some(e)),
+                                            }
+                                        });
+                                    },
+                                    "Delete"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
 
     rsx! {
         div { class: "flex justify-between items-center mb-4 gap-2 flex-wrap",
@@ -759,6 +890,63 @@ fn TransactionsTab() -> Element {
                         onchange: move |e| only_uncat.set(e.checked()),
                     }
                     span { class: "label-text", "Uncategorized only" }
+                }
+                label { class: "label cursor-pointer gap-2",
+                    input {
+                        r#type: "checkbox",
+                        class: "checkbox checkbox-sm",
+                        checked: include_recon(),
+                        onchange: move |e| include_recon.set(e.checked()),
+                    }
+                    span { class: "label-text", "Show reconciliations" }
+                }
+                select {
+                    class: "select select-bordered select-sm",
+                    value: "",
+                    onchange: move |e| {
+                        let (f, t) = date_range_for_preset(&e.value());
+                        date_from.set(f);
+                        date_to.set(t);
+                    },
+                    option { value: "", "Date range…" }
+                    option { value: "this_month", "This month" }
+                    option { value: "last_month", "Last month" }
+                    option { value: "last_30_days", "Last 30 days" }
+                    option { value: "this_year", "This year" }
+                    option { value: "last_year", "Last year" }
+                    option { value: "all_time", "All time" }
+                }
+                input {
+                    r#type: "date",
+                    class: "input input-bordered input-sm",
+                    value: "{date_from}",
+                    title: "From",
+                    oninput: move |e| date_from.set(e.value()),
+                }
+                input {
+                    r#type: "date",
+                    class: "input input-bordered input-sm",
+                    value: "{date_to}",
+                    title: "To",
+                    oninput: move |e| date_to.set(e.value()),
+                }
+                {
+                    let date_set = !date_from().is_empty() || !date_to().is_empty();
+                    rsx! {
+                        label { class: "label cursor-pointer gap-2 hidden lg:flex",
+                            input {
+                                r#type: "checkbox",
+                                class: "checkbox checkbox-sm",
+                                checked: split_view() && date_set,
+                                disabled: !date_set,
+                                onchange: move |e| split_view.set(e.checked()),
+                            }
+                            span {
+                                class: if date_set { "label-text" } else { "label-text opacity-50" },
+                                "Income / Expenses"
+                            }
+                        }
+                    }
                 }
                 button {
                     class: "btn btn-primary btn-sm",
@@ -790,86 +978,88 @@ fn TransactionsTab() -> Element {
             // screens. The transactions table is full-width and its
             // columns fit comfortably on desktop; on mobile the user
             // gets horizontal page scroll, which is fine.
-            div {
-                table { class: "table table-zebra",
-                    thead {
-                        tr {
-                            th { "Date" }
-                            th { "Account" }
-                            th { "Description" }
-                            th { "Category" }
-                            th { class: "text-right", "Amount" }
-                            th { "" }
-                        }
-                    }
-                    tbody {
-                        {transactions().iter().map(|t| {
-                            let t_edit = t.clone();
-                            let t_rule = t.clone();
-                            let t_id = t.id.clone();
-                            let date_short = t.date.split('T').next().unwrap_or(&t.date).to_string();
-                            let cat = t.category_id.as_deref().map(|id| category_name(id));
-                            rsx! {
-                                tr { key: "{t.id}",
-                                    td { class: "whitespace-nowrap font-mono text-sm", "{date_short}" }
-                                    td { "{account_name(&t.account_id)}" }
-                                    td {
-                                        "{t.description}"
-                                        if t.is_split { span { class: "badge badge-ghost ml-2 text-xs", "split" } }
+            {
+                let date_set = !date_from().is_empty() || !date_to().is_empty();
+                let show_split = split_view() && date_set;
+                let txs = transactions();
+                if show_split {
+                    let (income_total, expense_total) =
+                        txs.iter().fold((0i64, 0i64), |(i, e), t| {
+                            if t.amount_minor >= 0 { (i + t.amount_minor, e) } else { (i, e + t.amount_minor) }
+                        });
+                    let currency = txs.first().map(|t| t.currency.clone()).unwrap_or_default();
+                    rsx! {
+                        div { class: "grid grid-cols-2 gap-4",
+                            div {
+                                div { class: "flex justify-between items-baseline mb-2",
+                                    h3 { class: "font-semibold text-success", "Income" }
+                                    span { class: "font-mono text-success",
+                                        "{format_money(income_total, &currency)}"
                                     }
-                                    td { class: "opacity-80",
-                                        if let Some(name) = cat { "{name}" } else { span { class: "opacity-50 italic", "—" } }
-                                    }
-                                    td { class: "text-right font-mono",
-                                        class: if t.amount_minor < 0 { "text-right font-mono text-error" } else { "text-right font-mono text-success" },
-                                        "{format_money(t.amount_minor, &t.currency)}"
-                                    }
-                                    td { class: "text-right",
-                                        div { class: "dropdown dropdown-end",
-                                            div {
-                                                tabindex: "0",
-                                                role: "button",
-                                                class: "btn btn-ghost btn-xs btn-circle",
-                                                IconMoreVertical {}
-                                            }
-                                            ul {
-                                                tabindex: "0",
-                                                class: "menu dropdown-content bg-base-100 rounded-box shadow z-10 w-36 p-1",
-                                                if !t.is_split {
-                                                    li {
-                                                        a {
-                                                            onclick: move |_| edit_target.set(Some(t_edit.clone())),
-                                                            "Edit"
-                                                        }
-                                                    }
-                                                }
-                                                li {
-                                                    a {
-                                                        onclick: move |_| rule_from_tx.set(Some(t_rule.clone())),
-                                                        "Create rule…"
-                                                    }
-                                                }
-                                                li {
-                                                    a {
-                                                        class: "text-error",
-                                                        onclick: move |_| {
-                                                            let id = t_id.clone();
-                                                            spawn(async move {
-                                                                match use_finance::delete_transaction(&id).await {
-                                                                    Ok(_) => refresh += 1,
-                                                                    Err(e) => error.set(Some(e)),
-                                                                }
-                                                            });
-                                                        },
-                                                        "Delete"
-                                                    }
-                                                }
-                                            }
-                                        }
+                                }
+                                table { class: "table table-zebra",
+                                    thead { tr {
+                                        th { "Date" }
+                                        th { "Description" }
+                                        th { "Category" }
+                                        th { class: "text-right", "Amount" }
+                                        th { "" }
+                                    } }
+                                    tbody {
+                                        {txs.iter().filter(|t| t.amount_minor >= 0).map(|t| {
+                                            let row = render_row(t);
+                                            rsx! { {row} }
+                                        })}
                                     }
                                 }
                             }
-                        })}
+                            div {
+                                div { class: "flex justify-between items-baseline mb-2",
+                                    h3 { class: "font-semibold text-error", "Expenses" }
+                                    span { class: "font-mono text-error",
+                                        "{format_money(expense_total, &currency)}"
+                                    }
+                                }
+                                table { class: "table table-zebra",
+                                    thead { tr {
+                                        th { "Date" }
+                                        th { "Description" }
+                                        th { "Category" }
+                                        th { class: "text-right", "Amount" }
+                                        th { "" }
+                                    } }
+                                    tbody {
+                                        {txs.iter().filter(|t| t.amount_minor < 0).map(|t| {
+                                            let row = render_row(t);
+                                            rsx! { {row} }
+                                        })}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    rsx! {
+                        div {
+                            table { class: "table table-zebra",
+                                thead {
+                                    tr {
+                                        th { "Date" }
+                                        th { "Account" }
+                                        th { "Description" }
+                                        th { "Category" }
+                                        th { class: "text-right", "Amount" }
+                                        th { "" }
+                                    }
+                                }
+                                tbody {
+                                    {txs.iter().map(|t| {
+                                        let row = render_row(t);
+                                        rsx! { {row} }
+                                    })}
+                                }
+                            }
+                        }
                     }
                 }
             }

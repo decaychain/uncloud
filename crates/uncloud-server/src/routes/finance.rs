@@ -140,6 +140,7 @@ fn transaction_to_response(t: &FinanceTransaction) -> TransactionResponse {
         source_ref: t.source_ref.clone(),
         raw_bank_category: t.raw_bank_category.clone(),
         is_split: t.legs.len() > 1,
+        source_snapshot_id: t.source_snapshot_id.map(|s| s.to_hex()),
         created_at: t.created_at.to_rfc3339(),
         updated_at: t.updated_at.to_rfc3339(),
     }
@@ -521,6 +522,13 @@ pub async fn list_transactions(
     }
     if q.uncategorized.unwrap_or(false) {
         filter.insert("legs.category_id", Bson::Null);
+    }
+    // Reconciliation adjustments are hidden by default — they're not
+    // real spending and clutter the list. Caller can opt them back in.
+    // `null` matches both absent (older docs) and explicitly-null fields
+    // — Mongo treats them equivalently for equality.
+    if !q.include_reconciliations.unwrap_or(false) {
+        filter.insert("source_snapshot_id", Bson::Null);
     }
     let mut date_range = doc! {};
     if let Some(from) = q.from.as_deref() {

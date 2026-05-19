@@ -87,20 +87,32 @@ async fn apply_creates_snapshot_and_adjustment() {
         .json();
     assert_eq!(bal["balance_minor"], 105_00);
 
-    // The adjustment transaction is visible in the transaction list.
-    let txns: Value = app
+    // Reconciliation adjustments are hidden from the default listing.
+    let default_txns: Value = app
         .server
         .get("/api/finance/transactions")
         .add_query_param("account_id", &account_id)
         .await
         .json();
-    let items = txns["items"].as_array().unwrap();
+    let default_items = default_txns["items"].as_array().unwrap();
+    assert_eq!(default_items.len(), 1, "only the real deposit shows by default");
+
+    // Opting in surfaces the adjustment alongside the deposit.
+    let all_txns: Value = app
+        .server
+        .get("/api/finance/transactions")
+        .add_query_param("account_id", &account_id)
+        .add_query_param("include_reconciliations", "true")
+        .await
+        .json();
+    let items = all_txns["items"].as_array().unwrap();
     assert_eq!(items.len(), 2, "deposit + adjustment");
     let adj = items
         .iter()
         .find(|t| t["description"].as_str().unwrap().starts_with("Reconciliation"))
         .expect("adjustment transaction not found");
     assert_eq!(adj["amount_minor"], 5_00);
+    assert!(adj["source_snapshot_id"].as_str().is_some(), "snapshot link present");
 
     // Snapshot list shows the snapshot with zero drift.
     let snaps: Value = app
