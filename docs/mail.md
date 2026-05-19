@@ -4,6 +4,11 @@ Experimental design for adding a first-party email client to Uncloud. The goal
 is a mail client that connects to external providers over IMAP/SMTP, not a mail
 server.
 
+Status: experimental branch `experimental-mail-foundation`. The foundation has
+been manually verified against a real IMAP account: account creation works,
+`test-imap` authenticates successfully, and `folders/refresh` retrieves and
+stores the remote folder list.
+
 ## Scope
 
 The foundation supports:
@@ -55,13 +60,131 @@ Authenticated routes are mounted under both `/api` and `/api/v1`:
 `test-imap` and `folders/refresh` currently require implicit TLS IMAP. STARTTLS
 and plaintext ports are represented in the data model but not wired yet.
 
+## What Works
+
+- Creating, listing, updating, and deleting mail account metadata.
+- Creating, listing, updating, and deleting sender identities.
+- Multiple accounts per user and multiple identities per account.
+- IMAP implicit TLS login with a transient password.
+- IMAP capability retrieval through `POST /mail/accounts/{id}/test-imap`.
+- IMAP folder discovery through `POST /mail/accounts/{account_id}/folders/refresh`.
+- Folder/subfolder persistence using remote path, hierarchy delimiter, parent
+  path, attributes, and selectable state.
+- Mongo indexes for account, identity, folder, message, and attachment metadata.
+- Server-wide `features.mail` toggle plus per-user opt-out through
+  `disabled_features`.
+
+## Known Limits
+
+- No persistent provider credentials yet. The server cannot run background mail
+  sync until we add encrypted-at-rest secret storage.
+- Only implicit TLS IMAP is wired. STARTTLS and plaintext are represented in the
+  API/model but return a validation error in the provider layer.
+- SMTP is not wired beyond selecting `lettre` as the planned foundation.
+- No message sync yet. `mail_messages` and `mail_attachments` are model/index
+  scaffolding only.
+- No MIME parsing or HTML sanitization path is wired yet.
+- No UI yet. Testing is currently through authenticated HTTP calls.
+- Folder refresh currently replaces cached folder rows for the account. That is
+  acceptable before message sync, but once messages reference folders we should
+  upsert folders by `(owner_id, account_id, path)` to preserve stable folder ids.
+
+## End-to-End Test Path
+
+1. Start `uncloud-server` with MongoDB available.
+2. Log in and save the session cookie.
+3. `POST /api/mail/accounts` with IMAP/SMTP settings.
+4. `POST /api/mail/accounts/{id}/test-imap` with a transient app password.
+5. `POST /api/mail/accounts/{id}/folders/refresh` with the same transient
+   password.
+6. `GET /api/mail/accounts/{id}/folders` and verify folders/subfolders are
+   persisted with expected paths and delimiters.
+
+This is enough to validate the current protocol foundation before building UI.
+
 ## Next Work
 
-- Add encrypted credential storage before any background sync.
-- Add SMTP connection testing with `lettre`.
-- Implement mailbox sync using UIDVALIDITY, UIDNEXT, and per-folder high-water
-  marks.
-- Parse RFC822 messages with `mail-parser`, sanitize HTML with `ammonia`, and
-  store raw bodies/attachments in Uncloud storage instead of MongoDB.
-- Add message list/detail routes.
-- Build the Dioxus mail UI once the backend cache can serve real messages.
+### 1. Credential Storage
+
+Design encrypted server-side secret storage before any background sync:
+
+- Add a `secrets.master_key` or equivalent deployment secret.
+- Encrypt IMAP passwords / OAuth refresh tokens before writing to MongoDB.
+- Return only `credential_configured: true/false` to clients.
+- Add routes to set, replace, and clear account credentials.
+- Avoid logging provider usernames together with credential errors.
+
+This should land before scheduler/background sync.
+
+### 2. Provider Capability
+
+- Add STARTTLS support for IMAP port 143.
+- Decide whether plaintext IMAP should remain supported at all. If yes, keep it
+  explicit and warn loudly.
+- Add SMTP connection/authentication testing with `lettre`.
+- Normalize provider error mapping so bad credentials return a clear 400/401-ish
+  response while network/server failures remain operational errors.
+
+### 3. Read-Only Message Sync
+
+- Change folder refresh to upsert folders and keep stable ids.
+- Add per-folder sync state: UIDVALIDITY, UIDNEXT, highest synced UID, last sync
+  timestamps, and last error.
+- On UIDVALIDITY change, invalidate cached messages for that folder and resync.
+- Fetch message envelopes/flags/internal dates first.
+- Fetch raw RFC822 bodies only when needed, or in bounded batches.
+- Store raw messages and large decoded parts in Uncloud storage, not MongoDB.
+- Keep MongoDB as searchable/listable metadata cache.
+
+### 4. Message Read APIs
+
+- Add message list route with pagination by folder and date/UID.
+- Add message detail route that parses the stored raw message with
+  `mail-parser`.
+- Sanitize HTML with `ammonia` before returning/rendering it.
+- Add attachment metadata and download routes.
+- Decide how remote image loading should work. Default should be blocked or
+  proxied, not direct by default.
+
+### 5. Mutations
+
+- Mark read/unread, star/unstar, archive, move, delete.
+- Reflect remote flag/folder changes locally.
+- Make mutations idempotent where possible and record failures clearly.
+- Defer complex threading until list/detail sync is solid.
+
+### 6. Sending
+
+- Add compose/send route using an identity and SMTP settings.
+- Support plain text plus HTML body.
+- Save sent copy through provider conventions: SMTP server may do it, but IMAP
+  append to Sent may still be needed for some providers.
+- Add reply/forward metadata handling.
+- Add draft storage after basic send works.
+
+### 7. UI
+
+Do not build a Gmail-like shell before read-only message sync exists. The first
+useful UI should be:
+
+- Account setup and connection test.
+- Folder list.
+- Read-only message list.
+- Message reader.
+
+After that, add compose and mutations. A full Gmail/Proton-like layout becomes
+worth polishing once the backend cache can serve real message lists reliably.
+
+## Open Questions
+
+- Should mail credentials use a server-wide master key, per-user key material,
+  or both?
+- Should OAuth be a first-class credential type in v1, or should v1 focus on app
+  passwords/standard IMAP first?
+- Which storage backend should hold raw RFC822 bodies and attachments by
+  default: the user's resolved Uncloud storage, a dedicated mail storage prefix,
+  or Mongo GridFS?
+- Should message full-text search use Meilisearch immediately, or wait until the
+  cache/mutation model stabilizes?
+- How much provider-specific behavior do we want for Gmail/Outlook/Fastmail
+  versus a generic IMAP implementation?
