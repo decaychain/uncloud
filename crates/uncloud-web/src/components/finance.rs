@@ -665,7 +665,6 @@ fn TransactionsTab() -> Element {
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut refresh = use_signal(|| 0u32);
     let mut show_create = use_signal(|| false);
-    let mut show_import = use_signal(|| false);
     let mut edit_target: Signal<Option<TransactionResponse>> = use_signal(|| None);
     let mut rule_from_tx: Signal<Option<TransactionResponse>> = use_signal(|| None);
     let mut filter_account: Signal<String> = use_signal(String::new);
@@ -760,11 +759,6 @@ fn TransactionsTab() -> Element {
                         onchange: move |e| only_uncat.set(e.checked()),
                     }
                     span { class: "label-text", "Uncategorized only" }
-                }
-                button {
-                    class: "btn btn-ghost btn-sm",
-                    onclick: move |_| show_import.set(true),
-                    "Import CSV"
                 }
                 button {
                     class: "btn btn-primary btn-sm",
@@ -916,13 +910,6 @@ fn TransactionsTab() -> Element {
                 categories: categories(),
                 on_close: move |_| edit_target.set(None),
                 on_saved: move |_| { edit_target.set(None); refresh += 1; },
-            }
-        }
-        if show_import() {
-            ImportCsvModal {
-                accounts: accounts_for_select.clone(),
-                on_close: move |_| show_import.set(false),
-                on_imported: move |_| { show_import.set(false); refresh += 1; },
             }
         }
         if let Some(t) = rule_from_tx() {
@@ -1829,11 +1816,12 @@ fn SchemaFormModal(
 fn ImportsTab() -> Element {
     let mut runs: Signal<Vec<ImportRunResponse>> = use_signal(Vec::new);
     let mut schemas: Signal<HashMap<String, String>> = use_signal(HashMap::new);
-    let mut accounts: Signal<HashMap<String, String>> = use_signal(HashMap::new);
+    let mut accounts: Signal<Vec<AccountResponse>> = use_signal(Vec::new);
     let mut loading = use_signal(|| true);
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut refresh = use_signal(|| 0u32);
     let mut reverting: Signal<Option<String>> = use_signal(|| None);
+    let mut show_import = use_signal(|| false);
 
     use_effect(move || {
         let _ = refresh();
@@ -1849,15 +1837,27 @@ fn ImportsTab() -> Element {
                 schemas.set(list.into_iter().map(|s| (s.id, s.name)).collect());
             }
             if let Ok(list) = use_finance::list_accounts().await {
-                accounts.set(list.into_iter().map(|a| (a.id, a.name)).collect());
+                accounts.set(list);
             }
             loading.set(false);
         });
     });
 
+    let account_lookup = use_memo(move || {
+        accounts()
+            .into_iter()
+            .map(|a| (a.id, a.name))
+            .collect::<HashMap<String, String>>()
+    });
+
     rsx! {
         div { class: "flex justify-between items-center mb-4",
-            h2 { class: "text-xl font-semibold", "Import history" }
+            h2 { class: "text-xl font-semibold", "Imports" }
+            button {
+                class: "btn btn-primary btn-sm",
+                onclick: move |_| show_import.set(true),
+                "Import CSV"
+            }
         }
         if let Some(e) = error() {
             div { class: "alert alert-error mb-3", "{e}" }
@@ -1888,7 +1888,7 @@ fn ImportsTab() -> Element {
                     tbody {
                         {runs().iter().map(|r| {
                             let when = r.created_at.get(..10).unwrap_or(&r.created_at).to_string();
-                            let account_name = accounts().get(&r.account_id).cloned().unwrap_or_else(|| "—".into());
+                            let account_name = account_lookup().get(&r.account_id).cloned().unwrap_or_else(|| "—".into());
                             let schema_name = schemas().get(&r.schema_id).cloned().unwrap_or_else(|| "—".into());
                             let status = r.status.clone();
                             let run_id = r.id.clone();
@@ -1938,6 +1938,13 @@ fn ImportsTab() -> Element {
                         })}
                     }
                 }
+            }
+        }
+        if show_import() {
+            ImportCsvModal {
+                accounts: accounts(),
+                on_close: move |_| show_import.set(false),
+                on_imported: move |_| { show_import.set(false); refresh += 1; },
             }
         }
     }

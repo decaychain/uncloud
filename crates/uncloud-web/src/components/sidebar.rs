@@ -275,20 +275,22 @@ pub fn Sidebar() -> Element {
                             }
                             li {
                                 Link {
-                                    to: Route::FinanceSchemas {},
-                                    class: if matches!(route, Route::FinanceSchemas {}) { "active" } else { "" },
-                                    onclick: move |_| close_drawer(),
-                                    IconFileText {}
-                                    span { "Import schemas" }
-                                }
-                            }
-                            li {
-                                Link {
                                     to: Route::FinanceImports {},
                                     class: if matches!(route, Route::FinanceImports {}) { "active" } else { "" },
                                     onclick: move |_| close_drawer(),
                                     IconHistory {}
-                                    span { "Import history" }
+                                    span { "Import" }
+                                }
+                                ul {
+                                    li {
+                                        Link {
+                                            to: Route::FinanceSchemas {},
+                                            class: if matches!(route, Route::FinanceSchemas {}) { "active" } else { "" },
+                                            onclick: move |_| close_drawer(),
+                                            IconFileText {}
+                                            span { "Schemas" }
+                                        }
+                                    }
                                 }
                             }
                             li {
