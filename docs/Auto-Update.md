@@ -207,10 +207,12 @@ mock chroot.
 ### dioxus-cli version pin
 
 `cargo install dioxus-cli` without a `--version` pulls the latest from
-crates.io (currently 0.7.7), which refuses to build a project pinned to
-dioxus 0.7.5 with `dx and dioxus versions are incompatible!`. The spec
-pins `--version 0.7.5` to match the workspace's lockfile. The same pin
-lives in `Dockerfile.server`.
+crates.io, and newer dx releases can refuse to build a project pinned
+to dioxus 0.7.5 with `dx and dioxus versions are incompatible!`. The
+spec pins `--version 0.7.5` to match the workspace's lockfile. It also
+uses `--locked`; without it, Cargo may resolve newer transitive
+dependencies than dioxus-cli 0.7.5 was published/tested with, which has
+broken COPR builds before. The same pin lives in `Dockerfile.server`.
 
 ### RUSTFLAGS handling
 
