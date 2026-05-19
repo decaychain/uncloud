@@ -230,6 +230,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/finance/categories", get(finance::list_categories).post(finance::create_category))
         .route("/finance/categories/{id}", put(finance::update_category).delete(finance::delete_category))
         .route("/finance/transactions", get(finance::list_transactions).post(finance::create_transaction))
+        .route(
+            "/finance/transactions/category-summary",
+            get(finance::transaction_category_summary),
+        )
         .route("/finance/transactions/{id}", put(finance::update_transaction).delete(finance::delete_transaction))
         .route(
             "/finance/import-schemas",

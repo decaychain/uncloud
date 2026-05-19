@@ -31,11 +31,12 @@ use crate::models::{
 use crate::AppState;
 use uncloud_common::{
     AccountBalanceResponse, AccountResponse, ApplyRulesResponse, BalanceSnapshotResponse,
-    CreateAccountRequest, CreateFinanceCategoryRequest, CreateTransactionRequest,
-    FinanceCategoryResponse, FinanceRuleRequest, FinanceRuleResponse, ImportCsvResponse,
-    ImportRowError, ImportRunResponse, ImportRunSourceDto, ImportRunSummaryDto, ImportSchemaRequest,
-    ImportSchemaResponse, ListTransactionsQuery, ReconcilePreviewResponse, ReconcileRequest,
-    TestRuleMatch, TestRuleRequest, TestRuleResponse, TransactionListResponse, TransactionResponse,
+    CategorySummaryItem, CategorySummaryResponse, CreateAccountRequest,
+    CreateFinanceCategoryRequest, CreateTransactionRequest, FinanceCategoryResponse,
+    FinanceRuleRequest, FinanceRuleResponse, ImportCsvResponse, ImportRowError, ImportRunResponse,
+    ImportRunSourceDto, ImportRunSummaryDto, ImportSchemaRequest, ImportSchemaResponse,
+    ListTransactionsQuery, ReconcilePreviewResponse, ReconcileRequest, TestRuleMatch,
+    TestRuleRequest, TestRuleResponse, TransactionListResponse, TransactionResponse,
     UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
@@ -507,12 +508,10 @@ pub async fn delete_category(
 
 // ── Transactions ─────────────────────────────────────────────────────────
 
-pub async fn list_transactions(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-    Query(q): Query<ListTransactionsQuery>,
-) -> Result<Json<TransactionListResponse>> {
-    require_finance(&state)?;
+/// Builds the Mongo match filter for the user's transactions
+/// according to a `ListTransactionsQuery`. Shared between the list
+/// route and the category-summary aggregation so the two stay in sync.
+fn build_tx_filter(user: &AuthUser, q: &ListTransactionsQuery) -> Result<mongodb::bson::Document> {
     let mut filter = doc! { "owner_id": user.id };
     if let Some(acc) = q.account_id.as_deref() {
         filter.insert("account_id", parse_oid(acc, "account_id")?);
@@ -540,6 +539,16 @@ pub async fn list_transactions(
     if !date_range.is_empty() {
         filter.insert("date", date_range);
     }
+    Ok(filter)
+}
+
+pub async fn list_transactions(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Query(q): Query<ListTransactionsQuery>,
+) -> Result<Json<TransactionListResponse>> {
+    require_finance(&state)?;
+    let filter = build_tx_filter(&user, &q)?;
 
     let coll = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
     let total = coll.count_documents(filter.clone()).await?;
@@ -557,6 +566,64 @@ pub async fn list_transactions(
         items.push(transaction_to_response(&t));
     }
     Ok(Json(TransactionListResponse { items, total }))
+}
+
+/// Per-category income/expense aggregation for the same filter the
+/// transactions list uses. Single leg-level pass — handles split
+/// transactions correctly because each leg is attributed to its own
+/// category at its own amount.
+pub async fn transaction_category_summary(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Query(q): Query<ListTransactionsQuery>,
+) -> Result<Json<CategorySummaryResponse>> {
+    require_finance(&state)?;
+    let filter = build_tx_filter(&user, &q)?;
+
+    let coll = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
+    let pipeline = vec![
+        doc! { "$match": filter },
+        doc! { "$unwind": "$legs" },
+        doc! { "$group": {
+            "_id": "$legs.category_id",
+            "income": { "$sum": {
+                "$cond": [ { "$gte": ["$legs.amount_minor", 0] }, "$legs.amount_minor", 0 ]
+            } },
+            "expense": { "$sum": {
+                "$cond": [ { "$lt": ["$legs.amount_minor", 0] }, "$legs.amount_minor", 0 ]
+            } },
+        } },
+    ];
+
+    let mut cursor = coll.aggregate(pipeline).await?;
+    let mut items = Vec::new();
+    let mut income_total: i64 = 0;
+    let mut expense_total: i64 = 0;
+    while let Some(d) = cursor.try_next().await? {
+        let category_id = match d.get("_id") {
+            Some(Bson::ObjectId(oid)) => Some(oid.to_hex()),
+            _ => None,
+        };
+        let income = d.get_i64("income").unwrap_or_else(|_| {
+            d.get_i32("income").map(|n| n as i64).unwrap_or(0)
+        });
+        let expense = d.get_i64("expense").unwrap_or_else(|_| {
+            d.get_i32("expense").map(|n| n as i64).unwrap_or(0)
+        });
+        income_total += income;
+        expense_total += expense;
+        items.push(CategorySummaryItem {
+            category_id,
+            income_minor: income,
+            expense_minor: expense,
+        });
+    }
+
+    Ok(Json(CategorySummaryResponse {
+        items,
+        income_total_minor: income_total,
+        expense_total_minor: expense_total,
+    }))
 }
 
 pub async fn create_transaction(

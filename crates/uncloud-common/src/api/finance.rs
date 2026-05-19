@@ -128,6 +128,24 @@ pub struct ListTransactionsQuery {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CategorySummaryItem {
+    /// `None` for legs without a category (treat as "Uncategorized").
+    pub category_id: Option<String>,
+    pub income_minor: i64,
+    /// Always negative or zero (sum of all negative leg amounts in the
+    /// matching window).
+    pub expense_minor: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CategorySummaryResponse {
+    pub items: Vec<CategorySummaryItem>,
+    pub income_total_minor: i64,
+    /// Sum of all negative leg amounts (i.e. zero or negative).
+    pub expense_total_minor: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransactionListResponse {
     pub items: Vec<TransactionResponse>,
     pub total: u64,

@@ -8,11 +8,12 @@ use std::collections::HashMap;
 
 use dioxus::prelude::*;
 use uncloud_common::{
-    AccountResponse, BalanceSnapshotResponse, CreateAccountRequest, CreateFinanceCategoryRequest,
-    CreateTransactionRequest, FinanceCategoryResponse, FinanceRuleRequest, FinanceRuleResponse,
-    ImportCsvResponse, ImportRunResponse, ImportSchemaResponse, ReconcilePreviewResponse,
-    ReconcileRequest, TestRuleMatch, TestRuleRequest, TestRuleResponse, TransactionResponse,
-    UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
+    AccountResponse, BalanceSnapshotResponse, CategorySummaryResponse, CreateAccountRequest,
+    CreateFinanceCategoryRequest, CreateTransactionRequest, FinanceCategoryResponse,
+    FinanceRuleRequest, FinanceRuleResponse, ImportCsvResponse, ImportRunResponse,
+    ImportSchemaResponse, ReconcilePreviewResponse, ReconcileRequest, TestRuleMatch,
+    TestRuleRequest, TestRuleResponse, TransactionResponse, UpdateAccountRequest,
+    UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
 use crate::components::icons::IconMoreVertical;
@@ -717,6 +718,9 @@ fn TransactionsTab() -> Element {
     let mut date_to: Signal<String> = use_signal(String::new);
     let mut include_recon = use_signal(|| false);
     let mut split_view = use_signal(|| false);
+    let breakdown_expanded = use_signal(|| false);
+    let mut balances: Signal<HashMap<String, i64>> = use_signal(HashMap::new);
+    let mut summary: Signal<Option<CategorySummaryResponse>> = use_signal(|| None);
     let mut loading_more = use_signal(|| false);
     let page_size: u32 = 50;
 
@@ -758,6 +762,51 @@ fn TransactionsTab() -> Element {
                 Err(e) => error.set(Some(e)),
             }
             loading.set(false);
+        });
+    });
+
+    // Refetch summary panel data (per-account balances + per-category
+    // aggregation) whenever filters change or the refresh nonce bumps.
+    // Reads the same Signals as the transactions fetch above so Dioxus
+    // subscribes the effect to each filter.
+    use_effect(move || {
+        let _ = refresh();
+        let _ = filter_account();
+        let _ = only_uncat();
+        let _ = date_from();
+        let _ = date_to();
+        let _ = include_recon();
+        spawn(async move {
+            // Per-account balances — one call per visible account.
+            if let Ok(list) = use_finance::list_accounts().await {
+                let mut map: HashMap<String, i64> = HashMap::new();
+                for a in &list {
+                    if let Ok(b) = use_finance::account_balance(&a.id).await {
+                        map.insert(a.id.clone(), b.balance_minor);
+                    }
+                }
+                balances.set(map);
+            }
+
+            // Category summary — only meaningful with a date range.
+            let from_val = date_from.peek().clone();
+            let to_val = date_to.peek().clone();
+            if from_val.is_empty() && to_val.is_empty() {
+                summary.set(None);
+                return;
+            }
+            let acc = filter_account.peek().clone();
+            let only_un = *only_uncat.peek();
+            let inc_rec = *include_recon.peek();
+            let acc_opt = if acc.is_empty() { None } else { Some(acc.as_str()) };
+            let from_opt = if from_val.is_empty() { None } else { Some(from_val.as_str()) };
+            let to_opt = if to_val.is_empty() { None } else { Some(to_val.as_str()) };
+            match use_finance::transaction_category_summary(
+                acc_opt, only_un, from_opt, to_opt, inc_rec,
+            ).await {
+                Ok(s) => summary.set(Some(s)),
+                Err(_) => summary.set(None),
+            }
         });
     });
 
@@ -961,6 +1010,17 @@ fn TransactionsTab() -> Element {
                 "No accounts yet — add one from the Accounts page, or import a CSV with an IBAN-aware schema to auto-create one."
             }
         }
+        if !no_accounts {
+            SummaryStrip {
+                accounts: accounts_for_select.clone(),
+                categories: categories(),
+                balances: balances(),
+                summary: summary(),
+                account_filter: filter_account(),
+                has_date_range: !date_from().is_empty() || !date_to().is_empty(),
+                expanded: breakdown_expanded,
+            }
+        }
         if let Some(e) = error() {
             div { class: "alert alert-error mb-3", "{e}" }
         }
@@ -1121,6 +1181,177 @@ fn TransactionsTab() -> Element {
                         categories: cat_map,
                         on_close: move |_| rule_from_tx.set(None),
                         on_saved: move |_| { rule_from_tx.set(None); refresh += 1; },
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Dumb summary panel above the transactions table — the parent is
+/// responsible for fetching balances + summary so signal subscriptions
+/// fire correctly when filter Signals change.
+///
+/// Always shows per-account balances (only the selected one when an
+/// account filter is active). When a date range is set, additionally
+/// shows total income/expense for that range, and a collapsible
+/// breakdown of those amounts by category.
+#[component]
+fn SummaryStrip(
+    accounts: Vec<AccountResponse>,
+    categories: Vec<FinanceCategoryResponse>,
+    balances: HashMap<String, i64>,
+    summary: Option<CategorySummaryResponse>,
+    account_filter: String,
+    has_date_range: bool,
+    expanded: Signal<bool>,
+) -> Element {
+    let mut expanded = expanded;
+    let category_lookup: HashMap<String, String> = categories
+        .iter()
+        .map(|c| (c.id.clone(), c.name.clone()))
+        .collect();
+
+    let visible_accounts: Vec<&AccountResponse> = if account_filter.is_empty() {
+        accounts.iter().filter(|a| a.archived_at.is_none()).collect()
+    } else {
+        accounts.iter().filter(|a| a.id == account_filter).collect()
+    };
+
+    // Sorted by absolute total descending so the most-active rows go first.
+    let breakdown: Vec<(String, i64)> = summary
+        .as_ref()
+        .map(|s| {
+            let mut v: Vec<(String, i64)> = s
+                .items
+                .iter()
+                .map(|it| {
+                    let name = it
+                        .category_id
+                        .as_ref()
+                        .and_then(|id| category_lookup.get(id).cloned())
+                        .unwrap_or_else(|| "Uncategorized".into());
+                    let total = it.income_minor.saturating_add(it.expense_minor);
+                    (name, total)
+                })
+                .collect();
+            v.sort_by_key(|(_, t)| -(t.abs()));
+            v
+        })
+        .unwrap_or_default();
+    let breakdown_max_abs = breakdown
+        .iter()
+        .map(|(_, t)| t.abs())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+
+    let income_total = summary.as_ref().map(|s| s.income_total_minor).unwrap_or(0);
+    let expense_total = summary.as_ref().map(|s| s.expense_total_minor).unwrap_or(0);
+    let net_total = income_total + expense_total;
+    // Use the filtered account's currency when available; otherwise the
+    // first account's. Mixed-currency totals would need per-currency
+    // breakdown, which is out of scope for v1.
+    let currency_hint = visible_accounts
+        .first()
+        .map(|a| a.currency.clone())
+        .or_else(|| accounts.first().map(|a| a.currency.clone()))
+        .unwrap_or_default();
+
+    rsx! {
+        div { class: "mb-4 space-y-2",
+            if !visible_accounts.is_empty() {
+                div { class: "flex flex-wrap gap-2 items-stretch",
+                    {visible_accounts.iter().map(|a| {
+                        let bal = balances.get(&a.id).copied().unwrap_or(a.opening_balance_minor);
+                        rsx! {
+                            div { key: "{a.id}",
+                                class: "bg-base-200 rounded-box px-3 py-2 min-w-[10rem]",
+                                div { class: "text-xs opacity-70 truncate", "{a.name}" }
+                                div { class: "font-mono font-semibold",
+                                    "{format_money(bal, &a.currency)}"
+                                }
+                            }
+                        }
+                    })}
+                }
+            }
+
+            if has_date_range {
+                div { class: "stats stats-horizontal shadow-sm bg-base-100 w-full",
+                    div { class: "stat py-2 px-4",
+                        div { class: "stat-title text-xs", "Income" }
+                        div { class: "stat-value text-lg text-success font-mono",
+                            "{format_money(income_total, &currency_hint)}"
+                        }
+                    }
+                    div { class: "stat py-2 px-4",
+                        div { class: "stat-title text-xs", "Expenses" }
+                        div { class: "stat-value text-lg text-error font-mono",
+                            "{format_money(expense_total, &currency_hint)}"
+                        }
+                    }
+                    div { class: "stat py-2 px-4",
+                        div { class: "stat-title text-xs", "Net" }
+                        div {
+                            class: if net_total >= 0 {
+                                "stat-value text-lg font-mono text-success"
+                            } else {
+                                "stat-value text-lg font-mono text-error"
+                            },
+                            "{format_money(net_total, &currency_hint)}"
+                        }
+                    }
+                    div { class: "stat py-2 px-4 self-center",
+                        button {
+                            class: "btn btn-ghost btn-sm",
+                            onclick: move |_| expanded.set(!expanded()),
+                            if expanded() { "Hide breakdown" } else { "Show breakdown" }
+                        }
+                    }
+                }
+            }
+
+            if has_date_range && expanded() {
+                div { class: "bg-base-100 rounded-box border border-base-300 p-3",
+                    if breakdown.is_empty() {
+                        div { class: "text-sm opacity-60 text-center py-2",
+                            "No transactions in the selected range."
+                        }
+                    } else {
+                        ul { class: "space-y-1",
+                            {breakdown.iter().map(|(name, total)| {
+                                let width_pct = (total.abs() as f64 / breakdown_max_abs as f64) * 100.0;
+                                let positive = *total >= 0;
+                                let bar_class = if positive {
+                                    "h-2 rounded-full bg-success"
+                                } else {
+                                    "h-2 rounded-full bg-error"
+                                };
+                                let amount_class = if positive {
+                                    "text-success font-mono text-sm"
+                                } else {
+                                    "text-error font-mono text-sm"
+                                };
+                                let n = name.clone();
+                                let t = *total;
+                                let cur = currency_hint.clone();
+                                rsx! {
+                                    li { key: "{n}", class: "grid grid-cols-[12rem_1fr_8rem] items-center gap-3",
+                                        span { class: "truncate text-sm", "{n}" }
+                                        div { class: "bg-base-200 rounded-full h-2",
+                                            div {
+                                                class: "{bar_class}",
+                                                style: "width: {width_pct:.1}%",
+                                            }
+                                        }
+                                        span { class: "{amount_class} text-right",
+                                            "{format_money(t, &cur)}"
+                                        }
+                                    }
+                                }
+                            })}
+                        }
                     }
                 }
             }

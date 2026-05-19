@@ -2,12 +2,12 @@
 
 use uncloud_common::{
     AccountBalanceResponse, AccountResponse, ApplyRulesResponse, BalanceSnapshotResponse,
-    CreateAccountRequest, CreateFinanceCategoryRequest, CreateTransactionRequest,
-    FinanceCategoryResponse, FinanceRuleRequest, FinanceRuleResponse, ImportCsvResponse,
-    ImportRunResponse, ImportSchemaRequest, ImportSchemaResponse, ReconcilePreviewResponse,
-    ReconcileRequest, TestRuleRequest, TestRuleResponse, TransactionListResponse,
-    TransactionResponse, UpdateAccountRequest, UpdateFinanceCategoryRequest,
-    UpdateTransactionRequest,
+    CategorySummaryResponse, CreateAccountRequest, CreateFinanceCategoryRequest,
+    CreateTransactionRequest, FinanceCategoryResponse, FinanceRuleRequest, FinanceRuleResponse,
+    ImportCsvResponse, ImportRunResponse, ImportSchemaRequest, ImportSchemaResponse,
+    ReconcilePreviewResponse, ReconcileRequest, TestRuleRequest, TestRuleResponse,
+    TransactionListResponse, TransactionResponse, UpdateAccountRequest,
+    UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
 use super::api;
@@ -159,6 +159,37 @@ pub async fn list_transactions(
         r.json::<TransactionListResponse>().await.map_err(|e| e.to_string())
     } else {
         Err("Failed to load transactions".to_string())
+    }
+}
+
+pub async fn transaction_category_summary(
+    account_id: Option<&str>,
+    uncategorized: bool,
+    from: Option<&str>,
+    to: Option<&str>,
+    include_reconciliations: bool,
+) -> Result<CategorySummaryResponse, String> {
+    let mut url = String::from("/finance/transactions/category-summary?_=1");
+    if let Some(a) = account_id {
+        url.push_str(&format!("&account_id={}", a));
+    }
+    if uncategorized {
+        url.push_str("&uncategorized=true");
+    }
+    if let Some(f) = from {
+        url.push_str(&format!("&from={}", f));
+    }
+    if let Some(t) = to {
+        url.push_str(&format!("&to={}", t));
+    }
+    if include_reconciliations {
+        url.push_str("&include_reconciliations=true");
+    }
+    let r = api::get(&url).send().await.map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<CategorySummaryResponse>().await.map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
     }
 }
 
