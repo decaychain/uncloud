@@ -114,6 +114,13 @@ there is no storage cost to organising things for human-friendly restore.
     tasks.jsonl
     task_comments.jsonl
     task_labels.jsonl
+    finance_accounts.jsonl
+    finance_categories.jsonl
+    finance_transactions.jsonl
+    finance_import_schemas.jsonl
+    finance_import_runs.jsonl
+    finance_balance_snapshots.jsonl
+    finance_rules.jsonl
 /files/<owner_username>/<virtual path>      # logical tree as users see it
 /versions/<file_id>/<version_id>             # if include_versions (default on)
 /trash/<file_id>                             # if include_trash (default off)
@@ -206,7 +213,10 @@ users, folders, files, file_versions, storages, shares, folder_shares,
 api_tokens, s3_credentials, sftp_host_keys, apps, webhooks, sync_events,
 invites, user_preferences, playlists, music_categories, shopping_lists,
 shopping_items, shopping_list_items, shopping_categories, shops,
-task_projects, task_sections, tasks, task_comments, task_labels
+task_projects, task_sections, tasks, task_comments, task_labels,
+finance_accounts, finance_categories, finance_transactions,
+finance_import_schemas, finance_import_runs, finance_balance_snapshots,
+finance_rules
 ```
 
 **Skip**:

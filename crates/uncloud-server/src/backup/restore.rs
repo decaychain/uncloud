@@ -72,6 +72,13 @@ const RESTORE_COLLECTIONS: &[&str] = &[
     "tasks",
     "task_comments",
     "task_labels",
+    "finance_accounts",
+    "finance_categories",
+    "finance_transactions",
+    "finance_import_schemas",
+    "finance_import_runs",
+    "finance_balance_snapshots",
+    "finance_rules",
 ];
 
 pub async fn run(args: RestoreArgs) -> Result<(), Box<dyn std::error::Error>> {
