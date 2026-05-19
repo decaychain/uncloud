@@ -75,6 +75,7 @@ Uncloud/
           vault_recents.rs     ← per-user "recent password vaults" list
           admin_processing.rs  ← admin: rerun all processing tasks
           duplicates.rs        ← duplicate detection: hash-grouped sets, mirror clusters, subset pairs
+          mail.rs              ← experimental mail accounts, identities, IMAP folder refresh
         services/
           auth.rs              ← AuthService (sessions, password hashing, TOTP, invites,
                                  demo accounts, user bytes)
@@ -84,6 +85,7 @@ Uncloud/
           sharing.rs           ← FolderShare resolution (effective permission for a path)
           sync_log.rs          ← SyncLogService (append events, prune, broadcast)
           rescan.rs            ← RescanService (background storage rescan jobs)
+          mail.rs              ← MailService (experimental IMAP provider boundary)
         storage/
           mod.rs               ← StorageBackend trait
           local.rs             ← LocalStorage impl (filesystem)
@@ -117,6 +119,8 @@ Uncloud/
           sync_event.rs        ← SyncEvent (audit log row, TTL-purged)
           backup_lock.rs       ← single-writer lock for backup runs (heartbeat-based)
           migration_lock.rs    ← single-writer lock for offline storage migrations
+          mail.rs              ← experimental mail accounts, identities, folders,
+                                 message metadata, attachment metadata
         middleware/
           auth.rs              ← AuthUser extractor; cookie + Bearer-token auth_middleware;
                                  admin_middleware
@@ -640,6 +644,8 @@ sync_audit:
 features:
   shopping: true                   # server-wide shopping feature toggle (per-user opt-out
                                    # via User.disabled_features)
+  finance: true
+  mail: true                       # experimental IMAP/SMTP mail client foundation
 
 logging:
   # tracing_subscriber EnvFilter directive. RUST_LOG env var, when set, always overrides.

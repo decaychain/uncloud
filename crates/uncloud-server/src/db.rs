@@ -755,6 +755,91 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         )
         .await?;
 
+    // Mail client foundation indexes.
+    let mail_accounts = db.collection::<mongodb::bson::Document>("mail_accounts");
+    mail_accounts
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "email_address": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    let mail_identities = db.collection::<mongodb::bson::Document>("mail_identities");
+    mail_identities
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "account_id": 1 })
+                .build(),
+        )
+        .await?;
+    mail_identities
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "account_id": 1, "email_address": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    let mail_folders = db.collection::<mongodb::bson::Document>("mail_folders");
+    mail_folders
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "account_id": 1, "path": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    mail_folders
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "account_id": 1, "parent_path": 1 })
+                .build(),
+        )
+        .await?;
+
+    let mail_messages = db.collection::<mongodb::bson::Document>("mail_messages");
+    mail_messages
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "account_id": 1, "folder_id": 1, "uid": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    mail_messages
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "account_id": 1, "folder_id": 1, "internal_date": -1 })
+                .build(),
+        )
+        .await?;
+    mail_messages
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "account_id": 1, "message_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(mongodb::bson::doc! {
+                            "message_id": { "$type": "string" }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    let mail_attachments = db.collection::<mongodb::bson::Document>("mail_attachments");
+    mail_attachments
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "message_id": 1 })
+                .build(),
+        )
+        .await?;
+
     tracing::info!("Database indexes created successfully");
     Ok(())
 }
