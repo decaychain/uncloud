@@ -3135,7 +3135,7 @@ fn RuleFormModal(
 
     rsx! {
         div { class: "modal modal-open",
-            div { class: "modal-box max-w-xl",
+            div { class: "modal-box max-w-2xl",
                 h3 { class: "font-bold text-lg mb-3",
                     if is_edit { "Edit rule" } else { "New rule" }
                 }
@@ -3162,10 +3162,10 @@ fn RuleFormModal(
                             oninput: move |e| pattern.set(e.value()),
                         }
                     }
-                    div { class: "form-control",
-                        label { class: "label", span { class: "label-text", "Match" } }
+                    div { class: "form-control min-w-0",
+                        span { class: "block text-sm pb-2", "Match" }
                         select {
-                            class: "select select-bordered",
+                            class: "select select-bordered w-full",
                             value: "{pattern_kind}",
                             onchange: move |e| pattern_kind.set(e.value()),
                             option { value: "substring", "Contains" }
@@ -3173,18 +3173,19 @@ fn RuleFormModal(
                             option { value: "regex", "Regex" }
                         }
                     }
-                    div { class: "form-control",
-                        label { class: "label cursor-pointer justify-start gap-2",
+                    div { class: "form-control min-w-0",
+                        span { class: "block text-sm pb-2", "Options" }
+                        label { class: "flex min-h-12 items-center gap-3 rounded-lg border border-base-300 px-3 cursor-pointer",
                             input {
                                 r#type: "checkbox",
-                                class: "checkbox",
+                                class: "checkbox checkbox-sm",
                                 checked: case_insensitive(),
                                 oninput: move |e| case_insensitive.set(e.checked()),
                             }
                             span { class: "label-text", "Case-insensitive" }
                         }
                     }
-                    div { class: "form-control",
+                    div { class: "form-control md:col-span-2 min-w-0",
                         label { class: "label",
                             span { class: "label-text", "Category" }
                             if !show_new_cat() {
@@ -3197,16 +3198,16 @@ fn RuleFormModal(
                             }
                         }
                         if show_new_cat() {
-                            div { class: "join w-full",
+                            div { class: "grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto_auto] gap-2",
                                 input {
-                                    class: "input input-bordered input-sm join-item flex-1",
+                                    class: "input input-bordered input-sm w-full min-w-0",
                                     placeholder: "Category name",
                                     value: "{new_cat_name}",
                                     oninput: move |e| new_cat_name.set(e.value()),
                                 }
                                 button {
                                     r#type: "button",
-                                    class: "btn btn-sm join-item",
+                                    class: "btn btn-sm",
                                     disabled: new_cat_busy() || new_cat_name().trim().is_empty(),
                                     onclick: move |_| {
                                         new_cat_busy.set(true);
@@ -3220,7 +3221,8 @@ fn RuleFormModal(
                                             match use_finance::create_category(&req).await {
                                                 Ok(c) => {
                                                     let new_id = c.id.clone();
-                                                    local_cats.with_mut(|m| { m.insert(c.id, c.name); });
+                                                    let new_name = c.name.clone();
+                                                    local_cats.with_mut(|m| { m.insert(new_id.clone(), new_name); });
                                                     category_id.set(new_id);
                                                     show_new_cat.set(false);
                                                 }
@@ -3233,39 +3235,53 @@ fn RuleFormModal(
                                 }
                                 button {
                                     r#type: "button",
-                                    class: "btn btn-ghost btn-sm join-item",
+                                    class: "btn btn-ghost btn-sm",
                                     onclick: move |_| show_new_cat.set(false),
                                     "Cancel"
                                 }
                             }
                         } else {
                             select {
-                                class: "select select-bordered",
+                                class: "select select-bordered w-full",
                                 value: "{category_id}",
                                 onchange: move |e| category_id.set(e.value()),
                                 {cat_options().into_iter().map(|(id, n)| rsx! {
-                                    option { key: "{id}", value: "{id}", "{n}" }
+                                    option {
+                                        key: "{id}",
+                                        value: "{id}",
+                                        selected: category_id() == id,
+                                        "{n}"
+                                    }
                                 })}
                             }
                         }
                     }
-                    div { class: "form-control",
-                        label { class: "label",
-                            span { class: "label-text", "Priority" }
-                            span { class: "label-text-alt opacity-60", "lower = applied first" }
-                        }
-                        input {
-                            class: "input input-bordered",
-                            r#type: "number",
+                    div { class: "form-control min-w-0",
+                        span { class: "block text-sm pb-2", "Rule order" }
+                        select {
+                            class: "select select-bordered w-full",
                             value: "{priority}",
-                            oninput: move |e| priority.set(e.value()),
+                            onchange: move |e| priority.set(e.value()),
+                            {
+                                let current = priority();
+                                let custom = current != "-100" && current != "0" && current != "100";
+                                rsx! {
+                                    if custom {
+                                        option { value: "{current}", "Current ({current})" }
+                                    }
+                                }
+                            }
+                            option { value: "-100", "Run before other rules" }
+                            option { value: "0", "Default order" }
+                            option { value: "100", "Run after other rules" }
                         }
                     }
-                    div { class: "form-control md:col-span-2",
-                        label { class: "label cursor-pointer justify-start gap-2",
+                    div { class: "form-control min-w-0",
+                        span { class: "block text-sm pb-2", "Status" }
+                        label { class: "flex min-h-12 items-center gap-3 rounded-lg border border-base-300 px-3 cursor-pointer",
                             input {
                                 r#type: "checkbox",
-                                class: "checkbox",
+                                class: "checkbox checkbox-sm",
                                 checked: enabled(),
                                 oninput: move |e| enabled.set(e.checked()),
                             }
@@ -3329,7 +3345,7 @@ fn RuleFormModal(
                             class: "btn",
                             disabled: submitting() || applying(),
                             onclick: submit_and_apply,
-                            if applying() { "Applying…" } else { "Save & apply rules" }
+                            if applying() { "Applying…" } else { "Save & apply" }
                         }
                         button {
                             class: "btn btn-primary",

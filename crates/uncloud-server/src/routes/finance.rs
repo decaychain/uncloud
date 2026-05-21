@@ -1983,35 +1983,58 @@ pub async fn apply_rules(
     let mut updated = 0u32;
     let mut still_unmatched = 0u32;
     while let Some(t) = cursor.try_next().await? {
+        let leg = t.legs.first();
         match engine.match_first(&t.description) {
             Some(idx) => {
                 let rule = &rules[idx];
-                txns.update_one(
-                    doc! { "_id": t.id },
-                    doc! { "$set": {
+                let category_changed = leg.and_then(|l| l.category_id) != Some(rule.category_id);
+                let metadata_current = leg.is_some_and(|l| {
+                    l.category_source == CategorySource::Rule
+                        && l.category_id == Some(rule.category_id)
+                        && l.rule_id == Some(rule.id)
+                });
+                if !metadata_current {
+                    let mut set = doc! {
                         "legs.0.category_id": rule.category_id,
                         "legs.0.category_source": "rule",
                         "legs.0.rule_id": rule.id,
-                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                    } },
-                )
-                .await?;
-                updated += 1;
+                    };
+                    if category_changed {
+                        set.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
+                    }
+                    let result = txns
+                        .update_one(
+                            doc! { "_id": t.id },
+                            doc! { "$set": set },
+                        )
+                        .await?;
+                    if category_changed {
+                        updated += result.modified_count as u32;
+                    }
+                }
             }
             None => {
                 // No match — if we previously rule-tagged this leg,
                 // clear the tag so it doesn't pretend a rule still owns it.
-                if matches!(t.legs.first().map(|l| l.category_source), Some(CategorySource::Rule)) {
-                    txns.update_one(
-                        doc! { "_id": t.id },
-                        doc! { "$set": {
-                            "legs.0.category_id": Bson::Null,
-                            "legs.0.category_source": "unset",
-                            "legs.0.rule_id": Bson::Null,
-                            "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                        } },
-                    )
-                    .await?;
+                if matches!(leg.map(|l| l.category_source), Some(CategorySource::Rule)) {
+                    let category_changed = leg.and_then(|l| l.category_id).is_some();
+                    let mut set = doc! {
+                        "legs.0.category_id": Bson::Null,
+                        "legs.0.category_source": "unset",
+                        "legs.0.rule_id": Bson::Null,
+                    };
+                    if category_changed {
+                        set.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
+                    }
+                    let result = txns
+                        .update_one(
+                            doc! { "_id": t.id },
+                            doc! { "$set": set },
+                        )
+                        .await?;
+                    if category_changed {
+                        updated += result.modified_count as u32;
+                    }
                 }
                 still_unmatched += 1;
             }

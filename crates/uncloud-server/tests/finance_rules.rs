@@ -186,6 +186,15 @@ async fn apply_rules_categorizes_existing_rows_but_not_user_set_ones() {
         .await
         .json();
     assert_eq!(apply["updated"], 1, "only Spotify should retag");
+    let apply_again: Value = app
+        .server
+        .post("/api/finance/rules/apply")
+        .await
+        .json();
+    assert_eq!(
+        apply_again["updated"], 0,
+        "reapplying unchanged rules should not count already-current rows",
+    );
 
     let after: Value = app
         .server
@@ -201,6 +210,45 @@ async fn apply_rules_categorizes_existing_rows_but_not_user_set_ones() {
         .find(|t| t["description"].as_str().unwrap().contains("Spotify"))
         .unwrap();
     assert_eq!(spotify["category_id"], music);
+    let spotify_updated_at = spotify["updated_at"].clone();
+
+    // A higher-priority rule that maps the same transaction to the same
+    // category may update internal rule ownership, but it must not count
+    // as a visible transaction update or bump updated_at.
+    app.server
+        .post("/api/finance/rules")
+        .json(&serde_json::json!({
+            "name": "Spotify duplicate",
+            "pattern": "spotify",
+            "pattern_kind": "substring",
+            "category_id": music,
+            "priority": 0,
+            "enabled": true,
+        }))
+        .await;
+    let apply_same_category: Value = app
+        .server
+        .post("/api/finance/rules/apply")
+        .await
+        .json();
+    assert_eq!(
+        apply_same_category["updated"], 0,
+        "same-category rule metadata changes should not count as transaction updates",
+    );
+    let after_same_category: Value = app
+        .server
+        .get("/api/finance/transactions")
+        .add_query_param("account_id", &account_id)
+        .await
+        .json();
+    let spotify_after_same_category = after_same_category["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["description"].as_str().unwrap().contains("Spotify"))
+        .unwrap();
+    assert_eq!(spotify_after_same_category["category_id"], music);
+    assert_eq!(spotify_after_same_category["updated_at"], spotify_updated_at);
 
     app.cleanup().await;
 }
