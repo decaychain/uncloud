@@ -53,6 +53,7 @@ Authenticated routes are mounted under both `/api` and `/api/v1`:
 - `PUT /mail/accounts/{id}/credential`
 - `DELETE /mail/accounts/{id}/credential`
 - `POST /mail/accounts/{id}/test-imap`
+- `POST /mail/accounts/{id}/test-smtp`
 - `GET /mail/accounts/{account_id}/folders`
 - `POST /mail/accounts/{account_id}/folders/refresh`
 - `GET /mail/identities`
@@ -60,8 +61,10 @@ Authenticated routes are mounted under both `/api` and `/api/v1`:
 - `PUT /mail/identities/{id}`
 - `DELETE /mail/identities/{id}`
 
-`test-imap` and `folders/refresh` currently require implicit TLS IMAP. STARTTLS
-and plaintext ports are represented in the data model but not wired yet.
+`test-imap` and `folders/refresh` support implicit TLS, STARTTLS, and explicit
+plaintext IMAP. Plaintext is intended only for trusted local/testing setups.
+`test-smtp` supports implicit TLS, STARTTLS, and explicit plaintext SMTP using
+the account's SMTP settings.
 
 ## What Works
 
@@ -70,10 +73,13 @@ and plaintext ports are represented in the data model but not wired yet.
 - Multiple accounts per user and multiple identities per account.
 - Encrypted-at-rest IMAP password storage using `secrets.master_key`.
 - Credential status is exposed only as `credential_configured: true/false`.
-- IMAP implicit TLS login with a transient password.
-- IMAP implicit TLS login with a stored account credential.
+- IMAP implicit TLS, STARTTLS, or plaintext login with a transient password.
+- IMAP implicit TLS, STARTTLS, or plaintext login with a stored account
+  credential.
 - IMAP capability retrieval through `POST /mail/accounts/{id}/test-imap`.
 - IMAP folder discovery through `POST /mail/accounts/{account_id}/folders/refresh`.
+- SMTP connection/authentication testing through
+  `POST /mail/accounts/{id}/test-smtp`.
 - Folder/subfolder persistence using remote path, hierarchy delimiter, parent
   path, attributes, and selectable state.
 - Mongo indexes for account, identity, folder, message, and attachment metadata.
@@ -84,9 +90,8 @@ and plaintext ports are represented in the data model but not wired yet.
 
 - Stored credentials currently cover IMAP app passwords only. OAuth refresh
   tokens and SMTP credential handling still need a credential type model.
-- Only implicit TLS IMAP is wired. STARTTLS and plaintext are represented in the
-  API/model but return a validation error in the provider layer.
-- SMTP is not wired beyond selecting `lettre` as the planned foundation.
+- SMTP is wired only for connection/authentication testing. Sending is still not
+  implemented.
 - No message sync yet. `mail_messages` and `mail_attachments` are model/index
   scaffolding only.
 - No MIME parsing or HTML sanitization path is wired yet.
@@ -103,8 +108,9 @@ and plaintext ports are represented in the data model but not wired yet.
 4. Optionally `PUT /api/mail/accounts/{id}/credential` with an app password.
 5. `POST /api/mail/accounts/{id}/test-imap` with either a transient app
    password or `{}` to use the stored credential.
-6. `POST /api/mail/accounts/{id}/folders/refresh` the same way.
-7. `GET /api/mail/accounts/{id}/folders` and verify folders/subfolders are
+6. `POST /api/mail/accounts/{id}/test-smtp` the same way.
+7. `POST /api/mail/accounts/{id}/folders/refresh` the same way.
+8. `GET /api/mail/accounts/{id}/folders` and verify folders/subfolders are
    persisted with expected paths and delimiters.
 
 This is enough to validate the current protocol foundation before building UI.
@@ -132,10 +138,8 @@ Remaining credential work before scheduler/background sync:
 
 ### 2. Provider Capability
 
-- Add STARTTLS support for IMAP port 143.
-- Decide whether plaintext IMAP should remain supported at all. If yes, keep it
-  explicit and warn loudly.
-- Add SMTP connection/authentication testing with `lettre`.
+- IMAP STARTTLS and explicit plaintext support are wired.
+- SMTP connection/authentication testing with `lettre` is wired.
 - Normalize provider error mapping so bad credentials return a clear 400/401-ish
   response while network/server failures remain operational errors.
 

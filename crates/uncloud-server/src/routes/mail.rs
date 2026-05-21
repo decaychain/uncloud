@@ -162,7 +162,7 @@ fn credential_status(account: &MailAccount) -> MailCredentialStatusResponse {
     }
 }
 
-fn resolve_imap_password(
+fn resolve_mail_password(
     state: &AppState,
     account: &MailAccount,
     password: Option<&str>,
@@ -407,11 +407,29 @@ pub async fn test_account_imap(
     require_mail(&state)?;
     let id = parse_oid(&id, "mail account id")?;
     let account = find_account(&state, user.id, id).await?;
-    let password = resolve_imap_password(&state, &account, req.password.as_deref())?;
+    let password = resolve_mail_password(&state, &account, req.password.as_deref())?;
     Ok(Json(
         state
             .mail
             .test_imap_password(&account.imap, &password)
+            .await?,
+    ))
+}
+
+pub async fn test_account_smtp(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    Json(req): Json<MailPasswordAuthRequest>,
+) -> Result<Json<MailConnectionTestResponse>> {
+    require_mail(&state)?;
+    let id = parse_oid(&id, "mail account id")?;
+    let account = find_account(&state, user.id, id).await?;
+    let password = resolve_mail_password(&state, &account, req.password.as_deref())?;
+    Ok(Json(
+        state
+            .mail
+            .test_smtp_password(&account.smtp, &password)
             .await?,
     ))
 }
@@ -608,7 +626,7 @@ pub async fn refresh_folders(
     require_mail(&state)?;
     let account_id = parse_oid(&account_id, "mail account id")?;
     let account = find_account(&state, user.id, account_id).await?;
-    let password = resolve_imap_password(&state, &account, req.password.as_deref())?;
+    let password = resolve_mail_password(&state, &account, req.password.as_deref())?;
     let remote = state
         .mail
         .list_imap_mailboxes(&account.imap, &password)

@@ -295,6 +295,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
                 .delete(mail::clear_account_credential),
         )
         .route("/mail/accounts/{id}/test-imap", post(mail::test_account_imap))
+        .route("/mail/accounts/{id}/test-smtp", post(mail::test_account_smtp))
         .route("/mail/accounts/{account_id}/folders", get(mail::list_folders))
         .route("/mail/accounts/{account_id}/folders/refresh", post(mail::refresh_folders))
         .route("/mail/identities", get(mail::list_identities).post(mail::create_identity))
