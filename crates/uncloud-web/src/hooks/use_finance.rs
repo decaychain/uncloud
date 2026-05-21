@@ -131,6 +131,7 @@ pub async fn delete_category(id: &str) -> Result<(), String> {
 
 pub async fn list_transactions(
     account_id: Option<&str>,
+    category_id: Option<&str>,
     uncategorized: bool,
     from: Option<&str>,
     to: Option<&str>,
@@ -141,6 +142,9 @@ pub async fn list_transactions(
     let mut url = format!("/finance/transactions?limit={}&skip={}", limit, skip);
     if let Some(a) = account_id {
         url.push_str(&format!("&account_id={}", a));
+    }
+    if let Some(c) = category_id {
+        url.push_str(&format!("&category_id={}", c));
     }
     if uncategorized {
         url.push_str("&uncategorized=true");

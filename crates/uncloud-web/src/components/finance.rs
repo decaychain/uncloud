@@ -700,6 +700,8 @@ fn CategoryFormModal(
 // Transactions tab
 // ─────────────────────────────────────────────────────────────────────────
 
+const UNCATEGORIZED_FILTER: &str = "__uncategorized__";
+
 #[component]
 fn TransactionActions(
     transaction: TransactionResponse,
@@ -774,6 +776,7 @@ fn TransactionsTab() -> Element {
     let mut edit_target: Signal<Option<TransactionResponse>> = use_signal(|| None);
     let mut rule_from_tx: Signal<Option<TransactionResponse>> = use_signal(|| None);
     let mut filter_account: Signal<String> = use_signal(String::new);
+    let mut category_filter: Signal<Option<String>> = use_signal(|| None);
     let mut only_uncat = use_signal(|| false);
     let mut date_from: Signal<String> = use_signal(String::new);
     let mut date_to: Signal<String> = use_signal(String::new);
@@ -791,6 +794,7 @@ fn TransactionsTab() -> Element {
     use_effect(move || {
         let _ = refresh();
         let _ = filter_account();
+        let _ = category_filter();
         let _ = only_uncat();
         let _ = date_from();
         let _ = date_to();
@@ -810,11 +814,26 @@ fn TransactionsTab() -> Element {
             }
             let acc_filter = filter_account();
             let acc_opt = if acc_filter.is_empty() { None } else { Some(acc_filter.as_str()) };
+            let cat_filter = category_filter();
+            let cat_opt = cat_filter
+                .as_deref()
+                .filter(|c| *c != UNCATEGORIZED_FILTER);
+            let uncat_filter = only_uncat()
+                || cat_filter.as_deref() == Some(UNCATEGORIZED_FILTER);
             let from_val = date_from();
             let from_opt = if from_val.is_empty() { None } else { Some(from_val.as_str()) };
             let to_val = date_to();
             let to_opt = if to_val.is_empty() { None } else { Some(to_val.as_str()) };
-            match use_finance::list_transactions(acc_opt, only_uncat(), from_opt, to_opt, include_recon(), page_size, 0).await {
+            match use_finance::list_transactions(
+                acc_opt,
+                cat_opt,
+                uncat_filter,
+                from_opt,
+                to_opt,
+                include_recon(),
+                page_size,
+                0,
+            ).await {
                 Ok(resp) => {
                     transactions.set(resp.items);
                     total.set(resp.total);
@@ -879,6 +898,7 @@ fn TransactionsTab() -> Element {
         if *loading_more.peek() { return; }
         let skip_val = transactions.peek().len() as u32;
         let acc = filter_account.peek().clone();
+        let cat = category_filter.peek().clone();
         let only_un = *only_uncat.peek();
         let from_val = date_from.peek().clone();
         let to_val = date_to.peek().clone();
@@ -886,9 +906,22 @@ fn TransactionsTab() -> Element {
         spawn(async move {
             loading_more.set(true);
             let acc_opt = if acc.is_empty() { None } else { Some(acc.as_str()) };
+            let cat_opt = cat
+                .as_deref()
+                .filter(|c| *c != UNCATEGORIZED_FILTER);
+            let uncat_filter = only_un || cat.as_deref() == Some(UNCATEGORIZED_FILTER);
             let from_opt = if from_val.is_empty() { None } else { Some(from_val.as_str()) };
             let to_opt = if to_val.is_empty() { None } else { Some(to_val.as_str()) };
-            match use_finance::list_transactions(acc_opt, only_un, from_opt, to_opt, inc_recon, page_size, skip_val).await {
+            match use_finance::list_transactions(
+                acc_opt,
+                cat_opt,
+                uncat_filter,
+                from_opt,
+                to_opt,
+                inc_recon,
+                page_size,
+                skip_val,
+            ).await {
                 Ok(resp) => {
                     transactions.write().extend(resp.items);
                     total.set(resp.total);
@@ -901,6 +934,17 @@ fn TransactionsTab() -> Element {
 
     let accounts_for_select = accounts();
     let no_accounts = accounts_for_select.is_empty();
+    let selected_category_label = category_filter().map(|id| {
+        if id == UNCATEGORIZED_FILTER {
+            "Uncategorized".to_string()
+        } else {
+            categories()
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "Selected category".into())
+        }
+    });
 
     let render_row = move |t: &TransactionResponse| -> Element {
         let date_short = t.date.split('T').next().unwrap_or(&t.date).to_string();
@@ -1114,7 +1158,13 @@ fn TransactionsTab() -> Element {
                                 r#type: "checkbox",
                                 class: "checkbox checkbox-sm",
                                 checked: only_uncat(),
-                                onchange: move |e| only_uncat.set(e.checked()),
+                                onchange: move |e| {
+                                    let checked = e.checked();
+                                    only_uncat.set(checked);
+                                    if checked {
+                                        category_filter.set(None);
+                                    }
+                                },
                             }
                             span { class: "truncate", "Uncategorized only" }
                         }
@@ -1146,6 +1196,18 @@ fn TransactionsTab() -> Element {
                             }
                         }
                     }
+                    if let Some(label) = selected_category_label.clone() {
+                        div { class: "col-span-2 md:col-span-4 xl:col-span-8 flex flex-wrap items-center gap-2 rounded bg-primary/10 px-3 py-2 text-sm",
+                            span { class: "text-base-content/70", "Category" }
+                            span { class: "font-medium", "{label}" }
+                            button {
+                                r#type: "button",
+                                class: "btn btn-ghost btn-xs",
+                                onclick: move |_| category_filter.set(None),
+                                "Clear"
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1163,6 +1225,11 @@ fn TransactionsTab() -> Element {
                 account_filter: filter_account(),
                 has_date_range: !date_from().is_empty() || !date_to().is_empty(),
                 expanded: breakdown_expanded,
+                selected_category_filter: category_filter(),
+                on_category_filter: move |selected| {
+                    category_filter.set(selected);
+                    only_uncat.set(false);
+                },
             }
         }
         if let Some(e) = error() {
@@ -1352,6 +1419,8 @@ fn SummaryStrip(
     account_filter: String,
     has_date_range: bool,
     expanded: Signal<bool>,
+    selected_category_filter: Option<String>,
+    on_category_filter: EventHandler<Option<String>>,
 ) -> Element {
     let mut expanded = expanded;
     let category_lookup: HashMap<String, String> = categories
@@ -1366,10 +1435,10 @@ fn SummaryStrip(
     };
 
     // Sorted by absolute total descending so the most-active rows go first.
-    let breakdown: Vec<(String, i64)> = summary
+    let breakdown: Vec<(Option<String>, String, i64)> = summary
         .as_ref()
         .map(|s| {
-            let mut v: Vec<(String, i64)> = s
+            let mut v: Vec<(Option<String>, String, i64)> = s
                 .items
                 .iter()
                 .map(|it| {
@@ -1379,16 +1448,16 @@ fn SummaryStrip(
                         .and_then(|id| category_lookup.get(id).cloned())
                         .unwrap_or_else(|| "Uncategorized".into());
                     let total = it.income_minor.saturating_add(it.expense_minor);
-                    (name, total)
+                    (it.category_id.clone(), name, total)
                 })
                 .collect();
-            v.sort_by_key(|(_, t)| -(t.abs()));
+            v.sort_by_key(|(_, _, t)| -(t.abs()));
             v
         })
         .unwrap_or_default();
     let breakdown_max_abs = breakdown
         .iter()
-        .map(|(_, t)| t.abs())
+        .map(|(_, _, t)| t.abs())
         .max()
         .unwrap_or(1)
         .max(1);
@@ -1467,7 +1536,13 @@ fn SummaryStrip(
                         }
                     } else {
                         ul { class: "space-y-1",
-                            {breakdown.iter().map(|(name, total)| {
+                            {breakdown.iter().map(|(category_id, name, total)| {
+                                let filter_value = category_id
+                                    .clone()
+                                    .unwrap_or_else(|| UNCATEGORIZED_FILTER.to_string());
+                                let selected = selected_category_filter
+                                    .as_deref()
+                                    == Some(filter_value.as_str());
                                 let width_pct = (total.abs() as f64 / breakdown_max_abs as f64) * 100.0;
                                 let positive = *total >= 0;
                                 let bar_class = if positive {
@@ -1483,17 +1558,33 @@ fn SummaryStrip(
                                 let n = name.clone();
                                 let t = *total;
                                 let cur = currency_hint.clone();
+                                let row_class = if selected {
+                                    "grid w-full grid-cols-1 sm:grid-cols-[minmax(8rem,12rem)_minmax(0,1fr)_8rem] sm:items-center gap-1 sm:gap-3 rounded bg-primary/10 px-2 py-1 text-left ring-1 ring-primary/30"
+                                } else {
+                                    "grid w-full grid-cols-1 sm:grid-cols-[minmax(8rem,12rem)_minmax(0,1fr)_8rem] sm:items-center gap-1 sm:gap-3 rounded px-2 py-1 text-left hover:bg-base-200"
+                                };
                                 rsx! {
-                                    li { key: "{n}", class: "grid grid-cols-1 sm:grid-cols-[minmax(8rem,12rem)_minmax(0,1fr)_8rem] sm:items-center gap-1 sm:gap-3",
-                                        span { class: "truncate text-sm", "{n}" }
-                                        div { class: "bg-base-200 rounded-full h-2",
-                                            div {
-                                                class: "{bar_class}",
-                                                style: "width: {width_pct:.1}%",
+                                    li { key: "{filter_value}",
+                                        button {
+                                            r#type: "button",
+                                            class: "{row_class}",
+                                            onclick: move |_| {
+                                                if selected {
+                                                    on_category_filter.call(None);
+                                                } else {
+                                                    on_category_filter.call(Some(filter_value.clone()));
+                                                }
+                                            },
+                                            span { class: "truncate text-sm", "{n}" }
+                                            div { class: "bg-base-200 rounded-full h-2",
+                                                div {
+                                                    class: "{bar_class}",
+                                                    style: "width: {width_pct:.1}%",
+                                                }
                                             }
-                                        }
-                                        span { class: "{amount_class} text-right",
-                                            "{format_money(t, &cur)}"
+                                            span { class: "{amount_class} text-right",
+                                                "{format_money(t, &cur)}"
+                                            }
                                         }
                                     }
                                 }
