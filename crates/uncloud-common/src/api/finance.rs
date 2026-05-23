@@ -299,6 +299,11 @@ pub struct FinanceRuleRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReorderRulesRequest {
+    pub rule_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApplyRulesResponse {
     pub updated: u32,
     pub still_unmatched: u32,

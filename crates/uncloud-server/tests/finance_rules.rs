@@ -254,6 +254,74 @@ async fn apply_rules_categorizes_existing_rows_but_not_user_set_ones() {
 }
 
 #[tokio::test]
+async fn rules_can_be_reordered_without_numeric_priorities() {
+    let app = TestApp::new().await;
+    app.register_and_login("erin").await;
+    let music = create_category(&app, "Music").await;
+
+    let first: Value = app
+        .server
+        .post("/api/finance/rules")
+        .json(&serde_json::json!({
+            "name": "First",
+            "pattern": "first",
+            "pattern_kind": "substring",
+            "category_id": music,
+            "priority": 0,
+            "enabled": true,
+        }))
+        .await
+        .json();
+    let second: Value = app
+        .server
+        .post("/api/finance/rules")
+        .json(&serde_json::json!({
+            "name": "Second",
+            "pattern": "second",
+            "pattern_kind": "substring",
+            "category_id": music,
+            "priority": 0,
+            "enabled": true,
+        }))
+        .await
+        .json();
+    let third: Value = app
+        .server
+        .post("/api/finance/rules")
+        .json(&serde_json::json!({
+            "name": "Third",
+            "pattern": "third",
+            "pattern_kind": "substring",
+            "category_id": music,
+            "priority": 0,
+            "enabled": true,
+        }))
+        .await
+        .json();
+
+    let first_id = first["id"].as_str().unwrap();
+    let second_id = second["id"].as_str().unwrap();
+    let third_id = third["id"].as_str().unwrap();
+    app.server
+        .put("/api/finance/rules/reorder")
+        .json(&serde_json::json!({
+            "rule_ids": [third_id, first_id, second_id],
+        }))
+        .await;
+
+    let rules: Value = app.server.get("/api/finance/rules").await.json();
+    let names: Vec<&str> = rules
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["Third", "First", "Second"]);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn test_endpoint_returns_matches_without_writing() {
     let app = TestApp::new().await;
     app.register_and_login("carol").await;

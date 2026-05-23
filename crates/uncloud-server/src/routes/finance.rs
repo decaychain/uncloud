@@ -4,6 +4,7 @@
 //! the transaction model around `source_ref` upserts; existing fields are
 //! preserved through that work.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::extract::{Multipart, Path, Query, State};
@@ -35,9 +36,10 @@ use uncloud_common::{
     CreateFinanceCategoryRequest, CreateTransactionRequest, FinanceCategoryResponse,
     FinanceRuleRequest, FinanceRuleResponse, ImportCsvResponse, ImportRowError, ImportRunResponse,
     ImportRunSourceDto, ImportRunSummaryDto, ImportSchemaRequest, ImportSchemaResponse,
-    ListTransactionsQuery, ReconcilePreviewResponse, ReconcileRequest, TestRuleMatch,
-    TestRuleRequest, TestRuleResponse, TransactionListResponse, TransactionResponse,
-    UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
+    ListTransactionsQuery, ReconcilePreviewResponse, ReconcileRequest, ReorderRulesRequest,
+    TestRuleMatch, TestRuleRequest, TestRuleResponse, TransactionListResponse,
+    TransactionResponse, UpdateAccountRequest, UpdateFinanceCategoryRequest,
+    UpdateTransactionRequest,
 };
 
 const ACCOUNTS: &str = "finance_accounts";
@@ -1869,6 +1871,15 @@ async fn validate_rule_category(
     Ok(oid)
 }
 
+async fn next_rule_priority(state: &AppState, owner_id: ObjectId) -> Result<i32> {
+    let coll = state.db.collection::<FinanceRule>(RULES);
+    let latest = coll
+        .find_one(doc! { "owner_id": owner_id })
+        .sort(doc! { "priority": -1, "_id": -1 })
+        .await?;
+    Ok(latest.map(|r| r.priority.saturating_add(100)).unwrap_or(0))
+}
+
 pub async fn create_rule(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -1887,7 +1898,11 @@ pub async fn create_rule(
         pattern_kind: kind,
         case_insensitive: req.case_insensitive,
         category_id,
-        priority: req.priority,
+        priority: if req.priority == 0 {
+            next_rule_priority(&state, user.id).await?
+        } else {
+            req.priority
+        },
         enabled: req.enabled,
         created_at: now,
         updated_at: now,
@@ -1941,6 +1956,44 @@ pub async fn delete_rule(
         .await?;
     if r.deleted_count == 0 {
         return Err(AppError::NotFound("Rule not found".into()));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn reorder_rules(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(req): Json<ReorderRulesRequest>,
+) -> Result<StatusCode> {
+    require_finance(&state)?;
+    let ids: Vec<ObjectId> = req
+        .rule_ids
+        .iter()
+        .map(|id| parse_oid(id, "rule id"))
+        .collect::<Result<Vec<_>>>()?;
+    let unique: HashSet<ObjectId> = ids.iter().copied().collect();
+    if unique.len() != ids.len() {
+        return Err(AppError::BadRequest("Rule ids must be unique".into()));
+    }
+
+    let coll = state.db.collection::<FinanceRule>(RULES);
+    let count = coll
+        .count_documents(doc! { "owner_id": user.id, "_id": { "$in": ids.clone() } })
+        .await?;
+    if count != ids.len() as u64 {
+        return Err(AppError::BadRequest("Rule list contains unknown rules".into()));
+    }
+
+    let now = bson::DateTime::from_chrono(Utc::now());
+    for (idx, id) in ids.iter().enumerate() {
+        coll.update_one(
+            doc! { "_id": *id, "owner_id": user.id },
+            doc! { "$set": {
+                "priority": (idx as i32).saturating_mul(100),
+                "updated_at": now,
+            } },
+        )
+        .await?;
     }
     Ok(StatusCode::NO_CONTENT)
 }

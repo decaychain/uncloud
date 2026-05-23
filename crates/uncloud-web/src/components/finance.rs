@@ -16,7 +16,7 @@ use uncloud_common::{
     UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
-use crate::components::icons::{IconMoreVertical, IconPlus};
+use crate::components::icons::{IconGripVertical, IconMoreVertical, IconPlus};
 use crate::components::scroll_sentinel::ScrollSentinel;
 use crate::hooks::use_finance;
 
@@ -247,7 +247,7 @@ fn AccountsTab() -> Element {
             }
         } else {
             div { class: "overflow-x-auto",
-                table { class: "table table-zebra",
+                table { class: "table table-sm w-full",
                     thead {
                         tr {
                             th { "Name" }
@@ -2846,6 +2846,9 @@ fn RulesTab() -> Element {
     let mut edit_target: Signal<Option<FinanceRuleResponse>> = use_signal(|| None);
     let mut applying = use_signal(|| false);
     let mut apply_summary: Signal<Option<(u32, u32)>> = use_signal(|| None);
+    let mut reordering = use_signal(|| false);
+    let mut drag_rule_idx: Signal<Option<usize>> = use_signal(|| None);
+    let mut drop_rule_idx: Signal<Option<usize>> = use_signal(|| None);
 
     use_effect(move || {
         let _ = refresh();
@@ -2873,6 +2876,40 @@ fn RulesTab() -> Element {
                 Err(e) => error.set(Some(e)),
             }
             applying.set(false);
+        });
+    };
+
+    let mut finish_reorder = move || {
+        let from = *drag_rule_idx.peek();
+        let to = *drop_rule_idx.peek();
+        drag_rule_idx.set(None);
+        drop_rule_idx.set(None);
+        let (Some(from), Some(to)) = (from, to) else { return; };
+        if from == to || reordering() {
+            return;
+        }
+
+        let previous = rules.peek().clone();
+        if from >= previous.len() {
+            return;
+        }
+        let mut next = previous.clone();
+        let item = next.remove(from);
+        let to_clamped = to.min(next.len());
+        next.insert(to_clamped, item);
+        for (idx, rule) in next.iter_mut().enumerate() {
+            rule.priority = (idx as i32).saturating_mul(100);
+        }
+        let ordered_ids: Vec<String> = next.iter().map(|r| r.id.clone()).collect();
+        rules.set(next);
+        reordering.set(true);
+        error.set(None);
+        spawn(async move {
+            if let Err(e) = use_finance::reorder_rules(&ordered_ids).await {
+                rules.set(previous);
+                error.set(Some(e));
+            }
+            reordering.set(false);
         });
     };
 
@@ -2914,7 +2951,7 @@ fn RulesTab() -> Element {
             div { class: "overflow-x-auto",
                 table { class: "table table-zebra",
                     thead { tr {
-                        th { class: "text-right", "Priority" }
+                        th { class: "w-10", "" }
                         th { "Name" }
                         th { "Pattern" }
                         th { "Match" }
@@ -2922,15 +2959,61 @@ fn RulesTab() -> Element {
                         th { "" }
                     } }
                     tbody {
-                        {rules().iter().map(|r| {
+                        onpointerup: move |_| finish_reorder(),
+                        onpointercancel: move |_| {
+                            drag_rule_idx.set(None);
+                            drop_rule_idx.set(None);
+                        },
+                        {rules().iter().enumerate().map(|(idx, r)| {
                             let r_edit = r.clone();
                             let r_id = r.id.clone();
                             let category_name = categories().get(&r.category_id).cloned().unwrap_or_else(|| "—".into());
                             let kind = r.pattern_kind.clone();
                             let enabled = r.enabled;
+                            let drag_source = *drag_rule_idx.read() == Some(idx);
+                            let drag_from = *drag_rule_idx.read();
+                            let drop_target = drag_rule_idx.read().is_some()
+                                && *drop_rule_idx.read() == Some(idx)
+                                && !drag_source;
+                            let row_class = if drag_source {
+                                "opacity-30"
+                            } else if drop_target {
+                                if drag_from.unwrap_or(0) > idx {
+                                    "border-t-2 border-t-primary bg-primary/5"
+                                } else {
+                                    "border-b-2 border-b-primary bg-primary/5"
+                                }
+                            } else if enabled {
+                                "hover:bg-base-200"
+                            } else {
+                                "opacity-50 hover:bg-base-200"
+                            };
                             rsx! {
-                                tr { key: "{r.id}", class: if enabled { "" } else { "opacity-50" },
-                                    td { class: "text-right opacity-70", "{r.priority}" }
+                                tr {
+                                    key: "{r.id}",
+                                    class: "{row_class} group transition-colors",
+                                    onpointerenter: move |_| {
+                                        if drag_rule_idx.peek().is_some() {
+                                            drop_rule_idx.set(Some(idx));
+                                        }
+                                    },
+                                    td {
+                                        class: "w-10 px-1 cursor-grab active:cursor-grabbing",
+                                        style: "touch-action: none;",
+                                        onpointerdown: move |e: Event<PointerData>| {
+                                            e.stop_propagation();
+                                            e.prevent_default();
+                                            drag_rule_idx.set(Some(idx));
+                                            drop_rule_idx.set(Some(idx));
+                                        },
+                                        span {
+                                            class: "inline-flex",
+                                            title: "Drag to reorder",
+                                            IconGripVertical {
+                                                class: "w-4 h-4 text-base-content/30 group-hover:text-base-content/60".to_string()
+                                            }
+                                        }
+                                    }
                                     td {
                                         "{r.name}"
                                         if !enabled { span { class: "badge badge-ghost ml-2 text-xs", "disabled" } }
@@ -3005,6 +3088,7 @@ fn RuleFormModal(
 ) -> Element {
     let is_edit = initial.is_some();
     let editing_id = initial.as_ref().map(|r| r.id.clone());
+    let initial_priority = initial.as_ref().map(|r| r.priority).unwrap_or(0);
 
     let mut name = use_signal(|| {
         initial.as_ref().map(|r| r.name.clone())
@@ -3027,9 +3111,6 @@ fn RuleFormModal(
             .or_else(|| prefill.as_ref().and_then(|p| p.category_id.clone()))
             .or_else(|| categories.iter().next().map(|(k, _)| k.clone()))
             .unwrap_or_default()
-    });
-    let mut priority = use_signal(|| {
-        initial.as_ref().map(|r| r.priority.to_string()).unwrap_or_else(|| "0".into())
     });
     let mut enabled = use_signal(|| initial.as_ref().map(|r| r.enabled).unwrap_or(true));
 
@@ -3065,17 +3146,13 @@ fn RuleFormModal(
     };
 
     let build_req = move || -> std::result::Result<FinanceRuleRequest, String> {
-        let p = priority()
-            .trim()
-            .parse::<i32>()
-            .map_err(|_| "Priority must be a whole number".to_string())?;
         Ok(FinanceRuleRequest {
             name: name(),
             pattern: pattern(),
             pattern_kind: pattern_kind(),
             case_insensitive: case_insensitive(),
             category_id: category_id(),
-            priority: p,
+            priority: initial_priority,
             enabled: enabled(),
         })
     };
@@ -3256,27 +3333,7 @@ fn RuleFormModal(
                             }
                         }
                     }
-                    div { class: "form-control min-w-0",
-                        span { class: "block text-sm pb-2", "Rule order" }
-                        select {
-                            class: "select select-bordered w-full",
-                            value: "{priority}",
-                            onchange: move |e| priority.set(e.value()),
-                            {
-                                let current = priority();
-                                let custom = current != "-100" && current != "0" && current != "100";
-                                rsx! {
-                                    if custom {
-                                        option { value: "{current}", "Current ({current})" }
-                                    }
-                                }
-                            }
-                            option { value: "-100", "Run before other rules" }
-                            option { value: "0", "Default order" }
-                            option { value: "100", "Run after other rules" }
-                        }
-                    }
-                    div { class: "form-control min-w-0",
+                    div { class: "form-control md:col-span-2 min-w-0",
                         span { class: "block text-sm pb-2", "Status" }
                         label { class: "flex min-h-12 items-center gap-3 rounded-lg border border-base-300 px-3 cursor-pointer",
                             input {

@@ -281,6 +281,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/finance/rules/{id}",
             put(finance::update_rule).delete(finance::delete_rule),
         )
+        .route("/finance/rules/reorder", put(finance::reorder_rules))
         .route("/finance/rules/apply", post(finance::apply_rules))
         .route("/finance/rules/test", post(finance::test_rule));
 

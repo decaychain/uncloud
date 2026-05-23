@@ -5,8 +5,8 @@ use uncloud_common::{
     CategorySummaryResponse, CreateAccountRequest, CreateFinanceCategoryRequest,
     CreateTransactionRequest, FinanceCategoryResponse, FinanceRuleRequest, FinanceRuleResponse,
     ImportCsvResponse, ImportRunResponse, ImportSchemaRequest, ImportSchemaResponse,
-    ReconcilePreviewResponse, ReconcileRequest, TestRuleRequest, TestRuleResponse,
-    TransactionListResponse, TransactionResponse, UpdateAccountRequest,
+    ReconcilePreviewResponse, ReconcileRequest, ReorderRulesRequest, TestRuleRequest,
+    TestRuleResponse, TransactionListResponse, TransactionResponse, UpdateAccountRequest,
     UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
@@ -504,6 +504,23 @@ pub async fn delete_rule(id: &str) -> Result<(), String> {
     let r = api::delete(&format!("/finance/rules/{id}"))
         .send().await.map_err(|e| e.to_string())?;
     if r.ok() { Ok(()) } else { Err(extract_error(r).await) }
+}
+
+pub async fn reorder_rules(rule_ids: &[String]) -> Result<(), String> {
+    let body = ReorderRulesRequest {
+        rule_ids: rule_ids.to_vec(),
+    };
+    let r = api::put("/finance/rules/reorder")
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() || r.status() == 204 {
+        Ok(())
+    } else {
+        Err(extract_error(r).await)
+    }
 }
 
 pub async fn apply_rules() -> Result<ApplyRulesResponse, String> {
