@@ -117,6 +117,52 @@ async fn import_tags_rows_with_matching_rules() {
 }
 
 #[tokio::test]
+async fn wildcard_rule_matches_imported_rows() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice-wildcard").await;
+    let account_id = create_account(&app).await;
+    let schema_id = sparkasse_schema_id(&app).await;
+    let music = create_category(&app, "Music").await;
+
+    let _: Value = app
+        .server
+        .post("/api/finance/rules")
+        .json(&serde_json::json!({
+            "name": "Spotify wildcard",
+            "pattern": "Spotify*monthly",
+            "pattern_kind": "wildcard",
+            "case_insensitive": true,
+            "category_id": music,
+            "priority": 0,
+            "enabled": true,
+        }))
+        .await
+        .json();
+
+    let _: Value = app
+        .server
+        .post("/api/finance/import")
+        .multipart(import_form(&account_id, &schema_id, fixture_csv()))
+        .await
+        .json();
+
+    let listing: Value = app
+        .server
+        .get("/api/finance/transactions")
+        .add_query_param("account_id", &account_id)
+        .await
+        .json();
+    let items = listing["items"].as_array().unwrap();
+    let spotify = items
+        .iter()
+        .find(|t| t["description"].as_str().unwrap().contains("Spotify"))
+        .expect("Spotify transaction not found");
+    assert_eq!(spotify["category_id"], music);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn apply_rules_categorizes_existing_rows_but_not_user_set_ones() {
     let app = TestApp::new().await;
     app.register_and_login("bob").await;

@@ -20,6 +20,7 @@ pub struct CompiledRule {
 enum CompiledKind {
     Substring { needle: String, case_insensitive: bool },
     StartsWith { needle: String, case_insensitive: bool },
+    Wildcard(Regex),
     Regex(Regex),
 }
 
@@ -94,7 +95,7 @@ impl CompiledKind {
                     description.starts_with(needle.as_str())
                 }
             }
-            CompiledKind::Regex(re) => re.is_match(description),
+            CompiledKind::Wildcard(re) | CompiledKind::Regex(re) => re.is_match(description),
         }
     }
 }
@@ -119,6 +120,8 @@ fn compile_rule(rule: &FinanceRule) -> Result<CompiledKind, String> {
             needle: pattern.to_string(),
             case_insensitive: rule.case_insensitive,
         }),
+        RulePatternKind::Wildcard => compile_wildcard(pattern, rule.case_insensitive)
+            .map(CompiledKind::Wildcard),
         RulePatternKind::Regex => {
             let wrapped = if rule.case_insensitive {
                 format!("(?i){pattern}")
@@ -128,6 +131,21 @@ fn compile_rule(rule: &FinanceRule) -> Result<CompiledKind, String> {
             Regex::new(&wrapped).map(CompiledKind::Regex).map_err(|e| e.to_string())
         }
     }
+}
+
+fn compile_wildcard(pattern: &str, case_insensitive: bool) -> Result<Regex, String> {
+    let mut regex = String::new();
+    if case_insensitive {
+        regex.push_str("(?i)");
+    }
+    for ch in pattern.chars() {
+        match ch {
+            '*' => regex.push_str(".*"),
+            '?' => regex.push('.'),
+            _ => regex.push_str(&regex::escape(&ch.to_string())),
+        }
+    }
+    Regex::new(&regex).map_err(|e| e.to_string())
 }
 
 /// Build a single-rule engine for the `POST /rules/test` endpoint —
@@ -245,5 +263,31 @@ mod tests {
         let (engine, _) = RuleEngine::build(&rules);
         assert_eq!(engine.match_first("MIETE October 2026"), Some(0));
         assert_eq!(engine.match_first("Monthly miete"), None);
+    }
+
+    #[test]
+    fn wildcard_matches_terms_in_order() {
+        let rules = vec![rule(
+            "amazon via paypal",
+            "Paypal*Amazon*",
+            RulePatternKind::Wildcard,
+            0,
+        )];
+        let (engine, errs) = RuleEngine::build(&rules);
+        assert!(errs.is_empty());
+        assert_eq!(
+            engine.match_first("POS PAYPAL Europe payment Amazon Marketplace"),
+            Some(0)
+        );
+        assert_eq!(engine.match_first("Amazon Marketplace via PayPal"), None);
+    }
+
+    #[test]
+    fn wildcard_question_mark_matches_one_character() {
+        let rules = vec![rule("shop", "SHOP-??-Berlin", RulePatternKind::Wildcard, 0)];
+        let (engine, errs) = RuleEngine::build(&rules);
+        assert!(errs.is_empty());
+        assert_eq!(engine.match_first("Card SHOP-42-Berlin"), Some(0));
+        assert_eq!(engine.match_first("Card SHOP-123-Berlin"), None);
     }
 }

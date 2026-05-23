@@ -274,7 +274,7 @@ pub struct FinanceRuleResponse {
     pub id: String,
     pub name: String,
     pub pattern: String,
-    /// "substring", "starts_with", "regex".
+    /// "substring", "starts_with", "wildcard", "regex".
     pub pattern_kind: String,
     pub case_insensitive: bool,
     pub category_id: String,

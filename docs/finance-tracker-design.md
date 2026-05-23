@@ -42,12 +42,12 @@ A simple transaction has exactly one leg (auto-created on import). A split trans
 
 ### Rules
 
-A **rule** is a substring or regex pattern on transaction `description` that maps to a category. Applied:
+A **rule** is a substring, wildcard, or regex pattern on transaction `description` that maps to a category. Applied:
 
 1. **On import**: each new transaction runs through the rule list; first match wins; assigns the leg's category with `category_source = 'rule'` and records `rule_id` for provenance.
 2. **On demand**: "Apply current rules" button re-runs rules against existing transactions. Only touches legs whose `category_source` is `'unset'` or `'rule'` — user-set categories are never overwritten.
 
-Rules stay deliberately simple. No ML, no fuzzy matching, no merchant resolution; manual triage handles the long tail. Real-world coverage from substring rules + manual is ~95% with very little upkeep.
+Rules stay deliberately simple. No ML, no fuzzy matching, no merchant resolution; manual triage handles the long tail. Real-world coverage from simple pattern rules + manual is ~95% with very little upkeep.
 
 ### Pending settlements (separate module)
 
@@ -138,7 +138,7 @@ Each import creates an `ImportBatch` row recording the source filename, profile 
 ```
 Account            owner_id, name, type, currency, opening_balance
 Category           owner_id, parent_id (nullable), name, colour
-Rule               owner_id, name, pattern, pattern_kind (substring|regex), category_id, priority
+Rule               owner_id, name, pattern, pattern_kind (substring|starts_with|wildcard|regex), category_id, priority
 Transaction        owner_id, account_id, source_ref UNIQUE(account_id, source_ref),
                    date, amount, currency, description, raw_bank_category,
                    notes, tags

@@ -1832,9 +1832,10 @@ fn parse_rule_pattern_kind(s: &str) -> Result<RulePatternKind> {
     match s {
         "substring" => Ok(RulePatternKind::Substring),
         "starts_with" => Ok(RulePatternKind::StartsWith),
+        "wildcard" => Ok(RulePatternKind::Wildcard),
         "regex" => Ok(RulePatternKind::Regex),
         other => Err(AppError::BadRequest(format!(
-            "Invalid pattern_kind `{other}` (expected substring | starts_with | regex)"
+            "Invalid pattern_kind `{other}` (expected substring | starts_with | wildcard | regex)"
         ))),
     }
 }
@@ -1843,6 +1844,7 @@ fn rule_kind_str(k: RulePatternKind) -> &'static str {
     match k {
         RulePatternKind::Substring => "substring",
         RulePatternKind::StartsWith => "starts_with",
+        RulePatternKind::Wildcard => "wildcard",
         RulePatternKind::Regex => "regex",
     }
 }

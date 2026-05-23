@@ -3595,7 +3595,7 @@ fn RuleFormModal(
                         input {
                             class: "input input-bordered font-mono",
                             value: "{pattern}",
-                            placeholder: "e.g. spotify, ^Miete, Uber Eats",
+                            placeholder: "e.g. spotify, PayPal*Amazon*, ^Miete",
                             oninput: move |e| pattern.set(e.value()),
                         }
                     }
@@ -3607,6 +3607,7 @@ fn RuleFormModal(
                             onchange: move |e| pattern_kind.set(e.value()),
                             option { value: "substring", "Contains" }
                             option { value: "starts_with", "Starts with" }
+                            option { value: "wildcard", "Wildcard" }
                             option { value: "regex", "Regex" }
                         }
                     }

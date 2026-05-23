@@ -200,6 +200,7 @@ pub struct BalanceSnapshot {
 pub enum RulePatternKind {
     Substring,
     StartsWith,
+    Wildcard,
     Regex,
 }
 
