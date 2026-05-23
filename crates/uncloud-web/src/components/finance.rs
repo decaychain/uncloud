@@ -16,7 +16,7 @@ use uncloud_common::{
     UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
-use crate::components::icons::IconMoreVertical;
+use crate::components::icons::{IconGripVertical, IconMoreVertical, IconPlus};
 use crate::components::scroll_sentinel::ScrollSentinel;
 use crate::hooks::use_finance;
 
@@ -34,7 +34,7 @@ pub fn FinanceTransactionsPage() -> Element {
     // from horizontal real estate; the other finance views keep the
     // narrower max-w-6xl from `finance_shell`.
     rsx! {
-        div { class: "p-4 lg:p-6",
+        div { class: "w-full min-w-0",
             TransactionsTab {}
         }
     }
@@ -247,7 +247,7 @@ fn AccountsTab() -> Element {
             }
         } else {
             div { class: "overflow-x-auto",
-                table { class: "table table-zebra",
+                table { class: "table table-sm w-full",
                     thead {
                         tr {
                             th { "Name" }
@@ -506,6 +506,186 @@ fn format_amount_input(minor: i64) -> String {
 // Categories tab
 // ─────────────────────────────────────────────────────────────────────────
 
+#[derive(Clone, PartialEq)]
+enum CategoryDropTarget {
+    Root,
+    Parent(String),
+}
+
+fn category_has_children(categories: &[FinanceCategoryResponse], category_id: &str) -> bool {
+    categories
+        .iter()
+        .any(|c| c.parent_id.as_deref() == Some(category_id))
+}
+
+fn category_effective_roots(categories: &[FinanceCategoryResponse]) -> Vec<FinanceCategoryResponse> {
+    categories
+        .iter()
+        .filter(|c| {
+            c.parent_id
+                .as_ref()
+                .map(|pid| !categories.iter().any(|parent| &parent.id == pid))
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
+fn category_children(
+    categories: &[FinanceCategoryResponse],
+    parent_id: &str,
+) -> Vec<FinanceCategoryResponse> {
+    categories
+        .iter()
+        .filter(|c| c.parent_id.as_deref() == Some(parent_id))
+        .cloned()
+        .collect()
+}
+
+fn category_label(categories: &[FinanceCategoryResponse], category_id: &str) -> Option<String> {
+    let category = categories.iter().find(|c| c.id == category_id)?;
+    if let Some(parent_id) = category.parent_id.as_ref() {
+        if let Some(parent) = categories.iter().find(|c| &c.id == parent_id) {
+            return Some(format!("{} / {}", parent.name, category.name));
+        }
+    }
+    Some(category.name.clone())
+}
+
+fn can_drop_category_on_root(categories: &[FinanceCategoryResponse], dragged_id: &str) -> bool {
+    categories
+        .iter()
+        .find(|c| c.id == dragged_id)
+        .and_then(|c| c.parent_id.as_ref())
+        .is_some()
+}
+
+fn can_drop_category_on_parent(
+    categories: &[FinanceCategoryResponse],
+    dragged_id: &str,
+    parent_id: &str,
+) -> bool {
+    if dragged_id == parent_id || category_has_children(categories, dragged_id) {
+        return false;
+    }
+    let Some(dragged) = categories.iter().find(|c| c.id == dragged_id) else {
+        return false;
+    };
+    if dragged.parent_id.as_deref() == Some(parent_id) {
+        return false;
+    }
+    categories
+        .iter()
+        .find(|c| c.id == parent_id)
+        .map(|parent| parent.parent_id.is_none())
+        .unwrap_or(false)
+}
+
+fn render_category_row(
+    category: FinanceCategoryResponse,
+    depth: usize,
+    child_count: usize,
+    all_categories: Vec<FinanceCategoryResponse>,
+    mut drag_category_id: Signal<Option<String>>,
+    mut drop_target: Signal<Option<CategoryDropTarget>>,
+    mut edit_target: Signal<Option<FinanceCategoryResponse>>,
+    mut refresh: Signal<u32>,
+    mut error: Signal<Option<String>>,
+) -> Element {
+    let candidate_parent_id = category
+        .parent_id
+        .clone()
+        .unwrap_or_else(|| category.id.clone());
+    let is_dragging = drag_category_id.read().as_ref() == Some(&category.id);
+    let is_drop_parent = matches!(
+        drop_target.read().as_ref(),
+        Some(CategoryDropTarget::Parent(id)) if id == &candidate_parent_id
+    ) && category.parent_id.is_none();
+    let row_base = if depth == 0 {
+        "grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-lg border px-2 py-2 transition-colors group"
+    } else {
+        "grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-lg border px-2 py-1.5 transition-colors group"
+    };
+    let row_class = if is_dragging {
+        format!("{row_base} border-transparent bg-base-200/60 opacity-30 pointer-events-none")
+    } else if is_drop_parent {
+        format!("{row_base} border-primary bg-primary/10 ring-1 ring-primary/30")
+    } else {
+        format!("{row_base} border-transparent hover:border-base-300 hover:bg-base-200/70")
+    };
+    let name_class = if depth == 0 {
+        "font-medium truncate"
+    } else {
+        "truncate text-sm"
+    };
+    let c_edit = category.clone();
+    let c_delete = category.id.clone();
+    let target_categories = all_categories.clone();
+    let target_id = candidate_parent_id.clone();
+    let drag_id_for_handle = category.id.clone();
+
+    rsx! {
+        div {
+            key: "{category.id}",
+            class: "{row_class}",
+            onpointerenter: move |_| {
+                let Some(dragged_id) = drag_category_id.peek().clone() else {
+                    return;
+                };
+                if can_drop_category_on_parent(&target_categories, &dragged_id, &target_id) {
+                    drop_target.set(Some(CategoryDropTarget::Parent(target_id.clone())));
+                } else {
+                    drop_target.set(None);
+                }
+            },
+            span {
+                class: "cursor-grab active:cursor-grabbing opacity-30 hover:opacity-70 shrink-0",
+                style: "touch-action: none;",
+                title: "Drag category",
+                onpointerdown: move |e: Event<PointerData>| {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    drag_category_id.set(Some(drag_id_for_handle.clone()));
+                    drop_target.set(None);
+                },
+                IconGripVertical {
+                    class: "w-4 h-4".to_string()
+                }
+            }
+            div { class: "min-w-0 flex items-center gap-2",
+                span { class: "{name_class}", "{category.name}" }
+                if child_count > 0 {
+                    span {
+                        class: "badge badge-ghost badge-sm shrink-0",
+                        title: "Subcategories",
+                        "{child_count}"
+                    }
+                }
+            }
+            div { class: "flex items-center gap-1 justify-end",
+                button {
+                    class: "btn btn-ghost btn-xs",
+                    onclick: move |_| edit_target.set(Some(c_edit.clone())),
+                    "Edit"
+                }
+                button {
+                    class: "btn btn-ghost btn-xs text-error",
+                    onclick: move |_| {
+                        let id = c_delete.clone();
+                        spawn(async move {
+                            match use_finance::delete_category(&id).await {
+                                Ok(_) => refresh += 1,
+                                Err(e) => error.set(Some(e)),
+                            }
+                        });
+                    },
+                    "Delete"
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn CategoriesTab() -> Element {
     let mut categories: Signal<Vec<FinanceCategoryResponse>> = use_signal(Vec::new);
@@ -514,6 +694,9 @@ fn CategoriesTab() -> Element {
     let mut refresh = use_signal(|| 0u32);
     let mut show_create = use_signal(|| false);
     let mut edit_target: Signal<Option<FinanceCategoryResponse>> = use_signal(|| None);
+    let mut drag_category_id: Signal<Option<String>> = use_signal(|| None);
+    let mut drop_target: Signal<Option<CategoryDropTarget>> = use_signal(|| None);
+    let mut moving_category: Signal<Option<String>> = use_signal(|| None);
 
     use_effect(move || {
         let _ = refresh();
@@ -526,6 +709,76 @@ fn CategoriesTab() -> Element {
             loading.set(false);
         });
     });
+
+    let mut finish_category_drop = move || {
+        let dragged_id = drag_category_id.peek().clone();
+        let target = drop_target.peek().clone();
+        drag_category_id.set(None);
+        drop_target.set(None);
+        if moving_category.peek().is_some() {
+            return;
+        }
+        let (Some(dragged_id), Some(target)) = (dragged_id, target) else {
+            return;
+        };
+        let previous = categories.peek().clone();
+        let new_parent_id = match target {
+            CategoryDropTarget::Root => {
+                if !can_drop_category_on_root(&previous, &dragged_id) {
+                    return;
+                }
+                None
+            }
+            CategoryDropTarget::Parent(parent_id) => {
+                if !can_drop_category_on_parent(&previous, &dragged_id, &parent_id) {
+                    return;
+                }
+                Some(parent_id)
+            }
+        };
+        let Some(current) = previous.iter().find(|c| c.id == dragged_id) else {
+            return;
+        };
+        if current.parent_id == new_parent_id {
+            return;
+        }
+
+        let mut optimistic = previous.clone();
+        if let Some(cat) = optimistic.iter_mut().find(|c| c.id == dragged_id) {
+            cat.parent_id = new_parent_id.clone();
+        }
+        categories.set(optimistic);
+        moving_category.set(Some(dragged_id.clone()));
+        error.set(None);
+        let req = UpdateFinanceCategoryRequest {
+            name: None,
+            parent_id: Some(new_parent_id.unwrap_or_default()),
+            colour: None,
+        };
+        spawn(async move {
+            if let Err(e) = use_finance::update_category(&dragged_id, &req).await {
+                categories.set(previous);
+                error.set(Some(e));
+            }
+            moving_category.set(None);
+        });
+    };
+
+    let all_categories = categories();
+    let roots = category_effective_roots(&all_categories);
+    let can_promote_dragged = drag_category_id
+        .read()
+        .as_ref()
+        .map(|id| can_drop_category_on_root(&all_categories, id))
+        .unwrap_or(false);
+    let root_is_target = matches!(drop_target.read().as_ref(), Some(CategoryDropTarget::Root));
+    let root_class = if root_is_target {
+        "mb-2 rounded-lg border border-primary bg-primary/10 px-3 py-2 text-xs font-semibold uppercase text-primary"
+    } else if can_promote_dragged {
+        "mb-2 rounded-lg border border-dashed border-base-300 bg-base-100 px-3 py-2 text-xs font-semibold uppercase text-base-content/60"
+    } else {
+        "mb-2 px-3 py-2 text-xs font-semibold uppercase text-base-content/50"
+    };
 
     rsx! {
         div { class: "flex justify-between items-center mb-4",
@@ -547,51 +800,69 @@ fn CategoriesTab() -> Element {
                 p { class: "text-sm mt-2", "Categories are reused across transactions and pending settlements." }
             }
         } else {
-            div { class: "overflow-x-auto",
-                table { class: "table table-zebra",
-                    thead { tr { th { "Name" } th { "Parent" } th { "" } } }
-                    tbody {
-                        {categories().iter().map(|c| {
-                            let parent_name = c.parent_id.as_ref().and_then(|pid| {
-                                categories().iter().find(|p| &p.id == pid).map(|p| p.name.clone())
-                            }).unwrap_or_default();
-                            let c_edit = c.clone();
-                            let c_id = c.id.clone();
-                            rsx! {
-                                tr { key: "{c.id}",
-                                    td { "{c.name}" }
-                                    td { class: "opacity-60", "{parent_name}" }
-                                    td { class: "text-right",
-                                        button {
-                                            class: "btn btn-ghost btn-xs",
-                                            onclick: move |_| edit_target.set(Some(c_edit.clone())),
-                                            "Edit"
-                                        }
-                                        button {
-                                            class: "btn btn-ghost btn-xs text-error",
-                                            onclick: move |_| {
-                                                let id = c_id.clone();
-                                                spawn(async move {
-                                                    match use_finance::delete_category(&id).await {
-                                                        Ok(_) => refresh += 1,
-                                                        Err(e) => error.set(Some(e)),
-                                                    }
-                                                });
-                                            },
-                                            "Delete"
-                                        }
-                                    }
+            div {
+                class: "space-y-2",
+                onpointerup: move |_| finish_category_drop(),
+                onpointercancel: move |_| {
+                    drag_category_id.set(None);
+                    drop_target.set(None);
+                },
+                div {
+                    class: "{root_class}",
+                    onpointerenter: move |_| {
+                        let Some(dragged_id) = drag_category_id.peek().clone() else {
+                            return;
+                        };
+                        if can_drop_category_on_root(&categories.peek(), &dragged_id) {
+                            drop_target.set(Some(CategoryDropTarget::Root));
+                        } else {
+                            drop_target.set(None);
+                        }
+                    },
+                    "Top level"
+                }
+                {roots.iter().map(|parent| {
+                    let children = category_children(&all_categories, &parent.id);
+                    let parent_row = render_category_row(
+                        parent.clone(),
+                        0,
+                        children.len(),
+                        all_categories.clone(),
+                        drag_category_id,
+                        drop_target,
+                        edit_target,
+                        refresh,
+                        error,
+                    );
+                    rsx! {
+                        div { key: "{parent.id}", class: "space-y-1",
+                            {parent_row}
+                            if !children.is_empty() {
+                                div { class: "ml-5 border-l border-base-300/70 pl-4 space-y-1",
+                                    {children.iter().map(|child| {
+                                        let child_row = render_category_row(
+                                            child.clone(),
+                                            1,
+                                            0,
+                                            all_categories.clone(),
+                                            drag_category_id,
+                                            drop_target,
+                                            edit_target,
+                                            refresh,
+                                            error,
+                                        );
+                                        rsx! { {child_row} }
+                                    })}
                                 }
                             }
-                        })}
+                        }
                     }
-                }
+                })}
             }
         }
         if show_create() {
             CategoryFormModal {
                 initial: None,
-                all_categories: categories(),
                 on_close: move |_| show_create.set(false),
                 on_saved: move |_| { show_create.set(false); refresh += 1; },
             }
@@ -600,7 +871,6 @@ fn CategoriesTab() -> Element {
             CategoryFormModal {
                 key: "{c.id}",
                 initial: Some(c.clone()),
-                all_categories: categories(),
                 on_close: move |_| edit_target.set(None),
                 on_saved: move |_| { edit_target.set(None); refresh += 1; },
             }
@@ -611,21 +881,14 @@ fn CategoriesTab() -> Element {
 #[component]
 fn CategoryFormModal(
     initial: Option<FinanceCategoryResponse>,
-    all_categories: Vec<FinanceCategoryResponse>,
     on_close: EventHandler<()>,
     on_saved: EventHandler<()>,
 ) -> Element {
     let editing = initial.is_some();
     let mut name = use_signal(|| initial.as_ref().map(|c| c.name.clone()).unwrap_or_default());
-    let mut parent_id = use_signal(|| initial.as_ref().and_then(|c| c.parent_id.clone()).unwrap_or_default());
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut saving = use_signal(|| false);
     let initial_id = initial.as_ref().map(|c| c.id.clone());
-    let self_id = initial_id.clone();
-    let parent_candidates: Vec<FinanceCategoryResponse> = all_categories
-        .into_iter()
-        .filter(|c| c.parent_id.is_none() && Some(&c.id) != self_id.as_ref())
-        .collect();
 
     rsx! {
         div { class: "modal modal-open",
@@ -644,18 +907,6 @@ fn CategoryFormModal(
                         oninput: move |e| name.set(e.value()),
                     }
                 }
-                div { class: "form-control mt-2",
-                    label { class: "label", span { class: "label-text", "Parent (optional)" } }
-                    select {
-                        class: "select select-bordered",
-                        value: "{parent_id}",
-                        onchange: move |e| parent_id.set(e.value()),
-                        option { value: "", "(top-level)" }
-                        {parent_candidates.iter().map(|c| rsx! {
-                            option { key: "{c.id}", value: "{c.id}", "{c.name}" }
-                        })}
-                    }
-                }
                 div { class: "modal-action",
                     button { class: "btn btn-ghost", onclick: move |_| on_close.call(()), "Cancel" }
                     button {
@@ -669,15 +920,14 @@ fn CategoryFormModal(
                                 let result = if let Some(id) = id_opt {
                                     let req = UpdateFinanceCategoryRequest {
                                         name: Some(name()),
-                                        parent_id: Some(parent_id()),
+                                        parent_id: None,
                                         colour: None,
                                     };
                                     use_finance::update_category(&id, &req).await.map(|_| ())
                                 } else {
-                                    let p = parent_id();
                                     let req = CreateFinanceCategoryRequest {
                                         name: name(),
-                                        parent_id: if p.is_empty() { None } else { Some(p) },
+                                        parent_id: None,
                                         colour: None,
                                     };
                                     use_finance::create_category(&req).await.map(|_| ())
@@ -700,6 +950,69 @@ fn CategoryFormModal(
 // Transactions tab
 // ─────────────────────────────────────────────────────────────────────────
 
+const UNCATEGORIZED_FILTER: &str = "__uncategorized__";
+
+#[component]
+fn TransactionActions(
+    transaction: TransactionResponse,
+    edit_target: Signal<Option<TransactionResponse>>,
+    rule_from_tx: Signal<Option<TransactionResponse>>,
+    refresh: Signal<u32>,
+    error: Signal<Option<String>>,
+) -> Element {
+    let mut edit_target = edit_target;
+    let mut rule_from_tx = rule_from_tx;
+    let mut refresh = refresh;
+    let mut error = error;
+    let t_edit = transaction.clone();
+    let t_rule = transaction.clone();
+    let t_id = transaction.id.clone();
+
+    rsx! {
+        div { class: "dropdown dropdown-end",
+            div {
+                tabindex: "0",
+                role: "button",
+                class: "btn btn-ghost btn-xs btn-circle",
+                IconMoreVertical {}
+            }
+            ul {
+                tabindex: "0",
+                class: "menu dropdown-content bg-base-100 rounded-box shadow z-10 w-36 p-1",
+                if !transaction.is_split {
+                    li {
+                        a {
+                            onclick: move |_| edit_target.set(Some(t_edit.clone())),
+                            "Edit"
+                        }
+                    }
+                }
+                li {
+                    a {
+                        onclick: move |_| rule_from_tx.set(Some(t_rule.clone())),
+                        "Create rule..."
+                    }
+                }
+                li {
+                    a {
+                        class: "text-error",
+                        onclick: move |_| {
+                            let id = t_id.clone();
+                            spawn(async move {
+                                match use_finance::delete_transaction(&id).await {
+                                    Ok(_) => refresh += 1,
+                                    Err(e) => error.set(Some(e)),
+                                }
+                            });
+                        },
+                        "Delete"
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn TransactionsTab() -> Element {
     let mut transactions: Signal<Vec<TransactionResponse>> = use_signal(Vec::new);
@@ -713,6 +1026,7 @@ fn TransactionsTab() -> Element {
     let mut edit_target: Signal<Option<TransactionResponse>> = use_signal(|| None);
     let mut rule_from_tx: Signal<Option<TransactionResponse>> = use_signal(|| None);
     let mut filter_account: Signal<String> = use_signal(String::new);
+    let mut category_filter: Signal<Option<String>> = use_signal(|| None);
     let mut only_uncat = use_signal(|| false);
     let mut date_from: Signal<String> = use_signal(String::new);
     let mut date_to: Signal<String> = use_signal(String::new);
@@ -730,6 +1044,7 @@ fn TransactionsTab() -> Element {
     use_effect(move || {
         let _ = refresh();
         let _ = filter_account();
+        let _ = category_filter();
         let _ = only_uncat();
         let _ = date_from();
         let _ = date_to();
@@ -749,11 +1064,26 @@ fn TransactionsTab() -> Element {
             }
             let acc_filter = filter_account();
             let acc_opt = if acc_filter.is_empty() { None } else { Some(acc_filter.as_str()) };
+            let cat_filter = category_filter();
+            let cat_opt = cat_filter
+                .as_deref()
+                .filter(|c| *c != UNCATEGORIZED_FILTER);
+            let uncat_filter = only_uncat()
+                || cat_filter.as_deref() == Some(UNCATEGORIZED_FILTER);
             let from_val = date_from();
             let from_opt = if from_val.is_empty() { None } else { Some(from_val.as_str()) };
             let to_val = date_to();
             let to_opt = if to_val.is_empty() { None } else { Some(to_val.as_str()) };
-            match use_finance::list_transactions(acc_opt, only_uncat(), from_opt, to_opt, include_recon(), page_size, 0).await {
+            match use_finance::list_transactions(
+                acc_opt,
+                cat_opt,
+                uncat_filter,
+                from_opt,
+                to_opt,
+                include_recon(),
+                page_size,
+                0,
+            ).await {
                 Ok(resp) => {
                     transactions.set(resp.items);
                     total.set(resp.total);
@@ -818,6 +1148,7 @@ fn TransactionsTab() -> Element {
         if *loading_more.peek() { return; }
         let skip_val = transactions.peek().len() as u32;
         let acc = filter_account.peek().clone();
+        let cat = category_filter.peek().clone();
         let only_un = *only_uncat.peek();
         let from_val = date_from.peek().clone();
         let to_val = date_to.peek().clone();
@@ -825,9 +1156,22 @@ fn TransactionsTab() -> Element {
         spawn(async move {
             loading_more.set(true);
             let acc_opt = if acc.is_empty() { None } else { Some(acc.as_str()) };
+            let cat_opt = cat
+                .as_deref()
+                .filter(|c| *c != UNCATEGORIZED_FILTER);
+            let uncat_filter = only_un || cat.as_deref() == Some(UNCATEGORIZED_FILTER);
             let from_opt = if from_val.is_empty() { None } else { Some(from_val.as_str()) };
             let to_opt = if to_val.is_empty() { None } else { Some(to_val.as_str()) };
-            match use_finance::list_transactions(acc_opt, only_un, from_opt, to_opt, inc_recon, page_size, skip_val).await {
+            match use_finance::list_transactions(
+                acc_opt,
+                cat_opt,
+                uncat_filter,
+                from_opt,
+                to_opt,
+                inc_recon,
+                page_size,
+                skip_val,
+            ).await {
                 Ok(resp) => {
                     transactions.write().extend(resp.items);
                     total.set(resp.total);
@@ -838,33 +1182,39 @@ fn TransactionsTab() -> Element {
         });
     };
 
-    let account_name = |id: &str| {
-        accounts().iter().find(|a| a.id == id).map(|a| a.name.clone()).unwrap_or_else(|| "?".into())
-    };
-    let category_name = |id: &str| {
-        categories().iter().find(|c| c.id == id).map(|c| c.name.clone()).unwrap_or_else(|| "?".into())
-    };
     let accounts_for_select = accounts();
     let no_accounts = accounts_for_select.is_empty();
+    let selected_category_label = category_filter().map(|id| {
+        if id == UNCATEGORIZED_FILTER {
+            "Uncategorized".to_string()
+        } else {
+            category_label(&categories(), &id)
+                .unwrap_or_else(|| "Selected category".into())
+        }
+    });
 
     let render_row = move |t: &TransactionResponse| -> Element {
-        let t_edit = t.clone();
-        let t_rule = t.clone();
-        let t_id = t.id.clone();
         let date_short = t.date.split('T').next().unwrap_or(&t.date).to_string();
-        let cat = t.category_id.as_deref().map(|id| category_name(id));
+        let account = accounts()
+            .iter()
+            .find(|a| a.id == t.account_id)
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| "?".into());
+        let cat = t.category_id
+            .as_deref()
+            .map(|id| category_label(&categories(), id).unwrap_or_else(|| "?".into()));
         rsx! {
             tr { key: "{t.id}",
                 td { class: "whitespace-nowrap font-mono text-sm", "{date_short}" }
-                td { "{account_name(&t.account_id)}" }
-                td {
+                td { class: "min-w-0", "{account}" }
+                td { class: "min-w-0 break-words",
                     "{t.description}"
                     if t.is_split { span { class: "badge badge-ghost ml-2 text-xs", "split" } }
                     if t.source_snapshot_id.is_some() {
                         span { class: "badge badge-warning ml-2 text-xs", "reconciliation" }
                     }
                 }
-                td { class: "opacity-80",
+                td { class: "opacity-80 truncate",
                     if let Some(name) = cat { "{name}" } else { span { class: "opacity-50 italic", "—" } }
                 }
                 td {
@@ -872,46 +1222,102 @@ fn TransactionsTab() -> Element {
                     "{format_money(t.amount_minor, &t.currency)}"
                 }
                 td { class: "text-right",
-                    div { class: "dropdown dropdown-end",
-                        div {
-                            tabindex: "0",
-                            role: "button",
-                            class: "btn btn-ghost btn-xs btn-circle",
-                            IconMoreVertical {}
+                    TransactionActions {
+                        transaction: t.clone(),
+                        edit_target,
+                        rule_from_tx,
+                        refresh,
+                        error,
+                    }
+                }
+            }
+        }
+    };
+
+    let render_split_row = move |t: &TransactionResponse| -> Element {
+        let date_short = t.date.split('T').next().unwrap_or(&t.date).to_string();
+        let cat = t.category_id
+            .as_deref()
+            .map(|id| category_label(&categories(), id).unwrap_or_else(|| "?".into()));
+        rsx! {
+            tr { key: "{t.id}",
+                td { class: "whitespace-nowrap font-mono text-sm", "{date_short}" }
+                td { class: "min-w-0 break-words",
+                    "{t.description}"
+                    if t.is_split { span { class: "badge badge-ghost ml-2 text-xs", "split" } }
+                    if t.source_snapshot_id.is_some() {
+                        span { class: "badge badge-warning ml-2 text-xs", "reconciliation" }
+                    }
+                }
+                td { class: "opacity-80 truncate",
+                    if let Some(name) = cat { "{name}" } else { span { class: "opacity-50 italic", "—" } }
+                }
+                td {
+                    class: if t.amount_minor < 0 { "text-right font-mono text-error" } else { "text-right font-mono text-success" },
+                    "{format_money(t.amount_minor, &t.currency)}"
+                }
+                td { class: "text-right",
+                    TransactionActions {
+                        transaction: t.clone(),
+                        edit_target,
+                        rule_from_tx,
+                        refresh,
+                        error,
+                    }
+                }
+            }
+        }
+    };
+
+    let render_mobile_item = move |t: &TransactionResponse| -> Element {
+        let date_short = t.date.split('T').next().unwrap_or(&t.date).to_string();
+        let account = accounts()
+            .iter()
+            .find(|a| a.id == t.account_id)
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| "?".into());
+        let cat = t.category_id
+            .as_deref()
+            .map(|id| category_label(&categories(), id).unwrap_or_else(|| "?".into()));
+        let amount_class = if t.amount_minor < 0 {
+            "font-mono text-sm font-semibold text-error text-right break-words"
+        } else {
+            "font-mono text-sm font-semibold text-success text-right break-words"
+        };
+        rsx! {
+            div {
+                key: "{t.id}",
+                class: "rounded-lg border border-base-300 bg-base-100 px-3 py-3 shadow-sm min-w-0",
+                div { class: "grid grid-cols-[minmax(0,1fr)_auto] gap-2 items-start",
+                    div { class: "min-w-0",
+                        div { class: "flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-base-content/60",
+                            span { class: "font-mono", "{date_short}" }
+                            span { class: "truncate max-w-full", "{account}" }
                         }
-                        ul {
-                            tabindex: "0",
-                            class: "menu dropdown-content bg-base-100 rounded-box shadow z-10 w-36 p-1",
-                            if !t.is_split {
-                                li {
-                                    a {
-                                        onclick: move |_| edit_target.set(Some(t_edit.clone())),
-                                        "Edit"
-                                    }
-                                }
-                            }
-                            li {
-                                a {
-                                    onclick: move |_| rule_from_tx.set(Some(t_rule.clone())),
-                                    "Create rule…"
-                                }
-                            }
-                            li {
-                                a {
-                                    class: "text-error",
-                                    onclick: move |_| {
-                                        let id = t_id.clone();
-                                        spawn(async move {
-                                            match use_finance::delete_transaction(&id).await {
-                                                Ok(_) => refresh += 1,
-                                                Err(e) => error.set(Some(e)),
-                                            }
-                                        });
-                                    },
-                                    "Delete"
-                                }
-                            }
+                        div { class: "mt-1 font-medium leading-snug break-words",
+                            "{t.description}"
                         }
+                    }
+                    div { class: "flex items-start justify-end gap-1 min-w-0 max-w-[10rem]",
+                        div { class: "{amount_class}", "{format_money(t.amount_minor, &t.currency)}" }
+                        TransactionActions {
+                            transaction: t.clone(),
+                            edit_target,
+                            rule_from_tx,
+                            refresh,
+                            error,
+                        }
+                    }
+                }
+                div { class: "mt-2 flex flex-wrap items-center gap-1 text-xs",
+                    if let Some(name) = cat {
+                        span { class: "badge badge-outline badge-sm max-w-full truncate", "{name}" }
+                    } else {
+                        span { class: "badge badge-ghost badge-sm opacity-70", "Uncategorized" }
+                    }
+                    if t.is_split { span { class: "badge badge-ghost badge-sm", "split" } }
+                    if t.source_snapshot_id.is_some() {
+                        span { class: "badge badge-warning badge-sm", "reconciliation" }
                     }
                 }
             }
@@ -919,89 +1325,124 @@ fn TransactionsTab() -> Element {
     };
 
     rsx! {
-        div { class: "flex justify-between items-center mb-4 gap-2 flex-wrap",
-            h2 { class: "text-xl font-semibold", "Transactions" }
-            div { class: "flex gap-2 items-center flex-wrap",
-                select {
-                    class: "select select-bordered select-sm",
-                    value: "{filter_account}",
-                    onchange: move |e| filter_account.set(e.value()),
-                    option { value: "", "All accounts" }
-                    {accounts().iter().map(|a| rsx! {
-                        option { key: "{a.id}", value: "{a.id}", "{a.name}" }
-                    })}
+        div { class: "mb-4 space-y-3",
+            div { class: "flex items-center justify-between gap-3",
+                h2 { class: "text-xl font-semibold", "Transactions" }
+                button {
+                    class: "btn btn-primary btn-sm shrink-0",
+                    disabled: no_accounts,
+                    onclick: move |_| show_create.set(true),
+                    IconPlus {}
+                    span { "Add transaction" }
                 }
-                label { class: "label cursor-pointer gap-2",
-                    input {
-                        r#type: "checkbox",
-                        class: "checkbox checkbox-sm",
-                        checked: only_uncat(),
-                        onchange: move |e| only_uncat.set(e.checked()),
+            }
+            div { class: "rounded-lg border border-base-300 bg-base-100 p-3 shadow-sm",
+                div { class: "grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-8 xl:items-end",
+                    label { class: "form-control col-span-2 xl:col-span-2 min-w-0",
+                        span { class: "block text-xs opacity-70 pb-1", "Account" }
+                        select {
+                            class: "select select-bordered select-sm w-full min-w-0",
+                            value: "{filter_account}",
+                            onchange: move |e| filter_account.set(e.value()),
+                            option { value: "", "All accounts" }
+                            {accounts().iter().map(|a| rsx! {
+                                option { key: "{a.id}", value: "{a.id}", "{a.name}" }
+                            })}
+                        }
                     }
-                    span { class: "label-text", "Uncategorized only" }
-                }
-                label { class: "label cursor-pointer gap-2",
-                    input {
-                        r#type: "checkbox",
-                        class: "checkbox checkbox-sm",
-                        checked: include_recon(),
-                        onchange: move |e| include_recon.set(e.checked()),
+                    label { class: "form-control col-span-2 md:col-span-1 xl:col-span-1 min-w-0",
+                        span { class: "block text-xs opacity-70 pb-1", "Range" }
+                        select {
+                            class: "select select-bordered select-sm w-full min-w-0",
+                            value: "",
+                            onchange: move |e| {
+                                let (f, t) = date_range_for_preset(&e.value());
+                                date_from.set(f);
+                                date_to.set(t);
+                            },
+                            option { value: "", "Date range..." }
+                            option { value: "this_month", "This month" }
+                            option { value: "last_month", "Last month" }
+                            option { value: "last_30_days", "Last 30 days" }
+                            option { value: "this_year", "This year" }
+                            option { value: "last_year", "Last year" }
+                            option { value: "all_time", "All time" }
+                        }
                     }
-                    span { class: "label-text", "Show reconciliations" }
-                }
-                select {
-                    class: "select select-bordered select-sm",
-                    value: "",
-                    onchange: move |e| {
-                        let (f, t) = date_range_for_preset(&e.value());
-                        date_from.set(f);
-                        date_to.set(t);
-                    },
-                    option { value: "", "Date range…" }
-                    option { value: "this_month", "This month" }
-                    option { value: "last_month", "Last month" }
-                    option { value: "last_30_days", "Last 30 days" }
-                    option { value: "this_year", "This year" }
-                    option { value: "last_year", "Last year" }
-                    option { value: "all_time", "All time" }
-                }
-                input {
-                    r#type: "date",
-                    class: "input input-bordered input-sm",
-                    value: "{date_from}",
-                    title: "From",
-                    oninput: move |e| date_from.set(e.value()),
-                }
-                input {
-                    r#type: "date",
-                    class: "input input-bordered input-sm",
-                    value: "{date_to}",
-                    title: "To",
-                    oninput: move |e| date_to.set(e.value()),
-                }
-                {
-                    let date_set = !date_from().is_empty() || !date_to().is_empty();
-                    rsx! {
-                        label { class: "label cursor-pointer gap-2 hidden lg:flex",
+                    label { class: "form-control min-w-0",
+                        span { class: "block text-xs opacity-70 pb-1", "From" }
+                        input {
+                            r#type: "date",
+                            class: "input input-bordered input-sm w-full min-w-0",
+                            value: "{date_from}",
+                            oninput: move |e| date_from.set(e.value()),
+                        }
+                    }
+                    label { class: "form-control min-w-0",
+                        span { class: "block text-xs opacity-70 pb-1", "To" }
+                        input {
+                            r#type: "date",
+                            class: "input input-bordered input-sm w-full min-w-0",
+                            value: "{date_to}",
+                            oninput: move |e| date_to.set(e.value()),
+                        }
+                    }
+                    div { class: "col-span-2 md:col-span-4 xl:col-span-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 xl:pt-6",
+                        label { class: "flex h-8 items-center gap-2 rounded border border-base-300 bg-base-200/40 px-3 text-sm cursor-pointer min-w-0",
                             input {
                                 r#type: "checkbox",
                                 class: "checkbox checkbox-sm",
-                                checked: split_view() && date_set,
-                                disabled: !date_set,
-                                onchange: move |e| split_view.set(e.checked()),
+                                checked: only_uncat(),
+                                onchange: move |e| {
+                                    let checked = e.checked();
+                                    only_uncat.set(checked);
+                                    if checked {
+                                        category_filter.set(None);
+                                    }
+                                },
                             }
-                            span {
-                                class: if date_set { "label-text" } else { "label-text opacity-50" },
-                                "Income / Expenses"
+                            span { class: "truncate", "Uncategorized only" }
+                        }
+                        label { class: "flex h-8 items-center gap-2 rounded border border-base-300 bg-base-200/40 px-3 text-sm cursor-pointer min-w-0",
+                            input {
+                                r#type: "checkbox",
+                                class: "checkbox checkbox-sm",
+                                checked: include_recon(),
+                                onchange: move |e| include_recon.set(e.checked()),
+                            }
+                            span { class: "truncate", "Show reconciliations" }
+                        }
+                        {
+                            let date_set = !date_from().is_empty() || !date_to().is_empty();
+                            rsx! {
+                                label { class: "hidden lg:flex h-8 items-center gap-2 rounded border border-base-300 bg-base-200/40 px-3 text-sm cursor-pointer min-w-0",
+                                    input {
+                                        r#type: "checkbox",
+                                        class: "checkbox checkbox-sm",
+                                        checked: split_view() && date_set,
+                                        disabled: !date_set,
+                                        onchange: move |e| split_view.set(e.checked()),
+                                    }
+                                    span {
+                                        class: if date_set { "truncate" } else { "truncate opacity-50" },
+                                        "Income / Expenses"
+                                    }
+                                }
                             }
                         }
                     }
-                }
-                button {
-                    class: "btn btn-primary btn-sm",
-                    disabled: no_accounts,
-                    onclick: move |_| show_create.set(true),
-                    "Add transaction"
+                    if let Some(label) = selected_category_label.clone() {
+                        div { class: "col-span-2 md:col-span-4 xl:col-span-8 flex flex-wrap items-center gap-2 rounded bg-primary/10 px-3 py-2 text-sm",
+                            span { class: "text-base-content/70", "Category" }
+                            span { class: "font-medium", "{label}" }
+                            button {
+                                r#type: "button",
+                                class: "btn btn-ghost btn-xs",
+                                onclick: move |_| category_filter.set(None),
+                                "Clear"
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1019,6 +1460,11 @@ fn TransactionsTab() -> Element {
                 account_filter: filter_account(),
                 has_date_range: !date_from().is_empty() || !date_to().is_empty(),
                 expanded: breakdown_expanded,
+                selected_category_filter: category_filter(),
+                on_category_filter: move |selected| {
+                    category_filter.set(selected);
+                    only_uncat.set(false);
+                },
             }
         }
         if let Some(e) = error() {
@@ -1031,92 +1477,95 @@ fn TransactionsTab() -> Element {
                 p { "No transactions match the current filters." }
             }
         } else {
-            // Plain wrapper (no `overflow-x-auto`) so the table flows
-            // with the page rather than creating a nested scroll
-            // container — that container's overflow-y computes to auto
-            // and produces a phantom inner scrollbar even on wide
-            // screens. The transactions table is full-width and its
-            // columns fit comfortably on desktop; on mobile the user
-            // gets horizontal page scroll, which is fine.
             {
                 let date_set = !date_from().is_empty() || !date_to().is_empty();
                 let show_split = split_view() && date_set;
                 let txs = transactions();
-                if show_split {
-                    let (income_total, expense_total) =
-                        txs.iter().fold((0i64, 0i64), |(i, e), t| {
-                            if t.amount_minor >= 0 { (i + t.amount_minor, e) } else { (i, e + t.amount_minor) }
-                        });
-                    let currency = txs.first().map(|t| t.currency.clone()).unwrap_or_default();
-                    rsx! {
-                        div { class: "grid grid-cols-2 gap-4",
-                            div {
-                                div { class: "flex justify-between items-baseline mb-2",
-                                    h3 { class: "font-semibold text-success", "Income" }
-                                    span { class: "font-mono text-success",
-                                        "{format_money(income_total, &currency)}"
-                                    }
-                                }
-                                table { class: "table table-zebra",
-                                    thead { tr {
-                                        th { "Date" }
-                                        th { "Description" }
-                                        th { "Category" }
-                                        th { class: "text-right", "Amount" }
-                                        th { "" }
-                                    } }
-                                    tbody {
-                                        {txs.iter().filter(|t| t.amount_minor >= 0).map(|t| {
-                                            let row = render_row(t);
-                                            rsx! { {row} }
-                                        })}
-                                    }
-                                }
-                            }
-                            div {
-                                div { class: "flex justify-between items-baseline mb-2",
-                                    h3 { class: "font-semibold text-error", "Expenses" }
-                                    span { class: "font-mono text-error",
-                                        "{format_money(expense_total, &currency)}"
-                                    }
-                                }
-                                table { class: "table table-zebra",
-                                    thead { tr {
-                                        th { "Date" }
-                                        th { "Description" }
-                                        th { "Category" }
-                                        th { class: "text-right", "Amount" }
-                                        th { "" }
-                                    } }
-                                    tbody {
-                                        {txs.iter().filter(|t| t.amount_minor < 0).map(|t| {
-                                            let row = render_row(t);
-                                            rsx! { {row} }
-                                        })}
-                                    }
-                                }
-                            }
-                        }
+                let (income_total, expense_total) =
+                    txs.iter().fold((0i64, 0i64), |(i, e), t| {
+                        if t.amount_minor >= 0 { (i + t.amount_minor, e) } else { (i, e + t.amount_minor) }
+                    });
+                let currency = txs.first().map(|t| t.currency.clone()).unwrap_or_default();
+                rsx! {
+                    div { class: "lg:hidden space-y-2",
+                        {txs.iter().map(|t| {
+                            let item = render_mobile_item(t);
+                            rsx! { {item} }
+                        })}
                     }
-                } else {
-                    rsx! {
-                        div {
-                            table { class: "table table-zebra",
-                                thead {
-                                    tr {
-                                        th { "Date" }
-                                        th { "Account" }
-                                        th { "Description" }
-                                        th { "Category" }
-                                        th { class: "text-right", "Amount" }
-                                        th { "" }
+                    div { class: "hidden lg:block",
+                        if show_split {
+                            div { class: "grid grid-cols-2 gap-4",
+                                div { class: "min-w-0",
+                                    div { class: "flex justify-between items-baseline mb-2 gap-3",
+                                        h3 { class: "font-semibold text-success", "Income" }
+                                        span { class: "font-mono text-success text-right",
+                                            "{format_money(income_total, &currency)}"
+                                        }
+                                    }
+                                    div { class: "rounded-lg border border-base-300",
+                                        table { class: "table table-zebra table-sm w-full table-fixed",
+                                            thead { tr {
+                                                th { class: "w-28", "Date" }
+                                                th { "Description" }
+                                                th { class: "w-36", "Category" }
+                                                th { class: "w-32 text-right", "Amount" }
+                                                th { class: "w-12", "" }
+                                            } }
+                                            tbody {
+                                                {txs.iter().filter(|t| t.amount_minor >= 0).map(|t| {
+                                                    let row = render_split_row(t);
+                                                    rsx! { {row} }
+                                                })}
+                                            }
+                                        }
                                     }
                                 }
-                                tbody {
-                                    {txs.iter().map(|t| {
-                                        let row = render_row(t);
-                                        rsx! { {row} }
-                                    })}
+                                div { class: "min-w-0",
+                                    div { class: "flex justify-between items-baseline mb-2 gap-3",
+                                        h3 { class: "font-semibold text-error", "Expenses" }
+                                        span { class: "font-mono text-error text-right",
+                                            "{format_money(expense_total, &currency)}"
+                                        }
+                                    }
+                                    div { class: "rounded-lg border border-base-300",
+                                        table { class: "table table-zebra table-sm w-full table-fixed",
+                                            thead { tr {
+                                                th { class: "w-28", "Date" }
+                                                th { "Description" }
+                                                th { class: "w-36", "Category" }
+                                                th { class: "w-32 text-right", "Amount" }
+                                                th { class: "w-12", "" }
+                                            } }
+                                            tbody {
+                                                {txs.iter().filter(|t| t.amount_minor < 0).map(|t| {
+                                                    let row = render_split_row(t);
+                                                    rsx! { {row} }
+                                                })}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            div { class: "rounded-lg border border-base-300",
+                                table { class: "table table-zebra table-sm w-full table-fixed",
+                                    thead {
+                                        tr {
+                                            th { class: "w-32", "Date" }
+                                            th { class: "w-44", "Account" }
+                                            th { "Description" }
+                                            th { class: "w-48", "Category" }
+                                            th { class: "w-40 text-right", "Amount" }
+                                            th { class: "w-12", "" }
+                                        }
+                                    }
+                                    tbody {
+                                        {txs.iter().map(|t| {
+                                            let row = render_row(t);
+                                            rsx! { {row} }
+                                        })}
+                                    }
                                 }
                             }
                         }
@@ -1196,6 +1645,21 @@ fn TransactionsTab() -> Element {
 /// account filter is active). When a date range is set, additionally
 /// shows total income/expense for that range, and a collapsible
 /// breakdown of those amounts by category.
+#[derive(Clone)]
+struct CategoryBreakdownChild {
+    category_id: String,
+    name: String,
+    total: i64,
+}
+
+#[derive(Clone)]
+struct CategoryBreakdownRow {
+    category_id: Option<String>,
+    name: String,
+    total: i64,
+    children: Vec<CategoryBreakdownChild>,
+}
+
 #[component]
 fn SummaryStrip(
     accounts: Vec<AccountResponse>,
@@ -1205,12 +1669,10 @@ fn SummaryStrip(
     account_filter: String,
     has_date_range: bool,
     expanded: Signal<bool>,
+    selected_category_filter: Option<String>,
+    on_category_filter: EventHandler<Option<String>>,
 ) -> Element {
     let mut expanded = expanded;
-    let category_lookup: HashMap<String, String> = categories
-        .iter()
-        .map(|c| (c.id.clone(), c.name.clone()))
-        .collect();
 
     let visible_accounts: Vec<&AccountResponse> = if account_filter.is_empty() {
         accounts.iter().filter(|a| a.archived_at.is_none()).collect()
@@ -1218,30 +1680,80 @@ fn SummaryStrip(
         accounts.iter().filter(|a| a.id == account_filter).collect()
     };
 
-    // Sorted by absolute total descending so the most-active rows go first.
-    let breakdown: Vec<(String, i64)> = summary
+    // Parent rows are aggregate totals. Children stay visible underneath so the
+    // user can filter either the whole category group or one subcategory.
+    let breakdown: Vec<CategoryBreakdownRow> = summary
         .as_ref()
         .map(|s| {
-            let mut v: Vec<(String, i64)> = s
-                .items
-                .iter()
-                .map(|it| {
-                    let name = it
-                        .category_id
-                        .as_ref()
-                        .and_then(|id| category_lookup.get(id).cloned())
-                        .unwrap_or_else(|| "Uncategorized".into());
-                    let total = it.income_minor.saturating_add(it.expense_minor);
-                    (name, total)
-                })
-                .collect();
-            v.sort_by_key(|(_, t)| -(t.abs()));
-            v
+            let mut totals: HashMap<Option<String>, i64> = HashMap::new();
+            for item in &s.items {
+                totals.insert(
+                    item.category_id.clone(),
+                    item.income_minor.saturating_add(item.expense_minor),
+                );
+            }
+
+            let mut rows = Vec::new();
+            for parent in category_effective_roots(&categories) {
+                let parent_key = Some(parent.id.clone());
+                let parent_direct = totals.get(&parent_key).copied().unwrap_or(0);
+                let mut children: Vec<CategoryBreakdownChild> = category_children(&categories, &parent.id)
+                    .into_iter()
+                    .filter_map(|child| {
+                        let key = Some(child.id.clone());
+                        totals.get(&key).map(|total| CategoryBreakdownChild {
+                            category_id: child.id,
+                            name: child.name,
+                            total: *total,
+                        })
+                    })
+                    .collect();
+                children.sort_by_key(|child| -child.total.abs());
+                let child_total = children
+                    .iter()
+                    .fold(0i64, |sum, child| sum.saturating_add(child.total));
+                if totals.contains_key(&parent_key) || !children.is_empty() {
+                    rows.push(CategoryBreakdownRow {
+                        category_id: Some(parent.id),
+                        name: parent.name,
+                        total: parent_direct.saturating_add(child_total),
+                        children,
+                    });
+                }
+            }
+
+            if let Some(total) = totals.get(&None) {
+                rows.push(CategoryBreakdownRow {
+                    category_id: None,
+                    name: "Uncategorized".into(),
+                    total: *total,
+                    children: Vec::new(),
+                });
+            }
+
+            for item in &s.items {
+                let Some(category_id) = item.category_id.as_ref() else {
+                    continue;
+                };
+                if !categories.iter().any(|c| &c.id == category_id) {
+                    rows.push(CategoryBreakdownRow {
+                        category_id: Some(category_id.clone()),
+                        name: "Unknown category".into(),
+                        total: item.income_minor.saturating_add(item.expense_minor),
+                        children: Vec::new(),
+                    });
+                }
+            }
+
+            rows.sort_by_key(|row| -row.total.abs());
+            rows
         })
         .unwrap_or_default();
     let breakdown_max_abs = breakdown
         .iter()
-        .map(|(_, t)| t.abs())
+        .flat_map(|row| {
+            std::iter::once(row.total.abs()).chain(row.children.iter().map(|child| child.total.abs()))
+        })
         .max()
         .unwrap_or(1)
         .max(1);
@@ -1266,7 +1778,7 @@ fn SummaryStrip(
                         let bal = balances.get(&a.id).copied().unwrap_or(a.opening_balance_minor);
                         rsx! {
                             div { key: "{a.id}",
-                                class: "bg-base-200 rounded-box px-3 py-2 min-w-[10rem]",
+                                class: "bg-base-200 rounded-lg px-3 py-2 min-w-0 w-full sm:w-auto sm:min-w-[10rem]",
                                 div { class: "text-xs opacity-70 truncate", "{a.name}" }
                                 div { class: "font-mono font-semibold",
                                     "{format_money(bal, &a.currency)}"
@@ -1278,33 +1790,33 @@ fn SummaryStrip(
             }
 
             if has_date_range {
-                div { class: "stats stats-horizontal shadow-sm bg-base-100 w-full",
-                    div { class: "stat py-2 px-4",
-                        div { class: "stat-title text-xs", "Income" }
-                        div { class: "stat-value text-lg text-success font-mono",
+                div { class: "grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-[1fr_1fr_1fr_auto] gap-2 rounded-lg border border-base-300 bg-base-100 p-2 shadow-sm",
+                    div { class: "rounded bg-base-200/60 px-3 py-2 min-w-0",
+                        div { class: "text-xs opacity-60", "Income" }
+                        div { class: "text-lg font-semibold text-success font-mono truncate",
                             "{format_money(income_total, &currency_hint)}"
                         }
                     }
-                    div { class: "stat py-2 px-4",
-                        div { class: "stat-title text-xs", "Expenses" }
-                        div { class: "stat-value text-lg text-error font-mono",
+                    div { class: "rounded bg-base-200/60 px-3 py-2 min-w-0",
+                        div { class: "text-xs opacity-60", "Expenses" }
+                        div { class: "text-lg font-semibold text-error font-mono truncate",
                             "{format_money(expense_total, &currency_hint)}"
                         }
                     }
-                    div { class: "stat py-2 px-4",
-                        div { class: "stat-title text-xs", "Net" }
+                    div { class: "rounded bg-base-200/60 px-3 py-2 min-w-0",
+                        div { class: "text-xs opacity-60", "Net" }
                         div {
                             class: if net_total >= 0 {
-                                "stat-value text-lg font-mono text-success"
+                                "text-lg font-semibold font-mono text-success truncate"
                             } else {
-                                "stat-value text-lg font-mono text-error"
+                                "text-lg font-semibold font-mono text-error truncate"
                             },
                             "{format_money(net_total, &currency_hint)}"
                         }
                     }
-                    div { class: "stat py-2 px-4 self-center",
+                    div { class: "flex items-center sm:col-span-3 lg:col-span-1",
                         button {
-                            class: "btn btn-ghost btn-sm",
+                            class: "btn btn-ghost btn-sm w-full lg:w-auto",
                             onclick: move |_| expanded.set(!expanded()),
                             if expanded() { "Hide breakdown" } else { "Show breakdown" }
                         }
@@ -1313,16 +1825,23 @@ fn SummaryStrip(
             }
 
             if has_date_range && expanded() {
-                div { class: "bg-base-100 rounded-box border border-base-300 p-3",
+                div { class: "bg-base-100 rounded-lg border border-base-300 p-3",
                     if breakdown.is_empty() {
                         div { class: "text-sm opacity-60 text-center py-2",
                             "No transactions in the selected range."
                         }
                     } else {
-                        ul { class: "space-y-1",
-                            {breakdown.iter().map(|(name, total)| {
-                                let width_pct = (total.abs() as f64 / breakdown_max_abs as f64) * 100.0;
-                                let positive = *total >= 0;
+                        ul { class: "space-y-2",
+                            {breakdown.iter().map(|row| {
+                                let filter_value = row.category_id
+                                    .clone()
+                                    .unwrap_or_else(|| UNCATEGORIZED_FILTER.to_string());
+                                let selected = selected_category_filter
+                                    .as_deref()
+                                    == Some(filter_value.as_str());
+                                let width_pct =
+                                    (row.total.abs() as f64 / breakdown_max_abs as f64) * 100.0;
+                                let positive = row.total >= 0;
                                 let bar_class = if positive {
                                     "h-2 rounded-full bg-success"
                                 } else {
@@ -1333,20 +1852,99 @@ fn SummaryStrip(
                                 } else {
                                     "text-error font-mono text-sm"
                                 };
-                                let n = name.clone();
-                                let t = *total;
+                                let n = row.name.clone();
+                                let t = row.total;
                                 let cur = currency_hint.clone();
+                                let children = row.children.clone();
+                                let has_children = !children.is_empty();
+                                let name_class = if has_children {
+                                    "truncate text-sm font-medium"
+                                } else {
+                                    "truncate text-sm"
+                                };
+                                let row_class = if selected {
+                                    "grid w-full grid-cols-1 sm:grid-cols-[minmax(8rem,12rem)_minmax(0,1fr)_8rem] sm:items-center gap-1 sm:gap-3 rounded bg-primary/10 px-2 py-1 text-left ring-1 ring-primary/30"
+                                } else {
+                                    "grid w-full grid-cols-1 sm:grid-cols-[minmax(8rem,12rem)_minmax(0,1fr)_8rem] sm:items-center gap-1 sm:gap-3 rounded px-2 py-1 text-left hover:bg-base-200"
+                                };
                                 rsx! {
-                                    li { key: "{n}", class: "grid grid-cols-[12rem_1fr_8rem] items-center gap-3",
-                                        span { class: "truncate text-sm", "{n}" }
-                                        div { class: "bg-base-200 rounded-full h-2",
-                                            div {
-                                                class: "{bar_class}",
-                                                style: "width: {width_pct:.1}%",
+                                    li { key: "{filter_value}",
+                                        button {
+                                            r#type: "button",
+                                            class: "{row_class}",
+                                            onclick: move |_| {
+                                                if selected {
+                                                    on_category_filter.call(None);
+                                                } else {
+                                                    on_category_filter.call(Some(filter_value.clone()));
+                                                }
+                                            },
+                                            span { class: "{name_class}", "{n}" }
+                                            div { class: "bg-base-200 rounded-full h-2",
+                                                div {
+                                                    class: "{bar_class}",
+                                                    style: "width: {width_pct:.1}%",
+                                                }
+                                            }
+                                            span { class: "{amount_class} text-right",
+                                                "{format_money(t, &cur)}"
                                             }
                                         }
-                                        span { class: "{amount_class} text-right",
-                                            "{format_money(t, &cur)}"
+                                        if has_children {
+                                            div { class: "ml-4 border-l border-base-300/70 pl-3 space-y-1 mt-1",
+                                                {children.iter().map(|child| {
+                                                    let child_filter = child.category_id.clone();
+                                                    let child_selected = selected_category_filter
+                                                        .as_deref()
+                                                        == Some(child_filter.as_str());
+                                                    let child_width_pct =
+                                                        (child.total.abs() as f64
+                                                            / breakdown_max_abs as f64) * 100.0;
+                                                    let child_positive = child.total >= 0;
+                                                    let child_bar_class = if child_positive {
+                                                        "h-2 rounded-full bg-success"
+                                                    } else {
+                                                        "h-2 rounded-full bg-error"
+                                                    };
+                                                    let child_amount_class = if child_positive {
+                                                        "text-success font-mono text-sm"
+                                                    } else {
+                                                        "text-error font-mono text-sm"
+                                                    };
+                                                    let child_name = child.name.clone();
+                                                    let child_total = child.total;
+                                                    let child_cur = currency_hint.clone();
+                                                    let child_row_class = if child_selected {
+                                                        "grid w-full grid-cols-1 sm:grid-cols-[minmax(7rem,11rem)_minmax(0,1fr)_8rem] sm:items-center gap-1 sm:gap-3 rounded bg-primary/10 px-2 py-1 text-left ring-1 ring-primary/30"
+                                                    } else {
+                                                        "grid w-full grid-cols-1 sm:grid-cols-[minmax(7rem,11rem)_minmax(0,1fr)_8rem] sm:items-center gap-1 sm:gap-3 rounded px-2 py-1 text-left hover:bg-base-200"
+                                                    };
+                                                    rsx! {
+                                                        button {
+                                                            key: "{child_filter}",
+                                                            r#type: "button",
+                                                            class: "{child_row_class}",
+                                                            onclick: move |_| {
+                                                                if child_selected {
+                                                                    on_category_filter.call(None);
+                                                                } else {
+                                                                    on_category_filter.call(Some(child_filter.clone()));
+                                                                }
+                                                            },
+                                                            span { class: "truncate text-sm opacity-90", "{child_name}" }
+                                                            div { class: "bg-base-200 rounded-full h-2",
+                                                                div {
+                                                                    class: "{child_bar_class}",
+                                                                    style: "width: {child_width_pct:.1}%",
+                                                                }
+                                                            }
+                                                            span { class: "{child_amount_class} text-right",
+                                                                "{format_money(child_total, &child_cur)}"
+                                                            }
+                                                        }
+                                                    }
+                                                })}
+                                            }
                                         }
                                     }
                                 }
@@ -2608,6 +3206,9 @@ fn RulesTab() -> Element {
     let mut edit_target: Signal<Option<FinanceRuleResponse>> = use_signal(|| None);
     let mut applying = use_signal(|| false);
     let mut apply_summary: Signal<Option<(u32, u32)>> = use_signal(|| None);
+    let mut reordering = use_signal(|| false);
+    let mut drag_rule_idx: Signal<Option<usize>> = use_signal(|| None);
+    let mut drop_rule_idx: Signal<Option<usize>> = use_signal(|| None);
 
     use_effect(move || {
         let _ = refresh();
@@ -2635,6 +3236,40 @@ fn RulesTab() -> Element {
                 Err(e) => error.set(Some(e)),
             }
             applying.set(false);
+        });
+    };
+
+    let mut finish_reorder = move || {
+        let from = *drag_rule_idx.peek();
+        let to = *drop_rule_idx.peek();
+        drag_rule_idx.set(None);
+        drop_rule_idx.set(None);
+        let (Some(from), Some(to)) = (from, to) else { return; };
+        if from == to || reordering() {
+            return;
+        }
+
+        let previous = rules.peek().clone();
+        if from >= previous.len() {
+            return;
+        }
+        let mut next = previous.clone();
+        let item = next.remove(from);
+        let to_clamped = to.min(next.len());
+        next.insert(to_clamped, item);
+        for (idx, rule) in next.iter_mut().enumerate() {
+            rule.priority = (idx as i32).saturating_mul(100);
+        }
+        let ordered_ids: Vec<String> = next.iter().map(|r| r.id.clone()).collect();
+        rules.set(next);
+        reordering.set(true);
+        error.set(None);
+        spawn(async move {
+            if let Err(e) = use_finance::reorder_rules(&ordered_ids).await {
+                rules.set(previous);
+                error.set(Some(e));
+            }
+            reordering.set(false);
         });
     };
 
@@ -2676,7 +3311,7 @@ fn RulesTab() -> Element {
             div { class: "overflow-x-auto",
                 table { class: "table table-zebra",
                     thead { tr {
-                        th { class: "text-right", "Priority" }
+                        th { class: "w-10", "" }
                         th { "Name" }
                         th { "Pattern" }
                         th { "Match" }
@@ -2684,15 +3319,61 @@ fn RulesTab() -> Element {
                         th { "" }
                     } }
                     tbody {
-                        {rules().iter().map(|r| {
+                        onpointerup: move |_| finish_reorder(),
+                        onpointercancel: move |_| {
+                            drag_rule_idx.set(None);
+                            drop_rule_idx.set(None);
+                        },
+                        {rules().iter().enumerate().map(|(idx, r)| {
                             let r_edit = r.clone();
                             let r_id = r.id.clone();
                             let category_name = categories().get(&r.category_id).cloned().unwrap_or_else(|| "—".into());
                             let kind = r.pattern_kind.clone();
                             let enabled = r.enabled;
+                            let drag_source = *drag_rule_idx.read() == Some(idx);
+                            let drag_from = *drag_rule_idx.read();
+                            let drop_target = drag_rule_idx.read().is_some()
+                                && *drop_rule_idx.read() == Some(idx)
+                                && !drag_source;
+                            let row_class = if drag_source {
+                                "opacity-30"
+                            } else if drop_target {
+                                if drag_from.unwrap_or(0) > idx {
+                                    "border-t-2 border-t-primary bg-primary/5"
+                                } else {
+                                    "border-b-2 border-b-primary bg-primary/5"
+                                }
+                            } else if enabled {
+                                "hover:bg-base-200"
+                            } else {
+                                "opacity-50 hover:bg-base-200"
+                            };
                             rsx! {
-                                tr { key: "{r.id}", class: if enabled { "" } else { "opacity-50" },
-                                    td { class: "text-right opacity-70", "{r.priority}" }
+                                tr {
+                                    key: "{r.id}",
+                                    class: "{row_class} group transition-colors",
+                                    onpointerenter: move |_| {
+                                        if drag_rule_idx.peek().is_some() {
+                                            drop_rule_idx.set(Some(idx));
+                                        }
+                                    },
+                                    td {
+                                        class: "w-10 px-1 cursor-grab active:cursor-grabbing",
+                                        style: "touch-action: none;",
+                                        onpointerdown: move |e: Event<PointerData>| {
+                                            e.stop_propagation();
+                                            e.prevent_default();
+                                            drag_rule_idx.set(Some(idx));
+                                            drop_rule_idx.set(Some(idx));
+                                        },
+                                        span {
+                                            class: "inline-flex",
+                                            title: "Drag to reorder",
+                                            IconGripVertical {
+                                                class: "w-4 h-4 text-base-content/30 group-hover:text-base-content/60".to_string()
+                                            }
+                                        }
+                                    }
                                     td {
                                         "{r.name}"
                                         if !enabled { span { class: "badge badge-ghost ml-2 text-xs", "disabled" } }
@@ -2767,6 +3448,7 @@ fn RuleFormModal(
 ) -> Element {
     let is_edit = initial.is_some();
     let editing_id = initial.as_ref().map(|r| r.id.clone());
+    let initial_priority = initial.as_ref().map(|r| r.priority).unwrap_or(0);
 
     let mut name = use_signal(|| {
         initial.as_ref().map(|r| r.name.clone())
@@ -2789,9 +3471,6 @@ fn RuleFormModal(
             .or_else(|| prefill.as_ref().and_then(|p| p.category_id.clone()))
             .or_else(|| categories.iter().next().map(|(k, _)| k.clone()))
             .unwrap_or_default()
-    });
-    let mut priority = use_signal(|| {
-        initial.as_ref().map(|r| r.priority.to_string()).unwrap_or_else(|| "0".into())
     });
     let mut enabled = use_signal(|| initial.as_ref().map(|r| r.enabled).unwrap_or(true));
 
@@ -2827,17 +3506,13 @@ fn RuleFormModal(
     };
 
     let build_req = move || -> std::result::Result<FinanceRuleRequest, String> {
-        let p = priority()
-            .trim()
-            .parse::<i32>()
-            .map_err(|_| "Priority must be a whole number".to_string())?;
         Ok(FinanceRuleRequest {
             name: name(),
             pattern: pattern(),
             pattern_kind: pattern_kind(),
             case_insensitive: case_insensitive(),
             category_id: category_id(),
-            priority: p,
+            priority: initial_priority,
             enabled: enabled(),
         })
     };
@@ -2897,7 +3572,7 @@ fn RuleFormModal(
 
     rsx! {
         div { class: "modal modal-open",
-            div { class: "modal-box max-w-xl",
+            div { class: "modal-box max-w-2xl",
                 h3 { class: "font-bold text-lg mb-3",
                     if is_edit { "Edit rule" } else { "New rule" }
                 }
@@ -2920,33 +3595,35 @@ fn RuleFormModal(
                         input {
                             class: "input input-bordered font-mono",
                             value: "{pattern}",
-                            placeholder: "e.g. spotify, ^Miete, Uber Eats",
+                            placeholder: "e.g. spotify, PayPal*Amazon*, ^Miete",
                             oninput: move |e| pattern.set(e.value()),
                         }
                     }
-                    div { class: "form-control",
-                        label { class: "label", span { class: "label-text", "Match" } }
+                    div { class: "form-control min-w-0",
+                        span { class: "block text-sm pb-2", "Match" }
                         select {
-                            class: "select select-bordered",
+                            class: "select select-bordered w-full",
                             value: "{pattern_kind}",
                             onchange: move |e| pattern_kind.set(e.value()),
                             option { value: "substring", "Contains" }
                             option { value: "starts_with", "Starts with" }
+                            option { value: "wildcard", "Wildcard" }
                             option { value: "regex", "Regex" }
                         }
                     }
-                    div { class: "form-control",
-                        label { class: "label cursor-pointer justify-start gap-2",
+                    div { class: "form-control min-w-0",
+                        span { class: "block text-sm pb-2", "Options" }
+                        label { class: "flex min-h-12 items-center gap-3 rounded-lg border border-base-300 px-3 cursor-pointer",
                             input {
                                 r#type: "checkbox",
-                                class: "checkbox",
+                                class: "checkbox checkbox-sm",
                                 checked: case_insensitive(),
                                 oninput: move |e| case_insensitive.set(e.checked()),
                             }
                             span { class: "label-text", "Case-insensitive" }
                         }
                     }
-                    div { class: "form-control",
+                    div { class: "form-control md:col-span-2 min-w-0",
                         label { class: "label",
                             span { class: "label-text", "Category" }
                             if !show_new_cat() {
@@ -2959,16 +3636,16 @@ fn RuleFormModal(
                             }
                         }
                         if show_new_cat() {
-                            div { class: "join w-full",
+                            div { class: "grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto_auto] gap-2",
                                 input {
-                                    class: "input input-bordered input-sm join-item flex-1",
+                                    class: "input input-bordered input-sm w-full min-w-0",
                                     placeholder: "Category name",
                                     value: "{new_cat_name}",
                                     oninput: move |e| new_cat_name.set(e.value()),
                                 }
                                 button {
                                     r#type: "button",
-                                    class: "btn btn-sm join-item",
+                                    class: "btn btn-sm",
                                     disabled: new_cat_busy() || new_cat_name().trim().is_empty(),
                                     onclick: move |_| {
                                         new_cat_busy.set(true);
@@ -2982,7 +3659,8 @@ fn RuleFormModal(
                                             match use_finance::create_category(&req).await {
                                                 Ok(c) => {
                                                     let new_id = c.id.clone();
-                                                    local_cats.with_mut(|m| { m.insert(c.id, c.name); });
+                                                    let new_name = c.name.clone();
+                                                    local_cats.with_mut(|m| { m.insert(new_id.clone(), new_name); });
                                                     category_id.set(new_id);
                                                     show_new_cat.set(false);
                                                 }
@@ -2995,39 +3673,33 @@ fn RuleFormModal(
                                 }
                                 button {
                                     r#type: "button",
-                                    class: "btn btn-ghost btn-sm join-item",
+                                    class: "btn btn-ghost btn-sm",
                                     onclick: move |_| show_new_cat.set(false),
                                     "Cancel"
                                 }
                             }
                         } else {
                             select {
-                                class: "select select-bordered",
+                                class: "select select-bordered w-full",
                                 value: "{category_id}",
                                 onchange: move |e| category_id.set(e.value()),
                                 {cat_options().into_iter().map(|(id, n)| rsx! {
-                                    option { key: "{id}", value: "{id}", "{n}" }
+                                    option {
+                                        key: "{id}",
+                                        value: "{id}",
+                                        selected: category_id() == id,
+                                        "{n}"
+                                    }
                                 })}
                             }
                         }
                     }
-                    div { class: "form-control",
-                        label { class: "label",
-                            span { class: "label-text", "Priority" }
-                            span { class: "label-text-alt opacity-60", "lower = applied first" }
-                        }
-                        input {
-                            class: "input input-bordered",
-                            r#type: "number",
-                            value: "{priority}",
-                            oninput: move |e| priority.set(e.value()),
-                        }
-                    }
-                    div { class: "form-control md:col-span-2",
-                        label { class: "label cursor-pointer justify-start gap-2",
+                    div { class: "form-control md:col-span-2 min-w-0",
+                        span { class: "block text-sm pb-2", "Status" }
+                        label { class: "flex min-h-12 items-center gap-3 rounded-lg border border-base-300 px-3 cursor-pointer",
                             input {
                                 r#type: "checkbox",
-                                class: "checkbox",
+                                class: "checkbox checkbox-sm",
                                 checked: enabled(),
                                 oninput: move |e| enabled.set(e.checked()),
                             }
@@ -3091,7 +3763,7 @@ fn RuleFormModal(
                             class: "btn",
                             disabled: submitting() || applying(),
                             onclick: submit_and_apply,
-                            if applying() { "Applying…" } else { "Save & apply rules" }
+                            if applying() { "Applying…" } else { "Save & apply" }
                         }
                         button {
                             class: "btn btn-primary",
@@ -3105,4 +3777,3 @@ fn RuleFormModal(
         }
     }
 }
-

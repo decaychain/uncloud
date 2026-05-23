@@ -4,6 +4,7 @@
 //! the transaction model around `source_ref` upserts; existing fields are
 //! preserved through that work.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::extract::{Multipart, Path, Query, State};
@@ -35,9 +36,10 @@ use uncloud_common::{
     CreateFinanceCategoryRequest, CreateTransactionRequest, FinanceCategoryResponse,
     FinanceRuleRequest, FinanceRuleResponse, ImportCsvResponse, ImportRowError, ImportRunResponse,
     ImportRunSourceDto, ImportRunSummaryDto, ImportSchemaRequest, ImportSchemaResponse,
-    ListTransactionsQuery, ReconcilePreviewResponse, ReconcileRequest, TestRuleMatch,
-    TestRuleRequest, TestRuleResponse, TransactionListResponse, TransactionResponse,
-    UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
+    ListTransactionsQuery, ReconcilePreviewResponse, ReconcileRequest, ReorderRulesRequest,
+    TestRuleMatch, TestRuleRequest, TestRuleResponse, TransactionListResponse,
+    TransactionResponse, UpdateAccountRequest, UpdateFinanceCategoryRequest,
+    UpdateTransactionRequest,
 };
 
 const ACCOUNTS: &str = "finance_accounts";
@@ -440,6 +442,15 @@ pub async fn update_category(
                     "Categories are limited to two levels".into(),
                 ));
             }
+            if coll
+                .find_one(doc! { "parent_id": id, "owner_id": user.id })
+                .await?
+                .is_some()
+            {
+                return Err(AppError::BadRequest(
+                    "Category with subcategories cannot be nested".into(),
+                ));
+            }
             set.insert("parent_id", oid);
         }
     }
@@ -508,19 +519,50 @@ pub async fn delete_category(
 
 // ── Transactions ─────────────────────────────────────────────────────────
 
-/// Builds the Mongo match filter for the user's transactions
-/// according to a `ListTransactionsQuery`. Shared between the list
-/// route and the category-summary aggregation so the two stay in sync.
-fn build_tx_filter(user: &AuthUser, q: &ListTransactionsQuery) -> Result<mongodb::bson::Document> {
+async fn category_filter_ids(
+    state: &AppState,
+    owner_id: ObjectId,
+    category_id: &str,
+) -> Result<Vec<ObjectId>> {
+    let oid = parse_oid(category_id, "category_id")?;
+    let coll = state.db.collection::<FinanceCategory>(CATEGORIES);
+    let category = coll
+        .find_one(doc! { "_id": oid, "owner_id": owner_id })
+        .await?
+        .ok_or_else(|| AppError::BadRequest("Category not found".into()))?;
+    let mut ids = vec![oid];
+    if category.parent_id.is_none() {
+        let mut cursor = coll
+            .find(doc! { "parent_id": oid, "owner_id": owner_id })
+            .await?;
+        while let Some(child) = cursor.try_next().await? {
+            ids.push(child.id);
+        }
+    }
+    Ok(ids)
+}
+
+/// Builds the Mongo match filter for the user's transactions according to a
+/// `ListTransactionsQuery`. Shared between the list route and the
+/// category-summary aggregation so the two stay in sync.
+async fn build_tx_filter(
+    state: &AppState,
+    user: &AuthUser,
+    q: &ListTransactionsQuery,
+) -> Result<mongodb::bson::Document> {
     let mut filter = doc! { "owner_id": user.id };
     if let Some(acc) = q.account_id.as_deref() {
         filter.insert("account_id", parse_oid(acc, "account_id")?);
     }
-    if let Some(cat) = q.category_id.as_deref() {
-        filter.insert("legs.category_id", parse_oid(cat, "category_id")?);
-    }
     if q.uncategorized.unwrap_or(false) {
         filter.insert("legs.category_id", Bson::Null);
+    } else if let Some(cat) = q.category_id.as_deref() {
+        let ids = category_filter_ids(state, user.id, cat).await?;
+        if ids.len() == 1 {
+            filter.insert("legs.category_id", ids[0]);
+        } else {
+            filter.insert("legs.category_id", doc! { "$in": ids });
+        }
     }
     // Reconciliation adjustments are hidden by default — they're not
     // real spending and clutter the list. Caller can opt them back in.
@@ -548,7 +590,7 @@ pub async fn list_transactions(
     Query(q): Query<ListTransactionsQuery>,
 ) -> Result<Json<TransactionListResponse>> {
     require_finance(&state)?;
-    let filter = build_tx_filter(&user, &q)?;
+    let filter = build_tx_filter(&state, &user, &q).await?;
 
     let coll = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
     let total = coll.count_documents(filter.clone()).await?;
@@ -578,7 +620,7 @@ pub async fn transaction_category_summary(
     Query(q): Query<ListTransactionsQuery>,
 ) -> Result<Json<CategorySummaryResponse>> {
     require_finance(&state)?;
-    let filter = build_tx_filter(&user, &q)?;
+    let filter = build_tx_filter(&state, &user, &q).await?;
 
     let coll = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
     let pipeline = vec![
@@ -1790,9 +1832,10 @@ fn parse_rule_pattern_kind(s: &str) -> Result<RulePatternKind> {
     match s {
         "substring" => Ok(RulePatternKind::Substring),
         "starts_with" => Ok(RulePatternKind::StartsWith),
+        "wildcard" => Ok(RulePatternKind::Wildcard),
         "regex" => Ok(RulePatternKind::Regex),
         other => Err(AppError::BadRequest(format!(
-            "Invalid pattern_kind `{other}` (expected substring | starts_with | regex)"
+            "Invalid pattern_kind `{other}` (expected substring | starts_with | wildcard | regex)"
         ))),
     }
 }
@@ -1801,6 +1844,7 @@ fn rule_kind_str(k: RulePatternKind) -> &'static str {
     match k {
         RulePatternKind::Substring => "substring",
         RulePatternKind::StartsWith => "starts_with",
+        RulePatternKind::Wildcard => "wildcard",
         RulePatternKind::Regex => "regex",
     }
 }
@@ -1869,6 +1913,15 @@ async fn validate_rule_category(
     Ok(oid)
 }
 
+async fn next_rule_priority(state: &AppState, owner_id: ObjectId) -> Result<i32> {
+    let coll = state.db.collection::<FinanceRule>(RULES);
+    let latest = coll
+        .find_one(doc! { "owner_id": owner_id })
+        .sort(doc! { "priority": -1, "_id": -1 })
+        .await?;
+    Ok(latest.map(|r| r.priority.saturating_add(100)).unwrap_or(0))
+}
+
 pub async fn create_rule(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -1887,7 +1940,11 @@ pub async fn create_rule(
         pattern_kind: kind,
         case_insensitive: req.case_insensitive,
         category_id,
-        priority: req.priority,
+        priority: if req.priority == 0 {
+            next_rule_priority(&state, user.id).await?
+        } else {
+            req.priority
+        },
         enabled: req.enabled,
         created_at: now,
         updated_at: now,
@@ -1945,6 +2002,44 @@ pub async fn delete_rule(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn reorder_rules(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(req): Json<ReorderRulesRequest>,
+) -> Result<StatusCode> {
+    require_finance(&state)?;
+    let ids: Vec<ObjectId> = req
+        .rule_ids
+        .iter()
+        .map(|id| parse_oid(id, "rule id"))
+        .collect::<Result<Vec<_>>>()?;
+    let unique: HashSet<ObjectId> = ids.iter().copied().collect();
+    if unique.len() != ids.len() {
+        return Err(AppError::BadRequest("Rule ids must be unique".into()));
+    }
+
+    let coll = state.db.collection::<FinanceRule>(RULES);
+    let count = coll
+        .count_documents(doc! { "owner_id": user.id, "_id": { "$in": ids.clone() } })
+        .await?;
+    if count != ids.len() as u64 {
+        return Err(AppError::BadRequest("Rule list contains unknown rules".into()));
+    }
+
+    let now = bson::DateTime::from_chrono(Utc::now());
+    for (idx, id) in ids.iter().enumerate() {
+        coll.update_one(
+            doc! { "_id": *id, "owner_id": user.id },
+            doc! { "$set": {
+                "priority": (idx as i32).saturating_mul(100),
+                "updated_at": now,
+            } },
+        )
+        .await?;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn load_user_rules(state: &AppState, owner_id: ObjectId) -> Result<Vec<FinanceRule>> {
     let coll = state.db.collection::<FinanceRule>(RULES);
     let mut cursor = coll
@@ -1983,35 +2078,58 @@ pub async fn apply_rules(
     let mut updated = 0u32;
     let mut still_unmatched = 0u32;
     while let Some(t) = cursor.try_next().await? {
+        let leg = t.legs.first();
         match engine.match_first(&t.description) {
             Some(idx) => {
                 let rule = &rules[idx];
-                txns.update_one(
-                    doc! { "_id": t.id },
-                    doc! { "$set": {
+                let category_changed = leg.and_then(|l| l.category_id) != Some(rule.category_id);
+                let metadata_current = leg.is_some_and(|l| {
+                    l.category_source == CategorySource::Rule
+                        && l.category_id == Some(rule.category_id)
+                        && l.rule_id == Some(rule.id)
+                });
+                if !metadata_current {
+                    let mut set = doc! {
                         "legs.0.category_id": rule.category_id,
                         "legs.0.category_source": "rule",
                         "legs.0.rule_id": rule.id,
-                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                    } },
-                )
-                .await?;
-                updated += 1;
+                    };
+                    if category_changed {
+                        set.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
+                    }
+                    let result = txns
+                        .update_one(
+                            doc! { "_id": t.id },
+                            doc! { "$set": set },
+                        )
+                        .await?;
+                    if category_changed {
+                        updated += result.modified_count as u32;
+                    }
+                }
             }
             None => {
                 // No match — if we previously rule-tagged this leg,
                 // clear the tag so it doesn't pretend a rule still owns it.
-                if matches!(t.legs.first().map(|l| l.category_source), Some(CategorySource::Rule)) {
-                    txns.update_one(
-                        doc! { "_id": t.id },
-                        doc! { "$set": {
-                            "legs.0.category_id": Bson::Null,
-                            "legs.0.category_source": "unset",
-                            "legs.0.rule_id": Bson::Null,
-                            "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                        } },
-                    )
-                    .await?;
+                if matches!(leg.map(|l| l.category_source), Some(CategorySource::Rule)) {
+                    let category_changed = leg.and_then(|l| l.category_id).is_some();
+                    let mut set = doc! {
+                        "legs.0.category_id": Bson::Null,
+                        "legs.0.category_source": "unset",
+                        "legs.0.rule_id": Bson::Null,
+                    };
+                    if category_changed {
+                        set.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
+                    }
+                    let result = txns
+                        .update_one(
+                            doc! { "_id": t.id },
+                            doc! { "$set": set },
+                        )
+                        .await?;
+                    if category_changed {
+                        updated += result.modified_count as u32;
+                    }
                 }
                 still_unmatched += 1;
             }

@@ -274,7 +274,7 @@ pub struct FinanceRuleResponse {
     pub id: String,
     pub name: String,
     pub pattern: String,
-    /// "substring", "starts_with", "regex".
+    /// "substring", "starts_with", "wildcard", "regex".
     pub pattern_kind: String,
     pub case_insensitive: bool,
     pub category_id: String,
@@ -296,6 +296,11 @@ pub struct FinanceRuleRequest {
     pub priority: i32,
     #[serde(default = "default_true_serde")]
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReorderRulesRequest {
+    pub rule_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -105,7 +105,7 @@ BalanceSnapshot:
 ```
 Rule:
   id, owner_id, name
-  pattern, pattern_kind: 'substring' | 'regex' | 'starts_with'
+  pattern, pattern_kind: 'substring' | 'regex' | 'starts_with' | 'wildcard'
   case_insensitive: bool (default true)
   category_id
   priority: i32 (lower = applied first)
@@ -139,7 +139,7 @@ Each step lands as its own commit on `finance-tracker-foundation` and gets a bri
 
 - **Multi-currency in one CSV**: not supported; schema picks a single currency (column or fixed). Sparkasse CSVs are single-currency, so this is fine for v1.
 - **CSV header autodetection**: deferred. User picks column indices manually. A "detect" button that proposes a schema from the file's header row is a nice-to-have for a later iteration.
-- **Rule complexity**: starting at substring/starts_with/regex. No AND/OR composition, no amount-based conditions, no date-based conditions. Add later if substring + regex turn out to be insufficient.
+- **Rule complexity**: starting at substring/starts_with/wildcard/regex. No AND/OR composition, no amount-based conditions, no date-based conditions. Add later if these turn out to be insufficient.
 
 ## Out of scope (still)
 

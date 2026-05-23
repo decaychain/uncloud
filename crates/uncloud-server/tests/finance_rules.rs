@@ -117,6 +117,52 @@ async fn import_tags_rows_with_matching_rules() {
 }
 
 #[tokio::test]
+async fn wildcard_rule_matches_imported_rows() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice-wildcard").await;
+    let account_id = create_account(&app).await;
+    let schema_id = sparkasse_schema_id(&app).await;
+    let music = create_category(&app, "Music").await;
+
+    let _: Value = app
+        .server
+        .post("/api/finance/rules")
+        .json(&serde_json::json!({
+            "name": "Spotify wildcard",
+            "pattern": "Spotify*monthly",
+            "pattern_kind": "wildcard",
+            "case_insensitive": true,
+            "category_id": music,
+            "priority": 0,
+            "enabled": true,
+        }))
+        .await
+        .json();
+
+    let _: Value = app
+        .server
+        .post("/api/finance/import")
+        .multipart(import_form(&account_id, &schema_id, fixture_csv()))
+        .await
+        .json();
+
+    let listing: Value = app
+        .server
+        .get("/api/finance/transactions")
+        .add_query_param("account_id", &account_id)
+        .await
+        .json();
+    let items = listing["items"].as_array().unwrap();
+    let spotify = items
+        .iter()
+        .find(|t| t["description"].as_str().unwrap().contains("Spotify"))
+        .expect("Spotify transaction not found");
+    assert_eq!(spotify["category_id"], music);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
 async fn apply_rules_categorizes_existing_rows_but_not_user_set_ones() {
     let app = TestApp::new().await;
     app.register_and_login("bob").await;
@@ -186,6 +232,15 @@ async fn apply_rules_categorizes_existing_rows_but_not_user_set_ones() {
         .await
         .json();
     assert_eq!(apply["updated"], 1, "only Spotify should retag");
+    let apply_again: Value = app
+        .server
+        .post("/api/finance/rules/apply")
+        .await
+        .json();
+    assert_eq!(
+        apply_again["updated"], 0,
+        "reapplying unchanged rules should not count already-current rows",
+    );
 
     let after: Value = app
         .server
@@ -201,6 +256,113 @@ async fn apply_rules_categorizes_existing_rows_but_not_user_set_ones() {
         .find(|t| t["description"].as_str().unwrap().contains("Spotify"))
         .unwrap();
     assert_eq!(spotify["category_id"], music);
+    let spotify_updated_at = spotify["updated_at"].clone();
+
+    // A higher-priority rule that maps the same transaction to the same
+    // category may update internal rule ownership, but it must not count
+    // as a visible transaction update or bump updated_at.
+    app.server
+        .post("/api/finance/rules")
+        .json(&serde_json::json!({
+            "name": "Spotify duplicate",
+            "pattern": "spotify",
+            "pattern_kind": "substring",
+            "category_id": music,
+            "priority": 0,
+            "enabled": true,
+        }))
+        .await;
+    let apply_same_category: Value = app
+        .server
+        .post("/api/finance/rules/apply")
+        .await
+        .json();
+    assert_eq!(
+        apply_same_category["updated"], 0,
+        "same-category rule metadata changes should not count as transaction updates",
+    );
+    let after_same_category: Value = app
+        .server
+        .get("/api/finance/transactions")
+        .add_query_param("account_id", &account_id)
+        .await
+        .json();
+    let spotify_after_same_category = after_same_category["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["description"].as_str().unwrap().contains("Spotify"))
+        .unwrap();
+    assert_eq!(spotify_after_same_category["category_id"], music);
+    assert_eq!(spotify_after_same_category["updated_at"], spotify_updated_at);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn rules_can_be_reordered_without_numeric_priorities() {
+    let app = TestApp::new().await;
+    app.register_and_login("erin").await;
+    let music = create_category(&app, "Music").await;
+
+    let first: Value = app
+        .server
+        .post("/api/finance/rules")
+        .json(&serde_json::json!({
+            "name": "First",
+            "pattern": "first",
+            "pattern_kind": "substring",
+            "category_id": music,
+            "priority": 0,
+            "enabled": true,
+        }))
+        .await
+        .json();
+    let second: Value = app
+        .server
+        .post("/api/finance/rules")
+        .json(&serde_json::json!({
+            "name": "Second",
+            "pattern": "second",
+            "pattern_kind": "substring",
+            "category_id": music,
+            "priority": 0,
+            "enabled": true,
+        }))
+        .await
+        .json();
+    let third: Value = app
+        .server
+        .post("/api/finance/rules")
+        .json(&serde_json::json!({
+            "name": "Third",
+            "pattern": "third",
+            "pattern_kind": "substring",
+            "category_id": music,
+            "priority": 0,
+            "enabled": true,
+        }))
+        .await
+        .json();
+
+    let first_id = first["id"].as_str().unwrap();
+    let second_id = second["id"].as_str().unwrap();
+    let third_id = third["id"].as_str().unwrap();
+    app.server
+        .put("/api/finance/rules/reorder")
+        .json(&serde_json::json!({
+            "rule_ids": [third_id, first_id, second_id],
+        }))
+        .await;
+
+    let rules: Value = app.server.get("/api/finance/rules").await.json();
+    let names: Vec<&str> = rules
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["Third", "First", "Second"]);
 
     app.cleanup().await;
 }
