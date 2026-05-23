@@ -442,6 +442,15 @@ pub async fn update_category(
                     "Categories are limited to two levels".into(),
                 ));
             }
+            if coll
+                .find_one(doc! { "parent_id": id, "owner_id": user.id })
+                .await?
+                .is_some()
+            {
+                return Err(AppError::BadRequest(
+                    "Category with subcategories cannot be nested".into(),
+                ));
+            }
             set.insert("parent_id", oid);
         }
     }
@@ -510,19 +519,50 @@ pub async fn delete_category(
 
 // ── Transactions ─────────────────────────────────────────────────────────
 
-/// Builds the Mongo match filter for the user's transactions
-/// according to a `ListTransactionsQuery`. Shared between the list
-/// route and the category-summary aggregation so the two stay in sync.
-fn build_tx_filter(user: &AuthUser, q: &ListTransactionsQuery) -> Result<mongodb::bson::Document> {
+async fn category_filter_ids(
+    state: &AppState,
+    owner_id: ObjectId,
+    category_id: &str,
+) -> Result<Vec<ObjectId>> {
+    let oid = parse_oid(category_id, "category_id")?;
+    let coll = state.db.collection::<FinanceCategory>(CATEGORIES);
+    let category = coll
+        .find_one(doc! { "_id": oid, "owner_id": owner_id })
+        .await?
+        .ok_or_else(|| AppError::BadRequest("Category not found".into()))?;
+    let mut ids = vec![oid];
+    if category.parent_id.is_none() {
+        let mut cursor = coll
+            .find(doc! { "parent_id": oid, "owner_id": owner_id })
+            .await?;
+        while let Some(child) = cursor.try_next().await? {
+            ids.push(child.id);
+        }
+    }
+    Ok(ids)
+}
+
+/// Builds the Mongo match filter for the user's transactions according to a
+/// `ListTransactionsQuery`. Shared between the list route and the
+/// category-summary aggregation so the two stay in sync.
+async fn build_tx_filter(
+    state: &AppState,
+    user: &AuthUser,
+    q: &ListTransactionsQuery,
+) -> Result<mongodb::bson::Document> {
     let mut filter = doc! { "owner_id": user.id };
     if let Some(acc) = q.account_id.as_deref() {
         filter.insert("account_id", parse_oid(acc, "account_id")?);
     }
-    if let Some(cat) = q.category_id.as_deref() {
-        filter.insert("legs.category_id", parse_oid(cat, "category_id")?);
-    }
     if q.uncategorized.unwrap_or(false) {
         filter.insert("legs.category_id", Bson::Null);
+    } else if let Some(cat) = q.category_id.as_deref() {
+        let ids = category_filter_ids(state, user.id, cat).await?;
+        if ids.len() == 1 {
+            filter.insert("legs.category_id", ids[0]);
+        } else {
+            filter.insert("legs.category_id", doc! { "$in": ids });
+        }
     }
     // Reconciliation adjustments are hidden by default — they're not
     // real spending and clutter the list. Caller can opt them back in.
@@ -550,7 +590,7 @@ pub async fn list_transactions(
     Query(q): Query<ListTransactionsQuery>,
 ) -> Result<Json<TransactionListResponse>> {
     require_finance(&state)?;
-    let filter = build_tx_filter(&user, &q)?;
+    let filter = build_tx_filter(&state, &user, &q).await?;
 
     let coll = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
     let total = coll.count_documents(filter.clone()).await?;
@@ -580,7 +620,7 @@ pub async fn transaction_category_summary(
     Query(q): Query<ListTransactionsQuery>,
 ) -> Result<Json<CategorySummaryResponse>> {
     require_finance(&state)?;
-    let filter = build_tx_filter(&user, &q)?;
+    let filter = build_tx_filter(&state, &user, &q).await?;
 
     let coll = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
     let pipeline = vec![

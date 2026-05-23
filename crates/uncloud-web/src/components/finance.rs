@@ -506,6 +506,186 @@ fn format_amount_input(minor: i64) -> String {
 // Categories tab
 // ─────────────────────────────────────────────────────────────────────────
 
+#[derive(Clone, PartialEq)]
+enum CategoryDropTarget {
+    Root,
+    Parent(String),
+}
+
+fn category_has_children(categories: &[FinanceCategoryResponse], category_id: &str) -> bool {
+    categories
+        .iter()
+        .any(|c| c.parent_id.as_deref() == Some(category_id))
+}
+
+fn category_effective_roots(categories: &[FinanceCategoryResponse]) -> Vec<FinanceCategoryResponse> {
+    categories
+        .iter()
+        .filter(|c| {
+            c.parent_id
+                .as_ref()
+                .map(|pid| !categories.iter().any(|parent| &parent.id == pid))
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
+fn category_children(
+    categories: &[FinanceCategoryResponse],
+    parent_id: &str,
+) -> Vec<FinanceCategoryResponse> {
+    categories
+        .iter()
+        .filter(|c| c.parent_id.as_deref() == Some(parent_id))
+        .cloned()
+        .collect()
+}
+
+fn category_label(categories: &[FinanceCategoryResponse], category_id: &str) -> Option<String> {
+    let category = categories.iter().find(|c| c.id == category_id)?;
+    if let Some(parent_id) = category.parent_id.as_ref() {
+        if let Some(parent) = categories.iter().find(|c| &c.id == parent_id) {
+            return Some(format!("{} / {}", parent.name, category.name));
+        }
+    }
+    Some(category.name.clone())
+}
+
+fn can_drop_category_on_root(categories: &[FinanceCategoryResponse], dragged_id: &str) -> bool {
+    categories
+        .iter()
+        .find(|c| c.id == dragged_id)
+        .and_then(|c| c.parent_id.as_ref())
+        .is_some()
+}
+
+fn can_drop_category_on_parent(
+    categories: &[FinanceCategoryResponse],
+    dragged_id: &str,
+    parent_id: &str,
+) -> bool {
+    if dragged_id == parent_id || category_has_children(categories, dragged_id) {
+        return false;
+    }
+    let Some(dragged) = categories.iter().find(|c| c.id == dragged_id) else {
+        return false;
+    };
+    if dragged.parent_id.as_deref() == Some(parent_id) {
+        return false;
+    }
+    categories
+        .iter()
+        .find(|c| c.id == parent_id)
+        .map(|parent| parent.parent_id.is_none())
+        .unwrap_or(false)
+}
+
+fn render_category_row(
+    category: FinanceCategoryResponse,
+    depth: usize,
+    child_count: usize,
+    all_categories: Vec<FinanceCategoryResponse>,
+    mut drag_category_id: Signal<Option<String>>,
+    mut drop_target: Signal<Option<CategoryDropTarget>>,
+    mut edit_target: Signal<Option<FinanceCategoryResponse>>,
+    mut refresh: Signal<u32>,
+    mut error: Signal<Option<String>>,
+) -> Element {
+    let candidate_parent_id = category
+        .parent_id
+        .clone()
+        .unwrap_or_else(|| category.id.clone());
+    let is_dragging = drag_category_id.read().as_ref() == Some(&category.id);
+    let is_drop_parent = matches!(
+        drop_target.read().as_ref(),
+        Some(CategoryDropTarget::Parent(id)) if id == &candidate_parent_id
+    ) && category.parent_id.is_none();
+    let row_base = if depth == 0 {
+        "grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-lg border px-2 py-2 transition-colors group"
+    } else {
+        "grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-lg border px-2 py-1.5 transition-colors group"
+    };
+    let row_class = if is_dragging {
+        format!("{row_base} border-transparent bg-base-200/60 opacity-30 pointer-events-none")
+    } else if is_drop_parent {
+        format!("{row_base} border-primary bg-primary/10 ring-1 ring-primary/30")
+    } else {
+        format!("{row_base} border-transparent hover:border-base-300 hover:bg-base-200/70")
+    };
+    let name_class = if depth == 0 {
+        "font-medium truncate"
+    } else {
+        "truncate text-sm"
+    };
+    let c_edit = category.clone();
+    let c_delete = category.id.clone();
+    let target_categories = all_categories.clone();
+    let target_id = candidate_parent_id.clone();
+    let drag_id_for_handle = category.id.clone();
+
+    rsx! {
+        div {
+            key: "{category.id}",
+            class: "{row_class}",
+            onpointerenter: move |_| {
+                let Some(dragged_id) = drag_category_id.peek().clone() else {
+                    return;
+                };
+                if can_drop_category_on_parent(&target_categories, &dragged_id, &target_id) {
+                    drop_target.set(Some(CategoryDropTarget::Parent(target_id.clone())));
+                } else {
+                    drop_target.set(None);
+                }
+            },
+            span {
+                class: "cursor-grab active:cursor-grabbing opacity-30 hover:opacity-70 shrink-0",
+                style: "touch-action: none;",
+                title: "Drag category",
+                onpointerdown: move |e: Event<PointerData>| {
+                    e.stop_propagation();
+                    e.prevent_default();
+                    drag_category_id.set(Some(drag_id_for_handle.clone()));
+                    drop_target.set(None);
+                },
+                IconGripVertical {
+                    class: "w-4 h-4".to_string()
+                }
+            }
+            div { class: "min-w-0 flex items-center gap-2",
+                span { class: "{name_class}", "{category.name}" }
+                if child_count > 0 {
+                    span {
+                        class: "badge badge-ghost badge-sm shrink-0",
+                        title: "Subcategories",
+                        "{child_count}"
+                    }
+                }
+            }
+            div { class: "flex items-center gap-1 justify-end",
+                button {
+                    class: "btn btn-ghost btn-xs",
+                    onclick: move |_| edit_target.set(Some(c_edit.clone())),
+                    "Edit"
+                }
+                button {
+                    class: "btn btn-ghost btn-xs text-error",
+                    onclick: move |_| {
+                        let id = c_delete.clone();
+                        spawn(async move {
+                            match use_finance::delete_category(&id).await {
+                                Ok(_) => refresh += 1,
+                                Err(e) => error.set(Some(e)),
+                            }
+                        });
+                    },
+                    "Delete"
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn CategoriesTab() -> Element {
     let mut categories: Signal<Vec<FinanceCategoryResponse>> = use_signal(Vec::new);
@@ -514,6 +694,9 @@ fn CategoriesTab() -> Element {
     let mut refresh = use_signal(|| 0u32);
     let mut show_create = use_signal(|| false);
     let mut edit_target: Signal<Option<FinanceCategoryResponse>> = use_signal(|| None);
+    let mut drag_category_id: Signal<Option<String>> = use_signal(|| None);
+    let mut drop_target: Signal<Option<CategoryDropTarget>> = use_signal(|| None);
+    let mut moving_category: Signal<Option<String>> = use_signal(|| None);
 
     use_effect(move || {
         let _ = refresh();
@@ -526,6 +709,76 @@ fn CategoriesTab() -> Element {
             loading.set(false);
         });
     });
+
+    let mut finish_category_drop = move || {
+        let dragged_id = drag_category_id.peek().clone();
+        let target = drop_target.peek().clone();
+        drag_category_id.set(None);
+        drop_target.set(None);
+        if moving_category.peek().is_some() {
+            return;
+        }
+        let (Some(dragged_id), Some(target)) = (dragged_id, target) else {
+            return;
+        };
+        let previous = categories.peek().clone();
+        let new_parent_id = match target {
+            CategoryDropTarget::Root => {
+                if !can_drop_category_on_root(&previous, &dragged_id) {
+                    return;
+                }
+                None
+            }
+            CategoryDropTarget::Parent(parent_id) => {
+                if !can_drop_category_on_parent(&previous, &dragged_id, &parent_id) {
+                    return;
+                }
+                Some(parent_id)
+            }
+        };
+        let Some(current) = previous.iter().find(|c| c.id == dragged_id) else {
+            return;
+        };
+        if current.parent_id == new_parent_id {
+            return;
+        }
+
+        let mut optimistic = previous.clone();
+        if let Some(cat) = optimistic.iter_mut().find(|c| c.id == dragged_id) {
+            cat.parent_id = new_parent_id.clone();
+        }
+        categories.set(optimistic);
+        moving_category.set(Some(dragged_id.clone()));
+        error.set(None);
+        let req = UpdateFinanceCategoryRequest {
+            name: None,
+            parent_id: Some(new_parent_id.unwrap_or_default()),
+            colour: None,
+        };
+        spawn(async move {
+            if let Err(e) = use_finance::update_category(&dragged_id, &req).await {
+                categories.set(previous);
+                error.set(Some(e));
+            }
+            moving_category.set(None);
+        });
+    };
+
+    let all_categories = categories();
+    let roots = category_effective_roots(&all_categories);
+    let can_promote_dragged = drag_category_id
+        .read()
+        .as_ref()
+        .map(|id| can_drop_category_on_root(&all_categories, id))
+        .unwrap_or(false);
+    let root_is_target = matches!(drop_target.read().as_ref(), Some(CategoryDropTarget::Root));
+    let root_class = if root_is_target {
+        "mb-2 rounded-lg border border-primary bg-primary/10 px-3 py-2 text-xs font-semibold uppercase text-primary"
+    } else if can_promote_dragged {
+        "mb-2 rounded-lg border border-dashed border-base-300 bg-base-100 px-3 py-2 text-xs font-semibold uppercase text-base-content/60"
+    } else {
+        "mb-2 px-3 py-2 text-xs font-semibold uppercase text-base-content/50"
+    };
 
     rsx! {
         div { class: "flex justify-between items-center mb-4",
@@ -547,51 +800,69 @@ fn CategoriesTab() -> Element {
                 p { class: "text-sm mt-2", "Categories are reused across transactions and pending settlements." }
             }
         } else {
-            div { class: "overflow-x-auto",
-                table { class: "table table-zebra",
-                    thead { tr { th { "Name" } th { "Parent" } th { "" } } }
-                    tbody {
-                        {categories().iter().map(|c| {
-                            let parent_name = c.parent_id.as_ref().and_then(|pid| {
-                                categories().iter().find(|p| &p.id == pid).map(|p| p.name.clone())
-                            }).unwrap_or_default();
-                            let c_edit = c.clone();
-                            let c_id = c.id.clone();
-                            rsx! {
-                                tr { key: "{c.id}",
-                                    td { "{c.name}" }
-                                    td { class: "opacity-60", "{parent_name}" }
-                                    td { class: "text-right",
-                                        button {
-                                            class: "btn btn-ghost btn-xs",
-                                            onclick: move |_| edit_target.set(Some(c_edit.clone())),
-                                            "Edit"
-                                        }
-                                        button {
-                                            class: "btn btn-ghost btn-xs text-error",
-                                            onclick: move |_| {
-                                                let id = c_id.clone();
-                                                spawn(async move {
-                                                    match use_finance::delete_category(&id).await {
-                                                        Ok(_) => refresh += 1,
-                                                        Err(e) => error.set(Some(e)),
-                                                    }
-                                                });
-                                            },
-                                            "Delete"
-                                        }
-                                    }
+            div {
+                class: "space-y-2",
+                onpointerup: move |_| finish_category_drop(),
+                onpointercancel: move |_| {
+                    drag_category_id.set(None);
+                    drop_target.set(None);
+                },
+                div {
+                    class: "{root_class}",
+                    onpointerenter: move |_| {
+                        let Some(dragged_id) = drag_category_id.peek().clone() else {
+                            return;
+                        };
+                        if can_drop_category_on_root(&categories.peek(), &dragged_id) {
+                            drop_target.set(Some(CategoryDropTarget::Root));
+                        } else {
+                            drop_target.set(None);
+                        }
+                    },
+                    "Top level"
+                }
+                {roots.iter().map(|parent| {
+                    let children = category_children(&all_categories, &parent.id);
+                    let parent_row = render_category_row(
+                        parent.clone(),
+                        0,
+                        children.len(),
+                        all_categories.clone(),
+                        drag_category_id,
+                        drop_target,
+                        edit_target,
+                        refresh,
+                        error,
+                    );
+                    rsx! {
+                        div { key: "{parent.id}", class: "space-y-1",
+                            {parent_row}
+                            if !children.is_empty() {
+                                div { class: "ml-5 border-l border-base-300/70 pl-4 space-y-1",
+                                    {children.iter().map(|child| {
+                                        let child_row = render_category_row(
+                                            child.clone(),
+                                            1,
+                                            0,
+                                            all_categories.clone(),
+                                            drag_category_id,
+                                            drop_target,
+                                            edit_target,
+                                            refresh,
+                                            error,
+                                        );
+                                        rsx! { {child_row} }
+                                    })}
                                 }
                             }
-                        })}
+                        }
                     }
-                }
+                })}
             }
         }
         if show_create() {
             CategoryFormModal {
                 initial: None,
-                all_categories: categories(),
                 on_close: move |_| show_create.set(false),
                 on_saved: move |_| { show_create.set(false); refresh += 1; },
             }
@@ -600,7 +871,6 @@ fn CategoriesTab() -> Element {
             CategoryFormModal {
                 key: "{c.id}",
                 initial: Some(c.clone()),
-                all_categories: categories(),
                 on_close: move |_| edit_target.set(None),
                 on_saved: move |_| { edit_target.set(None); refresh += 1; },
             }
@@ -611,21 +881,14 @@ fn CategoriesTab() -> Element {
 #[component]
 fn CategoryFormModal(
     initial: Option<FinanceCategoryResponse>,
-    all_categories: Vec<FinanceCategoryResponse>,
     on_close: EventHandler<()>,
     on_saved: EventHandler<()>,
 ) -> Element {
     let editing = initial.is_some();
     let mut name = use_signal(|| initial.as_ref().map(|c| c.name.clone()).unwrap_or_default());
-    let mut parent_id = use_signal(|| initial.as_ref().and_then(|c| c.parent_id.clone()).unwrap_or_default());
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut saving = use_signal(|| false);
     let initial_id = initial.as_ref().map(|c| c.id.clone());
-    let self_id = initial_id.clone();
-    let parent_candidates: Vec<FinanceCategoryResponse> = all_categories
-        .into_iter()
-        .filter(|c| c.parent_id.is_none() && Some(&c.id) != self_id.as_ref())
-        .collect();
 
     rsx! {
         div { class: "modal modal-open",
@@ -644,18 +907,6 @@ fn CategoryFormModal(
                         oninput: move |e| name.set(e.value()),
                     }
                 }
-                div { class: "form-control mt-2",
-                    label { class: "label", span { class: "label-text", "Parent (optional)" } }
-                    select {
-                        class: "select select-bordered",
-                        value: "{parent_id}",
-                        onchange: move |e| parent_id.set(e.value()),
-                        option { value: "", "(top-level)" }
-                        {parent_candidates.iter().map(|c| rsx! {
-                            option { key: "{c.id}", value: "{c.id}", "{c.name}" }
-                        })}
-                    }
-                }
                 div { class: "modal-action",
                     button { class: "btn btn-ghost", onclick: move |_| on_close.call(()), "Cancel" }
                     button {
@@ -669,15 +920,14 @@ fn CategoryFormModal(
                                 let result = if let Some(id) = id_opt {
                                     let req = UpdateFinanceCategoryRequest {
                                         name: Some(name()),
-                                        parent_id: Some(parent_id()),
+                                        parent_id: None,
                                         colour: None,
                                     };
                                     use_finance::update_category(&id, &req).await.map(|_| ())
                                 } else {
-                                    let p = parent_id();
                                     let req = CreateFinanceCategoryRequest {
                                         name: name(),
-                                        parent_id: if p.is_empty() { None } else { Some(p) },
+                                        parent_id: None,
                                         colour: None,
                                     };
                                     use_finance::create_category(&req).await.map(|_| ())
@@ -938,10 +1188,7 @@ fn TransactionsTab() -> Element {
         if id == UNCATEGORIZED_FILTER {
             "Uncategorized".to_string()
         } else {
-            categories()
-                .iter()
-                .find(|c| c.id == id)
-                .map(|c| c.name.clone())
+            category_label(&categories(), &id)
                 .unwrap_or_else(|| "Selected category".into())
         }
     });
@@ -953,13 +1200,9 @@ fn TransactionsTab() -> Element {
             .find(|a| a.id == t.account_id)
             .map(|a| a.name.clone())
             .unwrap_or_else(|| "?".into());
-        let cat = t.category_id.as_deref().map(|id| {
-            categories()
-                .iter()
-                .find(|c| c.id == id)
-                .map(|c| c.name.clone())
-                .unwrap_or_else(|| "?".into())
-        });
+        let cat = t.category_id
+            .as_deref()
+            .map(|id| category_label(&categories(), id).unwrap_or_else(|| "?".into()));
         rsx! {
             tr { key: "{t.id}",
                 td { class: "whitespace-nowrap font-mono text-sm", "{date_short}" }
@@ -993,13 +1236,9 @@ fn TransactionsTab() -> Element {
 
     let render_split_row = move |t: &TransactionResponse| -> Element {
         let date_short = t.date.split('T').next().unwrap_or(&t.date).to_string();
-        let cat = t.category_id.as_deref().map(|id| {
-            categories()
-                .iter()
-                .find(|c| c.id == id)
-                .map(|c| c.name.clone())
-                .unwrap_or_else(|| "?".into())
-        });
+        let cat = t.category_id
+            .as_deref()
+            .map(|id| category_label(&categories(), id).unwrap_or_else(|| "?".into()));
         rsx! {
             tr { key: "{t.id}",
                 td { class: "whitespace-nowrap font-mono text-sm", "{date_short}" }
@@ -1037,13 +1276,9 @@ fn TransactionsTab() -> Element {
             .find(|a| a.id == t.account_id)
             .map(|a| a.name.clone())
             .unwrap_or_else(|| "?".into());
-        let cat = t.category_id.as_deref().map(|id| {
-            categories()
-                .iter()
-                .find(|c| c.id == id)
-                .map(|c| c.name.clone())
-                .unwrap_or_else(|| "?".into())
-        });
+        let cat = t.category_id
+            .as_deref()
+            .map(|id| category_label(&categories(), id).unwrap_or_else(|| "?".into()));
         let amount_class = if t.amount_minor < 0 {
             "font-mono text-sm font-semibold text-error text-right break-words"
         } else {
@@ -1410,6 +1645,21 @@ fn TransactionsTab() -> Element {
 /// account filter is active). When a date range is set, additionally
 /// shows total income/expense for that range, and a collapsible
 /// breakdown of those amounts by category.
+#[derive(Clone)]
+struct CategoryBreakdownChild {
+    category_id: String,
+    name: String,
+    total: i64,
+}
+
+#[derive(Clone)]
+struct CategoryBreakdownRow {
+    category_id: Option<String>,
+    name: String,
+    total: i64,
+    children: Vec<CategoryBreakdownChild>,
+}
+
 #[component]
 fn SummaryStrip(
     accounts: Vec<AccountResponse>,
@@ -1423,10 +1673,6 @@ fn SummaryStrip(
     on_category_filter: EventHandler<Option<String>>,
 ) -> Element {
     let mut expanded = expanded;
-    let category_lookup: HashMap<String, String> = categories
-        .iter()
-        .map(|c| (c.id.clone(), c.name.clone()))
-        .collect();
 
     let visible_accounts: Vec<&AccountResponse> = if account_filter.is_empty() {
         accounts.iter().filter(|a| a.archived_at.is_none()).collect()
@@ -1434,30 +1680,80 @@ fn SummaryStrip(
         accounts.iter().filter(|a| a.id == account_filter).collect()
     };
 
-    // Sorted by absolute total descending so the most-active rows go first.
-    let breakdown: Vec<(Option<String>, String, i64)> = summary
+    // Parent rows are aggregate totals. Children stay visible underneath so the
+    // user can filter either the whole category group or one subcategory.
+    let breakdown: Vec<CategoryBreakdownRow> = summary
         .as_ref()
         .map(|s| {
-            let mut v: Vec<(Option<String>, String, i64)> = s
-                .items
-                .iter()
-                .map(|it| {
-                    let name = it
-                        .category_id
-                        .as_ref()
-                        .and_then(|id| category_lookup.get(id).cloned())
-                        .unwrap_or_else(|| "Uncategorized".into());
-                    let total = it.income_minor.saturating_add(it.expense_minor);
-                    (it.category_id.clone(), name, total)
-                })
-                .collect();
-            v.sort_by_key(|(_, _, t)| -(t.abs()));
-            v
+            let mut totals: HashMap<Option<String>, i64> = HashMap::new();
+            for item in &s.items {
+                totals.insert(
+                    item.category_id.clone(),
+                    item.income_minor.saturating_add(item.expense_minor),
+                );
+            }
+
+            let mut rows = Vec::new();
+            for parent in category_effective_roots(&categories) {
+                let parent_key = Some(parent.id.clone());
+                let parent_direct = totals.get(&parent_key).copied().unwrap_or(0);
+                let mut children: Vec<CategoryBreakdownChild> = category_children(&categories, &parent.id)
+                    .into_iter()
+                    .filter_map(|child| {
+                        let key = Some(child.id.clone());
+                        totals.get(&key).map(|total| CategoryBreakdownChild {
+                            category_id: child.id,
+                            name: child.name,
+                            total: *total,
+                        })
+                    })
+                    .collect();
+                children.sort_by_key(|child| -child.total.abs());
+                let child_total = children
+                    .iter()
+                    .fold(0i64, |sum, child| sum.saturating_add(child.total));
+                if totals.contains_key(&parent_key) || !children.is_empty() {
+                    rows.push(CategoryBreakdownRow {
+                        category_id: Some(parent.id),
+                        name: parent.name,
+                        total: parent_direct.saturating_add(child_total),
+                        children,
+                    });
+                }
+            }
+
+            if let Some(total) = totals.get(&None) {
+                rows.push(CategoryBreakdownRow {
+                    category_id: None,
+                    name: "Uncategorized".into(),
+                    total: *total,
+                    children: Vec::new(),
+                });
+            }
+
+            for item in &s.items {
+                let Some(category_id) = item.category_id.as_ref() else {
+                    continue;
+                };
+                if !categories.iter().any(|c| &c.id == category_id) {
+                    rows.push(CategoryBreakdownRow {
+                        category_id: Some(category_id.clone()),
+                        name: "Unknown category".into(),
+                        total: item.income_minor.saturating_add(item.expense_minor),
+                        children: Vec::new(),
+                    });
+                }
+            }
+
+            rows.sort_by_key(|row| -row.total.abs());
+            rows
         })
         .unwrap_or_default();
     let breakdown_max_abs = breakdown
         .iter()
-        .map(|(_, _, t)| t.abs())
+        .flat_map(|row| {
+            std::iter::once(row.total.abs()).chain(row.children.iter().map(|child| child.total.abs()))
+        })
         .max()
         .unwrap_or(1)
         .max(1);
@@ -1535,16 +1831,17 @@ fn SummaryStrip(
                             "No transactions in the selected range."
                         }
                     } else {
-                        ul { class: "space-y-1",
-                            {breakdown.iter().map(|(category_id, name, total)| {
-                                let filter_value = category_id
+                        ul { class: "space-y-2",
+                            {breakdown.iter().map(|row| {
+                                let filter_value = row.category_id
                                     .clone()
                                     .unwrap_or_else(|| UNCATEGORIZED_FILTER.to_string());
                                 let selected = selected_category_filter
                                     .as_deref()
                                     == Some(filter_value.as_str());
-                                let width_pct = (total.abs() as f64 / breakdown_max_abs as f64) * 100.0;
-                                let positive = *total >= 0;
+                                let width_pct =
+                                    (row.total.abs() as f64 / breakdown_max_abs as f64) * 100.0;
+                                let positive = row.total >= 0;
                                 let bar_class = if positive {
                                     "h-2 rounded-full bg-success"
                                 } else {
@@ -1555,9 +1852,16 @@ fn SummaryStrip(
                                 } else {
                                     "text-error font-mono text-sm"
                                 };
-                                let n = name.clone();
-                                let t = *total;
+                                let n = row.name.clone();
+                                let t = row.total;
                                 let cur = currency_hint.clone();
+                                let children = row.children.clone();
+                                let has_children = !children.is_empty();
+                                let name_class = if has_children {
+                                    "truncate text-sm font-medium"
+                                } else {
+                                    "truncate text-sm"
+                                };
                                 let row_class = if selected {
                                     "grid w-full grid-cols-1 sm:grid-cols-[minmax(8rem,12rem)_minmax(0,1fr)_8rem] sm:items-center gap-1 sm:gap-3 rounded bg-primary/10 px-2 py-1 text-left ring-1 ring-primary/30"
                                 } else {
@@ -1575,7 +1879,7 @@ fn SummaryStrip(
                                                     on_category_filter.call(Some(filter_value.clone()));
                                                 }
                                             },
-                                            span { class: "truncate text-sm", "{n}" }
+                                            span { class: "{name_class}", "{n}" }
                                             div { class: "bg-base-200 rounded-full h-2",
                                                 div {
                                                     class: "{bar_class}",
@@ -1584,6 +1888,62 @@ fn SummaryStrip(
                                             }
                                             span { class: "{amount_class} text-right",
                                                 "{format_money(t, &cur)}"
+                                            }
+                                        }
+                                        if has_children {
+                                            div { class: "ml-4 border-l border-base-300/70 pl-3 space-y-1 mt-1",
+                                                {children.iter().map(|child| {
+                                                    let child_filter = child.category_id.clone();
+                                                    let child_selected = selected_category_filter
+                                                        .as_deref()
+                                                        == Some(child_filter.as_str());
+                                                    let child_width_pct =
+                                                        (child.total.abs() as f64
+                                                            / breakdown_max_abs as f64) * 100.0;
+                                                    let child_positive = child.total >= 0;
+                                                    let child_bar_class = if child_positive {
+                                                        "h-2 rounded-full bg-success"
+                                                    } else {
+                                                        "h-2 rounded-full bg-error"
+                                                    };
+                                                    let child_amount_class = if child_positive {
+                                                        "text-success font-mono text-sm"
+                                                    } else {
+                                                        "text-error font-mono text-sm"
+                                                    };
+                                                    let child_name = child.name.clone();
+                                                    let child_total = child.total;
+                                                    let child_cur = currency_hint.clone();
+                                                    let child_row_class = if child_selected {
+                                                        "grid w-full grid-cols-1 sm:grid-cols-[minmax(7rem,11rem)_minmax(0,1fr)_8rem] sm:items-center gap-1 sm:gap-3 rounded bg-primary/10 px-2 py-1 text-left ring-1 ring-primary/30"
+                                                    } else {
+                                                        "grid w-full grid-cols-1 sm:grid-cols-[minmax(7rem,11rem)_minmax(0,1fr)_8rem] sm:items-center gap-1 sm:gap-3 rounded px-2 py-1 text-left hover:bg-base-200"
+                                                    };
+                                                    rsx! {
+                                                        button {
+                                                            key: "{child_filter}",
+                                                            r#type: "button",
+                                                            class: "{child_row_class}",
+                                                            onclick: move |_| {
+                                                                if child_selected {
+                                                                    on_category_filter.call(None);
+                                                                } else {
+                                                                    on_category_filter.call(Some(child_filter.clone()));
+                                                                }
+                                                            },
+                                                            span { class: "truncate text-sm opacity-90", "{child_name}" }
+                                                            div { class: "bg-base-200 rounded-full h-2",
+                                                                div {
+                                                                    class: "{child_bar_class}",
+                                                                    style: "width: {child_width_pct:.1}%",
+                                                                }
+                                                            }
+                                                            span { class: "{child_amount_class} text-right",
+                                                                "{format_money(child_total, &child_cur)}"
+                                                            }
+                                                        }
+                                                    }
+                                                })}
                                             }
                                         }
                                     }
