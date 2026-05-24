@@ -5,7 +5,7 @@
 //! and emits `ParsedRow`s. The route handler then UPSERTs those into
 //! `finance_transactions` keyed by `(account_id, source_ref)`.
 
-use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use encoding_rs::{Encoding, UTF_8};
 use sha2::{Digest, Sha256};
 
@@ -269,15 +269,16 @@ pub fn parse_amount_minor(s: &str, sep: DecimalSeparator) -> Option<i64> {
 
 /// Parse a date string with one of the supported format directives.
 /// Today we accept `DD.MM.YY`, `DD.MM.YYYY`, `DD/MM/YYYY`, `YYYY-MM-DD`,
-/// `MM/DD/YYYY`. The schema's `date_format` is one of those literal
-/// strings; chrono format directives are *not* used directly so users
-/// can pick a format without learning strftime syntax.
+/// `YYYY-MM-DD HH:MM:SS`, and `MM/DD/YYYY`. The schema's `date_format` is one
+/// of those literal strings; chrono format directives are *not* used directly
+/// so users can pick a format without learning strftime syntax.
 pub fn parse_date(input: &str, format: &str) -> Option<DateTime<Utc>> {
     let nd = match format {
         "DD.MM.YY" | "DD.MM.YYYY" => parse_dotted(input),
         "DD/MM/YYYY" => parse_slashed_dmy(input),
         "MM/DD/YYYY" => parse_slashed_mdy(input),
-        "YYYY-MM-DD" => NaiveDate::parse_from_str(input, "%Y-%m-%d").ok(),
+        "YYYY-MM-DD" => parse_iso_date_or_datetime(input),
+        "YYYY-MM-DD HH:MM:SS" => parse_iso_datetime(input),
         // Fall through to chrono if the user picks something unusual.
         other => NaiveDate::parse_from_str(input, other).ok(),
     }?;
@@ -304,6 +305,26 @@ fn parse_slashed_mdy(s: &str) -> Option<NaiveDate> {
     }
     let (year, day, month) = pivot_year(year_raw, day, month)?;
     NaiveDate::from_ymd_opt(year, month, day)
+}
+
+fn parse_iso_date_or_datetime(s: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .ok()
+        .or_else(|| parse_iso_datetime(s))
+}
+
+fn parse_iso_datetime(s: &str) -> Option<NaiveDate> {
+    const FORMATS: &[&str] = &[
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S%.f",
+    ];
+    FORMATS.iter().find_map(|format| {
+        NaiveDateTime::parse_from_str(s, format)
+            .ok()
+            .map(|dt| dt.date())
+    })
 }
 
 fn parse_with_separator(s: &str, sep: char) -> Option<NaiveDate> {
@@ -356,4 +377,26 @@ fn stable_hash(parts: &[&[u8]]) -> String {
         first = false;
     }
     hex::encode(&hasher.finalize()[..8])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_date;
+
+    #[test]
+    fn parse_date_accepts_iso_datetime_and_ignores_time() {
+        let parsed = parse_date("2026-05-24 13:45:59", "YYYY-MM-DD HH:MM:SS")
+            .expect("date should parse");
+
+        assert_eq!(parsed.format("%Y-%m-%d").to_string(), "2026-05-24");
+        assert_eq!(parsed.format("%H:%M:%S").to_string(), "00:00:00");
+    }
+
+    #[test]
+    fn parse_iso_date_format_tolerates_datetime_column() {
+        let parsed = parse_date("2026-05-24 13:45:59", "YYYY-MM-DD")
+            .expect("date should parse");
+
+        assert_eq!(parsed.format("%Y-%m-%d").to_string(), "2026-05-24");
+    }
 }

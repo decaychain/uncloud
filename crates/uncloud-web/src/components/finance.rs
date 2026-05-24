@@ -2704,6 +2704,7 @@ fn SchemaFormModal(
                             option { value: "DD/MM/YYYY", "DD/MM/YYYY" }
                             option { value: "MM/DD/YYYY", "MM/DD/YYYY (US)" }
                             option { value: "YYYY-MM-DD", "YYYY-MM-DD (ISO)" }
+                            option { value: "YYYY-MM-DD HH:MM:SS", "YYYY-MM-DD HH:MM:SS" }
                         }
                     }
                     div { class: "form-control",
