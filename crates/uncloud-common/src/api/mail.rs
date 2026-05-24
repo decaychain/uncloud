@@ -8,6 +8,26 @@ pub enum MailSecurity {
     Plain,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MailFolderRole {
+    Inbox,
+    Sent,
+    Drafts,
+    Trash,
+    Archive,
+    Spam,
+    AllMail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MailFolderRoleSource {
+    #[default]
+    Inferred,
+    User,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MailServerSettings {
     pub host: String,
@@ -96,8 +116,10 @@ pub struct MailFolderResponse {
     pub name: String,
     pub delimiter: Option<String>,
     pub parent_path: Option<String>,
-    pub role: Option<String>,
+    pub role: Option<MailFolderRole>,
+    pub role_source: MailFolderRoleSource,
     pub selectable: bool,
+    pub sync_enabled: bool,
     pub attributes: Vec<String>,
     pub uid_validity: Option<u32>,
     pub uid_next: Option<u32>,
@@ -110,6 +132,16 @@ pub struct MailFolderResponse {
     pub last_sync_error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct UpdateMailFolderRequest {
+    pub role: Option<MailFolderRole>,
+    #[serde(default)]
+    pub infer_role: bool,
+    #[serde(default)]
+    pub clear_role: bool,
+    pub sync_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -143,6 +175,7 @@ pub struct MailMessageSummaryResponse {
 pub struct MailMessageDetailResponse {
     pub message: MailMessageSummaryResponse,
     pub body_text: Option<String>,
+    pub body_html: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

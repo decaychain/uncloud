@@ -57,6 +57,7 @@ Authenticated routes are mounted under both `/api` and `/api/v1`:
 - `POST /mail/accounts/{id}/sync`
 - `GET /mail/accounts/{account_id}/folders`
 - `POST /mail/accounts/{account_id}/folders/refresh`
+- `PUT /mail/accounts/{account_id}/folders/{folder_id}`
 - `POST /mail/accounts/{account_id}/folders/{folder_id}/sync`
 - `GET /mail/accounts/{account_id}/folders/{folder_id}/messages`
 - `GET /mail/messages/{message_id}`
@@ -85,23 +86,26 @@ the account's SMTP settings.
 - SMTP connection/authentication testing through
   `POST /mail/accounts/{id}/test-smtp`.
 - Folder/subfolder persistence using remote path, hierarchy delimiter, parent
-  path, attributes, and selectable state.
+  path, attributes, selectable state, role mapping, and account-sync inclusion.
 - Folder refresh upserts by `(owner_id, account_id, path)`, preserving stable
   folder ids across refreshes.
+- Folder role inference marks common Inbox, Sent, Drafts, Archive, Trash, Spam,
+  and All Mail folders from IMAP attributes and common folder names. Manual role
+  overrides are preserved across folder refreshes.
 - Manual read-only message summary sync for one folder or all cached selectable
-  folders. Each sync fetches a bounded UID window of envelope, flags, internal
-  date, and RFC822 size metadata.
+  folders included in account sync. Each sync fetches a bounded UID window of
+  envelope, flags, internal date, and RFC822 size metadata.
 - Per-folder sync state: UIDVALIDITY, UIDNEXT, exists/unseen counts, highest
   scanned UID, sync timestamps, and last error.
 - UIDVALIDITY changes invalidate cached message summaries for that folder before
   resync.
 - Basic message summary listing by folder from the MongoDB cache.
 - On-demand message detail/body fetch for the reader pane. This currently uses
-  the stored credential, fetches `BODY.PEEK[]`, strips headers/tags crudely, and
-  returns placeholder plain text.
+  the stored credential, fetches `BODY.PEEK[]`, parses MIME with `mail-parser`,
+  and returns plain text plus server-sanitized HTML.
 - First read-only web UI iteration at `/mail`: account/folder navigation,
-  account setup, IMAP/SMTP tests, manual account/folder sync, cached message
-  list, and a reader pane.
+  account setup/settings, IMAP/SMTP tests, folder settings, manual
+  account/folder sync, cached message list, and a reader pane.
 - Mongo indexes for account, identity, folder, message, and attachment metadata.
 - Server-wide `features.mail` toggle plus per-user opt-out through
   `disabled_features`.
@@ -113,10 +117,10 @@ the account's SMTP settings.
 - SMTP is wired only for connection/authentication testing. Sending is still not
   implemented.
 - Message sync currently stores summaries only. Raw RFC822 bodies, decoded
-  parts, MIME parsing, attachment persistence, and HTML sanitization are not
+  parts, parsed body output, attachment persistence, and sanitized HTML are not
   persisted yet.
-- Body rendering is intentionally provisional. The UI fetches a raw message body
-  on demand and displays best-effort plain text.
+- Body rendering is on-demand. The UI prefers sanitized HTML when available and
+  falls back to plain text. Remote image URLs are stripped during sanitization.
 - The UI is read-only. Compose, search, threading, flag changes, delete/archive,
   move, and attachments are not implemented.
 - Account-level manual sync refreshes folders first, then syncs selectable
@@ -139,7 +143,7 @@ the account's SMTP settings.
 10. `GET /api/mail/accounts/{account_id}/folders/{folder_id}/messages` to
     inspect cached message summaries for a synced folder.
 11. Open `/mail` in the web UI and verify account/folder selection, sync
-    controls, message list, and placeholder reader body.
+    controls, message list, and sanitized HTML/plain-text reader body.
 
 This is enough to validate the current protocol foundation before building UI.
 
@@ -192,15 +196,13 @@ Remaining credential work before scheduler/background sync:
 ### 4. Message Read APIs
 
 - Basic folder message listing exists for synced summaries.
-- Basic message detail route exists and fetches placeholder plain text on
-  demand.
+- Basic message detail route exists and fetches/parses MIME bodies on demand.
 - Add pagination cursors by folder and date/UID.
-- Replace placeholder body rendering with stored raw message fetch + proper
-  parsing through `mail-parser`.
-- Sanitize HTML with `ammonia` before returning/rendering it.
+- Store raw message fetches and parsed body output once the storage layout is
+  decided.
 - Add attachment metadata and download routes.
-- Decide how remote image loading should work. Default should be blocked or
-  proxied, not direct by default.
+- Add an explicit remote image loading/proxy policy. Direct remote image URLs
+  are stripped from sanitized HTML for now.
 
 ### 5. Mutations
 
@@ -223,10 +225,10 @@ Remaining credential work before scheduler/background sync:
 The first read-only UI shell exists. Continue improving it around real mailbox
 data before adding write actions:
 
-- Account setup and connection testing.
-- Folder list and sync status.
+- Account setup, settings, deletion, and connection testing.
+- Folder list, sync status, role labels, and per-folder settings.
 - Read-only message list.
-- Message reader with placeholder body text.
+- Message reader with sanitized HTML and plain-text fallback.
 
 Next UI work should focus on mailbox ergonomics, responsive navigation,
 pagination, and reader layout. Compose and mutations should wait until summary

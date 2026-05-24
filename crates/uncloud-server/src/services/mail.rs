@@ -12,6 +12,7 @@ use lettre::transport::smtp::{
     client::{Tls, TlsParameters},
 };
 use lettre::{AsyncSmtpTransport, Tokio1Executor};
+use mail_parser::MessageParser;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -139,7 +140,7 @@ impl MailService {
         password: &str,
         folder_path: &str,
         uid: u32,
-    ) -> Result<String> {
+    ) -> Result<RemoteMessageBody> {
         match settings.security {
             MailSecurity::Tls => {
                 let client = connect_imap_tls(settings, true).await?;
@@ -421,7 +422,7 @@ async fn fetch_imap_message_body<T>(
     password: &str,
     folder_path: &str,
     uid: u32,
-) -> Result<String>
+) -> Result<RemoteMessageBody>
 where
     T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
 {
@@ -445,7 +446,7 @@ where
         .find_map(|fetch| fetch.body().map(|body| body.to_vec()))
         .ok_or_else(|| AppError::NotFound("Mail message body".into()))?;
     let _ = session.logout().await;
-    Ok(raw_message_to_plain_text(&body))
+    Ok(parse_message_body(&body))
 }
 
 fn smtp_tls_parameters(settings: &MailServerConfig) -> Result<TlsParameters> {
@@ -517,6 +518,12 @@ pub struct RemoteMessageSummary {
     pub internal_date: Option<DateTime<Utc>>,
     pub flags: Vec<String>,
     pub size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteMessageBody {
+    pub text: Option<String>,
+    pub html: Option<String>,
 }
 
 fn display_name(path: &str, delimiter: Option<&str>) -> String {
@@ -753,7 +760,46 @@ fn flag_name(flag: Flag<'_>) -> String {
     }
 }
 
-fn raw_message_to_plain_text(raw: &[u8]) -> String {
+fn parse_message_body(raw: &[u8]) -> RemoteMessageBody {
+    let Some(message) = MessageParser::default().parse(raw) else {
+        return RemoteMessageBody {
+            text: Some(raw_message_to_plain_text_fallback(raw)),
+            html: None,
+        };
+    };
+
+    let text = message
+        .body_text(0)
+        .map(|body| body.into_owned())
+        .map(|body| normalize_plain_text(&body))
+        .filter(|body| !body.is_empty());
+    let html = message
+        .body_html(0)
+        .map(|body| body.into_owned())
+        .map(|body| sanitize_message_html(&body))
+        .filter(|body| !body.trim().is_empty());
+
+    if text.is_some() || html.is_some() {
+        RemoteMessageBody { text, html }
+    } else {
+        RemoteMessageBody {
+            text: Some(raw_message_to_plain_text_fallback(raw)),
+            html: None,
+        }
+    }
+}
+
+fn sanitize_message_html(input: &str) -> String {
+    let mut builder = ammonia::Builder::default();
+    builder.url_relative(ammonia::UrlRelative::Deny);
+    builder.attribute_filter(|element, attribute, value| match (element, attribute) {
+        ("img", "src") | ("img", "srcset") | ("source", "src") | ("source", "srcset") => None,
+        _ => Some(value.into()),
+    });
+    builder.clean(input).to_string()
+}
+
+fn raw_message_to_plain_text_fallback(raw: &[u8]) -> String {
     let text = String::from_utf8_lossy(raw);
     let body = text
         .split_once("\r\n\r\n")
@@ -803,7 +849,7 @@ fn normalize_plain_text(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        display_name, next_uid_sync_plan, parent_path, raw_message_to_plain_text, sync_completed,
+        display_name, next_uid_sync_plan, parent_path, parse_message_body, sync_completed,
         updated_uid_cursors, UidSyncDirection, UidSyncPlan,
     };
 
@@ -912,8 +958,31 @@ mod tests {
     }
 
     #[test]
-    fn raw_message_to_plain_text_strips_headers_and_tags() {
-        let raw = b"Subject: Hi\r\nContent-Type: text/html\r\n\r\n<html><body><p>Hello</p><p>World</p></body></html>";
-        assert_eq!(raw_message_to_plain_text(raw), "Hello World");
+    fn parse_message_body_decodes_text_and_sanitizes_html() {
+        let raw = b"Subject: Hi\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><p onclick=\"bad()\">Hello</p><script>alert(1)</script><img src=\"https://example.com/pixel.png\" srcset=\"https://example.com/large.png 2x\" alt=\"pixel\"><a href=\"/local\">Local</a><a href=\"https://example.com\">Example</a><p>World</p></body></html>";
+        let body = parse_message_body(raw);
+
+        let text = body.text.as_deref().unwrap_or_default();
+        assert!(text.contains("Hello"));
+        assert!(text.contains("World"));
+        assert!(!text.contains("alert"));
+        let html = body.html.as_deref().unwrap_or_default();
+        assert!(html.contains("Hello"));
+        assert!(html.contains("World"));
+        assert!(!html.contains("script"));
+        assert!(!html.contains("onclick"));
+        assert!(!html.contains("src="));
+        assert!(!html.contains("srcset"));
+        assert!(!html.contains("/local"));
+        assert!(html.contains("https://example.com"));
+    }
+
+    #[test]
+    fn parse_message_body_falls_back_when_parser_cannot_find_a_body() {
+        let raw = b"";
+        let body = parse_message_body(raw);
+
+        assert_eq!(body.text.as_deref(), Some(""));
+        assert_eq!(body.html, None);
     }
 }

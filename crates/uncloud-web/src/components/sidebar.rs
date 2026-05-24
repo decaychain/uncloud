@@ -323,15 +323,6 @@ pub fn Sidebar() -> Element {
                         },
                         "mail" => rsx! {
                             li { class: "menu-title", span { "Mail" } }
-                            li {
-                                Link {
-                                    to: Route::Mail {},
-                                    class: "active",
-                                    onclick: move |_| close_drawer(),
-                                    IconMail {}
-                                    span { "Inbox" }
-                                }
-                            }
                         },
                         "passwords" => rsx! {
                             li { class: "menu-title", span { "Passwords" } }

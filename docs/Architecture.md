@@ -76,7 +76,7 @@ Uncloud/
           admin_processing.rs  ← admin: rerun all processing tasks
           duplicates.rs        ← duplicate detection: hash-grouped sets, mirror clusters, subset pairs
           mail.rs              ← experimental mail accounts, identities, IMAP folder refresh,
-                                 latest-first read-only summary sync, placeholder body fetch
+                                 latest-first read-only summary sync, MIME body fetch
         services/
           auth.rs              ← AuthService (sessions, password hashing, TOTP, invites,
                                  demo accounts, user bytes)
@@ -193,6 +193,7 @@ Uncloud/
           version_history.rs   ← Version history panel for a file
           shopping.rs          ← Shopping page: lists, items, categories, shops, share list
           mail.rs              ← Experimental read-only IMAP/SMTP mail client shell
+                                 with account/folder navigation and folder settings
           passwords.rs         ← KeePass-format password vaults (browse, open, recents)
           auth/
             login.rs

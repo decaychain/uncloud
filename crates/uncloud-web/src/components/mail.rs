@@ -1,10 +1,13 @@
 use dioxus::prelude::*;
 use uncloud_common::{
-    CreateMailAccountRequest, MailAccountResponse, MailFolderResponse, MailMessageDetailResponse,
-    MailMessageSummaryResponse, MailSecurity, MailServerSettings,
+    CreateMailAccountRequest, MailAccountResponse, MailAddressDto, MailFolderResponse,
+    MailFolderRole, MailFolderRoleSource, MailMessageDetailResponse, MailMessageSummaryResponse,
+    MailSecurity, MailServerSettings, UpdateMailAccountRequest, UpdateMailFolderRequest,
 };
 
-use crate::components::icons::{IconFileText, IconFolder, IconMail, IconPlus, IconRefreshCw};
+use crate::components::icons::{
+    IconFileText, IconFolder, IconMail, IconPlus, IconRefreshCw, IconSettings, IconTrash,
+};
 use crate::hooks::use_mail;
 
 #[component]
@@ -22,6 +25,27 @@ pub fn MailPage() -> Element {
     let mut error = use_signal(|| None::<String>);
     let mut notice = use_signal(|| None::<String>);
     let mut show_setup = use_signal(|| false);
+    let mut settings_folder = use_signal(|| None::<MailFolderResponse>);
+    let mut folder_role_value = use_signal(|| "auto".to_string());
+    let mut folder_sync_enabled = use_signal(|| true);
+    let mut saving_folder_settings = use_signal(|| false);
+    let mut account_settings = use_signal(|| None::<MailAccountResponse>);
+    let mut account_display_name = use_signal(String::new);
+    let mut account_email_address = use_signal(String::new);
+    let mut account_imap_host = use_signal(String::new);
+    let mut account_imap_port = use_signal(String::new);
+    let mut account_imap_security = use_signal(|| "tls".to_string());
+    let mut account_imap_username = use_signal(String::new);
+    let mut account_smtp_host = use_signal(String::new);
+    let mut account_smtp_port = use_signal(String::new);
+    let mut account_smtp_security = use_signal(|| "tls".to_string());
+    let mut account_smtp_username = use_signal(String::new);
+    let mut account_password = use_signal(String::new);
+    let mut account_enabled = use_signal(|| true);
+    let mut account_sync_enabled = use_signal(|| false);
+    let mut saving_account_settings = use_signal(|| false);
+    let mut confirming_account_delete = use_signal(|| false);
+    let mut deleting_account = use_signal(|| false);
 
     let mut display_name = use_signal(String::new);
     let mut email_address = use_signal(String::new);
@@ -58,7 +82,7 @@ pub fn MailPage() -> Element {
     });
 
     let accounts_snapshot = accounts();
-    let folders_snapshot = folders();
+    let folders_snapshot = sorted_mail_folders(&folders());
     let messages_snapshot = messages();
     let detail_snapshot = detail();
     let selected_account_id = selected_account();
@@ -78,11 +102,36 @@ pub fn MailPage() -> Element {
             div { class: "flex flex-col gap-3 md:flex-row md:items-center md:justify-between",
                 div {
                     h1 { class: "text-2xl font-semibold tracking-normal", "Mail" }
-                    div { class: "text-sm text-base-content/60",
+                    div { class: "flex items-center gap-2 text-sm text-base-content/60",
                         if let Some(account) = active_account.as_ref() {
-                            "{account.email_address}"
+                            span { "{account.email_address}" }
+                            button {
+                                class: "btn btn-ghost btn-xs h-7 min-h-7 w-7 p-0",
+                                title: "Account settings",
+                                onclick: {
+                                    let account = account.clone();
+                                    move |_| {
+                                        account_display_name.set(account.display_name.clone());
+                                        account_email_address.set(account.email_address.clone());
+                                        account_imap_host.set(account.imap.host.clone());
+                                        account_imap_port.set(account.imap.port.to_string());
+                                        account_imap_security.set(security_to_value(account.imap.security).to_string());
+                                        account_imap_username.set(account.imap.username.clone());
+                                        account_smtp_host.set(account.smtp.host.clone());
+                                        account_smtp_port.set(account.smtp.port.to_string());
+                                        account_smtp_security.set(security_to_value(account.smtp.security).to_string());
+                                        account_smtp_username.set(account.smtp.username.clone());
+                                        account_password.set(String::new());
+                                        account_enabled.set(account.enabled);
+                                        account_sync_enabled.set(account.sync_enabled);
+                                        confirming_account_delete.set(false);
+                                        account_settings.set(Some(account.clone()));
+                                    }
+                                },
+                                IconSettings { class: "h-3.5 w-3.5".to_string() }
+                            }
                         } else {
-                            "No account selected"
+                            span { "No account selected" }
                         }
                     }
                 }
@@ -267,36 +316,49 @@ pub fn MailPage() -> Element {
                                     let active = id == selected_folder_id;
                                     let depth = folder_depth(&folder);
                                     rsx! {
-                                        button {
+                                        div {
                                             key: "{id}",
                                             class: if active {
-                                                "flex w-full items-center gap-2 bg-primary/10 px-2 py-1.5 text-left text-sm text-primary"
+                                                "group flex w-full items-center gap-1 bg-primary/10 text-sm text-primary"
                                             } else if folder.selectable {
-                                                "flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm hover:bg-base-200"
+                                                "group flex w-full items-center gap-1 text-sm hover:bg-base-200"
                                             } else {
-                                                "flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm text-base-content/45"
+                                                "group flex w-full items-center gap-1 text-sm text-base-content/45"
                                             },
                                             style: "padding-left: {0.5 + depth as f32 * 1.0}rem",
-                                            disabled: !folder.selectable,
-                                            onclick: move |_| {
-                                                let account_id = account_id.clone();
-                                                let folder_id = id.clone();
-                                                spawn(async move {
-                                                    selected_folder.set(folder_id.clone());
-                                                    selected_message.set(String::new());
-                                                    detail.set(None);
-                                                    error.set(None);
-                                                    match use_mail::list_messages(&account_id, &folder_id, 100).await {
-                                                        Ok(rows) => messages.set(rows),
-                                                        Err(e) => error.set(Some(e)),
+                                            button {
+                                                class: "flex min-w-0 flex-1 items-center gap-2 py-1.5 pr-1 text-left disabled:cursor-not-allowed",
+                                                disabled: !folder.selectable,
+                                                onclick: move |_| {
+                                                    let account_id = account_id.clone();
+                                                    let folder_id = id.clone();
+                                                    spawn(async move {
+                                                        selected_folder.set(folder_id.clone());
+                                                        selected_message.set(String::new());
+                                                        detail.set(None);
+                                                        error.set(None);
+                                                        match use_mail::list_messages(&account_id, &folder_id, 100).await {
+                                                            Ok(rows) => messages.set(rows),
+                                                            Err(e) => error.set(Some(e)),
+                                                        }
+                                                    });
+                                                },
+                                                IconFolder { class: "h-4 w-4".to_string() }
+                                                span { class: "min-w-0 flex-1 truncate", "{folder.name}" }
+                                                if let Some(label) = folder_role_label(folder.role) {
+                                                    span {
+                                                        class: if folder.role_source == MailFolderRoleSource::User {
+                                                            "badge badge-primary badge-outline badge-xs"
+                                                        } else {
+                                                            "badge badge-ghost badge-xs"
+                                                        },
+                                                        "{label}"
                                                     }
-                                                });
-                                            },
-                                            IconFolder { class: "h-4 w-4".to_string() }
-                                            span { class: "min-w-0 flex-1 truncate", "{folder.name}" }
-                                            if let Some(unseen) = folder.unseen {
-                                                if unseen > 0 {
-                                                    span { class: "badge badge-sm", "{unseen}" }
+                                                }
+                                                if let Some(unseen) = folder.unseen {
+                                                    if unseen > 0 {
+                                                        span { class: "badge badge-sm", "{unseen}" }
+                                                    }
                                                 }
                                             }
                                         }
@@ -318,39 +380,57 @@ pub fn MailPage() -> Element {
                                     }
                                 }
                             }
-                            button {
-                                class: "btn btn-sm btn-outline gap-2",
-                                disabled: selected_account_id.is_empty() || selected_folder_id.is_empty() || syncing(),
-                                onclick: move |_| {
-                                    let account_id = selected_account();
-                                    let folder_id = selected_folder();
-                                    if account_id.is_empty() || folder_id.is_empty() {
-                                        return;
-                                    }
-                                    spawn(async move {
-                                        syncing.set(true);
-                                        error.set(None);
-                                        match use_mail::sync_folder(&account_id, &folder_id, Some(50)).await {
-                                            Ok(_) => {
-                                                notice.set(Some("Folder sync finished".to_string()));
-                                                if let Ok(rows) = use_mail::list_folders(&account_id).await {
-                                                    folders.set(rows);
-                                                }
-                                                if let Ok(rows) = use_mail::list_messages(&account_id, &folder_id, 100).await {
-                                                    messages.set(rows);
-                                                }
+                            div { class: "flex items-center gap-1",
+                                button {
+                                    class: "btn btn-ghost btn-sm h-8 min-h-8 w-8 p-0",
+                                    title: "Folder settings",
+                                    disabled: active_folder.is_none(),
+                                    onclick: {
+                                        let active_folder = active_folder.clone();
+                                        move |_| {
+                                            if let Some(folder) = active_folder.clone() {
+                                                folder_role_value.set(folder_role_value_for(&folder));
+                                                folder_sync_enabled.set(folder.sync_enabled);
+                                                settings_folder.set(Some(folder));
                                             }
-                                            Err(e) => error.set(Some(e)),
                                         }
-                                        syncing.set(false);
-                                    });
-                                },
-                                if syncing() {
-                                    span { class: "loading loading-spinner loading-xs" }
-                                } else {
-                                    IconRefreshCw { class: "w-4 h-4".to_string() }
+                                    },
+                                    IconSettings { class: "h-4 w-4".to_string() }
                                 }
-                                span { "Sync" }
+                                button {
+                                    class: "btn btn-sm btn-outline gap-2",
+                                    disabled: selected_account_id.is_empty() || selected_folder_id.is_empty() || syncing(),
+                                    onclick: move |_| {
+                                        let account_id = selected_account();
+                                        let folder_id = selected_folder();
+                                        if account_id.is_empty() || folder_id.is_empty() {
+                                            return;
+                                        }
+                                        spawn(async move {
+                                            syncing.set(true);
+                                            error.set(None);
+                                            match use_mail::sync_folder(&account_id, &folder_id, Some(50)).await {
+                                                Ok(_) => {
+                                                    notice.set(Some("Folder sync finished".to_string()));
+                                                    if let Ok(rows) = use_mail::list_folders(&account_id).await {
+                                                        folders.set(rows);
+                                                    }
+                                                    if let Ok(rows) = use_mail::list_messages(&account_id, &folder_id, 100).await {
+                                                        messages.set(rows);
+                                                    }
+                                                }
+                                                Err(e) => error.set(Some(e)),
+                                            }
+                                            syncing.set(false);
+                                        });
+                                    },
+                                    if syncing() {
+                                        span { class: "loading loading-spinner loading-xs" }
+                                    } else {
+                                        IconRefreshCw { class: "w-4 h-4".to_string() }
+                                    }
+                                    span { "Sync" }
+                                }
                             }
                         }
                         div { class: "min-h-0 flex-1 overflow-y-auto",
@@ -416,7 +496,12 @@ pub fn MailPage() -> Element {
                                 }
                             }
                             div { class: "min-h-0 flex-1 overflow-y-auto p-4",
-                                if let Some(body) = row.body_text {
+                                if let Some(body) = row.body_html {
+                                    div {
+                                        class: "max-w-none break-words text-sm leading-6 [&_a]:text-primary [&_blockquote]:border-l-2 [&_blockquote]:border-base-300 [&_blockquote]:pl-3 [&_blockquote]:text-base-content/70 [&_img]:max-w-full [&_table]:max-w-full",
+                                        dangerous_inner_html: "{body}",
+                                    }
+                                } else if let Some(body) = row.body_text {
                                     pre { class: "whitespace-pre-wrap break-words font-sans text-sm leading-6", "{body}" }
                                 } else {
                                     div { class: "flex h-full items-center justify-center text-sm text-base-content/60",
@@ -568,6 +653,399 @@ pub fn MailPage() -> Element {
                     div { class: "modal-backdrop", onclick: move |_| show_setup.set(false) }
                 }
             }
+
+            if let Some(account) = account_settings() {
+                {
+                    let account_id = account.id.clone();
+                    rsx! {
+                        div { class: "modal modal-open",
+                            div { class: "modal-box max-w-4xl",
+                                h2 { class: "text-xl font-semibold", "Account settings" }
+                                div { class: "mt-1 truncate text-sm text-base-content/60", "{account.email_address}" }
+
+                                div { class: "mt-4 grid gap-4 md:grid-cols-2",
+                                    label { class: "form-control",
+                                        span { class: "label-text", "Display name" }
+                                        input {
+                                            class: "input input-bordered",
+                                            value: "{account_display_name()}",
+                                            oninput: move |e| account_display_name.set(e.value()),
+                                        }
+                                    }
+                                    label { class: "form-control",
+                                        span { class: "label-text", "Email address" }
+                                        input {
+                                            class: "input input-bordered",
+                                            r#type: "email",
+                                            value: "{account_email_address()}",
+                                            oninput: move |e| account_email_address.set(e.value()),
+                                        }
+                                    }
+                                    label { class: "form-control",
+                                        span { class: "label-text", "IMAP host" }
+                                        input {
+                                            class: "input input-bordered",
+                                            value: "{account_imap_host()}",
+                                            oninput: move |e| account_imap_host.set(e.value()),
+                                        }
+                                    }
+                                    label { class: "form-control",
+                                        span { class: "label-text", "IMAP username" }
+                                        input {
+                                            class: "input input-bordered",
+                                            value: "{account_imap_username()}",
+                                            oninput: move |e| account_imap_username.set(e.value()),
+                                        }
+                                    }
+                                    div { class: "grid grid-cols-[1fr_9rem] gap-3",
+                                        label { class: "form-control",
+                                            span { class: "label-text", "IMAP security" }
+                                            select {
+                                                class: "select select-bordered",
+                                                value: "{account_imap_security()}",
+                                                onchange: move |e| account_imap_security.set(e.value()),
+                                                option { value: "tls", "TLS" }
+                                                option { value: "start_tls", "STARTTLS" }
+                                                option { value: "plain", "Plain" }
+                                            }
+                                        }
+                                        label { class: "form-control",
+                                            span { class: "label-text", "Port" }
+                                            input {
+                                                class: "input input-bordered",
+                                                value: "{account_imap_port()}",
+                                                oninput: move |e| account_imap_port.set(e.value()),
+                                            }
+                                        }
+                                    }
+                                    label { class: "form-control",
+                                        span { class: "label-text", "SMTP host" }
+                                        input {
+                                            class: "input input-bordered",
+                                            value: "{account_smtp_host()}",
+                                            oninput: move |e| account_smtp_host.set(e.value()),
+                                        }
+                                    }
+                                    label { class: "form-control",
+                                        span { class: "label-text", "SMTP username" }
+                                        input {
+                                            class: "input input-bordered",
+                                            value: "{account_smtp_username()}",
+                                            oninput: move |e| account_smtp_username.set(e.value()),
+                                        }
+                                    }
+                                    div { class: "grid grid-cols-[1fr_9rem] gap-3",
+                                        label { class: "form-control",
+                                            span { class: "label-text", "SMTP security" }
+                                            select {
+                                                class: "select select-bordered",
+                                                value: "{account_smtp_security()}",
+                                                onchange: move |e| account_smtp_security.set(e.value()),
+                                                option { value: "tls", "TLS" }
+                                                option { value: "start_tls", "STARTTLS" }
+                                                option { value: "plain", "Plain" }
+                                            }
+                                        }
+                                        label { class: "form-control",
+                                            span { class: "label-text", "Port" }
+                                            input {
+                                                class: "input input-bordered",
+                                                value: "{account_smtp_port()}",
+                                                oninput: move |e| account_smtp_port.set(e.value()),
+                                            }
+                                        }
+                                    }
+                                    label { class: "form-control md:col-span-2",
+                                        span { class: "label-text", "New app password" }
+                                        input {
+                                            class: "input input-bordered",
+                                            r#type: "password",
+                                            value: "{account_password()}",
+                                            placeholder: "Leave empty to keep the stored credential",
+                                            oninput: move |e| account_password.set(e.value()),
+                                        }
+                                    }
+                                    label { class: "label cursor-pointer justify-start gap-3 rounded border border-base-300 px-3",
+                                        input {
+                                            class: "toggle toggle-sm",
+                                            r#type: "checkbox",
+                                            checked: account_enabled(),
+                                            onchange: move |e| account_enabled.set(e.checked()),
+                                        }
+                                        span {
+                                            span { class: "block text-sm font-medium", "Enabled" }
+                                            span { class: "block text-xs text-base-content/60", "Disabled accounts remain configured but hidden from future automatic sync." }
+                                        }
+                                    }
+                                    label { class: "label cursor-pointer justify-start gap-3 rounded border border-base-300 px-3",
+                                        input {
+                                            class: "toggle toggle-sm",
+                                            r#type: "checkbox",
+                                            checked: account_sync_enabled(),
+                                            onchange: move |e| account_sync_enabled.set(e.checked()),
+                                        }
+                                        span {
+                                            span { class: "block text-sm font-medium", "Include in scheduled sync" }
+                                            span { class: "block text-xs text-base-content/60", "Manual sync remains available from the mail view." }
+                                        }
+                                    }
+                                }
+
+                                div { class: "modal-action items-center justify-between",
+                                    button {
+                                        class: if confirming_account_delete() {
+                                            "btn btn-error gap-2"
+                                        } else {
+                                            "btn btn-outline btn-error gap-2"
+                                        },
+                                        disabled: saving_account_settings() || deleting_account(),
+                                        onclick: {
+                                            let account_id = account_id.clone();
+                                            move |_| {
+                                                if !confirming_account_delete() {
+                                                    confirming_account_delete.set(true);
+                                                    return;
+                                                }
+                                                let account_id = account_id.clone();
+                                                spawn(async move {
+                                                    deleting_account.set(true);
+                                                    error.set(None);
+                                                    notice.set(None);
+                                                    match use_mail::delete_account(&account_id).await {
+                                                        Ok(_) => {
+                                                            match use_mail::list_accounts().await {
+                                                                Ok(list) => {
+                                                                    let next = list.first().map(|a| a.id.clone()).unwrap_or_default();
+                                                                    accounts.set(list);
+                                                                    selected_account.set(next.clone());
+                                                                    selected_folder.set(String::new());
+                                                                    selected_message.set(String::new());
+                                                                    messages.set(Vec::new());
+                                                                    detail.set(None);
+                                                                    if next.is_empty() {
+                                                                        folders.set(Vec::new());
+                                                                    } else {
+                                                                        match use_mail::list_folders(&next).await {
+                                                                            Ok(rows) => folders.set(rows),
+                                                                            Err(e) => error.set(Some(e)),
+                                                                        }
+                                                                    }
+                                                                    account_settings.set(None);
+                                                                    notice.set(Some("Mail account deleted".to_string()));
+                                                                }
+                                                                Err(e) => error.set(Some(e)),
+                                                            }
+                                                        }
+                                                        Err(e) => error.set(Some(e)),
+                                                    }
+                                                    deleting_account.set(false);
+                                                    confirming_account_delete.set(false);
+                                                });
+                                            }
+                                        },
+                                        if deleting_account() {
+                                            span { class: "loading loading-spinner loading-xs" }
+                                        } else {
+                                            IconTrash { class: "h-4 w-4".to_string() }
+                                        }
+                                        if confirming_account_delete() {
+                                            span { "Confirm delete" }
+                                        } else {
+                                            span { "Delete" }
+                                        }
+                                    }
+                                    div { class: "flex gap-2",
+                                        button {
+                                            class: "btn",
+                                            disabled: saving_account_settings() || deleting_account(),
+                                            onclick: move |_| account_settings.set(None),
+                                            "Cancel"
+                                        }
+                                        button {
+                                            class: "btn btn-primary",
+                                            disabled: saving_account_settings() || deleting_account(),
+                                            onclick: {
+                                                let account_id = account_id.clone();
+                                                move |_| {
+                                                    let account_id = account_id.clone();
+                                                    let display = account_display_name();
+                                                    let email = account_email_address();
+                                                    let imap_host_val = account_imap_host();
+                                                    let imap_user = account_imap_username();
+                                                    let smtp_host_val = account_smtp_host();
+                                                    let smtp_user = account_smtp_username();
+                                                    let imap_port_val = account_imap_port().parse::<u16>().unwrap_or(993);
+                                                    let smtp_port_val = account_smtp_port().parse::<u16>().unwrap_or(465);
+                                                    let imap_sec = security_from_value(&account_imap_security());
+                                                    let smtp_sec = security_from_value(&account_smtp_security());
+                                                    let pass = account_password();
+                                                    let enabled = account_enabled();
+                                                    let sync_enabled = account_sync_enabled();
+                                                    spawn(async move {
+                                                        saving_account_settings.set(true);
+                                                        error.set(None);
+                                                        notice.set(None);
+                                                        let req = UpdateMailAccountRequest {
+                                                            display_name: Some(display),
+                                                            email_address: Some(email),
+                                                            imap: Some(MailServerSettings {
+                                                                host: imap_host_val,
+                                                                port: imap_port_val,
+                                                                security: imap_sec,
+                                                                username: imap_user,
+                                                            }),
+                                                            smtp: Some(MailServerSettings {
+                                                                host: smtp_host_val,
+                                                                port: smtp_port_val,
+                                                                security: smtp_sec,
+                                                                username: smtp_user,
+                                                            }),
+                                                            enabled: Some(enabled),
+                                                            sync_enabled: Some(sync_enabled),
+                                                        };
+                                                        match use_mail::update_account(&account_id, &req).await {
+                                                            Ok(updated) => {
+                                                                if !pass.trim().is_empty() {
+                                                                    if let Err(e) = use_mail::set_credential(&account_id, &pass).await {
+                                                                        error.set(Some(e));
+                                                                        saving_account_settings.set(false);
+                                                                        return;
+                                                                    }
+                                                                }
+                                                                let mut current = accounts();
+                                                                for item in &mut current {
+                                                                    if item.id == updated.id {
+                                                                        *item = updated.clone();
+                                                                        break;
+                                                                    }
+                                                                }
+                                                                accounts.set(current);
+                                                                selected_account.set(updated.id.clone());
+                                                                account_settings.set(None);
+                                                                notice.set(Some("Account settings saved".to_string()));
+                                                            }
+                                                            Err(e) => error.set(Some(e)),
+                                                        }
+                                                        saving_account_settings.set(false);
+                                                    });
+                                                }
+                                            },
+                                            if saving_account_settings() {
+                                                span { class: "loading loading-spinner loading-xs" }
+                                            }
+                                            "Save"
+                                        }
+                                    }
+                                }
+                            }
+                            div { class: "modal-backdrop", onclick: move |_| account_settings.set(None) }
+                        }
+                    }
+                }
+            }
+
+            if let Some(folder) = settings_folder() {
+                {
+                    let auto_label = match folder.role {
+                        Some(role) => format!("Automatic ({})", folder_role_name(role)),
+                        None => "Automatic".to_string(),
+                    };
+                    rsx! {
+                        div { class: "modal modal-open",
+                            div { class: "modal-box max-w-xl",
+                                h2 { class: "text-xl font-semibold", "Folder settings" }
+                                div { class: "mt-1 truncate text-sm text-base-content/60", "{folder.path}" }
+
+                                div { class: "mt-5 grid gap-4",
+                                    label { class: "form-control",
+                                        span { class: "label-text", "Folder role" }
+                                        select {
+                                            class: "select select-bordered",
+                                            value: "{folder_role_value()}",
+                                            onchange: move |e| folder_role_value.set(e.value()),
+                                            option { value: "auto", "{auto_label}" }
+                                            option { value: "none", "None" }
+                                            option { value: "inbox", "Inbox" }
+                                            option { value: "sent", "Sent" }
+                                            option { value: "drafts", "Drafts" }
+                                            option { value: "archive", "Archive" }
+                                            option { value: "trash", "Trash" }
+                                            option { value: "spam", "Spam" }
+                                            option { value: "all_mail", "All mail" }
+                                        }
+                                    }
+                                    label { class: "label cursor-pointer justify-start gap-3 rounded border border-base-300 px-3",
+                                        input {
+                                            class: "toggle toggle-sm",
+                                            r#type: "checkbox",
+                                            checked: folder_sync_enabled(),
+                                            onchange: move |e| folder_sync_enabled.set(e.checked()),
+                                        }
+                                        span {
+                                            span { class: "block text-sm font-medium", "Include in account sync" }
+                                            span { class: "block text-xs text-base-content/60", "Manual folder sync remains available." }
+                                        }
+                                    }
+                                }
+
+                                div { class: "modal-action",
+                                    button {
+                                        class: "btn",
+                                        disabled: saving_folder_settings(),
+                                        onclick: move |_| settings_folder.set(None),
+                                        "Cancel"
+                                    }
+                                    button {
+                                        class: "btn btn-primary",
+                                        disabled: saving_folder_settings(),
+                                        onclick: move |_| {
+                                            let folder = folder.clone();
+                                            let role_value = folder_role_value();
+                                            let sync_enabled = folder_sync_enabled();
+                                            spawn(async move {
+                                                saving_folder_settings.set(true);
+                                                error.set(None);
+                                                notice.set(None);
+                                                let req = UpdateMailFolderRequest {
+                                                    role: if role_value == "auto" {
+                                                        None
+                                                    } else {
+                                                        folder_role_from_value(&role_value)
+                                                    },
+                                                    infer_role: role_value == "auto",
+                                                    clear_role: role_value == "none",
+                                                    sync_enabled: Some(sync_enabled),
+                                                };
+                                                match use_mail::update_folder(&folder.account_id, &folder.id, &req).await {
+                                                    Ok(updated) => {
+                                                        let mut current = folders();
+                                                        for item in &mut current {
+                                                            if item.id == updated.id {
+                                                                *item = updated.clone();
+                                                                break;
+                                                            }
+                                                        }
+                                                        folders.set(current);
+                                                        settings_folder.set(None);
+                                                        notice.set(Some("Folder settings saved".to_string()));
+                                                    }
+                                                    Err(e) => error.set(Some(e)),
+                                                }
+                                                saving_folder_settings.set(false);
+                                            });
+                                        },
+                                        if saving_folder_settings() {
+                                            span { class: "loading loading-spinner loading-xs" }
+                                        }
+                                        "Save"
+                                    }
+                                }
+                            }
+                            div { class: "modal-backdrop", onclick: move |_| settings_folder.set(None) }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -577,6 +1055,133 @@ fn security_from_value(value: &str) -> MailSecurity {
         "start_tls" => MailSecurity::StartTls,
         "plain" => MailSecurity::Plain,
         _ => MailSecurity::Tls,
+    }
+}
+
+fn security_to_value(value: MailSecurity) -> &'static str {
+    match value {
+        MailSecurity::StartTls => "start_tls",
+        MailSecurity::Plain => "plain",
+        MailSecurity::Tls => "tls",
+    }
+}
+
+fn sorted_mail_folders(folders: &[MailFolderResponse]) -> Vec<MailFolderResponse> {
+    let folder_paths = folders
+        .iter()
+        .map(|folder| folder.path.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut by_parent = std::collections::HashMap::<Option<String>, Vec<MailFolderResponse>>::new();
+    for folder in folders {
+        let parent = folder
+            .parent_path
+            .as_ref()
+            .filter(|path| folder_paths.contains(path.as_str()))
+            .cloned();
+        by_parent.entry(parent).or_default().push(folder.clone());
+    }
+    for children in by_parent.values_mut() {
+        sort_mail_folder_siblings(children);
+    }
+
+    let mut out = Vec::with_capacity(folders.len());
+    append_mail_folder_children(None, &mut by_parent, &mut out);
+    while !by_parent.is_empty() {
+        let next_parent = by_parent.keys().next().cloned().unwrap_or(None);
+        append_mail_folder_children(next_parent.as_deref(), &mut by_parent, &mut out);
+    }
+    out
+}
+
+fn append_mail_folder_children(
+    parent: Option<&str>,
+    by_parent: &mut std::collections::HashMap<Option<String>, Vec<MailFolderResponse>>,
+    out: &mut Vec<MailFolderResponse>,
+) {
+    let key = parent.map(str::to_string);
+    let Some(children) = by_parent.remove(&key) else {
+        return;
+    };
+    for child in children {
+        let path = child.path.clone();
+        out.push(child);
+        append_mail_folder_children(Some(&path), by_parent, out);
+    }
+}
+
+fn sort_mail_folder_siblings(folders: &mut [MailFolderResponse]) {
+    folders.sort_by(|a, b| {
+        folder_role_rank(a.role)
+            .cmp(&folder_role_rank(b.role))
+            .then_with(|| {
+                a.name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase())
+            })
+            .then_with(|| {
+                a.path
+                    .to_ascii_lowercase()
+                    .cmp(&b.path.to_ascii_lowercase())
+            })
+    });
+}
+
+fn folder_role_rank(role: Option<MailFolderRole>) -> u8 {
+    match role {
+        Some(MailFolderRole::Inbox) => 0,
+        Some(MailFolderRole::Sent) => 10,
+        Some(MailFolderRole::Drafts) => 20,
+        Some(MailFolderRole::Archive) => 30,
+        Some(MailFolderRole::Spam) => 40,
+        Some(MailFolderRole::Trash) => 50,
+        Some(MailFolderRole::AllMail) => 60,
+        None => 100,
+    }
+}
+
+fn folder_role_label(role: Option<MailFolderRole>) -> Option<&'static str> {
+    role.map(folder_role_name)
+}
+
+fn folder_role_name(role: MailFolderRole) -> &'static str {
+    match role {
+        MailFolderRole::Inbox => "Inbox",
+        MailFolderRole::Sent => "Sent",
+        MailFolderRole::Drafts => "Drafts",
+        MailFolderRole::Trash => "Trash",
+        MailFolderRole::Archive => "Archive",
+        MailFolderRole::Spam => "Spam",
+        MailFolderRole::AllMail => "All mail",
+    }
+}
+
+fn folder_role_value_for(folder: &MailFolderResponse) -> String {
+    if folder.role_source == MailFolderRoleSource::Inferred {
+        return "auto".to_string();
+    }
+    match folder.role {
+        Some(MailFolderRole::Inbox) => "inbox",
+        Some(MailFolderRole::Sent) => "sent",
+        Some(MailFolderRole::Drafts) => "drafts",
+        Some(MailFolderRole::Trash) => "trash",
+        Some(MailFolderRole::Archive) => "archive",
+        Some(MailFolderRole::Spam) => "spam",
+        Some(MailFolderRole::AllMail) => "all_mail",
+        None => "none",
+    }
+    .to_string()
+}
+
+fn folder_role_from_value(value: &str) -> Option<MailFolderRole> {
+    match value {
+        "inbox" => Some(MailFolderRole::Inbox),
+        "sent" => Some(MailFolderRole::Sent),
+        "drafts" => Some(MailFolderRole::Drafts),
+        "trash" => Some(MailFolderRole::Trash),
+        "archive" => Some(MailFolderRole::Archive),
+        "spam" => Some(MailFolderRole::Spam),
+        "all_mail" => Some(MailFolderRole::AllMail),
+        _ => None,
     }
 }
 
@@ -602,14 +1207,7 @@ fn message_sender(message: &MailMessageSummaryResponse) -> String {
     message
         .from
         .first()
-        .map(|address| {
-            address
-                .name
-                .as_ref()
-                .filter(|name| !name.trim().is_empty())
-                .cloned()
-                .unwrap_or_else(|| address.address.clone())
-        })
+        .map(format_mail_address)
         .unwrap_or_else(|| "Unknown sender".to_string())
 }
 
@@ -620,16 +1218,19 @@ fn message_recipients(message: &MailMessageSummaryResponse) -> String {
     message
         .to
         .iter()
-        .map(|address| {
-            address
-                .name
-                .as_ref()
-                .filter(|name| !name.trim().is_empty())
-                .cloned()
-                .unwrap_or_else(|| address.address.clone())
-        })
+        .map(format_mail_address)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn format_mail_address(address: &MailAddressDto) -> String {
+    let email = address.address.trim();
+    match address.name.as_deref().map(str::trim) {
+        Some(name) if !name.is_empty() && !name.eq_ignore_ascii_case(email) => {
+            format!("{name} <{email}>")
+        }
+        _ => email.to_string(),
+    }
 }
 
 fn short_date(value: Option<&str>) -> String {

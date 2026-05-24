@@ -2,7 +2,7 @@ use bson::serde_helpers::chrono_datetime_as_bson_datetime;
 use chrono::{DateTime, Utc};
 use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
-use uncloud_common::MailSecurity;
+use uncloud_common::{MailFolderRole, MailFolderRoleSource, MailSecurity};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MailServerConfig {
@@ -78,9 +78,13 @@ pub struct MailFolder {
     #[serde(default)]
     pub parent_path: Option<String>,
     #[serde(default)]
-    pub role: Option<String>,
+    pub role: Option<MailFolderRole>,
+    #[serde(default)]
+    pub role_source: MailFolderRoleSource,
     #[serde(default = "default_true")]
     pub selectable: bool,
+    #[serde(default = "default_true")]
+    pub sync_enabled: bool,
     #[serde(default)]
     pub attributes: Vec<String>,
     #[serde(default)]

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     extract::{Path, Query, State},
@@ -13,9 +13,10 @@ use serde::Deserialize;
 use uncloud_common::{
     CreateMailAccountRequest, CreateMailIdentityRequest, MailAccountResponse,
     MailAccountSyncResponse, MailAddressDto, MailConnectionTestResponse,
-    MailCredentialStatusResponse, MailFolderResponse, MailFolderSyncResponse, MailIdentityResponse,
-    MailMessageDetailResponse, MailMessageSummaryResponse, MailPasswordAuthRequest,
-    MailServerSettings, MailSyncRequest, SetMailCredentialRequest, UpdateMailAccountRequest,
+    MailCredentialStatusResponse, MailFolderResponse, MailFolderRole, MailFolderRoleSource,
+    MailFolderSyncResponse, MailIdentityResponse, MailMessageDetailResponse,
+    MailMessageSummaryResponse, MailPasswordAuthRequest, MailServerSettings, MailSyncRequest,
+    SetMailCredentialRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
     UpdateMailIdentityRequest,
 };
 
@@ -142,6 +143,14 @@ fn identity_to_response(identity: &MailIdentity) -> MailIdentityResponse {
     }
 }
 
+fn folder_effective_role(folder: &MailFolder) -> Option<MailFolderRole> {
+    if folder.role_source == MailFolderRoleSource::User {
+        folder.role
+    } else {
+        infer_folder_role(&folder.path, &folder.name, &folder.attributes)
+    }
+}
+
 fn folder_to_response(folder: &MailFolder) -> MailFolderResponse {
     MailFolderResponse {
         id: folder.id.to_hex(),
@@ -150,8 +159,10 @@ fn folder_to_response(folder: &MailFolder) -> MailFolderResponse {
         name: folder.name.clone(),
         delimiter: folder.delimiter.clone(),
         parent_path: folder.parent_path.clone(),
-        role: folder.role.clone(),
+        role: folder_effective_role(folder),
+        role_source: folder.role_source,
         selectable: folder.selectable,
+        sync_enabled: folder.sync_enabled,
         attributes: folder.attributes.clone(),
         uid_validity: folder.uid_validity,
         uid_next: folder.uid_next,
@@ -249,6 +260,77 @@ fn optional_u32_bson(value: Option<u32>) -> bson::Bson {
     value
         .map(|value| bson::Bson::Int64(value as i64))
         .unwrap_or(bson::Bson::Null)
+}
+
+fn optional_role_bson(value: Option<MailFolderRole>) -> Result<bson::Bson> {
+    bson::to_bson(&value).map_err(|e| AppError::Internal(e.to_string()))
+}
+
+fn role_source_bson(value: MailFolderRoleSource) -> Result<bson::Bson> {
+    bson::to_bson(&value).map_err(|e| AppError::Internal(e.to_string()))
+}
+
+fn infer_folder_role(path: &str, name: &str, attributes: &[String]) -> Option<MailFolderRole> {
+    for attr in attributes.iter().map(|value| value.to_ascii_lowercase()) {
+        if attr.contains("inbox") {
+            return Some(MailFolderRole::Inbox);
+        }
+        if attr.contains("sent") {
+            return Some(MailFolderRole::Sent);
+        }
+        if attr.contains("draft") {
+            return Some(MailFolderRole::Drafts);
+        }
+        if attr.contains("trash") || attr.contains("deleted") || attr.contains("bin") {
+            return Some(MailFolderRole::Trash);
+        }
+        if attr.contains("archive") {
+            return Some(MailFolderRole::Archive);
+        }
+        if attr.contains("junk") || attr.contains("spam") {
+            return Some(MailFolderRole::Spam);
+        }
+        if attr.contains("all") {
+            return Some(MailFolderRole::AllMail);
+        }
+    }
+
+    let path_lower = path.trim().to_ascii_lowercase();
+    if path_lower == "inbox" {
+        return Some(MailFolderRole::Inbox);
+    }
+
+    match normalized_folder_name(name).as_str() {
+        "inbox" => Some(MailFolderRole::Inbox),
+        "sent" | "sent mail" | "sent items" | "sent messages" | "gesendet"
+        | "gesendete elemente" => Some(MailFolderRole::Sent),
+        "draft" | "drafts" | "entwurfe" | "entwuerfe" => Some(MailFolderRole::Drafts),
+        "trash" | "bin" | "deleted" | "deleted items" | "deleted messages" | "papierkorb" => {
+            Some(MailFolderRole::Trash)
+        }
+        "archive" | "archives" | "archiv" => Some(MailFolderRole::Archive),
+        "spam" | "junk" | "junk mail" | "junk email" | "junk e mail" | "bulk mail" => {
+            Some(MailFolderRole::Spam)
+        }
+        "all" | "all mail" | "all messages" | "alle nachrichten" => Some(MailFolderRole::AllMail),
+        _ => None,
+    }
+}
+
+fn normalized_folder_name(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn resolve_mail_password(
@@ -706,6 +788,56 @@ pub async fn list_folders(
     Ok(Json(out))
 }
 
+pub async fn update_folder(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((account_id, folder_id)): Path<(String, String)>,
+    Json(req): Json<UpdateMailFolderRequest>,
+) -> Result<Json<MailFolderResponse>> {
+    require_mail(&state)?;
+    let account_id = parse_oid(&account_id, "mail account id")?;
+    let folder_id = parse_oid(&folder_id, "mail folder id")?;
+    let _ = find_account(&state, user.id, account_id).await?;
+    let folder = find_folder(&state, user.id, account_id, folder_id).await?;
+
+    let mut set = doc! {};
+    if req.infer_role {
+        let role = infer_folder_role(&folder.path, &folder.name, &folder.attributes);
+        set.insert("role", optional_role_bson(role)?);
+        set.insert(
+            "role_source",
+            role_source_bson(MailFolderRoleSource::Inferred)?,
+        );
+    } else if req.clear_role {
+        set.insert("role", bson::Bson::Null);
+        set.insert("role_source", role_source_bson(MailFolderRoleSource::User)?);
+    } else if let Some(role) = req.role {
+        set.insert("role", optional_role_bson(Some(role))?);
+        set.insert("role_source", role_source_bson(MailFolderRoleSource::User)?);
+    }
+    if let Some(sync_enabled) = req.sync_enabled {
+        set.insert("sync_enabled", sync_enabled);
+    }
+
+    if set.is_empty() {
+        return Ok(Json(folder_to_response(&folder)));
+    }
+
+    let now = Utc::now();
+    set.insert("updated_at", bson::DateTime::from_chrono(now));
+    state
+        .db
+        .collection::<MailFolder>(FOLDERS)
+        .update_one(
+            doc! { "_id": folder.id, "owner_id": user.id, "account_id": account_id },
+            doc! { "$set": set },
+        )
+        .await?;
+
+    let updated = find_folder(&state, user.id, account_id, folder.id).await?;
+    Ok(Json(folder_to_response(&updated)))
+}
+
 async fn upsert_remote_folders(
     state: &AppState,
     owner_id: ObjectId,
@@ -715,9 +847,25 @@ async fn upsert_remote_folders(
     let coll = state.db.collection::<MailFolder>(FOLDERS);
     let now = Utc::now();
     let mut remote_paths = Vec::new();
+    let mut existing_by_path = HashMap::<String, MailFolder>::new();
+    let mut existing_cursor = coll
+        .find(doc! { "owner_id": owner_id, "account_id": account_id })
+        .await?;
+    while let Some(folder) = existing_cursor.try_next().await? {
+        existing_by_path.insert(folder.path.clone(), folder);
+    }
 
     for folder in remote {
         remote_paths.push(folder.path.clone());
+        let (role, role_source) = match existing_by_path.get(&folder.path) {
+            Some(existing) if existing.role_source == MailFolderRoleSource::User => {
+                (existing.role, MailFolderRoleSource::User)
+            }
+            _ => (
+                infer_folder_role(&folder.path, &folder.name, &folder.attributes),
+                MailFolderRoleSource::Inferred,
+            ),
+        };
         coll.update_one(
             doc! { "owner_id": owner_id, "account_id": account_id, "path": &folder.path },
             doc! {
@@ -725,6 +873,8 @@ async fn upsert_remote_folders(
                     "name": folder.name,
                     "delimiter": folder.delimiter.map(bson::Bson::String).unwrap_or(bson::Bson::Null),
                     "parent_path": folder.parent_path.map(bson::Bson::String).unwrap_or(bson::Bson::Null),
+                    "role": optional_role_bson(role)?,
+                    "role_source": role_source_bson(role_source)?,
                     "selectable": folder.selectable,
                     "attributes": folder.attributes,
                     "updated_at": bson::DateTime::from_chrono(now),
@@ -734,6 +884,7 @@ async fn upsert_remote_folders(
                     "owner_id": owner_id,
                     "account_id": account_id,
                     "path": folder.path,
+                    "sync_enabled": true,
                     "created_at": bson::DateTime::from_chrono(now),
                 },
             },
@@ -1063,7 +1214,10 @@ pub async fn sync_account(
     let folders = upsert_remote_folders(&state, user.id, account_id, remote).await?;
 
     let mut folder_results = Vec::new();
-    for folder in folders.iter().filter(|folder| folder.selectable) {
+    for folder in folders
+        .iter()
+        .filter(|folder| folder.selectable && folder.sync_enabled)
+    {
         match sync_one_folder(&state, user.id, &account, folder, &password, limit).await {
             Ok(result) => folder_results.push(result),
             Err(err) => folder_results.push(MailFolderSyncResponse {
@@ -1162,7 +1316,7 @@ pub async fn get_message(
     let account = find_account(&state, user.id, message.account_id).await?;
     let _ = find_folder(&state, user.id, message.account_id, message.folder_id).await?;
     let password = resolve_mail_password(&state, &account, None)?;
-    let body_text = state
+    let body = state
         .mail
         .fetch_imap_message_body(&account.imap, &password, &message.folder_path, message.uid)
         .await
@@ -1170,6 +1324,99 @@ pub async fn get_message(
 
     Ok(Json(MailMessageDetailResponse {
         message: message_to_response(&message),
-        body_text,
+        body_text: body.as_ref().and_then(|body| body.text.clone()),
+        body_html: body.and_then(|body| body.html),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_folder(
+        path: &str,
+        role_source: MailFolderRoleSource,
+        role: Option<MailFolderRole>,
+    ) -> MailFolder {
+        let now = Utc::now();
+        MailFolder {
+            id: ObjectId::new(),
+            owner_id: ObjectId::new(),
+            account_id: ObjectId::new(),
+            path: path.to_string(),
+            name: path.rsplit('/').next().unwrap_or(path).to_string(),
+            delimiter: Some("/".to_string()),
+            parent_path: None,
+            role,
+            role_source,
+            selectable: true,
+            sync_enabled: true,
+            attributes: Vec::new(),
+            uid_validity: None,
+            uid_next: None,
+            exists: None,
+            unseen: None,
+            highest_synced_uid: None,
+            lowest_synced_uid: None,
+            last_sync_started_at: None,
+            last_sync_finished_at: None,
+            last_sync_error: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn infer_folder_role_prefers_inbox_exact_path() {
+        assert_eq!(
+            infer_folder_role("INBOX", "INBOX", &[]),
+            Some(MailFolderRole::Inbox)
+        );
+        assert_eq!(infer_folder_role("INBOX/Travel", "Travel", &[]), None);
+    }
+
+    #[test]
+    fn infer_folder_role_uses_common_special_names() {
+        assert_eq!(
+            infer_folder_role("[Gmail]/Sent Mail", "Sent Mail", &[]),
+            Some(MailFolderRole::Sent)
+        );
+        assert_eq!(
+            infer_folder_role("[Gmail]/All Mail", "All Mail", &[]),
+            Some(MailFolderRole::AllMail)
+        );
+        assert_eq!(
+            infer_folder_role("Deleted Items", "Deleted Items", &[]),
+            Some(MailFolderRole::Trash)
+        );
+    }
+
+    #[test]
+    fn infer_folder_role_uses_special_use_attributes() {
+        assert_eq!(
+            infer_folder_role("Provider/Whatever", "Whatever", &["Sent".to_string()]),
+            Some(MailFolderRole::Sent)
+        );
+        assert_eq!(
+            infer_folder_role("Provider/Whatever", "Whatever", &["Junk".to_string()]),
+            Some(MailFolderRole::Spam)
+        );
+    }
+
+    #[test]
+    fn folder_response_applies_inferred_role_for_cached_folders() {
+        let folder = test_folder("INBOX", MailFolderRoleSource::Inferred, None);
+
+        assert_eq!(
+            folder_to_response(&folder).role,
+            Some(MailFolderRole::Inbox)
+        );
+    }
+
+    #[test]
+    fn folder_response_preserves_user_cleared_role() {
+        let folder = test_folder("INBOX", MailFolderRoleSource::User, None);
+
+        assert_eq!(folder_to_response(&folder).role, None);
+    }
 }

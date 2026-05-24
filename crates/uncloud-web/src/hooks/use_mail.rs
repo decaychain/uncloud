@@ -4,7 +4,8 @@ use uncloud_common::{
     CreateMailAccountRequest, MailAccountResponse, MailAccountSyncResponse,
     MailConnectionTestResponse, MailCredentialStatusResponse, MailFolderResponse,
     MailFolderSyncResponse, MailMessageDetailResponse, MailMessageSummaryResponse,
-    MailPasswordAuthRequest, MailSyncRequest, SetMailCredentialRequest,
+    MailPasswordAuthRequest, MailSyncRequest, SetMailCredentialRequest, UpdateMailAccountRequest,
+    UpdateMailFolderRequest,
 };
 
 use super::api;
@@ -34,6 +35,37 @@ pub async fn create_account(req: &CreateMailAccountRequest) -> Result<MailAccoun
         r.json::<MailAccountResponse>()
             .await
             .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn update_account(
+    account_id: &str,
+    req: &UpdateMailAccountRequest,
+) -> Result<MailAccountResponse, String> {
+    let r = api::put(&format!("/mail/accounts/{account_id}"))
+        .json(req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<MailAccountResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn delete_account(account_id: &str) -> Result<(), String> {
+    let r = api::delete(&format!("/mail/accounts/{account_id}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() || r.status() == 204 {
+        Ok(())
     } else {
         Err(extract_error(r).await)
     }
@@ -108,6 +140,26 @@ pub async fn refresh_folders(account_id: &str) -> Result<Vec<MailFolderResponse>
         .map_err(|e| e.to_string())?;
     if r.ok() {
         r.json::<Vec<MailFolderResponse>>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn update_folder(
+    account_id: &str,
+    folder_id: &str,
+    req: &UpdateMailFolderRequest,
+) -> Result<MailFolderResponse, String> {
+    let r = api::put(&format!("/mail/accounts/{account_id}/folders/{folder_id}"))
+        .json(req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<MailFolderResponse>()
             .await
             .map_err(|e| e.to_string())
     } else {

@@ -300,6 +300,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/mail/accounts/{account_id}/folders", get(mail::list_folders))
         .route("/mail/accounts/{account_id}/folders/refresh", post(mail::refresh_folders))
         .route(
+            "/mail/accounts/{account_id}/folders/{folder_id}",
+            put(mail::update_folder),
+        )
+        .route(
             "/mail/accounts/{account_id}/folders/{folder_id}/sync",
             post(mail::sync_folder),
         )
