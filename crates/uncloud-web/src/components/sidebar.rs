@@ -4,7 +4,7 @@ use uncloud_common::{AlbumResponse, MusicFolderResponse, PlaylistSummary, TaskPr
 use crate::hooks::tauri as tauri_hook;
 use crate::components::icons::{
     IconCheckSquare, IconFileText, IconFolder, IconHistory, IconImage, IconKey, IconLayoutGrid,
-    IconLink, IconList, IconListMusic, IconMusic, IconPalette, IconCopy, IconRefreshCw,
+    IconLink, IconList, IconListMusic, IconMail, IconMusic, IconPalette, IconCopy, IconRefreshCw,
     IconSettings, IconShield, IconShoppingCart, IconTrash, IconUser, IconUsers, IconWallet,
 };
 use crate::hooks::{use_apps, use_files, use_music, use_playlists, use_tasks};
@@ -48,6 +48,8 @@ pub fn Sidebar() -> Element {
         "tasks"
     } else if matches!(route, Route::Shopping {} | Route::ShoppingList { .. }) {
         "shopping"
+    } else if matches!(route, Route::Mail {}) {
+        "mail"
     } else if matches!(
         route,
         Route::Finance {}
@@ -76,6 +78,11 @@ pub fn Sidebar() -> Element {
         .user
         .as_ref()
         .map(|u| u.features_enabled.contains(&"finance".to_string()))
+        .unwrap_or(false);
+    let mail_enabled = auth_state()
+        .user
+        .as_ref()
+        .map(|u| u.features_enabled.contains(&"mail".to_string()))
         .unwrap_or(false);
 
     rsx! {
@@ -155,6 +162,17 @@ pub fn Sidebar() -> Element {
                             onclick: move |_| close_drawer(),
                             IconWallet {}
                             span { "Finance" }
+                        }
+                    }
+                }
+                if mail_enabled {
+                    li {
+                        Link {
+                            to: Route::Mail {},
+                            class: if section == "mail" { "active" } else { "" },
+                            onclick: move |_| close_drawer(),
+                            IconMail {}
+                            span { "Mail" }
                         }
                     }
                 }
@@ -300,6 +318,18 @@ pub fn Sidebar() -> Element {
                                     onclick: move |_| close_drawer(),
                                     IconShield {}
                                     span { "Rules" }
+                                }
+                            }
+                        },
+                        "mail" => rsx! {
+                            li { class: "menu-title", span { "Mail" } }
+                            li {
+                                Link {
+                                    to: Route::Mail {},
+                                    class: "active",
+                                    onclick: move |_| close_drawer(),
+                                    IconMail {}
+                                    span { "Inbox" }
                                 }
                             }
                         },

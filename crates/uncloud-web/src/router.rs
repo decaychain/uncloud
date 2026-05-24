@@ -9,8 +9,9 @@ use crate::components::{
         FinanceSchemasPage, FinanceTransactionsPage,
     },
     file_browser::FileBrowser,
-    layout::Layout,
     gallery::{Gallery, GalleryAlbum},
+    layout::Layout,
+    mail::MailPage,
     music::{
         Music, MusicArtistView, MusicAlbumView as MusicAlbumViewComp, MusicFolderView,
         MusicPlaylistView, MusicScopeCategoryView, MusicScopeFolderView,
@@ -127,6 +128,9 @@ pub enum Route {
 
         #[route("/shopping/list/:id")]
         ShoppingList { id: String },
+
+        #[route("/mail")]
+        Mail {},
 
         #[route("/settings")]
         Settings {},
@@ -348,6 +352,13 @@ fn Shopping() -> Element {
 fn ShoppingList(id: String) -> Element {
     rsx! {
         shopping::ShoppingListView { key: "{id}", list_id: id }
+    }
+}
+
+#[component]
+fn Mail() -> Element {
+    rsx! {
+        MailPage {}
     }
 }
 

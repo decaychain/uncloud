@@ -103,6 +103,11 @@ pub struct MailFolderResponse {
     pub uid_next: Option<u32>,
     pub exists: Option<u32>,
     pub unseen: Option<u32>,
+    pub highest_synced_uid: Option<u32>,
+    pub lowest_synced_uid: Option<u32>,
+    pub last_sync_started_at: Option<String>,
+    pub last_sync_finished_at: Option<String>,
+    pub last_sync_error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -135,6 +140,12 @@ pub struct MailMessageSummaryResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailMessageDetailResponse {
+    pub message: MailMessageSummaryResponse,
+    pub body_text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MailAttachmentResponse {
     pub id: String,
     pub message_id: String,
@@ -154,6 +165,40 @@ pub struct MailPasswordAuthRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetMailCredentialRequest {
     pub password: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MailSyncRequest {
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub limit_per_folder: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailFolderSyncResponse {
+    pub account_id: String,
+    pub folder_id: String,
+    pub folder_path: String,
+    pub fetched_messages: usize,
+    pub stored_messages: usize,
+    pub uid_validity: Option<u32>,
+    pub uid_next: Option<u32>,
+    pub exists: Option<u32>,
+    pub unseen: Option<u32>,
+    pub highest_synced_uid: Option<u32>,
+    pub lowest_synced_uid: Option<u32>,
+    pub completed: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailAccountSyncResponse {
+    pub account_id: String,
+    pub fetched_messages: usize,
+    pub stored_messages: usize,
+    pub errors: usize,
+    pub folders: Vec<MailFolderSyncResponse>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

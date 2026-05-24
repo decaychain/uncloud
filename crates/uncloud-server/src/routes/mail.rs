@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -9,16 +9,22 @@ use bson::doc;
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, oid::ObjectId};
+use serde::Deserialize;
 use uncloud_common::{
     CreateMailAccountRequest, CreateMailIdentityRequest, MailAccountResponse,
-    MailConnectionTestResponse, MailCredentialStatusResponse, MailFolderResponse,
-    MailIdentityResponse, MailPasswordAuthRequest, MailServerSettings, SetMailCredentialRequest,
-    UpdateMailAccountRequest, UpdateMailIdentityRequest,
+    MailAccountSyncResponse, MailAddressDto, MailConnectionTestResponse,
+    MailCredentialStatusResponse, MailFolderResponse, MailFolderSyncResponse, MailIdentityResponse,
+    MailMessageDetailResponse, MailMessageSummaryResponse, MailPasswordAuthRequest,
+    MailServerSettings, MailSyncRequest, SetMailCredentialRequest, UpdateMailAccountRequest,
+    UpdateMailIdentityRequest,
 };
 
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
-use crate::models::{MailAccount, MailFolder, MailIdentity, MailServerConfig};
+use crate::models::{
+    MailAccount, MailAddress, MailFolder, MailIdentity, MailMessage, MailServerConfig,
+};
+use crate::services::mail::{RemoteMailAddress, RemoteMailbox, RemoteMessageSummary};
 use crate::services::SecretCipher;
 use crate::AppState;
 
@@ -27,6 +33,16 @@ const IDENTITIES: &str = "mail_identities";
 const FOLDERS: &str = "mail_folders";
 const MESSAGES: &str = "mail_messages";
 const ATTACHMENTS: &str = "mail_attachments";
+const DEFAULT_SYNC_LIMIT_PER_FOLDER: u32 = 250;
+const MAX_SYNC_LIMIT_PER_FOLDER: u32 = 1_000;
+const DEFAULT_MESSAGE_LIST_LIMIT: i64 = 100;
+const MAX_MESSAGE_LIST_LIMIT: i64 = 500;
+
+#[derive(Debug, Deserialize)]
+pub struct MailMessageListQuery {
+    #[serde(default)]
+    limit: Option<i64>,
+}
 
 fn require_mail(state: &AppState) -> Result<()> {
     if !state.config.features.mail {
@@ -141,8 +157,42 @@ fn folder_to_response(folder: &MailFolder) -> MailFolderResponse {
         uid_next: folder.uid_next,
         exists: folder.exists,
         unseen: folder.unseen,
+        highest_synced_uid: folder.highest_synced_uid,
+        lowest_synced_uid: folder.lowest_synced_uid,
+        last_sync_started_at: folder.last_sync_started_at.map(|dt| dt.to_rfc3339()),
+        last_sync_finished_at: folder.last_sync_finished_at.map(|dt| dt.to_rfc3339()),
+        last_sync_error: folder.last_sync_error.clone(),
         created_at: folder.created_at.to_rfc3339(),
         updated_at: folder.updated_at.to_rfc3339(),
+    }
+}
+
+fn address_to_response(address: &MailAddress) -> MailAddressDto {
+    MailAddressDto {
+        name: address.name.clone(),
+        address: address.address.clone(),
+    }
+}
+
+fn message_to_response(message: &MailMessage) -> MailMessageSummaryResponse {
+    MailMessageSummaryResponse {
+        id: message.id.to_hex(),
+        account_id: message.account_id.to_hex(),
+        folder_id: message.folder_id.to_hex(),
+        folder_path: message.folder_path.clone(),
+        uid: message.uid,
+        message_id: message.message_id.clone(),
+        thread_id: message.thread_id.clone(),
+        subject: message.subject.clone(),
+        from: message.from.iter().map(address_to_response).collect(),
+        to: message.to.iter().map(address_to_response).collect(),
+        cc: message.cc.iter().map(address_to_response).collect(),
+        date: message.date.map(|dt| dt.to_rfc3339()),
+        internal_date: message.internal_date.map(|dt| dt.to_rfc3339()),
+        flags: message.flags.clone(),
+        size_bytes: message.size_bytes,
+        has_attachments: message.has_attachments,
+        snippet: message.snippet.clone(),
     }
 }
 
@@ -155,11 +205,50 @@ async fn find_account(state: &AppState, owner_id: ObjectId, id: ObjectId) -> Res
         .ok_or_else(|| AppError::NotFound("Mail account".into()))
 }
 
+async fn find_folder(
+    state: &AppState,
+    owner_id: ObjectId,
+    account_id: ObjectId,
+    id: ObjectId,
+) -> Result<MailFolder> {
+    state
+        .db
+        .collection::<MailFolder>(FOLDERS)
+        .find_one(doc! { "_id": id, "owner_id": owner_id, "account_id": account_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Mail folder".into()))
+}
+
 fn credential_status(account: &MailAccount) -> MailCredentialStatusResponse {
     MailCredentialStatusResponse {
         account_id: account.id.to_hex(),
         credential_configured: account.credential_configured || account.credential.is_some(),
     }
+}
+
+fn sync_limit(input: Option<u32>) -> u32 {
+    input
+        .unwrap_or(DEFAULT_SYNC_LIMIT_PER_FOLDER)
+        .clamp(1, MAX_SYNC_LIMIT_PER_FOLDER)
+}
+
+fn message_list_limit(input: Option<i64>) -> i64 {
+    input
+        .unwrap_or(DEFAULT_MESSAGE_LIST_LIMIT)
+        .clamp(1, MAX_MESSAGE_LIST_LIMIT)
+}
+
+fn remote_address_to_model(address: &RemoteMailAddress) -> MailAddress {
+    MailAddress {
+        name: address.name.clone(),
+        address: address.address.clone(),
+    }
+}
+
+fn optional_u32_bson(value: Option<u32>) -> bson::Bson {
+    value
+        .map(|value| bson::Bson::Int64(value as i64))
+        .unwrap_or(bson::Bson::Null)
 }
 
 fn resolve_mail_password(
@@ -617,6 +706,89 @@ pub async fn list_folders(
     Ok(Json(out))
 }
 
+async fn upsert_remote_folders(
+    state: &AppState,
+    owner_id: ObjectId,
+    account_id: ObjectId,
+    remote: Vec<RemoteMailbox>,
+) -> Result<Vec<MailFolder>> {
+    let coll = state.db.collection::<MailFolder>(FOLDERS);
+    let now = Utc::now();
+    let mut remote_paths = Vec::new();
+
+    for folder in remote {
+        remote_paths.push(folder.path.clone());
+        coll.update_one(
+            doc! { "owner_id": owner_id, "account_id": account_id, "path": &folder.path },
+            doc! {
+                "$set": {
+                    "name": folder.name,
+                    "delimiter": folder.delimiter.map(bson::Bson::String).unwrap_or(bson::Bson::Null),
+                    "parent_path": folder.parent_path.map(bson::Bson::String).unwrap_or(bson::Bson::Null),
+                    "selectable": folder.selectable,
+                    "attributes": folder.attributes,
+                    "updated_at": bson::DateTime::from_chrono(now),
+                },
+                "$setOnInsert": {
+                    "_id": ObjectId::new(),
+                    "owner_id": owner_id,
+                    "account_id": account_id,
+                    "path": folder.path,
+                    "created_at": bson::DateTime::from_chrono(now),
+                },
+            },
+        )
+        .with_options(
+            mongodb::options::UpdateOptions::builder()
+                .upsert(true)
+                .build(),
+        )
+        .await?;
+    }
+
+    let stale_filter = if remote_paths.is_empty() {
+        doc! { "owner_id": owner_id, "account_id": account_id }
+    } else {
+        doc! {
+            "owner_id": owner_id,
+            "account_id": account_id,
+            "path": { "$nin": remote_paths },
+        }
+    };
+    let mut stale_cursor = coll.find(stale_filter.clone()).await?;
+    let mut stale_ids = Vec::new();
+    while let Some(folder) = stale_cursor.try_next().await? {
+        stale_ids.push(folder.id);
+    }
+    if !stale_ids.is_empty() {
+        state
+            .db
+            .collection::<MailMessage>(MESSAGES)
+            .delete_many(doc! {
+                "owner_id": owner_id,
+                "account_id": account_id,
+                "folder_id": { "$in": stale_ids.clone() },
+            })
+            .await?;
+        coll.delete_many(doc! {
+            "owner_id": owner_id,
+            "account_id": account_id,
+            "_id": { "$in": stale_ids },
+        })
+        .await?;
+    }
+
+    let mut cursor = coll
+        .find(doc! { "owner_id": owner_id, "account_id": account_id })
+        .sort(doc! { "path": 1 })
+        .await?;
+    let mut folders = Vec::new();
+    while let Some(folder) = cursor.try_next().await? {
+        folders.push(folder);
+    }
+    Ok(folders)
+}
+
 pub async fn refresh_folders(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -632,34 +804,372 @@ pub async fn refresh_folders(
         .list_imap_mailboxes(&account.imap, &password)
         .await?;
 
-    let coll = state.db.collection::<MailFolder>(FOLDERS);
-    coll.delete_many(doc! { "owner_id": user.id, "account_id": account_id })
+    let folders = upsert_remote_folders(&state, user.id, account_id, remote).await?;
+    Ok(Json(folders.iter().map(folder_to_response).collect()))
+}
+
+async fn store_message_summary(
+    state: &AppState,
+    owner_id: ObjectId,
+    account_id: ObjectId,
+    folder: &MailFolder,
+    summary: &RemoteMessageSummary,
+    now: chrono::DateTime<Utc>,
+) -> Result<()> {
+    let message = MailMessage {
+        id: ObjectId::new(),
+        owner_id,
+        account_id,
+        folder_id: folder.id,
+        folder_path: folder.path.clone(),
+        uid: summary.uid,
+        message_id: summary.message_id.clone(),
+        thread_id: None,
+        in_reply_to: summary.in_reply_to.clone(),
+        references: Vec::new(),
+        subject: summary.subject.clone(),
+        from: summary.from.iter().map(remote_address_to_model).collect(),
+        to: summary.to.iter().map(remote_address_to_model).collect(),
+        cc: summary.cc.iter().map(remote_address_to_model).collect(),
+        bcc: summary.bcc.iter().map(remote_address_to_model).collect(),
+        date: summary.date,
+        internal_date: summary.internal_date,
+        flags: summary.flags.clone(),
+        size_bytes: summary.size_bytes,
+        has_attachments: false,
+        snippet: None,
+        raw_storage_path: None,
+        text_storage_path: None,
+        html_storage_path: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let message_bson = bson::to_bson(&message).map_err(|e| AppError::Internal(e.to_string()))?;
+    let mut set = message_bson
+        .as_document()
+        .cloned()
+        .ok_or_else(|| AppError::Internal("failed to serialize mail message".into()))?;
+    set.remove("_id");
+    set.remove("created_at");
+    state
+        .db
+        .collection::<MailMessage>(MESSAGES)
+        .update_one(
+            doc! {
+                "owner_id": owner_id,
+                "account_id": account_id,
+                "folder_id": folder.id,
+                "uid": summary.uid,
+            },
+            doc! {
+                "$set": set,
+                "$setOnInsert": {
+                    "_id": message.id,
+                    "created_at": bson::DateTime::from_chrono(now),
+                },
+            },
+        )
+        .with_options(
+            mongodb::options::UpdateOptions::builder()
+                .upsert(true)
+                .build(),
+        )
         .await?;
+    Ok(())
+}
+
+async fn record_folder_sync_error(
+    state: &AppState,
+    owner_id: ObjectId,
+    account_id: ObjectId,
+    folder_id: ObjectId,
+    error: &str,
+) -> Result<()> {
+    state
+        .db
+        .collection::<MailFolder>(FOLDERS)
+        .update_one(
+            doc! { "_id": folder_id, "owner_id": owner_id, "account_id": account_id },
+            doc! {
+                "$set": {
+                    "last_sync_finished_at": bson::DateTime::from_chrono(Utc::now()),
+                    "last_sync_error": error,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+async fn sync_one_folder(
+    state: &AppState,
+    owner_id: ObjectId,
+    account: &MailAccount,
+    folder: &MailFolder,
+    password: &str,
+    limit: u32,
+) -> Result<MailFolderSyncResponse> {
+    if !folder.selectable {
+        return Err(AppError::BadRequest("mail folder is not selectable".into()));
+    }
+
+    let started_at = Utc::now();
+    let coll = state.db.collection::<MailFolder>(FOLDERS);
+    coll.update_one(
+        doc! { "_id": folder.id, "owner_id": owner_id, "account_id": account.id },
+        doc! {
+            "$set": {
+                "last_sync_started_at": bson::DateTime::from_chrono(started_at),
+                "updated_at": bson::DateTime::from_chrono(started_at),
+            },
+            "$unset": { "last_sync_error": "" },
+        },
+    )
+    .await?;
+
+    let remote = match state
+        .mail
+        .fetch_next_imap_message_summaries(
+            &account.imap,
+            password,
+            &folder.path,
+            folder.uid_validity,
+            folder.lowest_synced_uid,
+            folder.highest_synced_uid,
+            limit,
+        )
+        .await
+    {
+        Ok(remote) => remote,
+        Err(err) => {
+            let message = err.to_string();
+            let _ =
+                record_folder_sync_error(state, owner_id, account.id, folder.id, &message).await;
+            return Err(err);
+        }
+    };
+
+    if remote.uid_validity_changed {
+        state
+            .db
+            .collection::<MailMessage>(MESSAGES)
+            .delete_many(doc! {
+                "owner_id": owner_id,
+                "account_id": account.id,
+                "folder_id": folder.id,
+            })
+            .await?;
+    }
 
     let now = Utc::now();
-    let folders: Vec<MailFolder> = remote
-        .into_iter()
-        .map(|folder| MailFolder {
-            id: ObjectId::new(),
-            owner_id: user.id,
-            account_id,
-            path: folder.path,
-            name: folder.name,
-            delimiter: folder.delimiter,
-            parent_path: folder.parent_path,
-            role: None,
-            selectable: folder.selectable,
-            attributes: folder.attributes,
-            uid_validity: None,
-            uid_next: None,
-            exists: None,
-            unseen: None,
-            created_at: now,
-            updated_at: now,
-        })
-        .collect();
-    if !folders.is_empty() {
-        coll.insert_many(&folders).await?;
+    for message in &remote.messages {
+        store_message_summary(state, owner_id, account.id, folder, message, now).await?;
     }
-    Ok(Json(folders.iter().map(folder_to_response).collect()))
+
+    let lowest_synced_uid = remote.lowest_synced_uid;
+    let highest_synced_uid = remote.highest_synced_uid;
+    let mut set = doc! {
+        "uid_validity": optional_u32_bson(remote.status.uid_validity),
+        "uid_next": optional_u32_bson(remote.status.uid_next),
+        "exists": optional_u32_bson(remote.status.exists),
+        "unseen": optional_u32_bson(remote.status.unseen),
+        "last_sync_finished_at": bson::DateTime::from_chrono(now),
+        "updated_at": bson::DateTime::from_chrono(now),
+    };
+    match highest_synced_uid {
+        Some(uid) => {
+            set.insert("highest_synced_uid", bson::Bson::Int64(uid as i64));
+        }
+        None => {
+            set.insert("highest_synced_uid", bson::Bson::Null);
+        }
+    }
+    match lowest_synced_uid {
+        Some(uid) => {
+            set.insert("lowest_synced_uid", bson::Bson::Int64(uid as i64));
+        }
+        None => {
+            set.insert("lowest_synced_uid", bson::Bson::Null);
+        }
+    }
+    coll.update_one(
+        doc! { "_id": folder.id, "owner_id": owner_id, "account_id": account.id },
+        doc! {
+            "$set": set,
+            "$unset": { "last_sync_error": "" },
+        },
+    )
+    .await?;
+
+    Ok(MailFolderSyncResponse {
+        account_id: account.id.to_hex(),
+        folder_id: folder.id.to_hex(),
+        folder_path: folder.path.clone(),
+        fetched_messages: remote.messages.len(),
+        stored_messages: remote.messages.len(),
+        uid_validity: remote.status.uid_validity,
+        uid_next: remote.status.uid_next,
+        exists: remote.status.exists,
+        unseen: remote.status.unseen,
+        highest_synced_uid,
+        lowest_synced_uid,
+        completed: remote.completed,
+        error: None,
+    })
+}
+
+pub async fn sync_folder(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((account_id, folder_id)): Path<(String, String)>,
+    Json(req): Json<MailSyncRequest>,
+) -> Result<Json<MailFolderSyncResponse>> {
+    require_mail(&state)?;
+    let account_id = parse_oid(&account_id, "mail account id")?;
+    let folder_id = parse_oid(&folder_id, "mail folder id")?;
+    let account = find_account(&state, user.id, account_id).await?;
+    let folder = find_folder(&state, user.id, account_id, folder_id).await?;
+    let password = resolve_mail_password(&state, &account, req.password.as_deref())?;
+    Ok(Json(
+        sync_one_folder(
+            &state,
+            user.id,
+            &account,
+            &folder,
+            &password,
+            sync_limit(req.limit_per_folder),
+        )
+        .await?,
+    ))
+}
+
+pub async fn sync_account(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(account_id): Path<String>,
+    Json(req): Json<MailSyncRequest>,
+) -> Result<Json<MailAccountSyncResponse>> {
+    require_mail(&state)?;
+    let account_id = parse_oid(&account_id, "mail account id")?;
+    let account = find_account(&state, user.id, account_id).await?;
+    let password = resolve_mail_password(&state, &account, req.password.as_deref())?;
+    let limit = sync_limit(req.limit_per_folder);
+
+    let remote = state
+        .mail
+        .list_imap_mailboxes(&account.imap, &password)
+        .await?;
+    let folders = upsert_remote_folders(&state, user.id, account_id, remote).await?;
+
+    let mut folder_results = Vec::new();
+    for folder in folders.iter().filter(|folder| folder.selectable) {
+        match sync_one_folder(&state, user.id, &account, folder, &password, limit).await {
+            Ok(result) => folder_results.push(result),
+            Err(err) => folder_results.push(MailFolderSyncResponse {
+                account_id: account.id.to_hex(),
+                folder_id: folder.id.to_hex(),
+                folder_path: folder.path.clone(),
+                fetched_messages: 0,
+                stored_messages: 0,
+                uid_validity: folder.uid_validity,
+                uid_next: folder.uid_next,
+                exists: folder.exists,
+                unseen: folder.unseen,
+                highest_synced_uid: folder.highest_synced_uid,
+                lowest_synced_uid: folder.lowest_synced_uid,
+                completed: false,
+                error: Some(err.to_string()),
+            }),
+        }
+    }
+
+    let fetched_messages = folder_results
+        .iter()
+        .map(|folder| folder.fetched_messages)
+        .sum();
+    let stored_messages = folder_results
+        .iter()
+        .map(|folder| folder.stored_messages)
+        .sum();
+    let errors = folder_results
+        .iter()
+        .filter(|folder| folder.error.is_some())
+        .count();
+    if errors == 0 {
+        state
+            .db
+            .collection::<MailAccount>(ACCOUNTS)
+            .update_one(
+                doc! { "_id": account.id, "owner_id": user.id },
+                doc! {
+                    "$set": {
+                        "last_sync_at": bson::DateTime::from_chrono(Utc::now()),
+                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                    }
+                },
+            )
+            .await?;
+    }
+
+    Ok(Json(MailAccountSyncResponse {
+        account_id: account.id.to_hex(),
+        fetched_messages,
+        stored_messages,
+        errors,
+        folders: folder_results,
+    }))
+}
+
+pub async fn list_messages(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((account_id, folder_id)): Path<(String, String)>,
+    Query(query): Query<MailMessageListQuery>,
+) -> Result<Json<Vec<MailMessageSummaryResponse>>> {
+    require_mail(&state)?;
+    let account_id = parse_oid(&account_id, "mail account id")?;
+    let folder_id = parse_oid(&folder_id, "mail folder id")?;
+    let _ = find_account(&state, user.id, account_id).await?;
+    let _ = find_folder(&state, user.id, account_id, folder_id).await?;
+    let mut cursor = state
+        .db
+        .collection::<MailMessage>(MESSAGES)
+        .find(doc! { "owner_id": user.id, "account_id": account_id, "folder_id": folder_id })
+        .sort(doc! { "internal_date": -1, "uid": -1 })
+        .limit(message_list_limit(query.limit))
+        .await?;
+    let mut out = Vec::new();
+    while let Some(message) = cursor.try_next().await? {
+        out.push(message_to_response(&message));
+    }
+    Ok(Json(out))
+}
+
+pub async fn get_message(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(message_id): Path<String>,
+) -> Result<Json<MailMessageDetailResponse>> {
+    require_mail(&state)?;
+    let message_id = parse_oid(&message_id, "mail message id")?;
+    let message = state
+        .db
+        .collection::<MailMessage>(MESSAGES)
+        .find_one(doc! { "_id": message_id, "owner_id": user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Mail message".into()))?;
+    let account = find_account(&state, user.id, message.account_id).await?;
+    let _ = find_folder(&state, user.id, message.account_id, message.folder_id).await?;
+    let password = resolve_mail_password(&state, &account, None)?;
+    let body_text = state
+        .mail
+        .fetch_imap_message_body(&account.imap, &password, &message.folder_path, message.uid)
+        .await
+        .ok();
+
+    Ok(Json(MailMessageDetailResponse {
+        message: message_to_response(&message),
+        body_text,
+    }))
 }

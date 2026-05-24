@@ -296,8 +296,18 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/mail/accounts/{id}/test-imap", post(mail::test_account_imap))
         .route("/mail/accounts/{id}/test-smtp", post(mail::test_account_smtp))
+        .route("/mail/accounts/{id}/sync", post(mail::sync_account))
         .route("/mail/accounts/{account_id}/folders", get(mail::list_folders))
         .route("/mail/accounts/{account_id}/folders/refresh", post(mail::refresh_folders))
+        .route(
+            "/mail/accounts/{account_id}/folders/{folder_id}/sync",
+            post(mail::sync_folder),
+        )
+        .route(
+            "/mail/accounts/{account_id}/folders/{folder_id}/messages",
+            get(mail::list_messages),
+        )
+        .route("/mail/messages/{message_id}", get(mail::get_message))
         .route("/mail/identities", get(mail::list_identities).post(mail::create_identity))
         .route("/mail/identities/{id}", put(mail::update_identity).delete(mail::delete_identity));
 

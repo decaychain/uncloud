@@ -91,6 +91,16 @@ pub struct MailFolder {
     pub exists: Option<u32>,
     #[serde(default)]
     pub unseen: Option<u32>,
+    #[serde(default)]
+    pub highest_synced_uid: Option<u32>,
+    #[serde(default)]
+    pub lowest_synced_uid: Option<u32>,
+    #[serde(default, with = "crate::models::opt_dt")]
+    pub last_sync_started_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::opt_dt")]
+    pub last_sync_finished_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_sync_error: Option<String>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]

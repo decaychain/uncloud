@@ -75,7 +75,8 @@ Uncloud/
           vault_recents.rs     ← per-user "recent password vaults" list
           admin_processing.rs  ← admin: rerun all processing tasks
           duplicates.rs        ← duplicate detection: hash-grouped sets, mirror clusters, subset pairs
-          mail.rs              ← experimental mail accounts, identities, IMAP folder refresh
+          mail.rs              ← experimental mail accounts, identities, IMAP folder refresh,
+                                 latest-first read-only summary sync, placeholder body fetch
         services/
           auth.rs              ← AuthService (sessions, password hashing, TOTP, invites,
                                  demo accounts, user bytes)
@@ -120,7 +121,7 @@ Uncloud/
           backup_lock.rs       ← single-writer lock for backup runs (heartbeat-based)
           migration_lock.rs    ← single-writer lock for offline storage migrations
           mail.rs              ← experimental mail accounts, identities, folders,
-                                 message metadata, attachment metadata
+                                 low/high UID sync state, message metadata, attachment metadata
         middleware/
           auth.rs              ← AuthUser extractor; cookie + Bearer-token auth_middleware;
                                  admin_middleware
@@ -191,6 +192,7 @@ Uncloud/
           duplicates.rs        ← Duplicates view (mirror folders / subsets / stray hash sets, with bulk delete)
           version_history.rs   ← Version history panel for a file
           shopping.rs          ← Shopping page: lists, items, categories, shops, share list
+          mail.rs              ← Experimental read-only IMAP/SMTP mail client shell
           passwords.rs         ← KeePass-format password vaults (browse, open, recents)
           auth/
             login.rs
@@ -212,6 +214,7 @@ Uncloud/
           use_shares.rs        ← public share link API calls
           use_folder_shares.rs ← folder-share-with-user API calls
           use_shopping.rs      ← shopping lists/items/categories/shops API calls
+          use_mail.rs          ← experimental mail accounts/folders/sync/message API calls
           use_tasks.rs         ← projects, sections, tasks, comments, schedule
           use_apps.rs          ← /api/v1/apps for sidebar
           use_s3.rs            ← /api/v1/s3/credentials CRUD

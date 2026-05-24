@@ -7,9 +7,9 @@
 use dioxus::prelude::*;
 
 use crate::components::icons::{
-    IconCheckSquare, IconFolder, IconImage, IconKey, IconMusic, IconShoppingCart,
+    IconCheckSquare, IconFolder, IconImage, IconKey, IconMail, IconMusic, IconShoppingCart,
 };
-use crate::hooks::{api, use_files, use_playlists, use_shopping, use_tasks};
+use crate::hooks::{api, use_files, use_mail, use_playlists, use_shopping, use_tasks};
 use crate::router::Route;
 use crate::state::AuthState;
 
@@ -23,6 +23,7 @@ pub fn all_tile_ids() -> &'static [&'static str] {
         "music",
         "tasks",
         "shopping",
+        "mail",
         "passwords",
     ]
 }
@@ -40,6 +41,7 @@ pub fn tile_label(id: &str) -> &'static str {
         "music" => "Music",
         "tasks" => "Tasks",
         "shopping" => "Shopping",
+        "mail" => "Mail",
         "passwords" => "Passwords",
         _ => "Unknown",
     }
@@ -52,6 +54,7 @@ fn tile_route(id: &str) -> Option<Route> {
         "music" => Some(Route::Music {}),
         "tasks" => Some(Route::Tasks {}),
         "shopping" => Some(Route::Shopping {}),
+        "mail" => Some(Route::Mail {}),
         "passwords" => Some(Route::Passwords {}),
         _ => None,
     }
@@ -65,6 +68,11 @@ pub fn DashboardPage() -> Element {
         .user
         .as_ref()
         .map(|u| u.features_enabled.contains(&"shopping".to_string()))
+        .unwrap_or(false);
+    let mail_enabled = auth_state()
+        .user
+        .as_ref()
+        .map(|u| u.features_enabled.contains(&"mail".to_string()))
         .unwrap_or(false);
 
     // Resolve enabled tiles: user's preference, or the default set.
@@ -86,6 +94,7 @@ pub fn DashboardPage() -> Element {
         base.into_iter()
             .filter(|id| known.contains(id.as_str()))
             .filter(|id| id != "shopping" || shopping_enabled)
+            .filter(|id| id != "mail" || mail_enabled)
             .collect()
     };
 
@@ -155,6 +164,7 @@ fn TileIcon(tile_id: String) -> Element {
         "music" => rsx! { IconMusic { class } },
         "tasks" => rsx! { IconCheckSquare { class } },
         "shopping" => rsx! { IconShoppingCart { class } },
+        "mail" => rsx! { IconMail { class } },
         "passwords" => rsx! { IconKey { class } },
         _ => rsx! {},
     }
@@ -193,6 +203,10 @@ fn use_tile_count(tile_id: &str) -> Signal<TileCount> {
                 "shopping" => use_shopping::list_lists()
                     .await
                     .map(|v| TileCount::Value(v.len(), "lists"))
+                    .unwrap_or(TileCount::None),
+                "mail" => use_mail::list_accounts()
+                    .await
+                    .map(|v| TileCount::Value(v.len(), "accounts"))
                     .unwrap_or(TileCount::None),
                 "gallery" => use_files::list_gallery_albums()
                     .await

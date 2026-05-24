@@ -54,8 +54,12 @@ Authenticated routes are mounted under both `/api` and `/api/v1`:
 - `DELETE /mail/accounts/{id}/credential`
 - `POST /mail/accounts/{id}/test-imap`
 - `POST /mail/accounts/{id}/test-smtp`
+- `POST /mail/accounts/{id}/sync`
 - `GET /mail/accounts/{account_id}/folders`
 - `POST /mail/accounts/{account_id}/folders/refresh`
+- `POST /mail/accounts/{account_id}/folders/{folder_id}/sync`
+- `GET /mail/accounts/{account_id}/folders/{folder_id}/messages`
+- `GET /mail/messages/{message_id}`
 - `GET /mail/identities`
 - `POST /mail/identities`
 - `PUT /mail/identities/{id}`
@@ -82,6 +86,22 @@ the account's SMTP settings.
   `POST /mail/accounts/{id}/test-smtp`.
 - Folder/subfolder persistence using remote path, hierarchy delimiter, parent
   path, attributes, and selectable state.
+- Folder refresh upserts by `(owner_id, account_id, path)`, preserving stable
+  folder ids across refreshes.
+- Manual read-only message summary sync for one folder or all cached selectable
+  folders. Each sync fetches a bounded UID window of envelope, flags, internal
+  date, and RFC822 size metadata.
+- Per-folder sync state: UIDVALIDITY, UIDNEXT, exists/unseen counts, highest
+  scanned UID, sync timestamps, and last error.
+- UIDVALIDITY changes invalidate cached message summaries for that folder before
+  resync.
+- Basic message summary listing by folder from the MongoDB cache.
+- On-demand message detail/body fetch for the reader pane. This currently uses
+  the stored credential, fetches `BODY.PEEK[]`, strips headers/tags crudely, and
+  returns placeholder plain text.
+- First read-only web UI iteration at `/mail`: account/folder navigation,
+  account setup, IMAP/SMTP tests, manual account/folder sync, cached message
+  list, and a reader pane.
 - Mongo indexes for account, identity, folder, message, and attachment metadata.
 - Server-wide `features.mail` toggle plus per-user opt-out through
   `disabled_features`.
@@ -92,13 +112,15 @@ the account's SMTP settings.
   tokens and SMTP credential handling still need a credential type model.
 - SMTP is wired only for connection/authentication testing. Sending is still not
   implemented.
-- No message sync yet. `mail_messages` and `mail_attachments` are model/index
-  scaffolding only.
-- No MIME parsing or HTML sanitization path is wired yet.
-- No UI yet. Testing is currently through authenticated HTTP calls.
-- Folder refresh currently replaces cached folder rows for the account. That is
-  acceptable before message sync, but once messages reference folders we should
-  upsert folders by `(owner_id, account_id, path)` to preserve stable folder ids.
+- Message sync currently stores summaries only. Raw RFC822 bodies, decoded
+  parts, MIME parsing, attachment persistence, and HTML sanitization are not
+  persisted yet.
+- Body rendering is intentionally provisional. The UI fetches a raw message body
+  on demand and displays best-effort plain text.
+- The UI is read-only. Compose, search, threading, flag changes, delete/archive,
+  move, and attachments are not implemented.
+- Account-level manual sync refreshes folders first, then syncs selectable
+  folders one-by-one. It is intentionally simple and not yet a scheduler.
 
 ## End-to-End Test Path
 
@@ -112,6 +134,12 @@ the account's SMTP settings.
 7. `POST /api/mail/accounts/{id}/folders/refresh` the same way.
 8. `GET /api/mail/accounts/{id}/folders` and verify folders/subfolders are
    persisted with expected paths and delimiters.
+9. `POST /api/mail/accounts/{id}/sync` with `{}` to use the stored credential,
+   or include `password` and optional `limit_per_folder` for manual testing.
+10. `GET /api/mail/accounts/{account_id}/folders/{folder_id}/messages` to
+    inspect cached message summaries for a synced folder.
+11. Open `/mail` in the web UI and verify account/folder selection, sync
+    controls, message list, and placeholder reader body.
 
 This is enough to validate the current protocol foundation before building UI.
 
@@ -145,20 +173,30 @@ Remaining credential work before scheduler/background sync:
 
 ### 3. Read-Only Message Sync
 
-- Change folder refresh to upsert folders and keep stable ids.
-- Add per-folder sync state: UIDVALIDITY, UIDNEXT, highest synced UID, last sync
-  timestamps, and last error.
-- On UIDVALIDITY change, invalidate cached messages for that folder and resync.
-- Fetch message envelopes/flags/internal dates first.
+- Folder refresh upserts folders and keeps stable ids.
+- Per-folder sync state is persisted: UIDVALIDITY, UIDNEXT, lowest/highest
+  scanned UID, sync timestamps, and last error.
+- On UIDVALIDITY change, cached message summaries for that folder are
+  invalidated before resync.
+- Manual sync fetches message envelopes, flags, internal dates, and sizes in a
+  bounded UID window. The default limit is 250 messages per folder per call,
+  capped at 1000.
+- Sync is latest-first. A folder without the new low/high cursor fetches the
+  newest UID window first, then future calls prioritize newly arrived mail and
+  backfill older UID windows toward UID 1.
+- Next: add a scheduler/queue to run this strategy automatically.
 - Fetch raw RFC822 bodies only when needed, or in bounded batches.
 - Store raw messages and large decoded parts in Uncloud storage, not MongoDB.
 - Keep MongoDB as searchable/listable metadata cache.
 
 ### 4. Message Read APIs
 
-- Add message list route with pagination by folder and date/UID.
-- Add message detail route that parses the stored raw message with
-  `mail-parser`.
+- Basic folder message listing exists for synced summaries.
+- Basic message detail route exists and fetches placeholder plain text on
+  demand.
+- Add pagination cursors by folder and date/UID.
+- Replace placeholder body rendering with stored raw message fetch + proper
+  parsing through `mail-parser`.
 - Sanitize HTML with `ammonia` before returning/rendering it.
 - Add attachment metadata and download routes.
 - Decide how remote image loading should work. Default should be blocked or
@@ -182,16 +220,17 @@ Remaining credential work before scheduler/background sync:
 
 ### 7. UI
 
-Do not build a Gmail-like shell before read-only message sync exists. The first
-useful UI should be:
+The first read-only UI shell exists. Continue improving it around real mailbox
+data before adding write actions:
 
-- Account setup and connection test.
-- Folder list.
+- Account setup and connection testing.
+- Folder list and sync status.
 - Read-only message list.
-- Message reader.
+- Message reader with placeholder body text.
 
-After that, add compose and mutations. A full Gmail/Proton-like layout becomes
-worth polishing once the backend cache can serve real message lists reliably.
+Next UI work should focus on mailbox ergonomics, responsive navigation,
+pagination, and reader layout. Compose and mutations should wait until summary
+sync, body fetch, and message detail APIs are more reliable.
 
 ## Open Questions
 

@@ -26,3 +26,4 @@ pub mod use_tasks;
 pub mod use_duplicates;
 pub mod use_oauth;
 pub mod use_finance;
+pub mod use_mail;
