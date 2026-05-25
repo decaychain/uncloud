@@ -1,20 +1,21 @@
 use dioxus::prelude::*;
 use uncloud_common::{
     CreateMailAccountRequest, MailAccountResponse, MailAddressDto, MailFolderResponse,
-    MailFolderRole, MailFolderRoleSource, MailMessageDetailResponse, MailMessageMutationAction,
-    MailMessageSummaryResponse, MailSecurity, MailServerSettings, UpdateMailAccountRequest,
-    UpdateMailFolderRequest,
+    MailFolderRole, MailFolderRoleSource, MailIdentityResponse, MailMessageDetailResponse,
+    MailMessageMutationAction, MailMessageSummaryResponse, MailSecurity, MailSentCopyStatus,
+    MailServerSettings, SendMailMessageRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
 };
 
 use crate::components::icons::{
     IconArchive, IconEye, IconFileText, IconFolder, IconMail, IconMoveRight, IconPlus,
-    IconRefreshCw, IconSettings, IconStar, IconTrash,
+    IconRefreshCw, IconSend, IconSettings, IconStar, IconTrash,
 };
 use crate::hooks::use_mail;
 
 #[component]
 pub fn MailPage() -> Element {
     let mut accounts = use_signal(Vec::<MailAccountResponse>::new);
+    let mut identities = use_signal(Vec::<MailIdentityResponse>::new);
     let mut folders = use_signal(Vec::<MailFolderResponse>::new);
     let mut messages = use_signal(Vec::<MailMessageSummaryResponse>::new);
     let mut detail = use_signal(|| None::<MailMessageDetailResponse>);
@@ -29,6 +30,14 @@ pub fn MailPage() -> Element {
     let mut error = use_signal(|| None::<String>);
     let mut notice = use_signal(|| None::<String>);
     let mut show_setup = use_signal(|| false);
+    let mut show_compose = use_signal(|| false);
+    let mut sending_message = use_signal(|| false);
+    let mut compose_identity_id = use_signal(String::new);
+    let mut compose_to = use_signal(String::new);
+    let mut compose_cc = use_signal(String::new);
+    let mut compose_bcc = use_signal(String::new);
+    let mut compose_subject = use_signal(String::new);
+    let mut compose_body = use_signal(String::new);
     let mut settings_folder = use_signal(|| None::<MailFolderResponse>);
     let mut folder_role_value = use_signal(|| "auto".to_string());
     let mut folder_sync_enabled = use_signal(|| true);
@@ -72,6 +81,10 @@ pub fn MailPage() -> Element {
                     let first = list.first().map(|a| a.id.clone()).unwrap_or_default();
                     accounts.set(list);
                     selected_account.set(first.clone());
+                    match use_mail::list_identities().await {
+                        Ok(rows) => identities.set(rows),
+                        Err(e) => error.set(Some(e)),
+                    }
                     if !first.is_empty() {
                         match use_mail::list_folders(&first).await {
                             Ok(rows) => folders.set(rows),
@@ -86,6 +99,7 @@ pub fn MailPage() -> Element {
     });
 
     let accounts_snapshot = accounts();
+    let identities_snapshot = identities();
     let folders_snapshot = sorted_mail_folders(&folders());
     let messages_snapshot = messages();
     let detail_snapshot = detail();
@@ -100,6 +114,11 @@ pub fn MailPage() -> Element {
         .iter()
         .find(|f| f.id == selected_folder_id)
         .cloned();
+    let active_identities = identities_snapshot
+        .iter()
+        .filter(|identity| identity.account_id == selected_account_id)
+        .cloned()
+        .collect::<Vec<_>>();
 
     rsx! {
         div { class: "space-y-3",
@@ -140,6 +159,21 @@ pub fn MailPage() -> Element {
                     }
                 }
                 div { class: "flex flex-wrap items-center gap-2",
+                    button {
+                        class: "btn btn-sm btn-primary gap-2",
+                        disabled: selected_account_id.is_empty(),
+                        onclick: move |_| {
+                            compose_identity_id.set(String::new());
+                            compose_to.set(String::new());
+                            compose_cc.set(String::new());
+                            compose_bcc.set(String::new());
+                            compose_subject.set(String::new());
+                            compose_body.set(String::new());
+                            show_compose.set(true);
+                        },
+                        IconSend { class: "w-4 h-4".to_string() }
+                        span { "Compose" }
+                    }
                     button {
                         class: "btn btn-sm btn-outline gap-2",
                         disabled: syncing() || selected_account_id.is_empty(),
@@ -775,6 +809,151 @@ pub fn MailPage() -> Element {
                             div { class: "flex flex-1 flex-col items-center justify-center gap-2 text-base-content/60",
                                 IconFileText { class: "h-8 w-8".to_string() }
                                 div { class: "text-sm", "Select a message" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if show_compose() {
+                if let Some(account) = active_account.clone() {
+                    {
+                        let account_id = account.id.clone();
+                        let account_from_label =
+                            format!("{} <{}>", account.display_name, account.email_address);
+                        let active_identities = active_identities.clone();
+                        rsx! {
+                            div { class: "modal modal-open",
+                                div { class: "modal-box max-w-3xl",
+                                    h2 { class: "text-xl font-semibold", "Compose" }
+                                    div { class: "mt-1 truncate text-sm text-base-content/60", "{account.email_address}" }
+
+                                    div { class: "mt-4 grid gap-3",
+                                        label { class: "form-control",
+                                            span { class: "label-text", "From" }
+                                            select {
+                                                class: "select select-bordered",
+                                                value: "{compose_identity_id()}",
+                                                onchange: move |e| compose_identity_id.set(e.value()),
+                                                option { value: "", "{account_from_label}" }
+                                                for identity in active_identities.clone() {
+                                                    {
+                                                        let identity_label = mail_identity_label(&identity);
+                                                        rsx! {
+                                                            option {
+                                                                value: "{identity.id}",
+                                                                "{identity_label}"
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        label { class: "form-control",
+                                            span { class: "label-text", "To" }
+                                            input {
+                                                class: "input input-bordered",
+                                                value: "{compose_to()}",
+                                                placeholder: "one@example.com, two@example.com",
+                                                oninput: move |e| compose_to.set(e.value()),
+                                            }
+                                        }
+                                        div { class: "grid gap-3 md:grid-cols-2",
+                                            label { class: "form-control",
+                                                span { class: "label-text", "Cc" }
+                                                input {
+                                                    class: "input input-bordered",
+                                                    value: "{compose_cc()}",
+                                                    oninput: move |e| compose_cc.set(e.value()),
+                                                }
+                                            }
+                                            label { class: "form-control",
+                                                span { class: "label-text", "Bcc" }
+                                                input {
+                                                    class: "input input-bordered",
+                                                    value: "{compose_bcc()}",
+                                                    oninput: move |e| compose_bcc.set(e.value()),
+                                                }
+                                            }
+                                        }
+                                        label { class: "form-control",
+                                            span { class: "label-text", "Subject" }
+                                            input {
+                                                class: "input input-bordered",
+                                                value: "{compose_subject()}",
+                                                oninput: move |e| compose_subject.set(e.value()),
+                                            }
+                                        }
+                                        label { class: "form-control",
+                                            span { class: "label-text", "Message" }
+                                            textarea {
+                                                class: "textarea textarea-bordered min-h-56 font-mono text-sm",
+                                                value: "{compose_body()}",
+                                                oninput: move |e| compose_body.set(e.value()),
+                                            }
+                                        }
+                                    }
+
+                                    div { class: "modal-action",
+                                        button {
+                                            class: "btn",
+                                            disabled: sending_message(),
+                                            onclick: move |_| show_compose.set(false),
+                                            "Cancel"
+                                        }
+                                        button {
+                                            class: "btn btn-primary gap-2",
+                                            disabled: sending_message(),
+                                            onclick: {
+                                                let account_id = account_id.clone();
+                                                move |_| {
+                                                    let account_id = account_id.clone();
+                                                    let identity_id = compose_identity_id();
+                                                    let to = compose_to();
+                                                    let cc = compose_cc();
+                                                    let bcc = compose_bcc();
+                                                    let subject = compose_subject();
+                                                    let body = compose_body();
+                                                    spawn(async move {
+                                                        sending_message.set(true);
+                                                        error.set(None);
+                                                        notice.set(None);
+                                                        let req = SendMailMessageRequest {
+                                                            identity_id: if identity_id.trim().is_empty() {
+                                                                None
+                                                            } else {
+                                                                Some(identity_id)
+                                                            },
+                                                            to: parse_compose_addresses(&to),
+                                                            cc: parse_compose_addresses(&cc),
+                                                            bcc: parse_compose_addresses(&bcc),
+                                                            subject,
+                                                            body_text: body,
+                                                        };
+                                                        match use_mail::send_message(&account_id, &req).await {
+                                                            Ok(sent) => {
+                                                                notice.set(Some(format!(
+                                                                    "Message sent ({})",
+                                                                    sent_copy_status_label(sent.sent_copy_status),
+                                                                )));
+                                                                show_compose.set(false);
+                                                            }
+                                                            Err(e) => error.set(Some(e)),
+                                                        }
+                                                        sending_message.set(false);
+                                                    });
+                                                }
+                                            },
+                                            if sending_message() {
+                                                span { class: "loading loading-spinner loading-xs" }
+                                            } else {
+                                                IconSend { class: "h-4 w-4".to_string() }
+                                            }
+                                            span { "Send" }
+                                        }
+                                    }
+                                }
+                                div { class: "modal-backdrop", onclick: move |_| show_compose.set(false) }
                             }
                         }
                     }
@@ -1467,6 +1646,19 @@ fn message_subject(message: &MailMessageSummaryResponse) -> String {
         .unwrap_or_else(|| "(no subject)".to_string())
 }
 
+fn mail_identity_label(identity: &MailIdentityResponse) -> String {
+    format!("{} <{}>", identity.display_name, identity.email_address)
+}
+
+fn sent_copy_status_label(status: MailSentCopyStatus) -> &'static str {
+    match status {
+        MailSentCopyStatus::ProviderSaved => "provider saved Sent copy",
+        MailSentCopyStatus::Appended => "Sent copy appended",
+        MailSentCopyStatus::SkippedNoSentFolder => "no Sent folder configured",
+        MailSentCopyStatus::Failed => "Sent copy failed",
+    }
+}
+
 fn message_sender(message: &MailMessageSummaryResponse) -> String {
     message
         .from
@@ -1494,6 +1686,18 @@ fn message_has_flag(message: &MailMessageSummaryResponse, flag: &str) -> bool {
             .trim_start_matches('\\')
             .eq_ignore_ascii_case(flag.trim_start_matches('\\'))
     })
+}
+
+fn parse_compose_addresses(input: &str) -> Vec<MailAddressDto> {
+    input
+        .split([',', ';', '\n'])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|address| MailAddressDto {
+            name: None,
+            address: address.to_string(),
+        })
+        .collect()
 }
 
 fn format_mail_address(address: &MailAddressDto) -> String {

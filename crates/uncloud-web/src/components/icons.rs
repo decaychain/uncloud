@@ -80,6 +80,11 @@ lucide_icon!(IconMail,
     path { d: "m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" }
 );
 
+lucide_icon!(IconSend,
+    path { d: "m22 2-7 20-4-9-9-4Z" }
+    path { d: "M22 2 11 13" }
+);
+
 lucide_icon!(IconWallet,
     path { d: "M19 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a2 2 0 0 1-2-2V5" }
     path { d: "M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4" }

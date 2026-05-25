@@ -3,9 +3,10 @@
 use uncloud_common::{
     CreateMailAccountRequest, MailAccountResponse, MailAccountSyncResponse,
     MailConnectionTestResponse, MailCredentialStatusResponse, MailFolderResponse,
-    MailFolderSyncResponse, MailMessageDetailResponse, MailMessageMutationAction,
-    MailMessageMutationRequest, MailMessageMutationResponse, MailMessageSummaryResponse,
-    MailPasswordAuthRequest, MailSyncRequest, SetMailCredentialRequest, UpdateMailAccountRequest,
+    MailFolderSyncResponse, MailIdentityResponse, MailMessageDetailResponse,
+    MailMessageMutationAction, MailMessageMutationRequest, MailMessageMutationResponse,
+    MailMessageSummaryResponse, MailPasswordAuthRequest, MailSyncRequest, SendMailMessageRequest,
+    SendMailMessageResponse, SetMailCredentialRequest, UpdateMailAccountRequest,
     UpdateMailFolderRequest,
 };
 
@@ -102,6 +103,25 @@ pub async fn test_smtp(account_id: &str) -> Result<MailConnectionTestResponse, S
     provider_test(&format!("/mail/accounts/{account_id}/test-smtp")).await
 }
 
+pub async fn send_message(
+    account_id: &str,
+    req: &SendMailMessageRequest,
+) -> Result<SendMailMessageResponse, String> {
+    let r = api::post(&format!("/mail/accounts/{account_id}/send"))
+        .json(req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<SendMailMessageResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
 async fn provider_test(path: &str) -> Result<MailConnectionTestResponse, String> {
     let r = api::post(path)
         .json(&MailPasswordAuthRequest { password: None })
@@ -125,6 +145,20 @@ pub async fn list_folders(account_id: &str) -> Result<Vec<MailFolderResponse>, S
         .map_err(|e| e.to_string())?;
     if r.ok() {
         r.json::<Vec<MailFolderResponse>>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn list_identities() -> Result<Vec<MailIdentityResponse>, String> {
+    let r = api::get("/mail/identities")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<Vec<MailIdentityResponse>>()
             .await
             .map_err(|e| e.to_string())
     } else {

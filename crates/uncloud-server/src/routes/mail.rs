@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use axum::{
     extract::{Path, Query, State},
@@ -10,6 +10,7 @@ use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, oid::ObjectId};
 use serde::Deserialize;
+use tokio::time::sleep;
 use uncloud_common::{
     CreateMailAccountRequest, CreateMailIdentityRequest, MailAccountResponse,
     MailAccountSyncResponse, MailAddressDto, MailConnectionTestResponse,
@@ -17,6 +18,7 @@ use uncloud_common::{
     MailFolderSyncResponse, MailIdentityResponse, MailMessageDetailResponse,
     MailMessageMutationAction, MailMessageMutationRequest, MailMessageMutationResponse,
     MailMessageSummaryResponse, MailPasswordAuthRequest, MailServerSettings, MailSyncRequest,
+    MailSentCopyStatus, SendMailMessageRequest, SendMailMessageResponse,
     SetMailCredentialRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
     UpdateMailIdentityRequest,
 };
@@ -28,6 +30,7 @@ use crate::models::{
 };
 use crate::services::mail::{
     RemoteMailAddress, RemoteMailbox, RemoteMessageFlag, RemoteMessageSummary,
+    RemoteOutgoingMessage,
 };
 use crate::services::SecretCipher;
 use crate::AppState;
@@ -41,6 +44,8 @@ const DEFAULT_SYNC_LIMIT_PER_FOLDER: u32 = 250;
 const MAX_SYNC_LIMIT_PER_FOLDER: u32 = 1_000;
 const DEFAULT_MESSAGE_LIST_LIMIT: i64 = 100;
 const MAX_MESSAGE_LIST_LIMIT: i64 = 500;
+const SENT_COPY_DETECT_ATTEMPTS: usize = 3;
+const SENT_COPY_DETECT_DELAY: Duration = Duration::from_millis(750);
 
 #[derive(Debug, Deserialize)]
 pub struct MailMessageListQuery {
@@ -242,12 +247,42 @@ async fn find_message(state: &AppState, owner_id: ObjectId, id: ObjectId) -> Res
         .ok_or_else(|| AppError::NotFound("Mail message".into()))
 }
 
+async fn find_identity(
+    state: &AppState,
+    owner_id: ObjectId,
+    account_id: ObjectId,
+    id: ObjectId,
+) -> Result<MailIdentity> {
+    state
+        .db
+        .collection::<MailIdentity>(IDENTITIES)
+        .find_one(doc! { "_id": id, "owner_id": owner_id, "account_id": account_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Mail identity".into()))
+}
+
 async fn find_folder_by_role(
     state: &AppState,
     owner_id: ObjectId,
     account_id: ObjectId,
     roles: &[MailFolderRole],
 ) -> Result<MailFolder> {
+    if let Some(folder) = find_optional_folder_by_role(state, owner_id, account_id, roles).await? {
+        return Ok(folder);
+    }
+
+    Err(AppError::BadRequest(format!(
+        "No selectable mail folder is configured as {}",
+        role_list_label(roles)
+    )))
+}
+
+async fn find_optional_folder_by_role(
+    state: &AppState,
+    owner_id: ObjectId,
+    account_id: ObjectId,
+    roles: &[MailFolderRole],
+) -> Result<Option<MailFolder>> {
     let mut cursor = state
         .db
         .collection::<MailFolder>(FOLDERS)
@@ -256,15 +291,12 @@ async fn find_folder_by_role(
     while let Some(folder) = cursor.try_next().await? {
         if let Some(role) = folder_effective_role(&folder) {
             if roles.contains(&role) {
-                return Ok(folder);
+                return Ok(Some(folder));
             }
         }
     }
 
-    Err(AppError::BadRequest(format!(
-        "No selectable mail folder is configured as {}",
-        role_list_label(roles)
-    )))
+    Ok(None)
 }
 
 fn role_list_label(roles: &[MailFolderRole]) -> String {
@@ -307,6 +339,52 @@ fn remote_address_to_model(address: &RemoteMailAddress) -> MailAddress {
         name: address.name.clone(),
         address: address.address.clone(),
     }
+}
+
+fn response_address_to_remote(address: &MailAddressDto) -> RemoteMailAddress {
+    RemoteMailAddress {
+        name: address
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        address: address.address.trim().to_string(),
+    }
+}
+
+fn recipient_count(req: &SendMailMessageRequest) -> usize {
+    req.to.len() + req.cc.len() + req.bcc.len()
+}
+
+fn validate_send_request(req: &SendMailMessageRequest) -> Result<()> {
+    if recipient_count(req) == 0 {
+        return Err(AppError::BadRequest(
+            "at least one recipient is required".into(),
+        ));
+    }
+    for address in req.to.iter().chain(req.cc.iter()).chain(req.bcc.iter()) {
+        if address.address.trim().is_empty() {
+            return Err(AppError::BadRequest(
+                "recipient address cannot be empty".into(),
+            ));
+        }
+    }
+    if req.subject.len() > 998 {
+        return Err(AppError::BadRequest(
+            "mail subject must be 998 characters or fewer".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn message_id_for_sender(email_address: &str) -> String {
+    let domain = email_address
+        .rsplit_once('@')
+        .map(|(_, domain)| domain.trim())
+        .filter(|domain| !domain.is_empty())
+        .unwrap_or("uncloud.local");
+    format!("<{}@{}>", ObjectId::new().to_hex(), domain)
 }
 
 fn mail_flag_eq(candidate: &str, flag: &str) -> bool {
@@ -667,6 +745,227 @@ pub async fn test_account_smtp(
             .test_smtp_password(&account.smtp, &password)
             .await?,
     ))
+}
+
+struct ResolvedSendIdentity {
+    id: Option<ObjectId>,
+    display_name: String,
+    email_address: String,
+    reply_to: Option<String>,
+}
+
+struct SentCopyResult {
+    status: MailSentCopyStatus,
+    folder_id: Option<String>,
+    folder_path: Option<String>,
+    error: Option<String>,
+}
+
+async fn resolve_send_identity(
+    state: &AppState,
+    owner_id: ObjectId,
+    account: &MailAccount,
+    identity_id: Option<&str>,
+) -> Result<ResolvedSendIdentity> {
+    if let Some(identity_id) = identity_id {
+        let id = parse_oid(identity_id, "mail identity id")?;
+        let identity = find_identity(state, owner_id, account.id, id).await?;
+        return Ok(ResolvedSendIdentity {
+            id: Some(identity.id),
+            display_name: identity.display_name,
+            email_address: identity.email_address,
+            reply_to: identity.reply_to,
+        });
+    }
+
+    let identity = state
+        .db
+        .collection::<MailIdentity>(IDENTITIES)
+        .find_one(doc! {
+            "owner_id": owner_id,
+            "account_id": account.id,
+            "is_default": true,
+        })
+        .await?;
+    let identity = match identity {
+        Some(identity) => Some(identity),
+        None => {
+            state
+                .db
+                .collection::<MailIdentity>(IDENTITIES)
+                .find_one(doc! { "owner_id": owner_id, "account_id": account.id })
+                .sort(doc! { "email_address": 1 })
+                .await?
+        }
+    };
+
+    if let Some(identity) = identity {
+        Ok(ResolvedSendIdentity {
+            id: Some(identity.id),
+            display_name: identity.display_name,
+            email_address: identity.email_address,
+            reply_to: identity.reply_to,
+        })
+    } else {
+        Ok(ResolvedSendIdentity {
+            id: None,
+            display_name: account.display_name.clone(),
+            email_address: account.email_address.clone(),
+            reply_to: None,
+        })
+    }
+}
+
+async fn handle_sent_copy(
+    state: &AppState,
+    owner_id: ObjectId,
+    account: &MailAccount,
+    password: &str,
+    message_id: &str,
+    raw_message: &[u8],
+) -> SentCopyResult {
+    let sent_folder =
+        match find_optional_folder_by_role(state, owner_id, account.id, &[MailFolderRole::Sent])
+            .await
+        {
+            Ok(Some(folder)) => folder,
+            Ok(None) => {
+                return SentCopyResult {
+                    status: MailSentCopyStatus::SkippedNoSentFolder,
+                    folder_id: None,
+                    folder_path: None,
+                    error: None,
+                };
+            }
+            Err(err) => {
+                return SentCopyResult {
+                    status: MailSentCopyStatus::Failed,
+                    folder_id: None,
+                    folder_path: None,
+                    error: Some(err.to_string()),
+                };
+            }
+        };
+
+    let folder_id = Some(sent_folder.id.to_hex());
+    let folder_path = Some(sent_folder.path.clone());
+    match wait_for_provider_sent_copy(state, account, password, &sent_folder, message_id).await {
+        Ok(true) => SentCopyResult {
+            status: MailSentCopyStatus::ProviderSaved,
+            folder_id,
+            folder_path,
+            error: None,
+        },
+        Ok(false) => match state
+            .mail
+            .append_imap_message(&account.imap, password, &sent_folder.path, raw_message)
+            .await
+        {
+            Ok(()) => SentCopyResult {
+                status: MailSentCopyStatus::Appended,
+                folder_id,
+                folder_path,
+                error: None,
+            },
+            Err(err) => SentCopyResult {
+                status: MailSentCopyStatus::Failed,
+                folder_id,
+                folder_path,
+                error: Some(err.to_string()),
+            },
+        },
+        Err(err) => SentCopyResult {
+            status: MailSentCopyStatus::Failed,
+            folder_id,
+            folder_path,
+            error: Some(err.to_string()),
+        },
+    }
+}
+
+async fn wait_for_provider_sent_copy(
+    state: &AppState,
+    account: &MailAccount,
+    password: &str,
+    sent_folder: &MailFolder,
+    message_id: &str,
+) -> Result<bool> {
+    for attempt in 0..SENT_COPY_DETECT_ATTEMPTS {
+        if state
+            .mail
+            .imap_message_exists_by_message_id(
+                &account.imap,
+                password,
+                &sent_folder.path,
+                message_id,
+            )
+            .await?
+        {
+            return Ok(true);
+        }
+        if attempt + 1 < SENT_COPY_DETECT_ATTEMPTS {
+            sleep(SENT_COPY_DETECT_DELAY).await;
+        }
+    }
+    Ok(false)
+}
+
+pub async fn send_account_message(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    Json(req): Json<SendMailMessageRequest>,
+) -> Result<Json<SendMailMessageResponse>> {
+    require_mail(&state)?;
+    validate_send_request(&req)?;
+    let id = parse_oid(&id, "mail account id")?;
+    let account = find_account(&state, user.id, id).await?;
+    let password = resolve_mail_password(&state, &account, None)?;
+    let identity =
+        resolve_send_identity(&state, user.id, &account, req.identity_id.as_deref()).await?;
+    let message_id = message_id_for_sender(&identity.email_address);
+    let accepted_recipients = recipient_count(&req);
+    let remote = RemoteOutgoingMessage {
+        message_id: message_id.clone(),
+        from: RemoteMailAddress {
+            name: Some(identity.display_name.clone()),
+            address: identity.email_address.clone(),
+        },
+        reply_to: identity.reply_to.as_ref().map(|address| RemoteMailAddress {
+            name: None,
+            address: address.clone(),
+        }),
+        to: req.to.iter().map(response_address_to_remote).collect(),
+        cc: req.cc.iter().map(response_address_to_remote).collect(),
+        bcc: req.bcc.iter().map(response_address_to_remote).collect(),
+        subject: req.subject,
+        body_text: req.body_text,
+    };
+    let sent = state
+        .mail
+        .send_smtp_plain_text(&account.smtp, &password, remote)
+        .await?;
+    let sent_copy = handle_sent_copy(
+        &state,
+        user.id,
+        &account,
+        &password,
+        &sent.message_id,
+        &sent.raw_message,
+    )
+    .await;
+
+    Ok(Json(SendMailMessageResponse {
+        account_id: account.id.to_hex(),
+        identity_id: identity.id.map(|id| id.to_hex()),
+        message_id: sent.message_id,
+        accepted_recipients,
+        smtp_response: sent.response,
+        sent_copy_status: sent_copy.status,
+        sent_copy_folder_id: sent_copy.folder_id,
+        sent_copy_folder_path: sent_copy.folder_path,
+        sent_copy_error: sent_copy.error,
+    }))
 }
 
 pub async fn list_identities(
@@ -1681,6 +1980,28 @@ mod tests {
         assert!(mail_flag_eq("\\Seen", "seen"));
         assert!(mail_flag_eq("flagged", "\\Flagged"));
         assert!(!mail_flag_eq("\\Answered", "\\Seen"));
+    }
+
+    #[test]
+    fn validate_send_request_requires_recipient() {
+        let req = SendMailMessageRequest {
+            identity_id: None,
+            to: Vec::new(),
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Test".to_string(),
+            body_text: "Body".to_string(),
+        };
+
+        assert!(validate_send_request(&req).is_err());
+    }
+
+    #[test]
+    fn message_id_for_sender_uses_sender_domain() {
+        let value = message_id_for_sender("sender@example.com");
+
+        assert!(value.starts_with('<'));
+        assert!(value.ends_with("@example.com>"));
     }
 
     #[test]

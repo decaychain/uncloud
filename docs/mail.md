@@ -54,6 +54,7 @@ Authenticated routes are mounted under both `/api` and `/api/v1`:
 - `DELETE /mail/accounts/{id}/credential`
 - `POST /mail/accounts/{id}/test-imap`
 - `POST /mail/accounts/{id}/test-smtp`
+- `POST /mail/accounts/{id}/send`
 - `POST /mail/accounts/{id}/sync`
 - `GET /mail/accounts/{account_id}/folders`
 - `POST /mail/accounts/{account_id}/folders/refresh`
@@ -106,10 +107,15 @@ the account's SMTP settings.
   and returns plain text plus server-sanitized HTML.
 - Manual message mutations for the first write-path spike: mark read/unread,
   star/unstar, move to a selected folder, archive, and move to trash.
-- First read-only web UI iteration at `/mail`: account/folder navigation,
+- Minimal SMTP send through a selected identity or account fallback. The first
+  compose path sends plain text only and uses the stored account credential.
+- Sent-copy handling for basic sends: after SMTP accepts the message, Uncloud
+  checks the configured Sent folder by `Message-ID`; if the provider did not
+  save it, Uncloud appends the exact RFC822 payload to Sent.
+- First experimental web UI iteration at `/mail`: account/folder navigation,
   account setup/settings, IMAP/SMTP tests, folder settings, manual
   account/folder sync, cached message list, reader pane, and basic message
-  mutation controls.
+  mutation/compose controls.
 - Mongo indexes for account, identity, folder, message, and attachment metadata.
 - Server-wide `features.mail` toggle plus per-user opt-out through
   `disabled_features`.
@@ -118,8 +124,7 @@ the account's SMTP settings.
 
 - Stored credentials currently cover IMAP app passwords only. OAuth refresh
   tokens and SMTP credential handling still need a credential type model.
-- SMTP is wired only for connection/authentication testing. Sending is still not
-  implemented.
+- SMTP is wired for connection/authentication testing and plain-text send.
 - Message sync currently stores summaries only. Raw RFC822 bodies, decoded
   parts, parsed body output, attachment persistence, and sanitized HTML are not
   persisted yet.
@@ -133,7 +138,12 @@ the account's SMTP settings.
   the destination UID and the foundation does not yet consume UIDPLUS response
   codes.
 - Compose, search, threading, attachments, permanent delete, and draft handling
-  are not implemented.
+  are not fully implemented. Compose currently means "send a plain-text message
+  now" with no drafts, attachments, rich editor, reply/forward headers, or
+  provider-specific sent-copy policy.
+- Sent-copy detection is intentionally conservative. If checking the Sent folder
+  fails, Uncloud reports the failure and does not append, to avoid creating a
+  duplicate when the provider may have saved the message already.
 - Account-level manual sync refreshes folders first, then syncs selectable
   folders one-by-one. It is intentionally simple and not yet a scheduler.
 
@@ -146,14 +156,16 @@ the account's SMTP settings.
 5. `POST /api/mail/accounts/{id}/test-imap` with either a transient app
    password or `{}` to use the stored credential.
 6. `POST /api/mail/accounts/{id}/test-smtp` the same way.
-7. `POST /api/mail/accounts/{id}/folders/refresh` the same way.
-8. `GET /api/mail/accounts/{id}/folders` and verify folders/subfolders are
+7. Optionally `POST /api/mail/accounts/{id}/send` with a small plain-text test
+   message.
+8. `POST /api/mail/accounts/{id}/folders/refresh` the same way.
+9. `GET /api/mail/accounts/{id}/folders` and verify folders/subfolders are
    persisted with expected paths and delimiters.
-9. `POST /api/mail/accounts/{id}/sync` with `{}` to use the stored credential,
+10. `POST /api/mail/accounts/{id}/sync` with `{}` to use the stored credential,
    or include `password` and optional `limit_per_folder` for manual testing.
-10. `GET /api/mail/accounts/{account_id}/folders/{folder_id}/messages` to
+11. `GET /api/mail/accounts/{account_id}/folders/{folder_id}/messages` to
     inspect cached message summaries for a synced folder.
-11. Open `/mail` in the web UI and verify account/folder selection, sync
+12. Open `/mail` in the web UI and verify account/folder selection, sync
     controls, message list, and sanitized HTML/plain-text reader body.
 
 This is enough to validate the current protocol foundation before building UI.
@@ -229,10 +241,12 @@ Remaining credential work before scheduler/background sync:
 
 ### 6. Sending
 
-- Add compose/send route using an identity and SMTP settings.
-- Support plain text plus HTML body.
-- Save sent copy through provider conventions: SMTP server may do it, but IMAP
-  append to Sent may still be needed for some providers.
+- Basic compose/send route using an identity and SMTP settings is wired.
+- Sent-copy handling checks for provider-saved messages and appends to Sent when
+  needed.
+- Support HTML body after plain-text send has been tested with real providers.
+- Add a user/provider setting for sent-copy policy once we know how common
+  providers behave.
 - Add reply/forward metadata handling.
 - Add draft storage after basic send works.
 

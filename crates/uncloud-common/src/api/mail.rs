@@ -205,6 +205,41 @@ pub struct MailMessageMutationResponse {
     pub destination_folder_path: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SendMailMessageRequest {
+    #[serde(default)]
+    pub identity_id: Option<String>,
+    pub to: Vec<MailAddressDto>,
+    #[serde(default)]
+    pub cc: Vec<MailAddressDto>,
+    #[serde(default)]
+    pub bcc: Vec<MailAddressDto>,
+    pub subject: String,
+    pub body_text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MailSentCopyStatus {
+    ProviderSaved,
+    Appended,
+    SkippedNoSentFolder,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SendMailMessageResponse {
+    pub account_id: String,
+    pub identity_id: Option<String>,
+    pub message_id: String,
+    pub accepted_recipients: usize,
+    pub smtp_response: Option<String>,
+    pub sent_copy_status: MailSentCopyStatus,
+    pub sent_copy_folder_id: Option<String>,
+    pub sent_copy_folder_path: Option<String>,
+    pub sent_copy_error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MailAttachmentResponse {
     pub id: String,

@@ -10,8 +10,11 @@ use futures::TryStreamExt;
 use lettre::transport::smtp::{
     authentication::Credentials,
     client::{Tls, TlsParameters},
+    response::Response,
 };
-use lettre::{AsyncSmtpTransport, Tokio1Executor};
+use lettre::{
+    message::Mailbox, AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+};
 use mail_parser::MessageParser;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
@@ -254,7 +257,7 @@ impl MailService {
             .build::<Tokio1Executor>();
         let connected = imap_timeout("SMTP connection test", transport.test_connection())
             .await?
-            .map_err(map_smtp_error)?;
+            .map_err(|err| map_smtp_error(err, "SMTP connection test"))?;
 
         if !connected {
             return Err(AppError::Internal(
@@ -266,6 +269,99 @@ impl MailService {
             ok: true,
             capabilities: Vec::new(),
         })
+    }
+
+    pub async fn send_smtp_plain_text(
+        &self,
+        settings: &MailServerConfig,
+        password: &str,
+        message: RemoteOutgoingMessage,
+    ) -> Result<RemoteSendResult> {
+        let tls = match settings.security {
+            MailSecurity::Tls => Tls::Wrapper(smtp_tls_parameters(settings)?),
+            MailSecurity::StartTls => Tls::Required(smtp_tls_parameters(settings)?),
+            MailSecurity::Plain => Tls::None,
+        };
+        let transport = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&settings.host)
+            .port(settings.port)
+            .tls(tls)
+            .credentials(Credentials::new(
+                settings.username.clone(),
+                password.to_string(),
+            ))
+            .timeout(Some(MAIL_OP_TIMEOUT))
+            .build::<Tokio1Executor>();
+        let message_id = message.message_id.clone();
+        let smtp_message = build_plain_text_message(message)?;
+        let raw_message = smtp_message.formatted();
+        let response = imap_timeout(
+            "SMTP send",
+            transport.send_raw(smtp_message.envelope(), &raw_message),
+        )
+            .await?
+            .map_err(|err| map_smtp_error(err, "SMTP send"))?;
+        transport.shutdown().await;
+
+        Ok(RemoteSendResult {
+            message_id,
+            response: smtp_response_text(&response),
+            raw_message,
+        })
+    }
+
+    pub async fn imap_message_exists_by_message_id(
+        &self,
+        settings: &MailServerConfig,
+        password: &str,
+        folder_path: &str,
+        message_id: &str,
+    ) -> Result<bool> {
+        match settings.security {
+            MailSecurity::Tls => {
+                let client = connect_imap_tls(settings, true).await?;
+                imap_message_exists_by_message_id(
+                    client, settings, password, folder_path, message_id,
+                )
+                .await
+            }
+            MailSecurity::StartTls => {
+                let client = connect_imap_starttls(settings).await?;
+                imap_message_exists_by_message_id(
+                    client, settings, password, folder_path, message_id,
+                )
+                .await
+            }
+            MailSecurity::Plain => {
+                let client = connect_imap_plain(settings).await?;
+                imap_message_exists_by_message_id(
+                    client, settings, password, folder_path, message_id,
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn append_imap_message(
+        &self,
+        settings: &MailServerConfig,
+        password: &str,
+        folder_path: &str,
+        raw_message: &[u8],
+    ) -> Result<()> {
+        match settings.security {
+            MailSecurity::Tls => {
+                let client = connect_imap_tls(settings, true).await?;
+                append_imap_message(client, settings, password, folder_path, raw_message).await
+            }
+            MailSecurity::StartTls => {
+                let client = connect_imap_starttls(settings).await?;
+                append_imap_message(client, settings, password, folder_path, raw_message).await
+            }
+            MailSecurity::Plain => {
+                let client = connect_imap_plain(settings).await?;
+                append_imap_message(client, settings, password, folder_path, raw_message).await
+            }
+        }
     }
 }
 
@@ -605,17 +701,125 @@ where
         .ok_or_else(|| AppError::NotFound("Mail message".into()))
 }
 
+async fn imap_message_exists_by_message_id<T>(
+    client: Client<T>,
+    settings: &MailServerConfig,
+    password: &str,
+    folder_path: &str,
+    message_id: &str,
+) -> Result<bool>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
+    let mut session = login_imap_client(client, settings, password).await?;
+    imap_timeout("IMAP EXAMINE", session.examine(folder_path))
+        .await?
+        .map_err(|e| AppError::Internal(format!("IMAP EXAMINE failed: {e}")))?;
+    let query = format!("HEADER Message-ID {}", quoted_imap_search_string(message_id)?);
+    let uids = imap_timeout("IMAP UID SEARCH", session.uid_search(query))
+        .await?
+        .map_err(|e| AppError::Internal(format!("IMAP UID SEARCH failed: {e}")))?;
+    let _ = session.logout().await;
+    Ok(!uids.is_empty())
+}
+
+async fn append_imap_message<T>(
+    client: Client<T>,
+    settings: &MailServerConfig,
+    password: &str,
+    folder_path: &str,
+    raw_message: &[u8],
+) -> Result<()>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
+    let mut session = login_imap_client(client, settings, password).await?;
+    imap_timeout(
+        "IMAP APPEND",
+        session.append(folder_path, Some("(\\Seen)"), None, raw_message),
+    )
+    .await?
+    .map_err(|e| AppError::Internal(format!("IMAP APPEND failed: {e}")))?;
+    let _ = session.logout().await;
+    Ok(())
+}
+
 fn smtp_tls_parameters(settings: &MailServerConfig) -> Result<TlsParameters> {
     TlsParameters::new(settings.host.clone())
         .map_err(|e| AppError::Internal(format!("SMTP TLS configuration failed: {e}")))
 }
 
-fn map_smtp_error(err: lettre::transport::smtp::Error) -> AppError {
+fn map_smtp_error(err: lettre::transport::smtp::Error, operation: &str) -> AppError {
     if err.is_client() || err.is_response() || err.is_permanent() {
-        AppError::BadRequest(format!("SMTP connection test failed: {err}"))
+        AppError::BadRequest(format!("{operation} failed: {err}"))
     } else {
-        AppError::Internal(format!("SMTP connection test failed: {err}"))
+        AppError::Internal(format!("{operation} failed: {err}"))
     }
+}
+
+fn build_plain_text_message(message: RemoteOutgoingMessage) -> Result<Message> {
+    let mut builder = Message::builder()
+        .message_id(Some(message.message_id.clone()))
+        .from(mailbox_from_address(&message.from)?)
+        .subject(message.subject);
+
+    if let Some(reply_to) = message.reply_to {
+        builder = builder.reply_to(mailbox_from_address(&reply_to)?);
+    }
+    for recipient in message.to {
+        builder = builder.to(mailbox_from_address(&recipient)?);
+    }
+    for recipient in message.cc {
+        builder = builder.cc(mailbox_from_address(&recipient)?);
+    }
+    for recipient in message.bcc {
+        builder = builder.bcc(mailbox_from_address(&recipient)?);
+    }
+
+    builder
+        .body(message.body_text)
+        .map_err(|e| AppError::BadRequest(format!("mail message could not be built: {e}")))
+}
+
+fn mailbox_from_address(address: &RemoteMailAddress) -> Result<Mailbox> {
+    if address.name.as_deref().is_none_or(str::is_empty) {
+        if let Ok(mailbox) = address.address.parse::<Mailbox>() {
+            return Ok(mailbox);
+        }
+    }
+    let email = address
+        .address
+        .parse()
+        .map_err(|e| AppError::BadRequest(format!("invalid email address: {e}")))?;
+    Ok(Mailbox::new(
+        address.name.as_ref().map(|value| value.trim().to_string()),
+        email,
+    ))
+}
+
+fn smtp_response_text(response: &Response) -> Option<String> {
+    response
+        .first_line()
+        .map(str::to_string)
+        .or_else(|| response.message().next().map(str::to_string))
+}
+
+fn quoted_imap_search_string(value: &str) -> Result<String> {
+    if value.contains('\r') || value.contains('\n') {
+        return Err(AppError::BadRequest(
+            "mail search value cannot contain line breaks".into(),
+        ));
+    }
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        if ch == '"' || ch == '\\' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    Ok(out)
 }
 
 fn capability_name(cap: &Capability) -> String {
@@ -658,6 +862,25 @@ pub struct RemoteMailboxSync {
 pub struct RemoteMailAddress {
     pub name: Option<String>,
     pub address: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteOutgoingMessage {
+    pub message_id: String,
+    pub from: RemoteMailAddress,
+    pub reply_to: Option<RemoteMailAddress>,
+    pub to: Vec<RemoteMailAddress>,
+    pub cc: Vec<RemoteMailAddress>,
+    pub bcc: Vec<RemoteMailAddress>,
+    pub subject: String,
+    pub body_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteSendResult {
+    pub message_id: String,
+    pub response: Option<String>,
+    pub raw_message: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -1020,8 +1243,10 @@ fn normalize_plain_text(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        display_name, flag_store_query, next_uid_sync_plan, parent_path, parse_message_body,
-        sync_completed, updated_uid_cursors, RemoteMessageFlag, UidSyncDirection, UidSyncPlan,
+        build_plain_text_message, display_name, flag_store_query, mailbox_from_address,
+        next_uid_sync_plan, parent_path, parse_message_body, quoted_imap_search_string,
+        sync_completed, updated_uid_cursors, RemoteMailAddress, RemoteMessageFlag,
+        RemoteOutgoingMessage, UidSyncDirection, UidSyncPlan,
     };
 
     #[test]
@@ -1060,6 +1285,78 @@ mod tests {
             flag_store_query(RemoteMessageFlag::Flagged, false),
             "-FLAGS.SILENT (\\Flagged)"
         );
+    }
+
+    #[test]
+    fn mailbox_from_address_accepts_display_address_syntax() {
+        let mailbox = mailbox_from_address(&RemoteMailAddress {
+            name: None,
+            address: "Example User <user@example.com>".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(mailbox.name.as_deref(), Some("Example User"));
+        assert_eq!(mailbox.email.to_string(), "user@example.com");
+    }
+
+    #[test]
+    fn build_plain_text_message_requires_valid_recipients() {
+        let err = build_plain_text_message(RemoteOutgoingMessage {
+            message_id: "<test@uncloud.local>".to_string(),
+            from: RemoteMailAddress {
+                name: Some("Sender".to_string()),
+                address: "sender@example.com".to_string(),
+            },
+            reply_to: None,
+            to: vec![RemoteMailAddress {
+                name: None,
+                address: "not-an-address".to_string(),
+            }],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Test".to_string(),
+            body_text: "Body".to_string(),
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("invalid email address"));
+    }
+
+    #[test]
+    fn build_plain_text_message_omits_bcc_header() {
+        let message = build_plain_text_message(RemoteOutgoingMessage {
+            message_id: "<test@uncloud.local>".to_string(),
+            from: RemoteMailAddress {
+                name: Some("Sender".to_string()),
+                address: "sender@example.com".to_string(),
+            },
+            reply_to: None,
+            to: vec![RemoteMailAddress {
+                name: None,
+                address: "visible@example.com".to_string(),
+            }],
+            cc: Vec::new(),
+            bcc: vec![RemoteMailAddress {
+                name: None,
+                address: "hidden@example.com".to_string(),
+            }],
+            subject: "Test".to_string(),
+            body_text: "Body".to_string(),
+        })
+        .unwrap();
+        let formatted = String::from_utf8(message.formatted()).unwrap();
+
+        assert!(!formatted.contains("Bcc:"));
+        assert!(!formatted.contains("hidden@example.com"));
+    }
+
+    #[test]
+    fn quoted_imap_search_string_escapes_special_chars() {
+        assert_eq!(
+            quoted_imap_search_string(r#"<a"b\c@example.com>"#).unwrap(),
+            r#""<a\"b\\c@example.com>""#
+        );
+        assert!(quoted_imap_search_string("bad\r\nvalue").is_err());
     }
 
     #[test]
