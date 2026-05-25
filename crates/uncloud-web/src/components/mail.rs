@@ -10,7 +10,11 @@ use crate::components::icons::{
     IconArchive, IconEye, IconFileText, IconFolder, IconMail, IconMoveRight, IconPlus,
     IconRefreshCw, IconSend, IconSettings, IconStar, IconTrash,
 };
+use crate::components::scroll_sentinel::ScrollSentinel;
 use crate::hooks::use_mail;
+
+const MAIL_MESSAGE_PAGE_SIZE: u32 = 50;
+const MAIL_BACKFILL_PAGE_SIZE: u32 = 50;
 
 #[component]
 pub fn MailPage() -> Element {
@@ -24,6 +28,8 @@ pub fn MailPage() -> Element {
     let mut selected_message = use_signal(String::new);
     let mut loading = use_signal(|| true);
     let mut syncing = use_signal(|| false);
+    let mut loading_more_messages = use_signal(|| false);
+    let mut backfilling_messages = use_signal(|| false);
     let mut loading_detail = use_signal(|| false);
     let mut mutating_message = use_signal(|| false);
     let mut move_target_folder = use_signal(String::new);
@@ -59,6 +65,8 @@ pub fn MailPage() -> Element {
     let mut saving_account_settings = use_signal(|| false);
     let mut confirming_account_delete = use_signal(|| false);
     let mut deleting_account = use_signal(|| false);
+    let mut message_next_cursor = use_signal(|| None::<String>);
+    let mut message_has_more = use_signal(|| false);
 
     let mut display_name = use_signal(String::new);
     let mut email_address = use_signal(String::new);
@@ -119,6 +127,84 @@ pub fn MailPage() -> Element {
         .filter(|identity| identity.account_id == selected_account_id)
         .cloned()
         .collect::<Vec<_>>();
+    let can_backfill_active_folder = active_folder
+        .as_ref()
+        .map(|folder| folder.selectable && !folder.sync_completed)
+        .unwrap_or(false);
+
+    let trigger_load_more_messages = move || {
+        if *syncing.peek() || *loading_more_messages.peek() || *backfilling_messages.peek() {
+            return;
+        }
+        let account_id = selected_account.peek().clone();
+        let folder_id = selected_folder.peek().clone();
+        if account_id.is_empty() || folder_id.is_empty() {
+            return;
+        }
+
+        if let Some(cursor) = message_next_cursor.peek().clone() {
+            spawn(async move {
+                loading_more_messages.set(true);
+                error.set(None);
+                match use_mail::list_messages(
+                    &account_id,
+                    &folder_id,
+                    MAIL_MESSAGE_PAGE_SIZE,
+                    Some(&cursor),
+                )
+                .await
+                {
+                    Ok(page) => {
+                        messages.set(append_unique_messages(messages(), page.messages));
+                        message_next_cursor.set(page.next_cursor);
+                        message_has_more.set(page.has_more);
+                    }
+                    Err(e) => error.set(Some(e)),
+                }
+                loading_more_messages.set(false);
+            });
+            return;
+        }
+
+        let should_backfill = folders
+            .peek()
+            .iter()
+            .find(|folder| folder.id == folder_id)
+            .map(|folder| folder.selectable && !folder.sync_completed)
+            .unwrap_or(false);
+        if !should_backfill {
+            return;
+        }
+        let last_cached_cursor = messages.peek().last().map(|message| message.uid.to_string());
+        spawn(async move {
+            backfilling_messages.set(true);
+            error.set(None);
+            match use_mail::sync_folder(&account_id, &folder_id, Some(MAIL_BACKFILL_PAGE_SIZE)).await {
+                Ok(_) => {
+                    if let Ok(rows) = use_mail::list_folders(&account_id).await {
+                        folders.set(rows);
+                    }
+                    match use_mail::list_messages(
+                        &account_id,
+                        &folder_id,
+                        MAIL_MESSAGE_PAGE_SIZE,
+                        last_cached_cursor.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(page) => {
+                            messages.set(append_unique_messages(messages(), page.messages));
+                            message_next_cursor.set(page.next_cursor);
+                            message_has_more.set(page.has_more);
+                        }
+                        Err(e) => error.set(Some(e)),
+                    }
+                }
+                Err(e) => error.set(Some(e)),
+            }
+            backfilling_messages.set(false);
+        });
+    };
 
     rsx! {
         div { class: "space-y-3",
@@ -193,8 +279,10 @@ pub fn MailPage() -> Element {
                                         }
                                         let folder_id = selected_folder();
                                         if !folder_id.is_empty() {
-                                            if let Ok(rows) = use_mail::list_messages(&account_id, &folder_id, 100).await {
-                                                messages.set(rows);
+                                            if let Ok(page) = use_mail::list_messages(&account_id, &folder_id, MAIL_MESSAGE_PAGE_SIZE, None).await {
+                                                messages.set(page.messages);
+                                                message_next_cursor.set(page.next_cursor);
+                                                message_has_more.set(page.has_more);
                                             }
                                         }
                                     }
@@ -308,6 +396,8 @@ pub fn MailPage() -> Element {
                                                     selected_message.set(String::new());
                                                     move_target_folder.set(String::new());
                                                     messages.set(Vec::new());
+                                                    message_next_cursor.set(None);
+                                                    message_has_more.set(false);
                                                     detail.set(None);
                                                     error.set(None);
                                                     match use_mail::list_folders(&account_id).await {
@@ -354,6 +444,7 @@ pub fn MailPage() -> Element {
                                     let account_id = folder.account_id.clone();
                                     let active = id == selected_folder_id;
                                     let depth = folder_depth(&folder);
+                                    let auto_sync_empty_folder = folder.selectable && !folder.sync_completed;
                                     rsx! {
                                         div {
                                             key: "{id}",
@@ -371,14 +462,47 @@ pub fn MailPage() -> Element {
                                                 onclick: move |_| {
                                                     let account_id = account_id.clone();
                                                     let folder_id = id.clone();
+                                                    let auto_sync_empty_folder = auto_sync_empty_folder;
                                                     spawn(async move {
                                                         selected_folder.set(folder_id.clone());
                                                         selected_message.set(String::new());
                                                         move_target_folder.set(String::new());
                                                         detail.set(None);
                                                         error.set(None);
-                                                        match use_mail::list_messages(&account_id, &folder_id, 100).await {
-                                                            Ok(rows) => messages.set(rows),
+                                                        message_next_cursor.set(None);
+                                                        message_has_more.set(false);
+                                                        match use_mail::list_messages(&account_id, &folder_id, MAIL_MESSAGE_PAGE_SIZE, None).await {
+                                                            Ok(page) => {
+                                                                let should_auto_sync =
+                                                                    page.messages.is_empty()
+                                                                        && !page.has_more
+                                                                        && auto_sync_empty_folder
+                                                                        && !*syncing.peek()
+                                                                        && !*backfilling_messages.peek();
+                                                                messages.set(page.messages);
+                                                                message_next_cursor.set(page.next_cursor);
+                                                                message_has_more.set(page.has_more);
+                                                                if should_auto_sync {
+                                                                    backfilling_messages.set(true);
+                                                                    match use_mail::sync_folder(&account_id, &folder_id, Some(MAIL_BACKFILL_PAGE_SIZE)).await {
+                                                                        Ok(_) => {
+                                                                            if let Ok(rows) = use_mail::list_folders(&account_id).await {
+                                                                                folders.set(rows);
+                                                                            }
+                                                                            match use_mail::list_messages(&account_id, &folder_id, MAIL_MESSAGE_PAGE_SIZE, None).await {
+                                                                                Ok(page) => {
+                                                                                    messages.set(page.messages);
+                                                                                    message_next_cursor.set(page.next_cursor);
+                                                                                    message_has_more.set(page.has_more);
+                                                                                }
+                                                                                Err(e) => error.set(Some(e)),
+                                                                            }
+                                                                        }
+                                                                        Err(e) => error.set(Some(e)),
+                                                                    }
+                                                                    backfilling_messages.set(false);
+                                                                }
+                                                            }
                                                             Err(e) => error.set(Some(e)),
                                                         }
                                                     });
@@ -455,8 +579,10 @@ pub fn MailPage() -> Element {
                                                     if let Ok(rows) = use_mail::list_folders(&account_id).await {
                                                         folders.set(rows);
                                                     }
-                                                    if let Ok(rows) = use_mail::list_messages(&account_id, &folder_id, 100).await {
-                                                        messages.set(rows);
+                                                    if let Ok(page) = use_mail::list_messages(&account_id, &folder_id, MAIL_MESSAGE_PAGE_SIZE, None).await {
+                                                        messages.set(page.messages);
+                                                        message_next_cursor.set(page.next_cursor);
+                                                        message_has_more.set(page.has_more);
                                                     }
                                                 }
                                                 Err(e) => error.set(Some(e)),
@@ -475,8 +601,21 @@ pub fn MailPage() -> Element {
                         }
                         div { class: "min-h-0 flex-1 overflow-y-auto",
                             if messages_snapshot.is_empty() {
-                                div { class: "flex h-52 items-center justify-center px-4 text-sm text-base-content/60",
-                                    "No cached messages"
+                                div { class: "flex h-52 flex-col items-center justify-center gap-3 px-4 text-sm text-base-content/60",
+                                    div { "No cached messages" }
+                                    if can_backfill_active_folder {
+                                        button {
+                                            class: "btn btn-sm btn-outline",
+                                            disabled: syncing() || backfilling_messages(),
+                                            onclick: move |_| trigger_load_more_messages(),
+                                            if backfilling_messages() {
+                                                span { class: "loading loading-spinner loading-xs" }
+                                                span { "Syncing messages" }
+                                            } else {
+                                                span { "Sync messages" }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             for message in messages_snapshot.clone() {
@@ -516,6 +655,37 @@ pub fn MailPage() -> Element {
                                                 "{message.snippet.clone().unwrap_or_default()}"
                                             }
                                         }
+                                    }
+                                }
+                            }
+                            if !messages_snapshot.is_empty() {
+                                if loading_more_messages() {
+                                    div { class: "flex items-center justify-center gap-2 border-t border-base-300 px-3 py-3 text-xs text-base-content/60",
+                                        span { class: "loading loading-spinner loading-xs" }
+                                        span { "Loading cached messages" }
+                                    }
+                                } else if backfilling_messages() {
+                                    div { class: "flex items-center justify-center gap-2 border-t border-base-300 px-3 py-3 text-xs text-base-content/60",
+                                        span { class: "loading loading-spinner loading-xs" }
+                                        span { "Syncing older messages" }
+                                    }
+                                } else if message_has_more() || can_backfill_active_folder {
+                                    ScrollSentinel { on_visible: move |_| trigger_load_more_messages() }
+                                    div { class: "flex justify-center border-t border-base-300 px-3 py-3",
+                                        button {
+                                            class: "btn btn-sm btn-ghost",
+                                            disabled: syncing(),
+                                            onclick: move |_| trigger_load_more_messages(),
+                                            if message_has_more() {
+                                                "Load more"
+                                            } else {
+                                                "Sync older messages"
+                                            }
+                                        }
+                                    }
+                                } else if active_folder.is_some() {
+                                    div { class: "border-t border-base-300 px-3 py-3 text-center text-xs text-base-content/50",
+                                        "No more messages"
                                     }
                                 }
                             }
@@ -1070,6 +1240,8 @@ pub fn MailPage() -> Element {
                                                 selected_message.set(String::new());
                                                 move_target_folder.set(String::new());
                                                 messages.set(Vec::new());
+                                                message_next_cursor.set(None);
+                                                message_has_more.set(false);
                                                 detail.set(None);
                                                 if let Ok(list) = use_mail::list_accounts().await {
                                                     accounts.set(list);
@@ -1264,6 +1436,8 @@ pub fn MailPage() -> Element {
                                                                     selected_message.set(String::new());
                                                                     move_target_folder.set(String::new());
                                                                     messages.set(Vec::new());
+                                                                    message_next_cursor.set(None);
+                                                                    message_has_more.set(false);
                                                                     detail.set(None);
                                                                     if next.is_empty() {
                                                                         folders.set(Vec::new());
@@ -1635,6 +1809,22 @@ fn folder_depth(folder: &MailFolderResponse) -> usize {
         .filter(|d| !d.is_empty())
         .map(|delimiter| folder.path.matches(delimiter).count())
         .unwrap_or(0)
+}
+
+fn append_unique_messages(
+    mut current: Vec<MailMessageSummaryResponse>,
+    incoming: Vec<MailMessageSummaryResponse>,
+) -> Vec<MailMessageSummaryResponse> {
+    let mut seen = current
+        .iter()
+        .map(|message| message.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    for message in incoming {
+        if seen.insert(message.id.clone()) {
+            current.push(message);
+        }
+    }
+    current
 }
 
 fn message_subject(message: &MailMessageSummaryResponse) -> String {

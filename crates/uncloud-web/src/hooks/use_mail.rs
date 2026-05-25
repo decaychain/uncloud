@@ -4,8 +4,8 @@ use uncloud_common::{
     CreateMailAccountRequest, MailAccountResponse, MailAccountSyncResponse,
     MailConnectionTestResponse, MailCredentialStatusResponse, MailFolderResponse,
     MailFolderSyncResponse, MailIdentityResponse, MailMessageDetailResponse,
-    MailMessageMutationAction, MailMessageMutationRequest, MailMessageMutationResponse,
-    MailMessageSummaryResponse, MailPasswordAuthRequest, MailSyncRequest, SendMailMessageRequest,
+    MailMessageListResponse, MailMessageMutationAction, MailMessageMutationRequest,
+    MailMessageMutationResponse, MailPasswordAuthRequest, MailSyncRequest, SendMailMessageRequest,
     SendMailMessageResponse, SetMailCredentialRequest, UpdateMailAccountRequest,
     UpdateMailFolderRequest,
 };
@@ -253,15 +253,20 @@ pub async fn list_messages(
     account_id: &str,
     folder_id: &str,
     limit: u32,
-) -> Result<Vec<MailMessageSummaryResponse>, String> {
-    let r = api::get(&format!(
-        "/mail/accounts/{account_id}/folders/{folder_id}/messages?limit={limit}"
-    ))
+    cursor: Option<&str>,
+) -> Result<MailMessageListResponse, String> {
+    let mut path =
+        format!("/mail/accounts/{account_id}/folders/{folder_id}/messages?limit={limit}");
+    if let Some(cursor) = cursor.filter(|value| !value.trim().is_empty()) {
+        path.push_str("&cursor=");
+        path.push_str(cursor);
+    }
+    let r = api::get(&path)
     .send()
     .await
     .map_err(|e| e.to_string())?;
     if r.ok() {
-        r.json::<Vec<MailMessageSummaryResponse>>()
+        r.json::<MailMessageListResponse>()
             .await
             .map_err(|e| e.to_string())
     } else {

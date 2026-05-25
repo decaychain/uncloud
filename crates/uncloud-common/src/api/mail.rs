@@ -127,6 +127,7 @@ pub struct MailFolderResponse {
     pub unseen: Option<u32>,
     pub highest_synced_uid: Option<u32>,
     pub lowest_synced_uid: Option<u32>,
+    pub sync_completed: bool,
     pub last_sync_started_at: Option<String>,
     pub last_sync_finished_at: Option<String>,
     pub last_sync_error: Option<String>,
@@ -169,6 +170,13 @@ pub struct MailMessageSummaryResponse {
     pub size_bytes: Option<u64>,
     pub has_attachments: bool,
     pub snippet: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailMessageListResponse {
+    pub messages: Vec<MailMessageSummaryResponse>,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -16,9 +16,10 @@ use uncloud_common::{
     MailAccountSyncResponse, MailAddressDto, MailConnectionTestResponse,
     MailCredentialStatusResponse, MailFolderResponse, MailFolderRole, MailFolderRoleSource,
     MailFolderSyncResponse, MailIdentityResponse, MailMessageDetailResponse,
-    MailMessageMutationAction, MailMessageMutationRequest, MailMessageMutationResponse,
-    MailMessageSummaryResponse, MailPasswordAuthRequest, MailServerSettings, MailSyncRequest,
-    MailSentCopyStatus, SendMailMessageRequest, SendMailMessageResponse,
+    MailMessageListResponse, MailMessageMutationAction, MailMessageMutationRequest,
+    MailMessageMutationResponse, MailMessageSummaryResponse, MailPasswordAuthRequest,
+    MailServerSettings, MailSyncRequest, MailSentCopyStatus, SendMailMessageRequest,
+    SendMailMessageResponse,
     SetMailCredentialRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
     UpdateMailIdentityRequest,
 };
@@ -51,6 +52,8 @@ const SENT_COPY_DETECT_DELAY: Duration = Duration::from_millis(750);
 pub struct MailMessageListQuery {
     #[serde(default)]
     limit: Option<i64>,
+    #[serde(default)]
+    cursor: Option<String>,
 }
 
 fn require_mail(state: &AppState) -> Result<()> {
@@ -159,6 +162,22 @@ fn folder_effective_role(folder: &MailFolder) -> Option<MailFolderRole> {
     }
 }
 
+fn folder_sync_completed(folder: &MailFolder) -> bool {
+    let Some(uid_next) = folder.uid_next else {
+        return false;
+    };
+    if uid_next <= 1 {
+        return true;
+    }
+    let Some(lowest) = folder.lowest_synced_uid else {
+        return false;
+    };
+    let Some(highest) = folder.highest_synced_uid else {
+        return false;
+    };
+    lowest <= 1 && highest.saturating_add(1) >= uid_next
+}
+
 fn folder_to_response(folder: &MailFolder) -> MailFolderResponse {
     MailFolderResponse {
         id: folder.id.to_hex(),
@@ -178,6 +197,7 @@ fn folder_to_response(folder: &MailFolder) -> MailFolderResponse {
         unseen: folder.unseen,
         highest_synced_uid: folder.highest_synced_uid,
         lowest_synced_uid: folder.lowest_synced_uid,
+        sync_completed: folder_sync_completed(folder),
         last_sync_started_at: folder.last_sync_started_at.map(|dt| dt.to_rfc3339()),
         last_sync_finished_at: folder.last_sync_finished_at.map(|dt| dt.to_rfc3339()),
         last_sync_error: folder.last_sync_error.clone(),
@@ -332,6 +352,20 @@ fn message_list_limit(input: Option<i64>) -> i64 {
     input
         .unwrap_or(DEFAULT_MESSAGE_LIST_LIMIT)
         .clamp(1, MAX_MESSAGE_LIST_LIMIT)
+}
+
+fn parse_message_list_cursor(input: Option<&str>) -> Result<Option<u32>> {
+    let Some(input) = input else {
+        return Ok(None);
+    };
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let uid = trimmed
+        .parse::<u32>()
+        .map_err(|_| AppError::BadRequest("Invalid message list cursor".into()))?;
+    Ok(Some(uid))
 }
 
 fn remote_address_to_model(address: &RemoteMailAddress) -> MailAddress {
@@ -1643,24 +1677,46 @@ pub async fn list_messages(
     user: AuthUser,
     Path((account_id, folder_id)): Path<(String, String)>,
     Query(query): Query<MailMessageListQuery>,
-) -> Result<Json<Vec<MailMessageSummaryResponse>>> {
+) -> Result<Json<MailMessageListResponse>> {
     require_mail(&state)?;
     let account_id = parse_oid(&account_id, "mail account id")?;
     let folder_id = parse_oid(&folder_id, "mail folder id")?;
     let _ = find_account(&state, user.id, account_id).await?;
     let _ = find_folder(&state, user.id, account_id, folder_id).await?;
+    let limit = message_list_limit(query.limit);
+    let cursor_uid = parse_message_list_cursor(query.cursor.as_deref())?;
+    let mut filter = doc! { "owner_id": user.id, "account_id": account_id, "folder_id": folder_id };
+    if let Some(uid) = cursor_uid {
+        filter.insert("uid", doc! { "$lt": uid as i64 });
+    }
     let mut cursor = state
         .db
         .collection::<MailMessage>(MESSAGES)
-        .find(doc! { "owner_id": user.id, "account_id": account_id, "folder_id": folder_id })
-        .sort(doc! { "internal_date": -1, "uid": -1 })
-        .limit(message_list_limit(query.limit))
+        .find(filter)
+        .sort(doc! { "uid": -1 })
+        .limit(limit + 1)
         .await?;
-    let mut out = Vec::new();
+    let mut messages = Vec::new();
     while let Some(message) = cursor.try_next().await? {
-        out.push(message_to_response(&message));
+        messages.push(message);
     }
-    Ok(Json(out))
+    let has_more = messages.len() > limit as usize;
+    if has_more {
+        messages.truncate(limit as usize);
+    }
+    let next_cursor = if has_more {
+        messages.last().map(|message| message.uid.to_string())
+    } else {
+        None
+    };
+    Ok(Json(MailMessageListResponse {
+        messages: messages
+            .iter()
+            .map(message_to_response)
+            .collect::<Vec<_>>(),
+        next_cursor,
+        has_more,
+    }))
 }
 
 async fn update_cached_message_flags(
@@ -2047,5 +2103,22 @@ mod tests {
         let folder = test_folder("INBOX", MailFolderRoleSource::User, None);
 
         assert_eq!(folder_to_response(&folder).role, None);
+    }
+
+    #[test]
+    fn folder_response_marks_completed_uid_window() {
+        let mut folder = test_folder("INBOX", MailFolderRoleSource::Inferred, None);
+        folder.uid_next = Some(12);
+        folder.lowest_synced_uid = Some(1);
+        folder.highest_synced_uid = Some(11);
+
+        assert!(folder_to_response(&folder).sync_completed);
+    }
+
+    #[test]
+    fn message_list_cursor_accepts_uid_only() {
+        assert_eq!(parse_message_list_cursor(Some("42")).unwrap(), Some(42));
+        assert_eq!(parse_message_list_cursor(Some("")).unwrap(), None);
+        assert!(parse_message_list_cursor(Some("not-a-uid")).is_err());
     }
 }

@@ -218,9 +218,11 @@ Remaining credential work before scheduler/background sync:
 
 ### 4. Message Read APIs
 
-- Basic folder message listing exists for synced summaries.
+- Folder message listing uses cursor-based pagination over cached summaries.
 - Basic message detail route exists and fetches/parses MIME bodies on demand.
-- Add pagination cursors by folder and date/UID.
+- The UI progressively appends cached pages. When it reaches the cached edge
+  for a folder whose UID window is not complete, it can trigger one bounded
+  folder sync/backfill and then append any newly cached older messages.
 - Store raw message fetches and parsed body output once the storage layout is
   decided.
 - Add attachment metadata and download routes.
@@ -261,8 +263,9 @@ data before adding write actions:
 - Message reader with sanitized HTML and plain-text fallback.
 
 Next UI work should focus on mailbox ergonomics, responsive navigation,
-pagination, and reader layout. Compose and mutations should wait until summary
-sync, body fetch, and message detail APIs are more reliable.
+reader layout, and clearer sync/backfill state. Compose and mutations are
+present as experimental workflows, but still need provider-specific hardening
+and richer failure reporting.
 
 ## Open Questions
 
