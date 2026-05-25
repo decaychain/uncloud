@@ -3,7 +3,8 @@
 use uncloud_common::{
     CreateMailAccountRequest, MailAccountResponse, MailAccountSyncResponse,
     MailConnectionTestResponse, MailCredentialStatusResponse, MailFolderResponse,
-    MailFolderSyncResponse, MailMessageDetailResponse, MailMessageSummaryResponse,
+    MailFolderSyncResponse, MailMessageDetailResponse, MailMessageMutationAction,
+    MailMessageMutationRequest, MailMessageMutationResponse, MailMessageSummaryResponse,
     MailPasswordAuthRequest, MailSyncRequest, SetMailCredentialRequest, UpdateMailAccountRequest,
     UpdateMailFolderRequest,
 };
@@ -241,6 +242,29 @@ pub async fn get_message(message_id: &str) -> Result<MailMessageDetailResponse, 
         .map_err(|e| e.to_string())?;
     if r.ok() {
         r.json::<MailMessageDetailResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn mutate_message(
+    message_id: &str,
+    action: MailMessageMutationAction,
+    target_folder_id: Option<String>,
+) -> Result<MailMessageMutationResponse, String> {
+    let r = api::post(&format!("/mail/messages/{message_id}/mutate"))
+        .json(&MailMessageMutationRequest {
+            action,
+            target_folder_id,
+        })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<MailMessageMutationResponse>()
             .await
             .map_err(|e| e.to_string())
     } else {

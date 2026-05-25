@@ -135,6 +135,16 @@ lucide_icon!(IconTrash,
     line { x1: "14", x2: "14", y1: "11", y2: "17" }
 );
 
+lucide_icon!(IconArchive,
+    rect { width: "20", height: "5", x: "2", y: "3", rx: "1" }
+    path { d: "M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" }
+    path { d: "M10 12h4" }
+);
+
+lucide_icon!(IconStar,
+    polygon { points: "12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" }
+);
+
 lucide_icon!(IconListMusic,
     path { d: "M21 15V6" }
     path { d: "M18.5 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" }

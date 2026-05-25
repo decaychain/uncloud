@@ -1,12 +1,14 @@
 use dioxus::prelude::*;
 use uncloud_common::{
     CreateMailAccountRequest, MailAccountResponse, MailAddressDto, MailFolderResponse,
-    MailFolderRole, MailFolderRoleSource, MailMessageDetailResponse, MailMessageSummaryResponse,
-    MailSecurity, MailServerSettings, UpdateMailAccountRequest, UpdateMailFolderRequest,
+    MailFolderRole, MailFolderRoleSource, MailMessageDetailResponse, MailMessageMutationAction,
+    MailMessageSummaryResponse, MailSecurity, MailServerSettings, UpdateMailAccountRequest,
+    UpdateMailFolderRequest,
 };
 
 use crate::components::icons::{
-    IconFileText, IconFolder, IconMail, IconPlus, IconRefreshCw, IconSettings, IconTrash,
+    IconArchive, IconEye, IconFileText, IconFolder, IconMail, IconMoveRight, IconPlus,
+    IconRefreshCw, IconSettings, IconStar, IconTrash,
 };
 use crate::hooks::use_mail;
 
@@ -22,6 +24,8 @@ pub fn MailPage() -> Element {
     let mut loading = use_signal(|| true);
     let mut syncing = use_signal(|| false);
     let mut loading_detail = use_signal(|| false);
+    let mut mutating_message = use_signal(|| false);
+    let mut move_target_folder = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
     let mut notice = use_signal(|| None::<String>);
     let mut show_setup = use_signal(|| false);
@@ -268,6 +272,7 @@ pub fn MailPage() -> Element {
                                                     selected_account.set(account_id.clone());
                                                     selected_folder.set(String::new());
                                                     selected_message.set(String::new());
+                                                    move_target_folder.set(String::new());
                                                     messages.set(Vec::new());
                                                     detail.set(None);
                                                     error.set(None);
@@ -335,6 +340,7 @@ pub fn MailPage() -> Element {
                                                     spawn(async move {
                                                         selected_folder.set(folder_id.clone());
                                                         selected_message.set(String::new());
+                                                        move_target_folder.set(String::new());
                                                         detail.set(None);
                                                         error.set(None);
                                                         match use_mail::list_messages(&account_id, &folder_id, 100).await {
@@ -455,6 +461,7 @@ pub fn MailPage() -> Element {
                                                 let message_id = id.clone();
                                                 spawn(async move {
                                                     selected_message.set(message_id.clone());
+                                                    move_target_folder.set(String::new());
                                                     loading_detail.set(true);
                                                     error.set(None);
                                                     match use_mail::get_message(&message_id).await {
@@ -487,25 +494,280 @@ pub fn MailPage() -> Element {
                                 span { class: "loading loading-spinner loading-md" }
                             }
                         } else if let Some(row) = detail_snapshot {
-                            div { class: "border-b border-base-300 px-4 py-3",
-                                div { class: "text-lg font-semibold", "{message_subject(&row.message)}" }
-                                div { class: "mt-2 grid gap-1 text-sm text-base-content/70",
-                                    div { "From: {message_sender(&row.message)}" }
-                                    div { "To: {message_recipients(&row.message)}" }
-                                    div { "Date: {short_date(row.message.internal_date.as_deref().or(row.message.date.as_deref()))}" }
-                                }
-                            }
-                            div { class: "min-h-0 flex-1 overflow-y-auto p-4",
-                                if let Some(body) = row.body_html {
-                                    div {
-                                        class: "max-w-none break-words text-sm leading-6 [&_a]:text-primary [&_blockquote]:border-l-2 [&_blockquote]:border-base-300 [&_blockquote]:pl-3 [&_blockquote]:text-base-content/70 [&_img]:max-w-full [&_table]:max-w-full",
-                                        dangerous_inner_html: "{body}",
+                            {
+                                let is_seen = message_has_flag(&row.message, "\\Seen");
+                                let is_flagged = message_has_flag(&row.message, "\\Flagged");
+                                let has_archive_target = folders_snapshot.iter().any(|folder| {
+                                    folder.selectable
+                                        && folder.id != row.message.folder_id
+                                        && matches!(folder.role, Some(MailFolderRole::Archive | MailFolderRole::AllMail))
+                                });
+                                let has_trash_target = folders_snapshot.iter().any(|folder| {
+                                    folder.selectable
+                                        && folder.id != row.message.folder_id
+                                        && folder.role == Some(MailFolderRole::Trash)
+                                });
+                                let message_id = row.message.id.clone();
+                                let account_id = row.message.account_id.clone();
+                                let seen_label = if is_seen { "Unread" } else { "Read" };
+                                let star_label = if is_flagged { "Unstar" } else { "Star" };
+                                rsx! {
+                                    div { class: "border-b border-base-300 px-4 py-3",
+                                        div { class: "flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between",
+                                            div { class: "min-w-0",
+                                                div { class: "text-lg font-semibold", "{message_subject(&row.message)}" }
+                                                div { class: "mt-2 grid gap-1 text-sm text-base-content/70",
+                                                    div { "From: {message_sender(&row.message)}" }
+                                                    div { "To: {message_recipients(&row.message)}" }
+                                                    div { "Date: {short_date(row.message.internal_date.as_deref().or(row.message.date.as_deref()))}" }
+                                                }
+                                            }
+                                            div { class: "flex flex-wrap items-center gap-1",
+                                                button {
+                                                    class: "btn btn-ghost btn-sm h-8 min-h-8 gap-1",
+                                                    title: if is_seen { "Mark unread" } else { "Mark read" },
+                                                    disabled: mutating_message(),
+                                                    onclick: {
+                                                        let message_id = message_id.clone();
+                                                        move |_| {
+                                                            let message_id = message_id.clone();
+                                                            let action = if is_seen {
+                                                                MailMessageMutationAction::MarkUnread
+                                                            } else {
+                                                                MailMessageMutationAction::MarkRead
+                                                            };
+                                                            spawn(async move {
+                                                                mutating_message.set(true);
+                                                                error.set(None);
+                                                                notice.set(None);
+                                                                match use_mail::mutate_message(&message_id, action, None).await {
+                                                                    Ok(result) => {
+                                                                        if let Some(updated) = result.message {
+                                                                            let mut current = messages();
+                                                                            for item in &mut current {
+                                                                                if item.id == updated.id {
+                                                                                    *item = updated.clone();
+                                                                                    break;
+                                                                                }
+                                                                            }
+                                                                            messages.set(current);
+                                                                            if let Some(mut current_detail) = detail() {
+                                                                                if current_detail.message.id == updated.id {
+                                                                                    current_detail.message = updated;
+                                                                                    detail.set(Some(current_detail));
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    Err(e) => error.set(Some(e)),
+                                                                }
+                                                                mutating_message.set(false);
+                                                            });
+                                                        }
+                                                    },
+                                                    if mutating_message() {
+                                                        span { class: "loading loading-spinner loading-xs" }
+                                                    } else {
+                                                        IconEye { class: "h-4 w-4".to_string() }
+                                                    }
+                                                    span { "{seen_label}" }
+                                                }
+                                                button {
+                                                    class: if is_flagged {
+                                                        "btn btn-ghost btn-sm h-8 min-h-8 gap-1 text-warning"
+                                                    } else {
+                                                        "btn btn-ghost btn-sm h-8 min-h-8 gap-1"
+                                                    },
+                                                    title: if is_flagged { "Remove star" } else { "Star" },
+                                                    disabled: mutating_message(),
+                                                    onclick: {
+                                                        let message_id = message_id.clone();
+                                                        move |_| {
+                                                            let message_id = message_id.clone();
+                                                            let action = if is_flagged {
+                                                                MailMessageMutationAction::Unstar
+                                                            } else {
+                                                                MailMessageMutationAction::Star
+                                                            };
+                                                            spawn(async move {
+                                                                mutating_message.set(true);
+                                                                error.set(None);
+                                                                notice.set(None);
+                                                                match use_mail::mutate_message(&message_id, action, None).await {
+                                                                    Ok(result) => {
+                                                                        if let Some(updated) = result.message {
+                                                                            let mut current = messages();
+                                                                            for item in &mut current {
+                                                                                if item.id == updated.id {
+                                                                                    *item = updated.clone();
+                                                                                    break;
+                                                                                }
+                                                                            }
+                                                                            messages.set(current);
+                                                                            if let Some(mut current_detail) = detail() {
+                                                                                if current_detail.message.id == updated.id {
+                                                                                    current_detail.message = updated;
+                                                                                    detail.set(Some(current_detail));
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    Err(e) => error.set(Some(e)),
+                                                                }
+                                                                mutating_message.set(false);
+                                                            });
+                                                        }
+                                                    },
+                                                    IconStar { class: "h-4 w-4".to_string() }
+                                                    span { "{star_label}" }
+                                                }
+                                                button {
+                                                    class: "btn btn-ghost btn-sm h-8 min-h-8 gap-1",
+                                                    title: "Archive",
+                                                    disabled: mutating_message() || !has_archive_target,
+                                                    onclick: {
+                                                        let message_id = message_id.clone();
+                                                        let account_id = account_id.clone();
+                                                        move |_| {
+                                                            let message_id = message_id.clone();
+                                                            let account_id = account_id.clone();
+                                                            spawn(async move {
+                                                                mutating_message.set(true);
+                                                                error.set(None);
+                                                                notice.set(None);
+                                                                match use_mail::mutate_message(&message_id, MailMessageMutationAction::Archive, None).await {
+                                                                    Ok(result) => {
+                                                                        if result.removed_from_folder {
+                                                                            messages.set(messages().into_iter().filter(|message| message.id != message_id).collect());
+                                                                            selected_message.set(String::new());
+                                                                            move_target_folder.set(String::new());
+                                                                            detail.set(None);
+                                                                            if let Ok(rows) = use_mail::list_folders(&account_id).await {
+                                                                                folders.set(rows);
+                                                                            }
+                                                                            notice.set(Some("Message archived".to_string()));
+                                                                        }
+                                                                    }
+                                                                    Err(e) => error.set(Some(e)),
+                                                                }
+                                                                mutating_message.set(false);
+                                                            });
+                                                        }
+                                                    },
+                                                    IconArchive { class: "h-4 w-4".to_string() }
+                                                    span { "Archive" }
+                                                }
+                                                button {
+                                                    class: "btn btn-ghost btn-sm h-8 min-h-8 gap-1 text-error",
+                                                    title: "Move to trash",
+                                                    disabled: mutating_message() || !has_trash_target,
+                                                    onclick: {
+                                                        let message_id = message_id.clone();
+                                                        let account_id = account_id.clone();
+                                                        move |_| {
+                                                            let message_id = message_id.clone();
+                                                            let account_id = account_id.clone();
+                                                            spawn(async move {
+                                                                mutating_message.set(true);
+                                                                error.set(None);
+                                                                notice.set(None);
+                                                                match use_mail::mutate_message(&message_id, MailMessageMutationAction::Trash, None).await {
+                                                                    Ok(result) => {
+                                                                        if result.removed_from_folder {
+                                                                            messages.set(messages().into_iter().filter(|message| message.id != message_id).collect());
+                                                                            selected_message.set(String::new());
+                                                                            move_target_folder.set(String::new());
+                                                                            detail.set(None);
+                                                                            if let Ok(rows) = use_mail::list_folders(&account_id).await {
+                                                                                folders.set(rows);
+                                                                            }
+                                                                            notice.set(Some("Message moved to trash".to_string()));
+                                                                        }
+                                                                    }
+                                                                    Err(e) => error.set(Some(e)),
+                                                                }
+                                                                mutating_message.set(false);
+                                                            });
+                                                        }
+                                                    },
+                                                    IconTrash { class: "h-4 w-4".to_string() }
+                                                    span { "Trash" }
+                                                }
+                                                div { class: "join",
+                                                    select {
+                                                        class: "select select-bordered select-sm join-item h-8 min-h-8 max-w-40",
+                                                        value: "{move_target_folder()}",
+                                                        disabled: mutating_message(),
+                                                        onchange: move |e| move_target_folder.set(e.value()),
+                                                        option { value: "", "Move to..." }
+                                                        for folder in folders_snapshot.clone().into_iter().filter(|folder| folder.selectable && folder.id != row.message.folder_id) {
+                                                            option { value: "{folder.id}", "{folder.path}" }
+                                                        }
+                                                    }
+                                                    button {
+                                                        class: "btn btn-outline btn-sm join-item h-8 min-h-8 px-2",
+                                                        title: "Move",
+                                                        disabled: mutating_message() || move_target_folder().is_empty(),
+                                                        onclick: {
+                                                            let message_id = message_id.clone();
+                                                            let account_id = account_id.clone();
+                                                            move |_| {
+                                                                let message_id = message_id.clone();
+                                                                let account_id = account_id.clone();
+                                                                let target_folder = move_target_folder();
+                                                                if target_folder.is_empty() {
+                                                                    return;
+                                                                }
+                                                                spawn(async move {
+                                                                    mutating_message.set(true);
+                                                                    error.set(None);
+                                                                    notice.set(None);
+                                                                    match use_mail::mutate_message(
+                                                                        &message_id,
+                                                                        MailMessageMutationAction::Move,
+                                                                        Some(target_folder),
+                                                                    ).await {
+                                                                        Ok(result) => {
+                                                                            if result.removed_from_folder {
+                                                                                messages.set(messages().into_iter().filter(|message| message.id != message_id).collect());
+                                                                                selected_message.set(String::new());
+                                                                                move_target_folder.set(String::new());
+                                                                                detail.set(None);
+                                                                                if let Ok(rows) = use_mail::list_folders(&account_id).await {
+                                                                                    folders.set(rows);
+                                                                                }
+                                                                                if let Some(path) = result.destination_folder_path {
+                                                                                    notice.set(Some(format!("Message moved to {path}")));
+                                                                                } else {
+                                                                                    notice.set(Some("Message moved".to_string()));
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                        Err(e) => error.set(Some(e)),
+                                                                    }
+                                                                    mutating_message.set(false);
+                                                                });
+                                                            }
+                                                        },
+                                                        IconMoveRight { class: "h-4 w-4".to_string() }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
-                                } else if let Some(body) = row.body_text {
-                                    pre { class: "whitespace-pre-wrap break-words font-sans text-sm leading-6", "{body}" }
-                                } else {
-                                    div { class: "flex h-full items-center justify-center text-sm text-base-content/60",
-                                        "Body unavailable"
+                                    div { class: "min-h-0 flex-1 overflow-y-auto p-4",
+                                        if let Some(body) = row.body_html.as_ref() {
+                                            div {
+                                                class: "max-w-none break-words text-sm leading-6 [&_a]:text-primary [&_blockquote]:border-l-2 [&_blockquote]:border-base-300 [&_blockquote]:pl-3 [&_blockquote]:text-base-content/70 [&_img]:max-w-full [&_table]:max-w-full",
+                                                dangerous_inner_html: "{body}",
+                                            }
+                                        } else if let Some(body) = row.body_text.as_ref() {
+                                            pre { class: "whitespace-pre-wrap break-words font-sans text-sm leading-6", "{body}" }
+                                        } else {
+                                            div { class: "flex h-full items-center justify-center text-sm text-base-content/60",
+                                                "Body unavailable"
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -627,6 +889,7 @@ pub fn MailPage() -> Element {
                                                 selected_account.set(account.id.clone());
                                                 selected_folder.set(String::new());
                                                 selected_message.set(String::new());
+                                                move_target_folder.set(String::new());
                                                 messages.set(Vec::new());
                                                 detail.set(None);
                                                 if let Ok(list) = use_mail::list_accounts().await {
@@ -820,6 +1083,7 @@ pub fn MailPage() -> Element {
                                                                     selected_account.set(next.clone());
                                                                     selected_folder.set(String::new());
                                                                     selected_message.set(String::new());
+                                                                    move_target_folder.set(String::new());
                                                                     messages.set(Vec::new());
                                                                     detail.set(None);
                                                                     if next.is_empty() {
@@ -1221,6 +1485,15 @@ fn message_recipients(message: &MailMessageSummaryResponse) -> String {
         .map(format_mail_address)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn message_has_flag(message: &MailMessageSummaryResponse, flag: &str) -> bool {
+    message.flags.iter().any(|value| {
+        value
+            .trim()
+            .trim_start_matches('\\')
+            .eq_ignore_ascii_case(flag.trim_start_matches('\\'))
+    })
 }
 
 fn format_mail_address(address: &MailAddressDto) -> String {

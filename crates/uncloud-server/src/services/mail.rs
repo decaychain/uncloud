@@ -157,6 +157,82 @@ impl MailService {
         }
     }
 
+    pub async fn set_imap_message_flag(
+        &self,
+        settings: &MailServerConfig,
+        password: &str,
+        folder_path: &str,
+        uid: u32,
+        flag: RemoteMessageFlag,
+        enabled: bool,
+    ) -> Result<Vec<String>> {
+        match settings.security {
+            MailSecurity::Tls => {
+                let client = connect_imap_tls(settings, true).await?;
+                set_imap_message_flag(client, settings, password, folder_path, uid, flag, enabled)
+                    .await
+            }
+            MailSecurity::StartTls => {
+                let client = connect_imap_starttls(settings).await?;
+                set_imap_message_flag(client, settings, password, folder_path, uid, flag, enabled)
+                    .await
+            }
+            MailSecurity::Plain => {
+                let client = connect_imap_plain(settings).await?;
+                set_imap_message_flag(client, settings, password, folder_path, uid, flag, enabled)
+                    .await
+            }
+        }
+    }
+
+    pub async fn move_imap_message(
+        &self,
+        settings: &MailServerConfig,
+        password: &str,
+        source_folder_path: &str,
+        uid: u32,
+        destination_folder_path: &str,
+    ) -> Result<()> {
+        match settings.security {
+            MailSecurity::Tls => {
+                let client = connect_imap_tls(settings, true).await?;
+                move_imap_message(
+                    client,
+                    settings,
+                    password,
+                    source_folder_path,
+                    uid,
+                    destination_folder_path,
+                )
+                .await
+            }
+            MailSecurity::StartTls => {
+                let client = connect_imap_starttls(settings).await?;
+                move_imap_message(
+                    client,
+                    settings,
+                    password,
+                    source_folder_path,
+                    uid,
+                    destination_folder_path,
+                )
+                .await
+            }
+            MailSecurity::Plain => {
+                let client = connect_imap_plain(settings).await?;
+                move_imap_message(
+                    client,
+                    settings,
+                    password,
+                    source_folder_path,
+                    uid,
+                    destination_folder_path,
+                )
+                .await
+            }
+        }
+    }
+
     pub async fn test_smtp_password(
         &self,
         settings: &MailServerConfig,
@@ -449,6 +525,86 @@ where
     Ok(parse_message_body(&body))
 }
 
+async fn set_imap_message_flag<T>(
+    client: Client<T>,
+    settings: &MailServerConfig,
+    password: &str,
+    folder_path: &str,
+    uid: u32,
+    flag: RemoteMessageFlag,
+    enabled: bool,
+) -> Result<Vec<String>>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
+    let mut session = login_imap_client(client, settings, password).await?;
+    imap_timeout("IMAP SELECT", session.select(folder_path))
+        .await?
+        .map_err(|e| AppError::Internal(format!("IMAP SELECT failed: {e}")))?;
+
+    {
+        let query = flag_store_query(flag, enabled);
+        let updates_stream =
+            imap_timeout("IMAP UID STORE", session.uid_store(uid.to_string(), query))
+                .await?
+                .map_err(|e| AppError::BadRequest(format!("IMAP UID STORE failed: {e}")))?
+                .try_collect();
+        let _updates: Vec<_> = imap_timeout("IMAP UID STORE read", updates_stream)
+            .await?
+            .map_err(|e| AppError::Internal(format!("IMAP UID STORE read failed: {e}")))?;
+    }
+
+    let flags = fetch_imap_message_flags(&mut session, uid).await?;
+    let _ = session.logout().await;
+    Ok(flags)
+}
+
+async fn move_imap_message<T>(
+    client: Client<T>,
+    settings: &MailServerConfig,
+    password: &str,
+    source_folder_path: &str,
+    uid: u32,
+    destination_folder_path: &str,
+) -> Result<()>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
+    let mut session = login_imap_client(client, settings, password).await?;
+    imap_timeout("IMAP SELECT", session.select(source_folder_path))
+        .await?
+        .map_err(|e| AppError::Internal(format!("IMAP SELECT failed: {e}")))?;
+    imap_timeout(
+        "IMAP UID MOVE",
+        session.uid_mv(uid.to_string(), destination_folder_path),
+    )
+    .await?
+    .map_err(|e| AppError::BadRequest(format!("IMAP UID MOVE failed: {e}")))?;
+    let _ = session.logout().await;
+    Ok(())
+}
+
+async fn fetch_imap_message_flags<T>(session: &mut Session<T>, uid: u32) -> Result<Vec<String>>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
+    let fetch_stream = imap_timeout(
+        "IMAP UID FETCH flags",
+        session.uid_fetch(uid.to_string(), "(UID FLAGS)"),
+    )
+    .await?
+    .map_err(|e| AppError::Internal(format!("IMAP UID FETCH flags failed: {e}")))?
+    .try_collect();
+    let fetches: Vec<_> = imap_timeout("IMAP UID FETCH flags read", fetch_stream)
+        .await?
+        .map_err(|e| AppError::Internal(format!("IMAP UID FETCH flags read failed: {e}")))?;
+    fetches
+        .iter()
+        .find(|fetch| fetch.uid == Some(uid))
+        .map(|fetch| fetch.flags().map(flag_name).collect())
+        .ok_or_else(|| AppError::NotFound("Mail message".into()))
+}
+
 fn smtp_tls_parameters(settings: &MailServerConfig) -> Result<TlsParameters> {
     TlsParameters::new(settings.host.clone())
         .map_err(|e| AppError::Internal(format!("SMTP TLS configuration failed: {e}")))
@@ -524,6 +680,21 @@ pub struct RemoteMessageSummary {
 pub struct RemoteMessageBody {
     pub text: Option<String>,
     pub html: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteMessageFlag {
+    Seen,
+    Flagged,
+}
+
+fn flag_store_query(flag: RemoteMessageFlag, enabled: bool) -> &'static str {
+    match (flag, enabled) {
+        (RemoteMessageFlag::Seen, true) => "+FLAGS.SILENT (\\Seen)",
+        (RemoteMessageFlag::Seen, false) => "-FLAGS.SILENT (\\Seen)",
+        (RemoteMessageFlag::Flagged, true) => "+FLAGS.SILENT (\\Flagged)",
+        (RemoteMessageFlag::Flagged, false) => "-FLAGS.SILENT (\\Flagged)",
+    }
 }
 
 fn display_name(path: &str, delimiter: Option<&str>) -> String {
@@ -849,8 +1020,8 @@ fn normalize_plain_text(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        display_name, next_uid_sync_plan, parent_path, parse_message_body, sync_completed,
-        updated_uid_cursors, UidSyncDirection, UidSyncPlan,
+        display_name, flag_store_query, next_uid_sync_plan, parent_path, parse_message_body,
+        sync_completed, updated_uid_cursors, RemoteMessageFlag, UidSyncDirection, UidSyncPlan,
     };
 
     #[test]
@@ -869,6 +1040,26 @@ mod tests {
         );
         assert_eq!(parent_path("INBOX", Some("/")), None);
         assert_eq!(parent_path("Flat", None), None);
+    }
+
+    #[test]
+    fn flag_store_query_uses_silent_uid_store_terms() {
+        assert_eq!(
+            flag_store_query(RemoteMessageFlag::Seen, true),
+            "+FLAGS.SILENT (\\Seen)"
+        );
+        assert_eq!(
+            flag_store_query(RemoteMessageFlag::Seen, false),
+            "-FLAGS.SILENT (\\Seen)"
+        );
+        assert_eq!(
+            flag_store_query(RemoteMessageFlag::Flagged, true),
+            "+FLAGS.SILENT (\\Flagged)"
+        );
+        assert_eq!(
+            flag_store_query(RemoteMessageFlag::Flagged, false),
+            "-FLAGS.SILENT (\\Flagged)"
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ use uncloud_common::{
     MailAccountSyncResponse, MailAddressDto, MailConnectionTestResponse,
     MailCredentialStatusResponse, MailFolderResponse, MailFolderRole, MailFolderRoleSource,
     MailFolderSyncResponse, MailIdentityResponse, MailMessageDetailResponse,
+    MailMessageMutationAction, MailMessageMutationRequest, MailMessageMutationResponse,
     MailMessageSummaryResponse, MailPasswordAuthRequest, MailServerSettings, MailSyncRequest,
     SetMailCredentialRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
     UpdateMailIdentityRequest,
@@ -25,7 +26,9 @@ use crate::middleware::AuthUser;
 use crate::models::{
     MailAccount, MailAddress, MailFolder, MailIdentity, MailMessage, MailServerConfig,
 };
-use crate::services::mail::{RemoteMailAddress, RemoteMailbox, RemoteMessageSummary};
+use crate::services::mail::{
+    RemoteMailAddress, RemoteMailbox, RemoteMessageFlag, RemoteMessageSummary,
+};
 use crate::services::SecretCipher;
 use crate::AppState;
 
@@ -230,6 +233,56 @@ async fn find_folder(
         .ok_or_else(|| AppError::NotFound("Mail folder".into()))
 }
 
+async fn find_message(state: &AppState, owner_id: ObjectId, id: ObjectId) -> Result<MailMessage> {
+    state
+        .db
+        .collection::<MailMessage>(MESSAGES)
+        .find_one(doc! { "_id": id, "owner_id": owner_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Mail message".into()))
+}
+
+async fn find_folder_by_role(
+    state: &AppState,
+    owner_id: ObjectId,
+    account_id: ObjectId,
+    roles: &[MailFolderRole],
+) -> Result<MailFolder> {
+    let mut cursor = state
+        .db
+        .collection::<MailFolder>(FOLDERS)
+        .find(doc! { "owner_id": owner_id, "account_id": account_id, "selectable": true })
+        .await?;
+    while let Some(folder) = cursor.try_next().await? {
+        if let Some(role) = folder_effective_role(&folder) {
+            if roles.contains(&role) {
+                return Ok(folder);
+            }
+        }
+    }
+
+    Err(AppError::BadRequest(format!(
+        "No selectable mail folder is configured as {}",
+        role_list_label(roles)
+    )))
+}
+
+fn role_list_label(roles: &[MailFolderRole]) -> String {
+    roles
+        .iter()
+        .map(|role| match role {
+            MailFolderRole::Inbox => "Inbox",
+            MailFolderRole::Sent => "Sent",
+            MailFolderRole::Drafts => "Drafts",
+            MailFolderRole::Trash => "Trash",
+            MailFolderRole::Archive => "Archive",
+            MailFolderRole::Spam => "Spam",
+            MailFolderRole::AllMail => "All Mail",
+        })
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
+
 fn credential_status(account: &MailAccount) -> MailCredentialStatusResponse {
     MailCredentialStatusResponse {
         account_id: account.id.to_hex(),
@@ -254,6 +307,17 @@ fn remote_address_to_model(address: &RemoteMailAddress) -> MailAddress {
         name: address.name.clone(),
         address: address.address.clone(),
     }
+}
+
+fn mail_flag_eq(candidate: &str, flag: &str) -> bool {
+    candidate
+        .trim()
+        .trim_start_matches('\\')
+        .eq_ignore_ascii_case(flag.trim_start_matches('\\'))
+}
+
+fn message_has_flag(message: &MailMessage, flag: &str) -> bool {
+    message.flags.iter().any(|value| mail_flag_eq(value, flag))
 }
 
 fn optional_u32_bson(value: Option<u32>) -> bson::Bson {
@@ -1300,6 +1364,168 @@ pub async fn list_messages(
     Ok(Json(out))
 }
 
+async fn update_cached_message_flags(
+    state: &AppState,
+    owner_id: ObjectId,
+    folder: &MailFolder,
+    message: &MailMessage,
+    flags: Vec<String>,
+) -> Result<MailMessage> {
+    let was_seen = message_has_flag(message, "\\Seen");
+    let is_seen = flags.iter().any(|flag| mail_flag_eq(flag, "\\Seen"));
+    let now = Utc::now();
+    state
+        .db
+        .collection::<MailMessage>(MESSAGES)
+        .update_one(
+            doc! { "_id": message.id, "owner_id": owner_id },
+            doc! {
+                "$set": {
+                    "flags": flags,
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }
+            },
+        )
+        .await?;
+
+    if was_seen != is_seen {
+        update_folder_unseen_after_seen_change(state, owner_id, folder, is_seen).await?;
+    }
+
+    find_message(state, owner_id, message.id).await
+}
+
+async fn update_folder_unseen_after_seen_change(
+    state: &AppState,
+    owner_id: ObjectId,
+    folder: &MailFolder,
+    is_seen: bool,
+) -> Result<()> {
+    let Some(unseen) = folder.unseen else {
+        return Ok(());
+    };
+    let next = if is_seen {
+        unseen.saturating_sub(1)
+    } else {
+        unseen.saturating_add(1)
+    };
+    state
+        .db
+        .collection::<MailFolder>(FOLDERS)
+        .update_one(
+            doc! { "_id": folder.id, "owner_id": owner_id, "account_id": folder.account_id },
+            doc! {
+                "$set": {
+                    "unseen": bson::Bson::Int64(next as i64),
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+async fn remove_cached_message_after_move(
+    state: &AppState,
+    owner_id: ObjectId,
+    source_folder: &MailFolder,
+    destination_folder: &MailFolder,
+    message: &MailMessage,
+) -> Result<()> {
+    state
+        .db
+        .collection::<MailMessage>(MESSAGES)
+        .delete_one(doc! { "_id": message.id, "owner_id": owner_id })
+        .await?;
+
+    let now = Utc::now();
+    let was_unseen = !message_has_flag(message, "\\Seen");
+    let mut source_set = doc! { "updated_at": bson::DateTime::from_chrono(now) };
+    if let Some(exists) = source_folder.exists {
+        source_set.insert("exists", bson::Bson::Int64(exists.saturating_sub(1) as i64));
+    }
+    if was_unseen {
+        if let Some(unseen) = source_folder.unseen {
+            source_set.insert("unseen", bson::Bson::Int64(unseen.saturating_sub(1) as i64));
+        }
+    }
+    state
+        .db
+        .collection::<MailFolder>(FOLDERS)
+        .update_one(
+            doc! {
+                "_id": source_folder.id,
+                "owner_id": owner_id,
+                "account_id": source_folder.account_id,
+            },
+            doc! { "$set": source_set },
+        )
+        .await?;
+
+    let mut destination_set = doc! { "updated_at": bson::DateTime::from_chrono(now) };
+    if let Some(exists) = destination_folder.exists {
+        destination_set.insert("exists", bson::Bson::Int64(exists.saturating_add(1) as i64));
+    }
+    if was_unseen {
+        if let Some(unseen) = destination_folder.unseen {
+            destination_set.insert("unseen", bson::Bson::Int64(unseen.saturating_add(1) as i64));
+        }
+    }
+    state
+        .db
+        .collection::<MailFolder>(FOLDERS)
+        .update_one(
+            doc! {
+                "_id": destination_folder.id,
+                "owner_id": owner_id,
+                "account_id": destination_folder.account_id,
+            },
+            doc! { "$set": destination_set },
+        )
+        .await?;
+
+    Ok(())
+}
+
+async fn mutation_destination_folder(
+    state: &AppState,
+    owner_id: ObjectId,
+    account_id: ObjectId,
+    req: &MailMessageMutationRequest,
+) -> Result<MailFolder> {
+    match req.action {
+        MailMessageMutationAction::Move => {
+            let target = req
+                .target_folder_id
+                .as_deref()
+                .ok_or_else(|| AppError::BadRequest("target_folder_id is required".into()))?;
+            let target = parse_oid(target, "target mail folder id")?;
+            let folder = find_folder(state, owner_id, account_id, target).await?;
+            if !folder.selectable {
+                return Err(AppError::BadRequest(
+                    "target mail folder is not selectable".into(),
+                ));
+            }
+            Ok(folder)
+        }
+        MailMessageMutationAction::Archive => {
+            find_folder_by_role(
+                state,
+                owner_id,
+                account_id,
+                &[MailFolderRole::Archive, MailFolderRole::AllMail],
+            )
+            .await
+        }
+        MailMessageMutationAction::Trash => {
+            find_folder_by_role(state, owner_id, account_id, &[MailFolderRole::Trash]).await
+        }
+        _ => Err(AppError::BadRequest(
+            "mail mutation action does not have a destination".into(),
+        )),
+    }
+}
+
 pub async fn get_message(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -1307,18 +1533,13 @@ pub async fn get_message(
 ) -> Result<Json<MailMessageDetailResponse>> {
     require_mail(&state)?;
     let message_id = parse_oid(&message_id, "mail message id")?;
-    let message = state
-        .db
-        .collection::<MailMessage>(MESSAGES)
-        .find_one(doc! { "_id": message_id, "owner_id": user.id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("Mail message".into()))?;
+    let message = find_message(&state, user.id, message_id).await?;
     let account = find_account(&state, user.id, message.account_id).await?;
-    let _ = find_folder(&state, user.id, message.account_id, message.folder_id).await?;
+    let folder = find_folder(&state, user.id, message.account_id, message.folder_id).await?;
     let password = resolve_mail_password(&state, &account, None)?;
     let body = state
         .mail
-        .fetch_imap_message_body(&account.imap, &password, &message.folder_path, message.uid)
+        .fetch_imap_message_body(&account.imap, &password, &folder.path, message.uid)
         .await
         .ok();
 
@@ -1327,6 +1548,86 @@ pub async fn get_message(
         body_text: body.as_ref().and_then(|body| body.text.clone()),
         body_html: body.and_then(|body| body.html),
     }))
+}
+
+pub async fn mutate_message(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(message_id): Path<String>,
+    Json(req): Json<MailMessageMutationRequest>,
+) -> Result<Json<MailMessageMutationResponse>> {
+    require_mail(&state)?;
+    let message_id = parse_oid(&message_id, "mail message id")?;
+    let message = find_message(&state, user.id, message_id).await?;
+    let account = find_account(&state, user.id, message.account_id).await?;
+    let folder = find_folder(&state, user.id, message.account_id, message.folder_id).await?;
+    let password = resolve_mail_password(&state, &account, None)?;
+
+    match req.action {
+        MailMessageMutationAction::MarkRead
+        | MailMessageMutationAction::MarkUnread
+        | MailMessageMutationAction::Star
+        | MailMessageMutationAction::Unstar => {
+            let (flag, enabled) = match req.action {
+                MailMessageMutationAction::MarkRead => (RemoteMessageFlag::Seen, true),
+                MailMessageMutationAction::MarkUnread => (RemoteMessageFlag::Seen, false),
+                MailMessageMutationAction::Star => (RemoteMessageFlag::Flagged, true),
+                MailMessageMutationAction::Unstar => (RemoteMessageFlag::Flagged, false),
+                _ => unreachable!(),
+            };
+            let flags = state
+                .mail
+                .set_imap_message_flag(
+                    &account.imap,
+                    &password,
+                    &folder.path,
+                    message.uid,
+                    flag,
+                    enabled,
+                )
+                .await?;
+            let updated =
+                update_cached_message_flags(&state, user.id, &folder, &message, flags).await?;
+
+            Ok(Json(MailMessageMutationResponse {
+                message: Some(message_to_response(&updated)),
+                removed_from_folder: false,
+                destination_folder_id: None,
+                destination_folder_path: None,
+            }))
+        }
+        MailMessageMutationAction::Move
+        | MailMessageMutationAction::Archive
+        | MailMessageMutationAction::Trash => {
+            let destination =
+                mutation_destination_folder(&state, user.id, account.id, &req).await?;
+            if destination.id == folder.id {
+                return Err(AppError::BadRequest(
+                    "message is already in the target folder".into(),
+                ));
+            }
+
+            state
+                .mail
+                .move_imap_message(
+                    &account.imap,
+                    &password,
+                    &folder.path,
+                    message.uid,
+                    &destination.path,
+                )
+                .await?;
+            remove_cached_message_after_move(&state, user.id, &folder, &destination, &message)
+                .await?;
+
+            Ok(Json(MailMessageMutationResponse {
+                message: None,
+                removed_from_folder: true,
+                destination_folder_id: Some(destination.id.to_hex()),
+                destination_folder_path: Some(destination.path),
+            }))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1373,6 +1674,13 @@ mod tests {
             Some(MailFolderRole::Inbox)
         );
         assert_eq!(infer_folder_role("INBOX/Travel", "Travel", &[]), None);
+    }
+
+    #[test]
+    fn mail_flag_eq_ignores_case_and_leading_slash() {
+        assert!(mail_flag_eq("\\Seen", "seen"));
+        assert!(mail_flag_eq("flagged", "\\Flagged"));
+        assert!(!mail_flag_eq("\\Answered", "\\Seen"));
     }
 
     #[test]

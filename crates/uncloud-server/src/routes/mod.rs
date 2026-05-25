@@ -312,6 +312,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             get(mail::list_messages),
         )
         .route("/mail/messages/{message_id}", get(mail::get_message))
+        .route("/mail/messages/{message_id}/mutate", post(mail::mutate_message))
         .route("/mail/identities", get(mail::list_identities).post(mail::create_identity))
         .route("/mail/identities/{id}", put(mail::update_identity).delete(mail::delete_identity));
 

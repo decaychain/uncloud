@@ -61,6 +61,7 @@ Authenticated routes are mounted under both `/api` and `/api/v1`:
 - `POST /mail/accounts/{account_id}/folders/{folder_id}/sync`
 - `GET /mail/accounts/{account_id}/folders/{folder_id}/messages`
 - `GET /mail/messages/{message_id}`
+- `POST /mail/messages/{message_id}/mutate`
 - `GET /mail/identities`
 - `POST /mail/identities`
 - `PUT /mail/identities/{id}`
@@ -103,9 +104,12 @@ the account's SMTP settings.
 - On-demand message detail/body fetch for the reader pane. This currently uses
   the stored credential, fetches `BODY.PEEK[]`, parses MIME with `mail-parser`,
   and returns plain text plus server-sanitized HTML.
+- Manual message mutations for the first write-path spike: mark read/unread,
+  star/unstar, move to a selected folder, archive, and move to trash.
 - First read-only web UI iteration at `/mail`: account/folder navigation,
   account setup/settings, IMAP/SMTP tests, folder settings, manual
-  account/folder sync, cached message list, and a reader pane.
+  account/folder sync, cached message list, reader pane, and basic message
+  mutation controls.
 - Mongo indexes for account, identity, folder, message, and attachment metadata.
 - Server-wide `features.mail` toggle plus per-user opt-out through
   `disabled_features`.
@@ -121,8 +125,15 @@ the account's SMTP settings.
   persisted yet.
 - Body rendering is on-demand. The UI prefers sanitized HTML when available and
   falls back to plain text. Remote image URLs are stripped during sanitization.
-- The UI is read-only. Compose, search, threading, flag changes, delete/archive,
-  move, and attachments are not implemented.
+- Move/archive/trash currently require provider support for `UID MOVE`. There is
+  deliberately no copy-plus-expunge fallback yet, because expunge semantics can
+  be risky across clients.
+- After a successful move/archive/trash, the source cached message is removed.
+  The destination copy is discovered by the next sync because IMAP move changes
+  the destination UID and the foundation does not yet consume UIDPLUS response
+  codes.
+- Compose, search, threading, attachments, permanent delete, and draft handling
+  are not implemented.
 - Account-level manual sync refreshes folders first, then syncs selectable
   folders one-by-one. It is intentionally simple and not yet a scheduler.
 
@@ -206,8 +217,13 @@ Remaining credential work before scheduler/background sync:
 
 ### 5. Mutations
 
-- Mark read/unread, star/unstar, archive, move, delete.
-- Reflect remote flag/folder changes locally.
+- Mark read/unread, star/unstar, archive, move, and move-to-trash are wired as
+  manual actions.
+- Reflect remote flag/folder changes discovered outside Uncloud locally.
+- Decide whether to support providers without `UID MOVE`, and if so, how to do
+  it without unsafe expunge behavior.
+- Add permanent delete semantics for Trash after the folder role model has been
+  tested against real providers.
 - Make mutations idempotent where possible and record failures clearly.
 - Defer complex threading until list/detail sync is solid.
 

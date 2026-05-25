@@ -178,6 +178,33 @@ pub struct MailMessageDetailResponse {
     pub body_html: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MailMessageMutationAction {
+    MarkRead,
+    MarkUnread,
+    Star,
+    Unstar,
+    Move,
+    Archive,
+    Trash,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailMessageMutationRequest {
+    pub action: MailMessageMutationAction,
+    #[serde(default)]
+    pub target_folder_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailMessageMutationResponse {
+    pub message: Option<MailMessageSummaryResponse>,
+    pub removed_from_folder: bool,
+    pub destination_folder_id: Option<String>,
+    pub destination_folder_path: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MailAttachmentResponse {
     pub id: String,
