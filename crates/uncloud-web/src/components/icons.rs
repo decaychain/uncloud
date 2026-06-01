@@ -336,6 +336,10 @@ lucide_icon!(IconDownload,
     line { x1: "12", y1: "15", x2: "12", y2: "3" }
 );
 
+lucide_icon!(IconPaperclip,
+    path { d: "m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.586a6 6 0 1 0 8.485 8.485l8.379-8.586" }
+);
+
 lucide_icon!(IconShare,
     circle { cx: "18", cy: "5", r: "3" }
     circle { cx: "6", cy: "12", r: "3" }

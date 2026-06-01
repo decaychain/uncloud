@@ -1,40 +1,50 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use axum::{
-    Json,
+    body::Body,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header, StatusCode},
+    response::Response,
+    Json,
 };
 use bson::doc;
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, oid::ObjectId};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tokio::time::sleep;
+use tokio_util::io::ReaderStream;
 use uncloud_common::{
     CreateMailAccountRequest, CreateMailIdentityRequest, MailAccountResponse,
-    MailAccountSyncResponse, MailAddressDto, MailConnectionTestResponse,
+    MailAccountSyncResponse, MailAddressDto, MailAttachmentResponse, MailConnectionTestResponse,
     MailCredentialStatusResponse, MailFolderResponse, MailFolderRole, MailFolderRoleSource,
     MailFolderSyncResponse, MailIdentityResponse, MailMessageDetailResponse,
     MailMessageListResponse, MailMessageMutationAction, MailMessageMutationRequest,
     MailMessageMutationResponse, MailMessageSummaryResponse, MailPasswordAuthRequest,
-    MailSentCopyStatus, MailServerSettings, MailSyncRequest, SendMailMessageRequest,
-    SendMailMessageResponse, SetMailCredentialRequest, UpdateMailAccountRequest,
-    UpdateMailFolderRequest, UpdateMailIdentityRequest,
+    MailSentCopyStatus, MailServerSettings, MailSyncRequest, SaveMailAttachmentRequest,
+    SaveMailAttachmentResponse, SendMailMessageRequest, SendMailMessageResponse,
+    SetMailCredentialRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
+    UpdateMailIdentityRequest,
 };
 
-use crate::AppState;
 use crate::error::{AppError, Result};
-use crate::middleware::AuthUser;
+use crate::middleware::{AuthUser, RequestMeta};
 use crate::models::{
-    MailAccount, MailAddress, MailFolder, MailIdentity, MailMessage, MailServerConfig,
+    File, Folder, MailAccount, MailAddress, MailAttachment, MailFolder, MailIdentity, MailMessage,
+    MailServerConfig,
+    User,
 };
-use crate::services::SecretCipher;
+use crate::routes::apps::{deliver_webhooks, EVENT_FILE_CREATED};
+use crate::routes::files::{check_name_conflict, file_to_response, resolve_storage_path};
 use crate::services::mail::{
-    RemoteMailAddress, RemoteMailbox, RemoteMessageFlag, RemoteMessageSummary,
+    RemoteMailAddress, RemoteMailbox, RemoteMessageBody, RemoteMessageFlag, RemoteMessageSummary,
     RemoteOutgoingMessage,
 };
-use crate::services::mail_blob::{read_cached_message_body, store_message_body};
+use crate::services::mail_blob::{read_cached_message_body, store_message_body, StoredMailBody};
+use crate::services::sharing::check_folder_access;
+use crate::services::SecretCipher;
+use crate::AppState;
 
 const ACCOUNTS: &str = "mail_accounts";
 const IDENTITIES: &str = "mail_identities";
@@ -213,6 +223,18 @@ fn address_to_response(address: &MailAddress) -> MailAddressDto {
     }
 }
 
+fn attachment_to_response(attachment: &MailAttachment) -> MailAttachmentResponse {
+    MailAttachmentResponse {
+        id: attachment.id.to_hex(),
+        message_id: attachment.message_id.to_hex(),
+        filename: attachment.filename.clone(),
+        content_type: attachment.content_type.clone(),
+        content_id: attachment.content_id.clone(),
+        disposition: attachment.disposition.clone(),
+        size_bytes: attachment.size_bytes,
+    }
+}
+
 fn message_to_response(message: &MailMessage) -> MailMessageSummaryResponse {
     MailMessageSummaryResponse {
         id: message.id.to_hex(),
@@ -265,6 +287,24 @@ async fn find_message(state: &AppState, owner_id: ObjectId, id: ObjectId) -> Res
         .find_one(doc! { "_id": id, "owner_id": owner_id })
         .await?
         .ok_or_else(|| AppError::NotFound("Mail message".into()))
+}
+
+async fn list_message_attachments(
+    state: &AppState,
+    owner_id: ObjectId,
+    message_id: ObjectId,
+) -> Result<Vec<MailAttachment>> {
+    let mut cursor = state
+        .db
+        .collection::<MailAttachment>(ATTACHMENTS)
+        .find(doc! { "owner_id": owner_id, "message_id": message_id })
+        .sort(doc! { "created_at": 1 })
+        .await?;
+    let mut out = Vec::new();
+    while let Some(attachment) = cursor.try_next().await? {
+        out.push(attachment);
+    }
+    Ok(out)
 }
 
 async fn find_identity(
@@ -1395,7 +1435,7 @@ async fn store_message_summary(
         internal_date: summary.internal_date,
         flags: summary.flags.clone(),
         size_bytes: summary.size_bytes,
-        has_attachments: false,
+        has_attachments: summary.has_attachments,
         snippet: None,
         mail_storage_id: None,
         raw_storage_path: None,
@@ -1893,6 +1933,47 @@ async fn mutation_destination_folder(
     }
 }
 
+async fn replace_message_attachments(
+    state: &AppState,
+    owner_id: ObjectId,
+    account_id: ObjectId,
+    message_id: ObjectId,
+    body: &RemoteMessageBody,
+    stored: &StoredMailBody,
+    now: chrono::DateTime<Utc>,
+) -> Result<Vec<MailAttachment>> {
+    let coll = state.db.collection::<MailAttachment>(ATTACHMENTS);
+    coll.delete_many(doc! { "owner_id": owner_id, "message_id": message_id })
+        .await?;
+
+    let mut attachments = Vec::new();
+    for stored_attachment in &stored.attachments {
+        let Some(remote) = body.attachments.get(stored_attachment.index) else {
+            continue;
+        };
+        attachments.push(MailAttachment {
+            id: ObjectId::new(),
+            owner_id,
+            account_id,
+            message_id,
+            filename: remote.filename.clone(),
+            content_type: remote.content_type.clone(),
+            content_id: remote.content_id.clone(),
+            disposition: remote.disposition.clone(),
+            size_bytes: Some(stored_attachment.size_bytes),
+            storage_id: Some(stored.storage_id),
+            storage_path: Some(stored_attachment.storage_path.clone()),
+            created_at: now,
+        });
+    }
+
+    if !attachments.is_empty() {
+        coll.insert_many(&attachments).await?;
+    }
+
+    Ok(attachments)
+}
+
 pub async fn get_message(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -1903,10 +1984,12 @@ pub async fn get_message(
     let message = find_message(&state, user.id, message_id).await?;
     match read_cached_message_body(&state.storage, &message).await {
         Ok(Some(body)) => {
+            let attachments = list_message_attachments(&state, user.id, message.id).await?;
             return Ok(Json(MailMessageDetailResponse {
                 message: message_to_response(&message),
                 body_text: body.text,
                 body_html: body.html,
+                attachments: attachments.iter().map(attachment_to_response).collect(),
             }));
         }
         Ok(None) => {}
@@ -1927,6 +2010,8 @@ pub async fn get_message(
         .fetch_imap_message_body(&account.imap, &password, &folder.path, message.uid)
         .await
         .ok();
+    let mut response_message = message.clone();
+    let mut attachments = Vec::new();
     if let Some(body) = body.as_ref() {
         match store_message_body(
             &state.storage,
@@ -1939,6 +2024,12 @@ pub async fn get_message(
         .await
         {
             Ok(stored) => {
+                let now = Utc::now();
+                attachments = replace_message_attachments(
+                    &state, user.id, account.id, message.id, body, &stored, now,
+                )
+                .await?;
+                response_message.has_attachments = !attachments.is_empty();
                 state
                     .db
                     .collection::<MailMessage>(MESSAGES)
@@ -1953,7 +2044,8 @@ pub async fn get_message(
                                 "text_storage_size_bytes": optional_u64_bson(stored.text_size_bytes),
                                 "html_storage_path": optional_string_bson(stored.html_path),
                                 "html_storage_size_bytes": optional_u64_bson(stored.html_size_bytes),
-                                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                                "has_attachments": response_message.has_attachments,
+                                "updated_at": bson::DateTime::from_chrono(now),
                             },
                         },
                     )
@@ -1970,9 +2062,271 @@ pub async fn get_message(
     }
 
     Ok(Json(MailMessageDetailResponse {
-        message: message_to_response(&message),
+        message: message_to_response(&response_message),
         body_text: body.as_ref().and_then(|body| body.text.clone()),
         body_html: body.and_then(|body| body.html),
+        attachments: attachments.iter().map(attachment_to_response).collect(),
+    }))
+}
+
+pub async fn download_attachment(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(attachment_id): Path<String>,
+) -> Result<Response> {
+    require_mail(&state)?;
+    stream_attachment_response(&state, user.id, &attachment_id, "attachment").await
+}
+
+pub async fn open_attachment(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(attachment_id): Path<String>,
+) -> Result<Response> {
+    require_mail(&state)?;
+    stream_attachment_response(&state, user.id, &attachment_id, "inline").await
+}
+
+async fn stream_attachment_response(
+    state: &AppState,
+    owner_id: ObjectId,
+    attachment_id: &str,
+    disposition: &str,
+) -> Result<Response> {
+    let attachment_id = parse_oid(attachment_id, "mail attachment id")?;
+    let attachment = state
+        .db
+        .collection::<MailAttachment>(ATTACHMENTS)
+        .find_one(doc! { "_id": attachment_id, "owner_id": owner_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Mail attachment".into()))?;
+    let storage_id = attachment
+        .storage_id
+        .ok_or_else(|| AppError::NotFound("Mail attachment blob".into()))?;
+    let storage_path = attachment
+        .storage_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| AppError::NotFound("Mail attachment blob".into()))?;
+
+    let backend = state.storage.get_backend(storage_id).await?;
+    let reader = backend.read(storage_path).await?;
+    let stream = ReaderStream::new(reader);
+    let body = Body::from_stream(stream);
+
+    let filename = attachment
+        .filename
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("attachment");
+    let content_disposition = format!("{disposition}; filename=\"{}\"", filename.replace('"', "\\\""));
+    let content_type = attachment
+        .content_type
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("application/octet-stream");
+
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_DISPOSITION, content_disposition);
+    if let Some(size) = attachment.size_bytes {
+        response = response.header(header::CONTENT_LENGTH, size);
+    }
+    Ok(response.body(body).unwrap())
+}
+
+async fn files_destination_owner(
+    state: &AppState,
+    user: &AuthUser,
+    parent_id: Option<ObjectId>,
+) -> Result<(ObjectId, String)> {
+    let Some(parent_id) = parent_id else {
+        return Ok((user.id, user.username.clone()));
+    };
+
+    let parent = state
+        .db
+        .collection::<Folder>("folders")
+        .find_one(doc! { "_id": parent_id, "deleted_at": mongodb::bson::Bson::Null })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Parent folder not found".into()))?;
+    if parent.owner_id == user.id {
+        return Ok((user.id, user.username.clone()));
+    }
+
+    let access = check_folder_access(&state.db, user.id, parent_id).await?;
+    if !access.can_write() {
+        return Err(if access.can_read() {
+            AppError::Forbidden("Read-only access".into())
+        } else {
+            AppError::NotFound("Parent folder not found".into())
+        });
+    }
+
+    let owner_username = state
+        .db
+        .collection::<User>("users")
+        .find_one(doc! { "_id": parent.owner_id })
+        .await?
+        .map(|owner| owner.username)
+        .unwrap_or_else(|| user.username.clone());
+    Ok((parent.owner_id, owner_username))
+}
+
+pub async fn save_attachment_to_files(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    meta: RequestMeta,
+    Path(attachment_id): Path<String>,
+    Json(req): Json<SaveMailAttachmentRequest>,
+) -> Result<Json<SaveMailAttachmentResponse>> {
+    require_mail(&state)?;
+    let attachment_id = parse_oid(&attachment_id, "mail attachment id")?;
+    let attachment = state
+        .db
+        .collection::<MailAttachment>(ATTACHMENTS)
+        .find_one(doc! { "_id": attachment_id, "owner_id": user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Mail attachment".into()))?;
+    let source_storage_id = attachment
+        .storage_id
+        .ok_or_else(|| AppError::NotFound("Mail attachment blob".into()))?;
+    let source_storage_path = attachment
+        .storage_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| AppError::NotFound("Mail attachment blob".into()))?;
+
+    let parent_id = match req.parent_id.as_deref().map(str::trim) {
+        Some("") | None => None,
+        Some(id) => Some(parse_oid(id, "parent folder id")?),
+    };
+    let filename = req
+        .filename
+        .as_deref()
+        .or(attachment.filename.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("attachment");
+    let filename = validate_label(filename, "attachment filename")?;
+    let (effective_owner_id, effective_username) =
+        files_destination_owner(&state, &user, parent_id).await?;
+
+    if check_name_conflict(
+        &state.db,
+        effective_owner_id,
+        parent_id,
+        &filename,
+        None,
+        None,
+    )
+    .await?
+    {
+        return Err(AppError::Conflict(
+            "A file with this name already exists at this location".to_string(),
+        ));
+    }
+
+    let source_backend = state.storage.get_backend(source_storage_id).await?;
+    let file_data = source_backend.read_all(source_storage_path).await?;
+    let size = file_data.len() as i64;
+    {
+        let users_coll = state.db.collection::<User>("users");
+        if let Some(owner) = users_coll.find_one(doc! { "_id": effective_owner_id }).await? {
+            if !owner.has_quota_space(size) {
+                return Err(AppError::Forbidden("Quota exceeded".into()));
+            }
+        }
+    }
+
+    let storage_id = state.storage.resolve_storage_for_parent(parent_id).await?;
+    let storage = state.storage.get_storage(storage_id).await?;
+    let backend = state.storage.get_backend(storage.id).await?;
+    let storage_path = resolve_storage_path(
+        &state.db,
+        effective_owner_id,
+        &effective_username,
+        parent_id,
+        &filename,
+    )
+    .await?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(&file_data);
+    let checksum = hex::encode(hasher.finalize());
+    backend.write(&storage_path, &file_data).await?;
+
+    let mime_type = attachment
+        .content_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            mime_guess::from_path(&filename)
+                .first_or_octet_stream()
+                .to_string()
+        });
+    let file = File::new(
+        storage.id,
+        storage_path,
+        effective_owner_id,
+        parent_id,
+        filename,
+        mime_type,
+        size,
+        checksum,
+    );
+
+    let collection = state.db.collection::<File>("files");
+    if let Err(err) = collection.insert_one(&file).await {
+        if is_duplicate_key_error(&err) {
+            return Err(AppError::Conflict(
+                "A file with this name already exists at this location".to_string(),
+            ));
+        }
+        return Err(err.into());
+    }
+
+    state.auth.update_user_bytes(effective_owner_id, size).await?;
+    state.events.emit_file_created(effective_owner_id, &file).await;
+    state
+        .sync_log
+        .record(super::audit::file_event(
+            effective_owner_id,
+            uncloud_common::SyncOperation::Created,
+            file.id,
+            file.storage_path.clone(),
+            None,
+            &meta,
+        ))
+        .await;
+
+    {
+        let state_clone = state.clone();
+        let file_id = file.id.to_hex();
+        let owner_id = effective_owner_id.to_hex();
+        let username = effective_username.clone();
+        let name = file.name.clone();
+        tokio::spawn(async move {
+            deliver_webhooks(
+                &state_clone,
+                EVENT_FILE_CREATED,
+                serde_json::json!({
+                    "file_id": file_id,
+                    "owner_id": owner_id,
+                    "username": username,
+                    "name": name,
+                }),
+            )
+            .await;
+        });
+    }
+    state.processing.enqueue(&file, state.clone()).await;
+
+    Ok(Json(SaveMailAttachmentResponse {
+        file: file_to_response(&file),
     }))
 }
 

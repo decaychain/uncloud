@@ -314,6 +314,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/mail/messages/{message_id}", get(mail::get_message))
         .route("/mail/messages/{message_id}/mutate", post(mail::mutate_message))
+        .route("/mail/attachments/{attachment_id}/open", get(mail::open_attachment))
+        .route("/mail/attachments/{attachment_id}/download", get(mail::download_attachment))
+        .route(
+            "/mail/attachments/{attachment_id}/save",
+            post(mail::save_attachment_to_files).layer(middleware::from_fn(require_files_write)),
+        )
         .route("/mail/identities", get(mail::list_identities).post(mail::create_identity))
         .route("/mail/identities/{id}", put(mail::update_identity).delete(mail::delete_identity));
 

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::files::FileResponse;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MailSecurity {
@@ -184,6 +186,7 @@ pub struct MailMessageDetailResponse {
     pub message: MailMessageSummaryResponse,
     pub body_text: Option<String>,
     pub body_html: Option<String>,
+    pub attachments: Vec<MailAttachmentResponse>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,6 +260,19 @@ pub struct MailAttachmentResponse {
     pub content_id: Option<String>,
     pub disposition: Option<String>,
     pub size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SaveMailAttachmentRequest {
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub filename: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SaveMailAttachmentResponse {
+    pub file: FileResponse,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

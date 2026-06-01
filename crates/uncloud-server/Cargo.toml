@@ -38,6 +38,7 @@ hex.workspace = true
 serde_yaml.workspace = true
 futures.workspace = true
 async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+imap-proto = "0.16"
 async-native-tls = { version = "0.6", default-features = false, features = ["runtime-tokio"] }
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls", "pool"] }
 mail-parser = "0.11"

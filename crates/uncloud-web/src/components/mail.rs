@@ -1,17 +1,19 @@
 use dioxus::prelude::*;
 use uncloud_common::{
-    CreateMailAccountRequest, MailAccountResponse, MailAddressDto, MailFolderResponse,
-    MailFolderRole, MailFolderRoleSource, MailIdentityResponse, MailMessageDetailResponse,
-    MailMessageMutationAction, MailMessageSummaryResponse, MailSecurity, MailSentCopyStatus,
-    MailServerSettings, SendMailMessageRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
+    CreateMailAccountRequest, FolderResponse, MailAccountResponse, MailAddressDto,
+    MailAttachmentResponse, MailFolderResponse, MailFolderRole, MailFolderRoleSource,
+    MailIdentityResponse, MailMessageDetailResponse, MailMessageMutationAction,
+    MailMessageSummaryResponse, MailSecurity, MailSentCopyStatus, MailServerSettings,
+    SendMailMessageRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
 };
 
 use crate::components::icons::{
-    IconArchive, IconEye, IconFileText, IconFolder, IconMail, IconMoveRight, IconPlus,
-    IconRefreshCw, IconSend, IconSettings, IconStar, IconTrash,
+    IconArchive, IconChevronRight, IconDownload, IconEye, IconFileText, IconFolder,
+    IconFolderOpen, IconMail, IconMoveRight, IconPaperclip, IconPlus, IconRefreshCw, IconSend,
+    IconSettings, IconStar, IconTrash,
 };
 use crate::components::scroll_sentinel::ScrollSentinel;
-use crate::hooks::use_mail;
+use crate::hooks::{use_files, use_mail};
 
 const MAIL_MESSAGE_PAGE_SIZE: u32 = 50;
 const MAIL_BACKFILL_PAGE_SIZE: u32 = 50;
@@ -67,6 +69,12 @@ pub fn MailPage() -> Element {
     let mut deleting_account = use_signal(|| false);
     let mut message_next_cursor = use_signal(|| None::<String>);
     let mut message_has_more = use_signal(|| false);
+    let mut saving_attachment = use_signal(|| None::<MailAttachmentResponse>);
+    let mut attachment_save_parent = use_signal(|| None::<String>);
+    let mut attachment_save_folders = use_signal(Vec::<FolderResponse>::new);
+    let mut attachment_save_breadcrumb = use_signal(Vec::<FolderResponse>::new);
+    let mut attachment_save_loading = use_signal(|| false);
+    let mut attachment_save_busy = use_signal(|| false);
 
     let mut display_name = use_signal(String::new);
     let mut email_address = use_signal(String::new);
@@ -103,6 +111,28 @@ pub fn MailPage() -> Element {
                 Err(e) => error.set(Some(e)),
             }
             loading.set(false);
+        });
+    });
+
+    use_effect(move || {
+        if saving_attachment().is_none() {
+            return;
+        }
+        let parent = attachment_save_parent();
+        spawn(async move {
+            attachment_save_loading.set(true);
+            if let Ok(rows) = use_files::list_folders(parent.as_deref()).await {
+                attachment_save_folders.set(rows);
+            }
+            match &parent {
+                Some(parent_id) => {
+                    if let Ok(rows) = use_files::get_breadcrumb(parent_id).await {
+                        attachment_save_breadcrumb.set(rows);
+                    }
+                }
+                None => attachment_save_breadcrumb.set(Vec::new()),
+            }
+            attachment_save_loading.set(false);
         });
     });
 
@@ -622,11 +652,20 @@ pub fn MailPage() -> Element {
                                 {
                                     let id = message.id.clone();
                                     let active = id == selected_message_id;
+                                    let is_seen = message_has_flag(&message, "\\Seen");
+                                    let is_flagged = message_has_flag(&message, "\\Flagged");
+                                    let subject_class = if is_seen {
+                                        "min-w-0 flex-1 truncate text-sm font-medium"
+                                    } else {
+                                        "min-w-0 flex-1 truncate text-sm font-semibold"
+                                    };
                                     rsx! {
                                         button {
                                             key: "{id}",
                                             class: if active {
                                                 "block w-full border-l-4 border-primary bg-primary/10 px-3 py-3 text-left"
+                                            } else if !is_seen {
+                                                "block w-full border-l-4 border-transparent bg-base-200/50 px-3 py-3 text-left hover:bg-base-200"
                                             } else {
                                                 "block w-full border-l-4 border-transparent px-3 py-3 text-left hover:bg-base-200"
                                             },
@@ -638,7 +677,18 @@ pub fn MailPage() -> Element {
                                                     loading_detail.set(true);
                                                     error.set(None);
                                                     match use_mail::get_message(&message_id).await {
-                                                        Ok(row) => detail.set(Some(row)),
+                                                        Ok(row) => {
+                                                            let updated_message = row.message.clone();
+                                                            let mut current = messages();
+                                                            for item in &mut current {
+                                                                if item.id == updated_message.id {
+                                                                    *item = updated_message.clone();
+                                                                    break;
+                                                                }
+                                                            }
+                                                            messages.set(current);
+                                                            detail.set(Some(row));
+                                                        }
                                                         Err(e) => error.set(Some(e)),
                                                     }
                                                     loading_detail.set(false);
@@ -646,10 +696,23 @@ pub fn MailPage() -> Element {
                                             },
                                             div { class: "flex items-start justify-between gap-2",
                                                 div { class: "min-w-0 flex-1",
-                                                    div { class: "truncate text-sm font-medium", "{message_subject(&message)}" }
+                                                    div { class: "flex min-w-0 items-center gap-2",
+                                                        if !is_seen {
+                                                            span { class: "h-2 w-2 rounded-full bg-primary", title: "Unread" }
+                                                        }
+                                                        if is_flagged {
+                                                            IconStar { class: "h-3.5 w-3.5 text-warning".to_string() }
+                                                        }
+                                                        div { class: "{subject_class}", "{message_subject(&message)}" }
+                                                    }
                                                     div { class: "truncate text-xs text-base-content/60", "{message_sender(&message)}" }
                                                 }
-                                                div { class: "shrink-0 text-xs text-base-content/50", "{short_date(message.internal_date.as_deref().or(message.date.as_deref()))}" }
+                                                div { class: "flex shrink-0 items-center gap-1 text-xs text-base-content/50",
+                                                    if message.has_attachments {
+                                                        IconPaperclip { class: "h-3.5 w-3.5".to_string() }
+                                                    }
+                                                    span { "{short_date(message.internal_date.as_deref().or(message.date.as_deref()))}" }
+                                                }
                                             }
                                             div { class: "mt-1 line-clamp-2 text-xs text-base-content/60",
                                                 "{message.snippet.clone().unwrap_or_default()}"
@@ -960,6 +1023,63 @@ pub fn MailPage() -> Element {
                                         }
                                     }
                                     div { class: "min-h-0 flex-1 overflow-y-auto p-4",
+                                        if !row.attachments.is_empty() {
+                                            div { class: "mb-4 rounded border border-base-300 bg-base-200/60 p-3",
+                                                div { class: "mb-2 text-xs font-semibold uppercase text-base-content/60",
+                                                    "Attachments"
+                                                }
+                                                div { class: "grid gap-2",
+                                                    for attachment in row.attachments.clone() {
+                                                        {
+                                                            let name = mail_attachment_name(&attachment);
+                                                            let meta = mail_attachment_meta(&attachment);
+                                                            let href = format!("/api/mail/attachments/{}/download", attachment.id);
+                                                            let open_href = format!("/api/mail/attachments/{}/open", attachment.id);
+                                                            let attachment_for_save = attachment.clone();
+                                                            rsx! {
+                                                                div {
+                                                                    class: "flex items-center gap-3 rounded border border-base-300 bg-base-100 px-3 py-2 text-sm",
+                                                                    IconFileText { class: "h-4 w-4 text-base-content/60".to_string() }
+                                                                    div { class: "min-w-0 flex-1",
+                                                                        div { class: "truncate font-medium", "{name}" }
+                                                                        div { class: "truncate text-xs text-base-content/50", "{meta}" }
+                                                                    }
+                                                                    div { class: "flex shrink-0 items-center gap-1",
+                                                                        a {
+                                                                            class: "btn btn-ghost btn-xs h-8 min-h-8 px-2",
+                                                                            href: "{open_href}",
+                                                                            target: "_blank",
+                                                                            rel: "noreferrer",
+                                                                            title: "Open attachment",
+                                                                            IconEye { class: "h-4 w-4".to_string() }
+                                                                        }
+                                                                        a {
+                                                                            class: "btn btn-ghost btn-xs h-8 min-h-8 px-2",
+                                                                            href: "{href}",
+                                                                            target: "_blank",
+                                                                            rel: "noreferrer",
+                                                                            title: "Download attachment",
+                                                                            IconDownload { class: "h-4 w-4".to_string() }
+                                                                        }
+                                                                        button {
+                                                                            class: "btn btn-ghost btn-xs h-8 min-h-8 px-2",
+                                                                            title: "Save to Files",
+                                                                            onclick: move |_| {
+                                                                                attachment_save_parent.set(None);
+                                                                                attachment_save_folders.set(Vec::new());
+                                                                                attachment_save_breadcrumb.set(Vec::new());
+                                                                                saving_attachment.set(Some(attachment_for_save.clone()));
+                                                                            },
+                                                                            IconFolderOpen { class: "h-4 w-4".to_string() }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                         if let Some(body) = row.body_html.as_ref() {
                                             div {
                                                 class: "max-w-none break-words text-sm leading-6 [&_a]:text-primary [&_blockquote]:border-l-2 [&_blockquote]:border-base-300 [&_blockquote]:pl-3 [&_blockquote]:text-base-content/70 [&_img]:max-w-full [&_table]:max-w-full",
@@ -979,6 +1099,130 @@ pub fn MailPage() -> Element {
                             div { class: "flex flex-1 flex-col items-center justify-center gap-2 text-base-content/60",
                                 IconFileText { class: "h-8 w-8".to_string() }
                                 div { class: "text-sm", "Select a message" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(attachment) = saving_attachment() {
+                {
+                    let attachment_name = mail_attachment_name(&attachment);
+                    let attachment_meta = mail_attachment_meta(&attachment);
+                    let destination_label = attachment_save_breadcrumb()
+                        .last()
+                        .map(|folder| folder.name.clone())
+                        .unwrap_or_else(|| "Files".to_string());
+                    rsx! {
+                        div { class: "modal modal-open",
+                            div {
+                                class: "modal-box max-w-md",
+                                onclick: move |event| event.stop_propagation(),
+
+                                h2 { class: "text-lg font-semibold", "Save Attachment" }
+                                div { class: "mt-2 rounded border border-base-300 bg-base-200/60 px-3 py-2 text-sm",
+                                    div { class: "truncate font-medium", "{attachment_name}" }
+                                    div { class: "truncate text-xs text-base-content/50", "{attachment_meta}" }
+                                }
+
+                                div { class: "mt-4 text-sm breadcrumbs px-0",
+                                    ul {
+                                        li {
+                                            a {
+                                                class: "cursor-pointer",
+                                                onclick: move |_| attachment_save_parent.set(None),
+                                                "Files"
+                                            }
+                                        }
+                                        for folder in attachment_save_breadcrumb() {
+                                            li {
+                                                a {
+                                                    class: "cursor-pointer",
+                                                    onclick: {
+                                                        let id = folder.id.clone();
+                                                        move |_| attachment_save_parent.set(Some(id.clone()))
+                                                    },
+                                                    "{folder.name}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                div { class: "min-h-32 max-h-64 overflow-y-auto rounded border border-base-300",
+                                    if attachment_save_loading() {
+                                        div { class: "flex h-32 items-center justify-center",
+                                            span { class: "loading loading-spinner loading-md" }
+                                        }
+                                    } else if attachment_save_folders().is_empty() {
+                                        div { class: "flex h-32 items-center justify-center text-sm text-base-content/40",
+                                            "No subfolders here"
+                                        }
+                                    } else {
+                                        ul { class: "menu menu-sm p-1",
+                                            for folder in attachment_save_folders() {
+                                                li {
+                                                    a {
+                                                        onclick: {
+                                                            let id = folder.id.clone();
+                                                            move |_| attachment_save_parent.set(Some(id.clone()))
+                                                        },
+                                                        IconFolder {}
+                                                        span { "{folder.name}" }
+                                                        IconChevronRight { class: "ml-auto h-4 w-4 opacity-40".to_string() }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                div { class: "mt-3 text-xs text-base-content/60",
+                                    "Destination: {destination_label}"
+                                }
+
+                                div { class: "modal-action",
+                                    button {
+                                        class: "btn btn-ghost",
+                                        disabled: attachment_save_busy(),
+                                        onclick: move |_| saving_attachment.set(None),
+                                        "Cancel"
+                                    }
+                                    button {
+                                        class: "btn btn-primary gap-2",
+                                        disabled: attachment_save_busy(),
+                                        onclick: {
+                                            let attachment_id = attachment.id.clone();
+                                            move |_| {
+                                                let attachment_id = attachment_id.clone();
+                                                let parent = attachment_save_parent();
+                                                spawn(async move {
+                                                    attachment_save_busy.set(true);
+                                                    error.set(None);
+                                                    notice.set(None);
+                                                    match use_mail::save_attachment(
+                                                        &attachment_id,
+                                                        parent.as_deref(),
+                                                        None,
+                                                    ).await {
+                                                        Ok(file) => {
+                                                            notice.set(Some(format!("Saved {} to Files", file.name)));
+                                                            saving_attachment.set(None);
+                                                        }
+                                                        Err(e) => error.set(Some(e)),
+                                                    }
+                                                    attachment_save_busy.set(false);
+                                                });
+                                            }
+                                        },
+                                        if attachment_save_busy() {
+                                            span { class: "loading loading-spinner loading-xs" }
+                                        } else {
+                                            IconFolderOpen { class: "h-4 w-4".to_string() }
+                                        }
+                                        span { "Save Here" }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1846,6 +2090,34 @@ fn sent_copy_status_label(status: MailSentCopyStatus) -> &'static str {
         MailSentCopyStatus::Appended => "Sent copy appended",
         MailSentCopyStatus::SkippedNoSentFolder => "no Sent folder configured",
         MailSentCopyStatus::Failed => "Sent copy failed",
+    }
+}
+
+fn mail_attachment_name(attachment: &MailAttachmentResponse) -> String {
+    attachment
+        .filename
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| "Attachment".to_string())
+}
+
+fn mail_attachment_meta(attachment: &MailAttachmentResponse) -> String {
+    let mut parts = Vec::new();
+    if let Some(size) = attachment.size_bytes {
+        parts.push(uncloud_common::validation::format_bytes(size as i64));
+    }
+    if let Some(content_type) = attachment
+        .content_type
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        parts.push(content_type.clone());
+    }
+    if parts.is_empty() {
+        "download".to_string()
+    } else {
+        parts.join(" | ")
     }
 }
 

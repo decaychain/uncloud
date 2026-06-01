@@ -14,6 +14,14 @@ pub struct StoredMailBody {
     pub text_size_bytes: Option<u64>,
     pub html_path: Option<String>,
     pub html_size_bytes: Option<u64>,
+    pub attachments: Vec<StoredMailAttachment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredMailAttachment {
+    pub index: usize,
+    pub storage_path: String,
+    pub size_bytes: u64,
 }
 
 fn sanitize_storage_component(value: &str) -> String {
@@ -74,6 +82,7 @@ pub async fn read_cached_message_body(
         raw: Vec::new(),
         text,
         html,
+        attachments: Vec::new(),
     }))
 }
 
@@ -113,6 +122,23 @@ pub async fn store_message_body(
         (None, None)
     };
 
+    let mut attachments = Vec::new();
+    for (index, attachment) in body.attachments.iter().enumerate() {
+        let filename = attachment
+            .filename
+            .as_deref()
+            .map(sanitize_storage_component)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "attachment.bin".to_string());
+        let path = format!("{prefix}/attachments/{index}-{filename}");
+        backend.write(&path, &attachment.data).await?;
+        attachments.push(StoredMailAttachment {
+            index,
+            storage_path: path,
+            size_bytes: attachment.data.len() as u64,
+        });
+    }
+
     Ok(StoredMailBody {
         storage_id,
         raw_path,
@@ -121,5 +147,6 @@ pub async fn store_message_body(
         text_size_bytes,
         html_path,
         html_size_bytes,
+        attachments,
     })
 }

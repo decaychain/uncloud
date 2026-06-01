@@ -7,13 +7,14 @@ use async_imap::{Client, Session};
 use async_native_tls::TlsConnector;
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
+use imap_proto::types::{BodyContentCommon, BodyParams, BodyStructure};
 use lettre::transport::smtp::{
     authentication::Credentials,
     client::{Tls, TlsParameters},
     response::Response,
 };
 use lettre::{message::Mailbox, AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
-use mail_parser::MessageParser;
+use mail_parser::{MessageParser, MimeHeaders, PartType};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -565,7 +566,10 @@ where
         let uid_set = format!("{start}:{end}");
         let fetch_stream = imap_timeout(
             "IMAP UID FETCH",
-            session.uid_fetch(uid_set, "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE)"),
+            session.uid_fetch(
+                uid_set,
+                "(UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE BODYSTRUCTURE)",
+            ),
         )
         .await?
         .map_err(|e| AppError::Internal(format!("IMAP UID FETCH failed: {e}")))?
@@ -910,6 +914,7 @@ pub struct RemoteMessageSummary {
     pub internal_date: Option<DateTime<Utc>>,
     pub flags: Vec<String>,
     pub size_bytes: Option<u64>,
+    pub has_attachments: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -917,6 +922,16 @@ pub struct RemoteMessageBody {
     pub raw: Vec<u8>,
     pub text: Option<String>,
     pub html: Option<String>,
+    pub attachments: Vec<RemoteAttachment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteAttachment {
+    pub filename: Option<String>,
+    pub content_type: Option<String>,
+    pub content_id: Option<String>,
+    pub disposition: Option<String>,
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1136,7 +1151,42 @@ fn remote_message_summary(fetch: &async_imap::types::Fetch) -> Option<RemoteMess
         internal_date: fetch.internal_date().map(|dt| dt.with_timezone(&Utc)),
         flags: fetch.flags().map(flag_name).collect(),
         size_bytes: fetch.size.map(u64::from),
+        has_attachments: fetch
+            .bodystructure()
+            .map(bodystructure_has_attachment)
+            .unwrap_or(false),
     })
+}
+
+fn bodystructure_has_attachment(structure: &BodyStructure<'_>) -> bool {
+    match structure {
+        BodyStructure::Basic { common, .. } | BodyStructure::Text { common, .. } => {
+            body_common_has_attachment(common)
+        }
+        BodyStructure::Message { common, body, .. } => {
+            body_common_has_attachment(common) || bodystructure_has_attachment(body)
+        }
+        BodyStructure::Multipart { bodies, .. } => bodies.iter().any(bodystructure_has_attachment),
+    }
+}
+
+fn body_common_has_attachment(common: &BodyContentCommon<'_>) -> bool {
+    let disposition_has_attachment = common
+        .disposition
+        .as_ref()
+        .map(|disposition| {
+            disposition.ty.eq_ignore_ascii_case("attachment")
+                || body_params_has_key(&disposition.params, "filename")
+        })
+        .unwrap_or(false);
+    disposition_has_attachment || body_params_has_key(&common.ty.params, "name")
+}
+
+fn body_params_has_key(params: &BodyParams<'_>, key: &str) -> bool {
+    params
+        .as_ref()
+        .map(|params| params.iter().any(|(name, _)| name.eq_ignore_ascii_case(key)))
+        .unwrap_or(false)
 }
 
 fn decode_bytes(bytes: &[u8]) -> Option<String> {
@@ -1174,6 +1224,7 @@ fn parse_message_body(raw: &[u8]) -> RemoteMessageBody {
             raw: raw.to_vec(),
             text: Some(raw_message_to_plain_text_fallback(raw)),
             html: None,
+            attachments: Vec::new(),
         };
     };
 
@@ -1193,13 +1244,45 @@ fn parse_message_body(raw: &[u8]) -> RemoteMessageBody {
             raw: raw.to_vec(),
             text,
             html,
+            attachments: extract_message_attachments(&message),
         }
     } else {
         RemoteMessageBody {
             raw: raw.to_vec(),
             text: Some(raw_message_to_plain_text_fallback(raw)),
             html: None,
+            attachments: extract_message_attachments(&message),
         }
+    }
+}
+
+fn extract_message_attachments(message: &mail_parser::Message<'_>) -> Vec<RemoteAttachment> {
+    message
+        .attachments()
+        .filter_map(|part| {
+            let data = match &part.body {
+                PartType::Binary(bytes) | PartType::InlineBinary(bytes) => bytes.as_ref().to_vec(),
+                PartType::Text(text) | PartType::Html(text) => text.as_bytes().to_vec(),
+                PartType::Message(message) => message.raw_message.as_ref().to_vec(),
+                PartType::Multipart(_) => return None,
+            };
+            Some(RemoteAttachment {
+                filename: part.attachment_name().map(str::to_string),
+                content_type: part.content_type().map(content_type_label),
+                content_id: part.content_id().map(str::to_string),
+                disposition: part
+                    .content_disposition()
+                    .map(|disposition| disposition.ctype().to_string()),
+                data,
+            })
+        })
+        .collect()
+}
+
+fn content_type_label(content_type: &mail_parser::ContentType<'_>) -> String {
+    match content_type.subtype() {
+        Some(subtype) => format!("{}/{}", content_type.ctype(), subtype),
+        None => content_type.ctype().to_string(),
     }
 }
 
@@ -1263,11 +1346,16 @@ fn normalize_plain_text(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_plain_text_message, display_name, flag_store_query, mailbox_from_address,
-        next_uid_sync_plan, parent_path, parse_message_body, quoted_imap_search_string,
-        sync_completed, updated_uid_cursors, RemoteMailAddress, RemoteMessageFlag,
-        RemoteOutgoingMessage, UidSyncDirection, UidSyncPlan,
+        bodystructure_has_attachment, build_plain_text_message, display_name, flag_store_query,
+        mailbox_from_address, next_uid_sync_plan, parent_path, parse_message_body,
+        quoted_imap_search_string, sync_completed, updated_uid_cursors, RemoteMailAddress,
+        RemoteMessageFlag, RemoteOutgoingMessage, UidSyncDirection, UidSyncPlan,
     };
+    use imap_proto::types::{
+        BodyContentCommon, BodyContentSinglePart, BodyStructure, ContentDisposition,
+        ContentEncoding, ContentType,
+    };
+    use std::borrow::Cow;
 
     #[test]
     fn folder_display_name_uses_hierarchy_delimiter() {
@@ -1305,6 +1393,76 @@ mod tests {
             flag_store_query(RemoteMessageFlag::Flagged, false),
             "-FLAGS.SILENT (\\Flagged)"
         );
+    }
+
+    #[test]
+    fn bodystructure_has_attachment_detects_disposition_and_named_parts() {
+        let plain_text = BodyStructure::Text {
+            common: body_common("TEXT", "PLAIN", None, None),
+            other: body_single_part(),
+            lines: 1,
+            extension: None,
+        };
+        assert!(!bodystructure_has_attachment(&plain_text));
+
+        let pdf_attachment = BodyStructure::Basic {
+            common: body_common(
+                "APPLICATION",
+                "PDF",
+                None,
+                Some(("attachment", Some(("filename", "statement.pdf")))),
+            ),
+            other: body_single_part(),
+            extension: None,
+        };
+        assert!(bodystructure_has_attachment(&pdf_attachment));
+
+        let named_text_attachment = BodyStructure::Text {
+            common: body_common("TEXT", "CSV", Some(("name", "export.csv")), None),
+            other: body_single_part(),
+            lines: 5,
+            extension: None,
+        };
+        assert!(bodystructure_has_attachment(&named_text_attachment));
+
+        let multipart = BodyStructure::Multipart {
+            common: body_common("MULTIPART", "MIXED", None, None),
+            bodies: vec![plain_text, pdf_attachment],
+            extension: None,
+        };
+        assert!(bodystructure_has_attachment(&multipart));
+    }
+
+    fn body_common(
+        ty: &'static str,
+        subtype: &'static str,
+        type_param: Option<(&'static str, &'static str)>,
+        disposition: Option<(&'static str, Option<(&'static str, &'static str)>)>,
+    ) -> BodyContentCommon<'static> {
+        BodyContentCommon {
+            ty: ContentType {
+                ty: Cow::Borrowed(ty),
+                subtype: Cow::Borrowed(subtype),
+                params: type_param
+                    .map(|(key, value)| vec![(Cow::Borrowed(key), Cow::Borrowed(value))]),
+            },
+            disposition: disposition.map(|(ty, param)| ContentDisposition {
+                ty: Cow::Borrowed(ty),
+                params: param.map(|(key, value)| vec![(Cow::Borrowed(key), Cow::Borrowed(value))]),
+            }),
+            language: None,
+            location: None,
+        }
+    }
+
+    fn body_single_part() -> BodyContentSinglePart<'static> {
+        BodyContentSinglePart {
+            id: None,
+            md5: None,
+            description: None,
+            transfer_encoding: ContentEncoding::SevenBit,
+            octets: 42,
+        }
     }
 
     #[test]
@@ -1492,5 +1650,18 @@ mod tests {
 
         assert_eq!(body.text.as_deref(), Some(""));
         assert_eq!(body.html, None);
+    }
+
+    #[test]
+    fn parse_message_body_extracts_attachments() {
+        let raw = b"Subject: File\r\nContent-Type: multipart/mixed; boundary=\"x\"\r\n\r\n--x\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nSee attached.\r\n--x\r\nContent-Type: text/plain; name=\"note.txt\"\r\nContent-Disposition: attachment; filename=\"note.txt\"\r\n\r\nhello attachment\r\n--x--\r\n";
+        let body = parse_message_body(raw);
+
+        assert_eq!(body.attachments.len(), 1);
+        let attachment = &body.attachments[0];
+        assert_eq!(attachment.filename.as_deref(), Some("note.txt"));
+        assert_eq!(attachment.content_type.as_deref(), Some("text/plain"));
+        assert_eq!(attachment.disposition.as_deref(), Some("attachment"));
+        assert_eq!(attachment.data, b"hello attachment");
     }
 }

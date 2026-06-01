@@ -63,6 +63,9 @@ Authenticated routes are mounted under both `/api` and `/api/v1`:
 - `GET /mail/accounts/{account_id}/folders/{folder_id}/messages`
 - `GET /mail/messages/{message_id}`
 - `POST /mail/messages/{message_id}/mutate`
+- `GET /mail/attachments/{attachment_id}/open`
+- `GET /mail/attachments/{attachment_id}/download`
+- `POST /mail/attachments/{attachment_id}/save`
 - `GET /mail/identities`
 - `POST /mail/identities`
 - `PUT /mail/identities/{id}`
@@ -105,6 +108,14 @@ the account's SMTP settings.
 - On-demand message detail/body fetch for the reader pane. This currently uses
   the stored credential, fetches `BODY.PEEK[]`, parses MIME with `mail-parser`,
   and returns plain text plus server-sanitized HTML.
+- On-demand attachment extraction for fetched message bodies. Attachment blobs
+  are cached in the hidden mail storage namespace, metadata is stored in
+  `mail_attachments`, message detail returns attachment metadata, and a download
+  route streams cached attachment blobs. An inline open route is also available
+  for attachment types the browser can render.
+- Cached attachments can be saved into user-visible Files storage through the
+  mail UI or `POST /mail/attachments/{attachment_id}/save`, with a destination
+  folder choice and normal Files quota/audit/event handling.
 - Manual message mutations for the first write-path spike: mark read/unread,
   star/unstar, move to a selected folder, archive, and move to trash.
 - Minimal SMTP send through a selected identity or account fallback. The first
@@ -140,9 +151,9 @@ the account's SMTP settings.
   The destination copy is discovered by the next sync because IMAP move changes
   the destination UID and the foundation does not yet consume UIDPLUS response
   codes.
-- Compose, search, threading, attachments, permanent delete, and draft handling
-  are not fully implemented. Compose currently means "send a plain-text message
-  now" with no drafts, attachments, rich editor, reply/forward headers, or
+- Compose, search, threading, permanent delete, and draft handling are not fully
+  implemented. Compose currently means "send a plain-text message now" with no
+  drafts, outgoing attachments, rich editor, reply/forward headers, or
   provider-specific sent-copy policy.
 - Sent-copy detection is intentionally conservative. If checking the Sent folder
   fails, Uncloud reports the failure and does not append, to avoid creating a
@@ -168,7 +179,14 @@ the account's SMTP settings.
    or include `password` and optional `limit_per_folder` for manual testing.
 11. `GET /api/mail/accounts/{account_id}/folders/{folder_id}/messages` to
     inspect cached message summaries for a synced folder.
-12. Open `/mail` in the web UI and verify account/folder selection, sync
+12. Open a message with an attachment and verify
+    `GET /api/mail/messages/{message_id}` includes `attachments`, then download
+    one with `GET /api/mail/attachments/{attachment_id}/download` or open it
+    with `GET /api/mail/attachments/{attachment_id}/open`.
+13. Save an attachment into Files with
+    `POST /api/mail/attachments/{attachment_id}/save` and an optional
+    `parent_id`, then verify it appears in the selected folder.
+14. Open `/mail` in the web UI and verify account/folder selection, sync
     controls, message list, and sanitized HTML/plain-text reader body.
 
 This is enough to validate the current protocol foundation before building UI.
@@ -228,10 +246,12 @@ Remaining credential work before scheduler/background sync:
 - Folder message listing uses cursor-based pagination over cached summaries.
 - Basic message detail route exists and reads cached parsed bodies first, then
   fetches/parses/caches MIME bodies from IMAP on cache miss.
+- Attachment metadata and download routes exist for cached message bodies.
 - The UI progressively appends cached pages. When it reaches the cached edge
   for a folder whose UID window is not complete, it can trigger one bounded
   folder sync/backfill and then append any newly cached older messages.
-- Add attachment metadata and download routes.
+- Add inline CID image handling and a stronger policy for which attachment
+  content can be previewed in the reader.
 - Add an explicit remote image loading/proxy policy. Direct remote image URLs
   are stripped from sanitized HTML for now.
 
@@ -267,6 +287,9 @@ data before adding write actions:
 - Folder list, sync status, role labels, and per-folder settings.
 - Read-only message list.
 - Message reader with sanitized HTML and plain-text fallback.
+- After the first prototype lands, extract the Files copy/move destination
+  picker into a shared component and reuse it for attachment saves so mail gets
+  folder creation without duplicating picker logic.
 
 Next UI work should focus on mailbox ergonomics, responsive navigation,
 reader layout, and clearer sync/backfill state. Compose and mutations are

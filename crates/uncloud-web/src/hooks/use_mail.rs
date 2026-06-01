@@ -6,9 +6,10 @@ use uncloud_common::{
     MailFolderSyncResponse, MailIdentityResponse, MailMessageDetailResponse,
     MailMessageListResponse, MailMessageMutationAction, MailMessageMutationRequest,
     MailMessageMutationResponse, MailPasswordAuthRequest, MailSyncRequest, SendMailMessageRequest,
-    SendMailMessageResponse, SetMailCredentialRequest, UpdateMailAccountRequest,
-    UpdateMailFolderRequest,
+    SaveMailAttachmentRequest, SaveMailAttachmentResponse, SendMailMessageResponse,
+    SetMailCredentialRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
 };
+use uncloud_common::FileResponse;
 
 use super::api;
 
@@ -305,6 +306,30 @@ pub async fn mutate_message(
     if r.ok() {
         r.json::<MailMessageMutationResponse>()
             .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn save_attachment(
+    attachment_id: &str,
+    parent_id: Option<&str>,
+    filename: Option<&str>,
+) -> Result<FileResponse, String> {
+    let r = api::post(&format!("/mail/attachments/{attachment_id}/save"))
+        .json(&SaveMailAttachmentRequest {
+            parent_id: parent_id.map(str::to_string),
+            filename: filename.map(str::to_string),
+        })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<SaveMailAttachmentResponse>()
+            .await
+            .map(|response| response.file)
             .map_err(|e| e.to_string())
     } else {
         Err(extract_error(r).await)

@@ -11424,6 +11424,7 @@ dependencies = [
  "hmac 0.12.1",
  "http-body-util",
  "image",
+ "imap-proto",
  "jiff",
  "kamadak-exif",
  "lettre",
