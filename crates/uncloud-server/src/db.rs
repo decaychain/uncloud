@@ -1,6 +1,6 @@
-use mongodb::{Client, Database, IndexModel, options::IndexOptions};
 use crate::config::{DatabaseConfig, SyncAuditConfig};
 use crate::error::{AppError, Result};
+use mongodb::{Client, Database, IndexModel, options::IndexOptions};
 
 pub async fn connect(config: &DatabaseConfig) -> Result<Database> {
     let client = Client::with_uri_str(&config.uri)
@@ -801,6 +801,13 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         .await?;
 
     let mail_messages = db.collection::<mongodb::bson::Document>("mail_messages");
+    mail_accounts
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "mail_storage_id": 1 })
+                .build(),
+        )
+        .await?;
     mail_messages
         .create_index(
             IndexModel::builder()
@@ -813,6 +820,13 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         .create_index(
             IndexModel::builder()
                 .keys(mongodb::bson::doc! { "owner_id": 1, "account_id": 1, "folder_id": 1, "internal_date": -1 })
+                .build(),
+        )
+        .await?;
+    mail_messages
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "mail_storage_id": 1 })
                 .build(),
         )
         .await?;
@@ -836,6 +850,13 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         .create_index(
             IndexModel::builder()
                 .keys(mongodb::bson::doc! { "owner_id": 1, "message_id": 1 })
+                .build(),
+        )
+        .await?;
+    mail_attachments
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "storage_id": 1 })
                 .build(),
         )
         .await?;

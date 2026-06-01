@@ -125,11 +125,14 @@ the account's SMTP settings.
 - Stored credentials currently cover IMAP app passwords only. OAuth refresh
   tokens and SMTP credential handling still need a credential type model.
 - SMTP is wired for connection/authentication testing and plain-text send.
-- Message sync currently stores summaries only. Raw RFC822 bodies, decoded
-  parts, parsed body output, attachment persistence, and sanitized HTML are not
-  persisted yet.
-- Body rendering is on-demand. The UI prefers sanitized HTML when available and
-  falls back to plain text. Remote image URLs are stripped during sanitization.
+- Message sync stores summaries first. Message bodies are fetched on demand and
+  cached after the first successful reader open.
+- Raw RFC822 bodies plus parsed text/html sidecars are stored through the
+  Uncloud storage backend under a reserved `{username}/.uncloud/mail/v1/...`
+  namespace. They are not inserted into the user-visible `files` / `folders`
+  catalog, and storage rescan skips `.uncloud`.
+- Body rendering prefers cached sanitized HTML when available and falls back to
+  plain text. Remote image URLs are stripped during sanitization.
 - Move/archive/trash currently require provider support for `UID MOVE`. There is
   deliberately no copy-plus-expunge fallback yet, because expunge semantics can
   be risky across clients.
@@ -213,18 +216,21 @@ Remaining credential work before scheduler/background sync:
   backfill older UID windows toward UID 1.
 - Next: add a scheduler/queue to run this strategy automatically.
 - Fetch raw RFC822 bodies only when needed, or in bounded batches.
-- Store raw messages and large decoded parts in Uncloud storage, not MongoDB.
+- Store raw messages and parsed body sidecars in Uncloud storage, not MongoDB.
+  `mail_messages.mail_storage_id` records the actual backend used so default
+  storage changes do not break cached bodies.
+- Storage migration, restore, cleanup, and storage-removal validation are
+  mail-aware for cached body blobs.
 - Keep MongoDB as searchable/listable metadata cache.
 
 ### 4. Message Read APIs
 
 - Folder message listing uses cursor-based pagination over cached summaries.
-- Basic message detail route exists and fetches/parses MIME bodies on demand.
+- Basic message detail route exists and reads cached parsed bodies first, then
+  fetches/parses/caches MIME bodies from IMAP on cache miss.
 - The UI progressively appends cached pages. When it reaches the cached edge
   for a folder whose UID window is not complete, it can trigger one bounded
   folder sync/backfill and then append any newly cached older messages.
-- Store raw message fetches and parsed body output once the storage layout is
-  decided.
 - Add attachment metadata and download routes.
 - Add an explicit remote image loading/proxy policy. Direct remote image URLs
   are stripped from sanitized HTML for now.
@@ -273,9 +279,8 @@ and richer failure reporting.
   or both?
 - Should OAuth be a first-class credential type in v1, or should v1 focus on app
   passwords/standard IMAP first?
-- Which storage backend should hold raw RFC822 bodies and attachments by
-  default: the user's resolved Uncloud storage, a dedicated mail storage prefix,
-  or Mongo GridFS?
+- Should users be able to choose a dedicated per-account mail cache storage in
+  the UI, or is using the deployment default enough for the first version?
 - Should message full-text search use Meilisearch immediately, or wait until the
   cache/mutation model stabilizes?
 - How much provider-specific behavior do we want for Gmail/Outlook/Fastmail

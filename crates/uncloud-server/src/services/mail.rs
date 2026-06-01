@@ -12,9 +12,7 @@ use lettre::transport::smtp::{
     client::{Tls, TlsParameters},
     response::Response,
 };
-use lettre::{
-    message::Mailbox, AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
-};
+use lettre::{message::Mailbox, AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use mail_parser::MessageParser;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
@@ -298,8 +296,8 @@ impl MailService {
             "SMTP send",
             transport.send_raw(smtp_message.envelope(), &raw_message),
         )
-            .await?
-            .map_err(|err| map_smtp_error(err, "SMTP send"))?;
+        .await?
+        .map_err(|err| map_smtp_error(err, "SMTP send"))?;
         transport.shutdown().await;
 
         Ok(RemoteSendResult {
@@ -320,21 +318,33 @@ impl MailService {
             MailSecurity::Tls => {
                 let client = connect_imap_tls(settings, true).await?;
                 imap_message_exists_by_message_id(
-                    client, settings, password, folder_path, message_id,
+                    client,
+                    settings,
+                    password,
+                    folder_path,
+                    message_id,
                 )
                 .await
             }
             MailSecurity::StartTls => {
                 let client = connect_imap_starttls(settings).await?;
                 imap_message_exists_by_message_id(
-                    client, settings, password, folder_path, message_id,
+                    client,
+                    settings,
+                    password,
+                    folder_path,
+                    message_id,
                 )
                 .await
             }
             MailSecurity::Plain => {
                 let client = connect_imap_plain(settings).await?;
                 imap_message_exists_by_message_id(
-                    client, settings, password, folder_path, message_id,
+                    client,
+                    settings,
+                    password,
+                    folder_path,
+                    message_id,
                 )
                 .await
             }
@@ -715,7 +725,10 @@ where
     imap_timeout("IMAP EXAMINE", session.examine(folder_path))
         .await?
         .map_err(|e| AppError::Internal(format!("IMAP EXAMINE failed: {e}")))?;
-    let query = format!("HEADER Message-ID {}", quoted_imap_search_string(message_id)?);
+    let query = format!(
+        "HEADER Message-ID {}",
+        quoted_imap_search_string(message_id)?
+    );
     let uids = imap_timeout("IMAP UID SEARCH", session.uid_search(query))
         .await?
         .map_err(|e| AppError::Internal(format!("IMAP UID SEARCH failed: {e}")))?;
@@ -901,6 +914,7 @@ pub struct RemoteMessageSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteMessageBody {
+    pub raw: Vec<u8>,
     pub text: Option<String>,
     pub html: Option<String>,
 }
@@ -1157,6 +1171,7 @@ fn flag_name(flag: Flag<'_>) -> String {
 fn parse_message_body(raw: &[u8]) -> RemoteMessageBody {
     let Some(message) = MessageParser::default().parse(raw) else {
         return RemoteMessageBody {
+            raw: raw.to_vec(),
             text: Some(raw_message_to_plain_text_fallback(raw)),
             html: None,
         };
@@ -1174,9 +1189,14 @@ fn parse_message_body(raw: &[u8]) -> RemoteMessageBody {
         .filter(|body| !body.trim().is_empty());
 
     if text.is_some() || html.is_some() {
-        RemoteMessageBody { text, html }
+        RemoteMessageBody {
+            raw: raw.to_vec(),
+            text,
+            html,
+        }
     } else {
         RemoteMessageBody {
+            raw: raw.to_vec(),
             text: Some(raw_message_to_plain_text_fallback(raw)),
             html: None,
         }

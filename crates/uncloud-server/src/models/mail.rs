@@ -37,6 +37,8 @@ pub struct MailAccount {
     pub credential_configured: bool,
     #[serde(default)]
     pub credential: Option<EncryptedMailCredential>,
+    #[serde(default)]
+    pub mail_storage_id: Option<ObjectId>,
     #[serde(default, with = "crate::models::opt_dt")]
     pub last_sync_at: Option<DateTime<Utc>>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]
@@ -158,11 +160,19 @@ pub struct MailMessage {
     #[serde(default)]
     pub snippet: Option<String>,
     #[serde(default)]
+    pub mail_storage_id: Option<ObjectId>,
+    #[serde(default)]
     pub raw_storage_path: Option<String>,
+    #[serde(default)]
+    pub raw_storage_size_bytes: Option<u64>,
     #[serde(default)]
     pub text_storage_path: Option<String>,
     #[serde(default)]
+    pub text_storage_size_bytes: Option<u64>,
+    #[serde(default)]
     pub html_storage_path: Option<String>,
+    #[serde(default)]
+    pub html_storage_size_bytes: Option<u64>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]
@@ -186,6 +196,8 @@ pub struct MailAttachment {
     pub disposition: Option<String>,
     #[serde(default)]
     pub size_bytes: Option<u64>,
+    #[serde(default)]
+    pub storage_id: Option<ObjectId>,
     #[serde(default)]
     pub storage_path: Option<String>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]

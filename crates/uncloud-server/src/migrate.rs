@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use chrono::Utc;
 use futures::TryStreamExt;
-use mongodb::bson::{self, doc, oid::ObjectId};
 use mongodb::Database;
+use mongodb::bson::{self, doc, oid::ObjectId};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use tokio::sync::Notify;
@@ -31,7 +31,9 @@ use tokio::task::JoinHandle;
 
 use crate::config::Config;
 use crate::db;
-use crate::models::{File, FileVersion, Folder, MigrationLock, Storage};
+use crate::models::{
+    File, FileVersion, Folder, MailAccount, MailAttachment, MailMessage, MigrationLock, Storage,
+};
 use crate::services::StorageService;
 use crate::storage::StorageBackend;
 
@@ -40,6 +42,25 @@ const STALE_AFTER: chrono::Duration = chrono::Duration::minutes(5);
 
 /// How often the heartbeat task refreshes `last_heartbeat`.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone)]
+struct MailBlobCandidate {
+    id: ObjectId,
+    kind: MailBlobKind,
+    blobs: Vec<MailBlobPath>,
+}
+
+#[derive(Debug, Clone)]
+struct MailBlobPath {
+    path: String,
+    size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MailBlobKind {
+    Message,
+    Attachment,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerifyMode {
@@ -55,7 +76,9 @@ impl FromStr for VerifyMode {
             "none" => Ok(VerifyMode::None),
             "size" => Ok(VerifyMode::Size),
             "hash" => Ok(VerifyMode::Hash),
-            other => Err(format!("unknown verify mode {other:?}; expected none|size|hash")),
+            other => Err(format!(
+                "unknown verify mode {other:?}; expected none|size|hash"
+            )),
         }
     }
 }
@@ -111,7 +134,9 @@ pub async fn check_no_active_migration(db: &Database) -> Result<(), String> {
     // Stale row — refuse but with a clearer hint than "migration in progress".
     Err(format!(
         "found stale migration lock (last heartbeat {} ago, started by pid {}@{}). Run `uncloud-server migrate --force-unlock` to clear it.",
-        format_age(age), lock.pid, lock.hostname,
+        format_age(age),
+        lock.pid,
+        lock.hostname,
     ))
 }
 
@@ -128,8 +153,9 @@ fn format_age(d: chrono::Duration) -> String {
 
 pub async fn run(args: MigrateArgs) -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "info".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .try_init()
         .ok();
 
@@ -183,22 +209,35 @@ pub async fn run(args: MigrateArgs) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let candidates = enumerate_candidates(&db, from_id, folder_filter.as_ref()).await?;
+    let mail_candidates = if folder_filter.is_none() {
+        enumerate_mail_blob_candidates(&db, from_id).await?
+    } else {
+        Vec::new()
+    };
     let total_files = candidates.len();
     let total_bytes: i64 = candidates.iter().map(|f| f.size_bytes).sum();
+    let total_mail_blobs: usize = mail_candidates
+        .iter()
+        .map(|candidate| candidate.blobs.len())
+        .sum();
     println!(
-        "Migrating {} → {}\n  Files: {}\n  Bytes: {} ({})",
+        "Migrating {} → {}\n  Files: {}\n  Bytes: {} ({})\n  Mail blobs: {}",
         args.from,
         args.to,
         total_files,
         total_bytes,
         humanize_bytes(total_bytes.max(0) as u64),
+        total_mail_blobs,
     );
+    if folder_filter.is_some() {
+        println!("Folder-scoped migration skips mail cache blobs.");
+    }
 
     if args.dry_run {
         println!("Dry run — no data will be copied. Re-run without --dry-run to proceed.");
         return Ok(());
     }
-    if total_files == 0 {
+    if folder_filter.is_some() && total_files == 0 {
         println!("Nothing to do.");
         return Ok(());
     }
@@ -207,17 +246,32 @@ pub async fn run(args: MigrateArgs) -> Result<(), Box<dyn std::error::Error>> {
     let stop_heartbeat = Arc::new(Notify::new());
     let heartbeat_handle = spawn_heartbeat(db.clone(), lock_id, stop_heartbeat.clone());
 
-    let result = run_migration(
+    let result = match run_migration(
         &db,
-        from_backend,
-        to_backend,
+        from_backend.clone(),
+        to_backend.clone(),
         from_id,
         to_id,
         &candidates,
         args.verify,
         args.delete_source,
     )
-    .await;
+    .await
+    {
+        Ok(()) => {
+            run_mail_blob_migration(
+                &db,
+                &from_backend,
+                &to_backend,
+                from_id,
+                to_id,
+                &mail_candidates,
+                args.delete_source,
+            )
+            .await
+        }
+        Err(err) => Err(err),
+    };
 
     // Re-pin folders that were pointing at the source storage so future
     // uploads land on the destination. Conceptually part of "migrating a
@@ -230,6 +284,13 @@ pub async fn run(args: MigrateArgs) -> Result<(), Box<dyn std::error::Error>> {
             Ok(0) => {}
             Ok(n) => println!("Re-pinned {n} folder(s) to the destination storage."),
             Err(e) => eprintln!("Warning: failed to re-pin folders: {e}"),
+        }
+        if folder_filter.is_none() {
+            match repin_mail_accounts(&db, from_id, to_id).await {
+                Ok(0) => {}
+                Ok(n) => println!("Re-pinned {n} mail account(s) to the destination storage."),
+                Err(e) => eprintln!("Warning: failed to re-pin mail accounts: {e}"),
+            }
         }
     }
 
@@ -271,9 +332,7 @@ pub async fn run_migration(
 
         // Pull the file's versions up front so migrate_one can copy them
         // alongside the active blob. Empty for files without history.
-        let mut versions_cursor = versions_coll
-            .find(doc! { "file_id": file.id })
-            .await?;
+        let mut versions_cursor = versions_coll.find(doc! { "file_id": file.id }).await?;
         let mut file_versions = Vec::new();
         while let Some(v) = versions_cursor.try_next().await? {
             file_versions.push(v);
@@ -282,7 +341,10 @@ pub async fn run_migration(
         match migrate_one(&from, &to, file, &file_versions, verify).await {
             Ok(()) => {}
             Err(e) => {
-                eprintln!("{progress_prefix} FAILED {} ({}): {}", file.id, file.name, e);
+                eprintln!(
+                    "{progress_prefix} FAILED {} ({}): {}",
+                    file.id, file.name, e
+                );
                 failed.push((file.id, e));
                 continue;
             }
@@ -322,11 +384,7 @@ pub async fn run_migration(
             // And the version archives.
             for v in &file_versions {
                 if let Err(e) = from.delete(&v.storage_path).await {
-                    tracing::warn!(
-                        "delete-source version {} of {}: {e}",
-                        v.id,
-                        file.id
-                    );
+                    tracing::warn!("delete-source version {} of {}: {e}", v.id, file.id);
                 }
             }
         }
@@ -362,6 +420,118 @@ pub async fn run_migration(
             eprintln!("  {id}: {err}");
         }
         return Err(format!("{} file(s) failed to migrate", failed.len()).into());
+    }
+    Ok(())
+}
+
+async fn run_mail_blob_migration(
+    db: &Database,
+    from: &Arc<dyn StorageBackend>,
+    to: &Arc<dyn StorageBackend>,
+    from_id: ObjectId,
+    to_id: ObjectId,
+    candidates: &[MailBlobCandidate],
+    delete_source: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let messages = db.collection::<MailMessage>("mail_messages");
+    let attachments = db.collection::<MailAttachment>("mail_attachments");
+    let total_blobs: usize = candidates
+        .iter()
+        .map(|candidate| candidate.blobs.len())
+        .sum();
+    let mut copied_records = 0u64;
+    let mut copied_blobs = 0u64;
+    let mut failed: Vec<(ObjectId, String)> = Vec::new();
+
+    for candidate in candidates {
+        for blob in &candidate.blobs {
+            let copy_result = match blob.size {
+                Some(size) => copy_blob(from, to, &blob.path, size).await,
+                None => copy_blob_unknown_size(from, to, &blob.path).await,
+            };
+            if let Err(err) = copy_result {
+                failed.push((candidate.id, format!("{}: {err}", blob.path)));
+                continue;
+            }
+            copied_blobs += 1;
+        }
+        if failed.iter().any(|(id, _)| *id == candidate.id) {
+            continue;
+        }
+
+        let update = match candidate.kind {
+            MailBlobKind::Message => {
+                messages
+                    .update_one(
+                        doc! { "_id": candidate.id, "mail_storage_id": from_id },
+                        doc! { "$set": { "mail_storage_id": to_id } },
+                    )
+                    .await?
+            }
+            MailBlobKind::Attachment => {
+                attachments
+                    .update_one(
+                        doc! { "_id": candidate.id, "storage_id": from_id },
+                        doc! { "$set": { "storage_id": to_id } },
+                    )
+                    .await?
+            }
+        };
+        if update.matched_count == 0 {
+            continue;
+        }
+
+        if delete_source {
+            for blob in &candidate.blobs {
+                if let Err(err) = from.delete(&blob.path).await {
+                    tracing::warn!(
+                        "delete-source mail blob {} ({}): {err}",
+                        candidate.id,
+                        blob.path
+                    );
+                }
+            }
+        }
+        copied_records += 1;
+    }
+
+    println!(
+        "Mail cache: copied {} blob(s) across {} record(s).",
+        copied_blobs, copied_records
+    );
+    if copied_blobs < total_blobs as u64 {
+        eprintln!(
+            "Mail cache: {} of {} blob(s) copied successfully.",
+            copied_blobs, total_blobs
+        );
+    }
+    if !failed.is_empty() {
+        eprintln!("Mail cache failures:");
+        for (id, err) in &failed {
+            eprintln!("  {id}: {err}");
+        }
+        return Err(format!("{} mail cache record(s) failed to migrate", failed.len()).into());
+    }
+
+    let metadata_only_messages = messages
+        .update_many(
+            doc! { "mail_storage_id": from_id },
+            doc! { "$set": { "mail_storage_id": to_id } },
+        )
+        .await?
+        .modified_count;
+    let metadata_only_attachments = attachments
+        .update_many(
+            doc! { "storage_id": from_id },
+            doc! { "$set": { "storage_id": to_id } },
+        )
+        .await?
+        .modified_count;
+    if metadata_only_messages > 0 || metadata_only_attachments > 0 {
+        println!(
+            "Mail cache: re-pointed {} message row(s) and {} attachment row(s) without cached blobs.",
+            metadata_only_messages, metadata_only_attachments
+        );
     }
     Ok(())
 }
@@ -453,10 +623,9 @@ async fn copy_blob(
     Ok(())
 }
 
-/// Like `copy_blob` but used for sidecars where we don't have the size up
-/// front. `write_stream`'s `size` parameter is advisory for backends like S3
-/// that prefer it — passing 0 is acceptable for local/SFTP and falls back to
-/// chunked upload on S3.
+/// Like `copy_blob` but used for legacy/cache blobs where we don't have the
+/// size up front. Prefer `copy_blob` when the model carries a size; this
+/// fallback buffers the source before writing.
 async fn copy_blob_unknown_size(
     from: &Arc<dyn StorageBackend>,
     to: &Arc<dyn StorageBackend>,
@@ -483,7 +652,11 @@ async fn verify_size(
     path: &str,
     expected: u64,
 ) -> std::result::Result<(), String> {
-    if !backend.exists(path).await.map_err(|e| format!("verify exists: {e}"))? {
+    if !backend
+        .exists(path)
+        .await
+        .map_err(|e| format!("verify exists: {e}"))?
+    {
         return Err("dest blob missing after write".into());
     }
     // No size accessor on the trait — rely on a streaming read. This adds a
@@ -496,7 +669,10 @@ async fn verify_size(
     let mut total: u64 = 0;
     let mut buf = vec![0u8; 64 * 1024];
     loop {
-        let n = reader.read(&mut buf).await.map_err(|e| format!("verify read: {e}"))?;
+        let n = reader
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("verify read: {e}"))?;
         if n == 0 {
             break;
         }
@@ -595,6 +771,66 @@ async fn enumerate_candidates(
     Ok(out)
 }
 
+async fn enumerate_mail_blob_candidates(
+    db: &Database,
+    from_id: ObjectId,
+) -> Result<Vec<MailBlobCandidate>, Box<dyn std::error::Error>> {
+    let mut out = Vec::new();
+
+    let mut messages = db
+        .collection::<MailMessage>("mail_messages")
+        .find(doc! { "mail_storage_id": from_id })
+        .await?;
+    while let Some(message) = messages.try_next().await? {
+        let mut blobs = Vec::new();
+        push_optional_blob(
+            &mut blobs,
+            message.raw_storage_path,
+            message.raw_storage_size_bytes,
+        );
+        push_optional_blob(
+            &mut blobs,
+            message.text_storage_path,
+            message.text_storage_size_bytes,
+        );
+        push_optional_blob(
+            &mut blobs,
+            message.html_storage_path,
+            message.html_storage_size_bytes,
+        );
+        if !blobs.is_empty() {
+            out.push(MailBlobCandidate {
+                id: message.id,
+                kind: MailBlobKind::Message,
+                blobs,
+            });
+        }
+    }
+
+    let mut attachments = db
+        .collection::<MailAttachment>("mail_attachments")
+        .find(doc! { "storage_id": from_id })
+        .await?;
+    while let Some(attachment) = attachments.try_next().await? {
+        let mut blobs = Vec::new();
+        push_optional_blob(&mut blobs, attachment.storage_path, attachment.size_bytes);
+        if !blobs.is_empty() {
+            out.push(MailBlobCandidate {
+                id: attachment.id,
+                kind: MailBlobKind::Attachment,
+                blobs,
+            });
+        }
+    }
+
+    Ok(out)
+}
+
+fn push_optional_blob(blobs: &mut Vec<MailBlobPath>, path: Option<String>, size: Option<u64>) {
+    if let Some(path) = path.filter(|value| !value.trim().is_empty()) {
+        blobs.push(MailBlobPath { path, size });
+    }
+}
 
 /// Re-pin folders that were pinning `from_id` so future uploads land on
 /// `to_id`. Scoped to the descendant set when migration was restricted by
@@ -618,6 +854,21 @@ pub async fn repin_folders(
     Ok(res.modified_count)
 }
 
+async fn repin_mail_accounts(
+    db: &Database,
+    from_id: ObjectId,
+    to_id: ObjectId,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let accounts = db.collection::<MailAccount>("mail_accounts");
+    let res = accounts
+        .update_many(
+            doc! { "mail_storage_id": from_id },
+            doc! { "$set": { "mail_storage_id": to_id } },
+        )
+        .await?;
+    Ok(res.modified_count)
+}
+
 /// Sweep a storage backend for blobs whose owning `File` document either
 /// doesn't exist or no longer points at this storage, and delete them.
 /// Acquires the same `migration_locks` row as `migrate` so the two operations
@@ -626,8 +877,7 @@ pub async fn repin_folders(
 pub async fn run_cleanup(args: CleanupArgs) -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .try_init()
         .ok();
@@ -671,8 +921,7 @@ pub async fn run_cleanup(args: CleanupArgs) -> Result<(), Box<dyn std::error::Er
         Some(spawn_heartbeat(db.clone(), lock_id, stop_heartbeat.clone()))
     };
 
-    let result =
-        run_cleanup_inner(
+    let result = run_cleanup_inner(
         &db,
         &backend,
         storage_id,
@@ -717,9 +966,7 @@ pub async fn run_cleanup_inner(
     let mut keep_thumbs_for: HashSet<ObjectId> = HashSet::new();
     let mut broken: Vec<(ObjectId, String, String)> = Vec::new();
 
-    let mut cursor = files_coll
-        .find(doc! { "storage_id": storage_id })
-        .await?;
+    let mut cursor = files_coll.find(doc! { "storage_id": storage_id }).await?;
     while let Some(f) = cursor.try_next().await? {
         let path = f
             .trash_path
@@ -792,6 +1039,8 @@ pub async fn run_cleanup_inner(
             orphan_versions.len(),
         );
     }
+
+    add_mail_blob_keep_set(db, storage_id, &mut keep_blobs).await?;
 
     let mut would_delete: Vec<(String, u64)> = Vec::new();
     let mut kept_count = 0u64;
@@ -881,7 +1130,10 @@ pub async fn run_cleanup_inner(
             .delete_many(doc! { "file_id": { "$in": ids } })
             .await?;
         if v.deleted_count > 0 {
-            println!("Cascaded delete to {} file_version row(s).", v.deleted_count);
+            println!(
+                "Cascaded delete to {} file_version row(s).",
+                v.deleted_count
+            );
         }
     }
 
@@ -916,6 +1168,38 @@ pub async fn run_cleanup_inner(
         }
     }
     Ok(())
+}
+
+async fn add_mail_blob_keep_set(
+    db: &Database,
+    storage_id: ObjectId,
+    keep_blobs: &mut HashSet<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut messages = db
+        .collection::<MailMessage>("mail_messages")
+        .find(doc! { "mail_storage_id": storage_id })
+        .await?;
+    while let Some(message) = messages.try_next().await? {
+        insert_optional_path(keep_blobs, message.raw_storage_path);
+        insert_optional_path(keep_blobs, message.text_storage_path);
+        insert_optional_path(keep_blobs, message.html_storage_path);
+    }
+
+    let mut attachments = db
+        .collection::<MailAttachment>("mail_attachments")
+        .find(doc! { "storage_id": storage_id })
+        .await?;
+    while let Some(attachment) = attachments.try_next().await? {
+        insert_optional_path(keep_blobs, attachment.storage_path);
+    }
+
+    Ok(())
+}
+
+fn insert_optional_path(keep_blobs: &mut HashSet<String>, path: Option<String>) {
+    if let Some(path) = path.filter(|value| !value.trim().is_empty()) {
+        keep_blobs.insert(path);
+    }
 }
 
 /// Returns `Some(file_id)` if `path` matches `.thumbs/{ObjectId}.jpg`.

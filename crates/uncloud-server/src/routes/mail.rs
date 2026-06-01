@@ -1,9 +1,9 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    Json,
 };
 use bson::doc;
 use chrono::Utc;
@@ -18,23 +18,23 @@ use uncloud_common::{
     MailFolderSyncResponse, MailIdentityResponse, MailMessageDetailResponse,
     MailMessageListResponse, MailMessageMutationAction, MailMessageMutationRequest,
     MailMessageMutationResponse, MailMessageSummaryResponse, MailPasswordAuthRequest,
-    MailServerSettings, MailSyncRequest, MailSentCopyStatus, SendMailMessageRequest,
-    SendMailMessageResponse,
-    SetMailCredentialRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
-    UpdateMailIdentityRequest,
+    MailSentCopyStatus, MailServerSettings, MailSyncRequest, SendMailMessageRequest,
+    SendMailMessageResponse, SetMailCredentialRequest, UpdateMailAccountRequest,
+    UpdateMailFolderRequest, UpdateMailIdentityRequest,
 };
 
+use crate::AppState;
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
 use crate::models::{
     MailAccount, MailAddress, MailFolder, MailIdentity, MailMessage, MailServerConfig,
 };
+use crate::services::SecretCipher;
 use crate::services::mail::{
     RemoteMailAddress, RemoteMailbox, RemoteMessageFlag, RemoteMessageSummary,
     RemoteOutgoingMessage,
 };
-use crate::services::SecretCipher;
-use crate::AppState;
+use crate::services::mail_blob::{read_cached_message_body, store_message_body};
 
 const ACCOUNTS: &str = "mail_accounts";
 const IDENTITIES: &str = "mail_identities";
@@ -438,6 +438,16 @@ fn optional_u32_bson(value: Option<u32>) -> bson::Bson {
         .unwrap_or(bson::Bson::Null)
 }
 
+fn optional_u64_bson(value: Option<u64>) -> bson::Bson {
+    value
+        .map(|value| bson::Bson::Int64(value as i64))
+        .unwrap_or(bson::Bson::Null)
+}
+
+fn optional_string_bson(value: Option<String>) -> bson::Bson {
+    value.map(bson::Bson::String).unwrap_or(bson::Bson::Null)
+}
+
 fn optional_role_bson(value: Option<MailFolderRole>) -> Result<bson::Bson> {
     bson::to_bson(&value).map_err(|e| AppError::Internal(e.to_string()))
 }
@@ -562,6 +572,7 @@ pub async fn create_account(
         sync_enabled: req.sync_enabled,
         credential_configured: false,
         credential: None,
+        mail_storage_id: None,
         last_sync_at: None,
         created_at: now,
         updated_at: now,
@@ -1386,9 +1397,13 @@ async fn store_message_summary(
         size_bytes: summary.size_bytes,
         has_attachments: false,
         snippet: None,
+        mail_storage_id: None,
         raw_storage_path: None,
+        raw_storage_size_bytes: None,
         text_storage_path: None,
+        text_storage_size_bytes: None,
         html_storage_path: None,
+        html_storage_size_bytes: None,
         created_at: now,
         updated_at: now,
     };
@@ -1710,10 +1725,7 @@ pub async fn list_messages(
         None
     };
     Ok(Json(MailMessageListResponse {
-        messages: messages
-            .iter()
-            .map(message_to_response)
-            .collect::<Vec<_>>(),
+        messages: messages.iter().map(message_to_response).collect::<Vec<_>>(),
         next_cursor,
         has_more,
     }))
@@ -1889,6 +1901,24 @@ pub async fn get_message(
     require_mail(&state)?;
     let message_id = parse_oid(&message_id, "mail message id")?;
     let message = find_message(&state, user.id, message_id).await?;
+    match read_cached_message_body(&state.storage, &message).await {
+        Ok(Some(body)) => {
+            return Ok(Json(MailMessageDetailResponse {
+                message: message_to_response(&message),
+                body_text: body.text,
+                body_html: body.html,
+            }));
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::warn!(
+                "mail cached body read failed for message {}: {}",
+                message.id,
+                err
+            );
+        }
+    }
+
     let account = find_account(&state, user.id, message.account_id).await?;
     let folder = find_folder(&state, user.id, message.account_id, message.folder_id).await?;
     let password = resolve_mail_password(&state, &account, None)?;
@@ -1897,6 +1927,47 @@ pub async fn get_message(
         .fetch_imap_message_body(&account.imap, &password, &folder.path, message.uid)
         .await
         .ok();
+    if let Some(body) = body.as_ref() {
+        match store_message_body(
+            &state.storage,
+            &user.username,
+            &account,
+            &folder,
+            &message,
+            body,
+        )
+        .await
+        {
+            Ok(stored) => {
+                state
+                    .db
+                    .collection::<MailMessage>(MESSAGES)
+                    .update_one(
+                        doc! { "_id": message.id, "owner_id": user.id },
+                        doc! {
+                            "$set": {
+                                "mail_storage_id": stored.storage_id,
+                                "raw_storage_path": stored.raw_path,
+                                "raw_storage_size_bytes": stored.raw_size_bytes as i64,
+                                "text_storage_path": optional_string_bson(stored.text_path),
+                                "text_storage_size_bytes": optional_u64_bson(stored.text_size_bytes),
+                                "html_storage_path": optional_string_bson(stored.html_path),
+                                "html_storage_size_bytes": optional_u64_bson(stored.html_size_bytes),
+                                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                            },
+                        },
+                    )
+                    .await?;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "mail cached body write failed for message {}: {}",
+                    message.id,
+                    err
+                );
+            }
+        }
+    }
 
     Ok(Json(MailMessageDetailResponse {
         message: message_to_response(&message),

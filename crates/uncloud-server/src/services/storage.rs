@@ -39,7 +39,8 @@ impl StorageService {
             .cloned()
             .map(|s| (s.name.clone(), s))
             .collect();
-        let configured_names: HashSet<&str> = resolved.entries.iter().map(|e| e.name.as_str()).collect();
+        let configured_names: HashSet<&str> =
+            resolved.entries.iter().map(|e| e.name.as_str()).collect();
 
         // Reject if removing a storage that still has files referencing it.
         let files_collection = db.collection::<mongodb::bson::Document>("files");
@@ -48,11 +49,12 @@ impl StorageService {
                 let count = files_collection
                     .count_documents(doc! { "storage_id": storage.id })
                     .await?;
-                if count > 0 {
+                let mail_refs = count_mail_storage_references(db, storage.id).await?;
+                if count > 0 || mail_refs > 0 {
                     return Err(AppError::Internal(format!(
-                        "Storage `{}` was removed from config but still has {count} file(s) on it. \
-                         Restore the entry in config.yaml or move/delete those files first.",
-                        storage.name
+                        "Storage `{}` was removed from config but still has {count} file(s) and {mail_refs} mail blob reference(s) on it. \
+                         Restore the entry in config.yaml or move/delete those references first.",
+                        storage.name,
                     )));
                 }
                 // No files — silently drop the orphan row.
@@ -120,7 +122,9 @@ impl StorageService {
         }
 
         let default_storage_id = default_storage_id.ok_or_else(|| {
-            AppError::Internal("No default storage resolved (config validation should have caught this)".into())
+            AppError::Internal(
+                "No default storage resolved (config validation should have caught this)".into(),
+            )
         })?;
 
         Ok(Self {
@@ -192,6 +196,22 @@ impl StorageService {
             .cloned()
             .ok_or_else(|| AppError::NotFound("Storage backend not found".to_string()))
     }
+}
+
+async fn count_mail_storage_references(db: &Database, storage_id: ObjectId) -> Result<u64> {
+    let accounts = db
+        .collection::<mongodb::bson::Document>("mail_accounts")
+        .count_documents(doc! { "mail_storage_id": storage_id })
+        .await?;
+    let messages = db
+        .collection::<mongodb::bson::Document>("mail_messages")
+        .count_documents(doc! { "mail_storage_id": storage_id })
+        .await?;
+    let attachments = db
+        .collection::<mongodb::bson::Document>("mail_attachments")
+        .count_documents(doc! { "storage_id": storage_id })
+        .await?;
+    Ok(accounts + messages + attachments)
 }
 
 impl From<ConfiguredStorageBackend> for StorageBackendConfig {
@@ -272,13 +292,9 @@ async fn create_backend(
             Ok(Arc::new(storage))
         }
         StorageBackendConfig::Sftp { .. } => {
-            let storage = crate::storage::SftpStorage::new(
-                config,
-                retry.clone(),
-                db.clone(),
-                storage_id,
-            )
-            .await?;
+            let storage =
+                crate::storage::SftpStorage::new(config, retry.clone(), db.clone(), storage_id)
+                    .await?;
             Ok(Arc::new(storage))
         }
     }

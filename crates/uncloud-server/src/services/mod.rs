@@ -6,6 +6,7 @@ pub mod sharing;
 pub mod rescan;
 pub mod sync_log;
 pub mod mail;
+pub mod mail_blob;
 pub mod secrets;
 
 pub use auth::AuthService;
