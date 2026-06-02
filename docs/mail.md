@@ -100,6 +100,10 @@ the account's SMTP settings.
 - Manual read-only message summary sync for one folder or all cached selectable
   folders included in account sync. Each sync fetches a bounded UID window of
   envelope, flags, internal date, and RFC822 size metadata.
+- Message summary sync refreshes cached rows in fetched UID windows, so
+  read/unread, starred, size, envelope, and attachment-presence metadata changed
+  by another client are reflected locally. Cached messages missing from a
+  fetched UID window are removed from the local message list.
 - Per-folder sync state: UIDVALIDITY, UIDNEXT, exists/unseen counts, highest
   scanned UID, sync timestamps, and last error.
 - UIDVALIDITY changes invalidate cached message summaries for that folder before
@@ -160,6 +164,10 @@ the account's SMTP settings.
   duplicate when the provider may have saved the message already.
 - Account-level manual sync refreshes folders first, then syncs selectable
   folders one-by-one. It is intentionally simple and not yet a scheduler.
+- Without CONDSTORE/QRESYNC, complete old-folder reconciliation still requires
+  bounded rescans. The current implementation refreshes fetched windows and the
+  latest cached window, but does not yet rotate through every previously cached
+  older UID window automatically.
 
 ## End-to-End Test Path
 
@@ -231,7 +239,10 @@ Remaining credential work before scheduler/background sync:
   capped at 1000.
 - Sync is latest-first. A folder without the new low/high cursor fetches the
   newest UID window first, then future calls prioritize newly arrived mail and
-  backfill older UID windows toward UID 1.
+  backfill older UID windows toward UID 1. While backfilling, sync also refreshes
+  the newest cached UID window so visible flag changes and vanished messages do
+  not wait for the full backfill to finish.
+- Manual sync responses report new, refreshed, and removed message counts.
 - Next: add a scheduler/queue to run this strategy automatically.
 - Fetch raw RFC822 bodies only when needed, or in bounded batches.
 - Store raw messages and parsed body sidecars in Uncloud storage, not MongoDB.

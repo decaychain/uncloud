@@ -1,16 +1,16 @@
 use dioxus::prelude::*;
 use uncloud_common::{
-    CreateMailAccountRequest, FolderResponse, MailAccountResponse, MailAddressDto,
-    MailAttachmentResponse, MailFolderResponse, MailFolderRole, MailFolderRoleSource,
-    MailIdentityResponse, MailMessageDetailResponse, MailMessageMutationAction,
-    MailMessageSummaryResponse, MailSecurity, MailSentCopyStatus, MailServerSettings,
-    SendMailMessageRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
+    CreateMailAccountRequest, FolderResponse, MailAccountResponse, MailAccountSyncResponse,
+    MailAddressDto, MailAttachmentResponse, MailFolderResponse, MailFolderRole,
+    MailFolderRoleSource, MailFolderSyncResponse, MailIdentityResponse, MailMessageDetailResponse,
+    MailMessageMutationAction, MailMessageSummaryResponse, MailSecurity, MailSentCopyStatus,
+    MailServerSettings, SendMailMessageRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
 };
 
 use crate::components::icons::{
-    IconArchive, IconChevronRight, IconDownload, IconEye, IconFileText, IconFolder,
-    IconFolderOpen, IconMail, IconMoveRight, IconPaperclip, IconPlus, IconRefreshCw, IconSend,
-    IconSettings, IconStar, IconTrash,
+    IconArchive, IconChevronRight, IconDownload, IconEye, IconFileText, IconFolder, IconFolderOpen,
+    IconMail, IconMoveRight, IconPaperclip, IconPlus, IconRefreshCw, IconSend, IconSettings,
+    IconStar, IconTrash,
 };
 use crate::components::scroll_sentinel::ScrollSentinel;
 use crate::hooks::{use_files, use_mail};
@@ -302,17 +302,23 @@ pub fn MailPage() -> Element {
                                 syncing.set(true);
                                 error.set(None);
                                 match use_mail::sync_account(&account_id, Some(25)).await {
-                                    Ok(_) => {
-                                        notice.set(Some("Account sync finished".to_string()));
+                                    Ok(result) => {
+                                        notice.set(Some(account_sync_notice(&result)));
                                         if let Ok(rows) = use_mail::list_folders(&account_id).await {
                                             folders.set(rows);
                                         }
                                         let folder_id = selected_folder();
                                         if !folder_id.is_empty() {
                                             if let Ok(page) = use_mail::list_messages(&account_id, &folder_id, MAIL_MESSAGE_PAGE_SIZE, None).await {
+                                                let selected = selected_message.peek().clone();
+                                                let still_selected = page.messages.iter().any(|message| message.id == selected);
                                                 messages.set(page.messages);
                                                 message_next_cursor.set(page.next_cursor);
                                                 message_has_more.set(page.has_more);
+                                                if !selected.is_empty() && !still_selected {
+                                                    selected_message.set(String::new());
+                                                    detail.set(None);
+                                                }
                                             }
                                         }
                                     }
@@ -604,15 +610,21 @@ pub fn MailPage() -> Element {
                                             syncing.set(true);
                                             error.set(None);
                                             match use_mail::sync_folder(&account_id, &folder_id, Some(50)).await {
-                                                Ok(_) => {
-                                                    notice.set(Some("Folder sync finished".to_string()));
+                                                Ok(result) => {
+                                                    notice.set(Some(folder_sync_notice(&result)));
                                                     if let Ok(rows) = use_mail::list_folders(&account_id).await {
                                                         folders.set(rows);
                                                     }
                                                     if let Ok(page) = use_mail::list_messages(&account_id, &folder_id, MAIL_MESSAGE_PAGE_SIZE, None).await {
+                                                        let selected = selected_message.peek().clone();
+                                                        let still_selected = page.messages.iter().any(|message| message.id == selected);
                                                         messages.set(page.messages);
                                                         message_next_cursor.set(page.next_cursor);
                                                         message_has_more.set(page.has_more);
+                                                        if !selected.is_empty() && !still_selected {
+                                                            selected_message.set(String::new());
+                                                            detail.set(None);
+                                                        }
                                                     }
                                                 }
                                                 Err(e) => error.set(Some(e)),
@@ -2059,16 +2071,38 @@ fn append_unique_messages(
     mut current: Vec<MailMessageSummaryResponse>,
     incoming: Vec<MailMessageSummaryResponse>,
 ) -> Vec<MailMessageSummaryResponse> {
-    let mut seen = current
-        .iter()
-        .map(|message| message.id.clone())
-        .collect::<std::collections::HashSet<_>>();
     for message in incoming {
-        if seen.insert(message.id.clone()) {
+        if let Some(existing) = current
+            .iter_mut()
+            .find(|existing| existing.id == message.id)
+        {
+            *existing = message;
+        } else {
             current.push(message);
         }
     }
     current
+}
+
+fn folder_sync_notice(result: &MailFolderSyncResponse) -> String {
+    format!(
+        "Folder sync finished: {} new, {} refreshed, {} removed",
+        result.new_messages, result.refreshed_messages, result.removed_messages
+    )
+}
+
+fn account_sync_notice(result: &MailAccountSyncResponse) -> String {
+    if result.errors == 0 {
+        format!(
+            "Account sync finished: {} new, {} refreshed, {} removed",
+            result.new_messages, result.refreshed_messages, result.removed_messages
+        )
+    } else {
+        format!(
+            "Account sync finished with {} error(s): {} new, {} refreshed, {} removed",
+            result.errors, result.new_messages, result.refreshed_messages, result.removed_messages
+        )
+    }
 }
 
 fn message_subject(message: &MailMessageSummaryResponse) -> String {

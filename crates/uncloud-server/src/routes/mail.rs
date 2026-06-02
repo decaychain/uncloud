@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     body::Body,
@@ -39,7 +43,7 @@ use crate::routes::apps::{deliver_webhooks, EVENT_FILE_CREATED};
 use crate::routes::files::{check_name_conflict, file_to_response, resolve_storage_path};
 use crate::services::mail::{
     RemoteMailAddress, RemoteMailbox, RemoteMessageBody, RemoteMessageFlag, RemoteMessageSummary,
-    RemoteOutgoingMessage,
+    RemoteOutgoingMessage, RemoteUidRange,
 };
 use crate::services::mail_blob::{read_cached_message_body, store_message_body, StoredMailBody};
 use crate::services::sharing::check_folder_access;
@@ -173,6 +177,9 @@ fn folder_effective_role(folder: &MailFolder) -> Option<MailFolderRole> {
 }
 
 fn folder_sync_completed(folder: &MailFolder) -> bool {
+    if folder.exists == Some(0) {
+        return true;
+    }
     let Some(uid_next) = folder.uid_next else {
         return false;
     };
@@ -1414,7 +1421,7 @@ async fn store_message_summary(
     folder: &MailFolder,
     summary: &RemoteMessageSummary,
     now: chrono::DateTime<Utc>,
-) -> Result<()> {
+) -> Result<StoreMessageSummaryResult> {
     let message = MailMessage {
         id: ObjectId::new(),
         owner_id,
@@ -1454,7 +1461,7 @@ async fn store_message_summary(
         .ok_or_else(|| AppError::Internal("failed to serialize mail message".into()))?;
     set.remove("_id");
     set.remove("created_at");
-    state
+    let result = state
         .db
         .collection::<MailMessage>(MESSAGES)
         .update_one(
@@ -1478,7 +1485,80 @@ async fn store_message_summary(
                 .build(),
         )
         .await?;
-    Ok(())
+    if result.upserted_id.is_some() {
+        Ok(StoreMessageSummaryResult::Inserted)
+    } else {
+        Ok(StoreMessageSummaryResult::Refreshed)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoreMessageSummaryResult {
+    Inserted,
+    Refreshed,
+}
+
+async fn delete_cached_messages_matching(
+    state: &AppState,
+    mut filter: bson::Document,
+) -> Result<usize> {
+    let coll = state.db.collection::<MailMessage>(MESSAGES);
+    let mut cursor = coll.find(filter.clone()).await?;
+    let mut message_ids = Vec::new();
+    while let Some(message) = cursor.try_next().await? {
+        message_ids.push(message.id);
+    }
+    if message_ids.is_empty() {
+        return Ok(0);
+    }
+
+    state
+        .db
+        .collection::<MailAttachment>(ATTACHMENTS)
+        .delete_many(doc! { "message_id": { "$in": message_ids.clone() } })
+        .await?;
+
+    filter.insert("_id", doc! { "$in": message_ids });
+    let result = coll.delete_many(filter).await?;
+    Ok(result.deleted_count as usize)
+}
+
+async fn delete_cached_messages_missing_from_uid_range(
+    state: &AppState,
+    owner_id: ObjectId,
+    account_id: ObjectId,
+    folder_id: ObjectId,
+    range: RemoteUidRange,
+    remote_messages: &[RemoteMessageSummary],
+) -> Result<usize> {
+    let remote_uids = remote_messages
+        .iter()
+        .map(|message| message.uid)
+        .collect::<HashSet<_>>();
+    let mut uid_filter = doc! {
+        "$gte": range.start as i64,
+        "$lte": range.end as i64,
+    };
+    if !remote_uids.is_empty() {
+        uid_filter.insert(
+            "$nin",
+            remote_uids
+                .iter()
+                .map(|uid| bson::Bson::Int64(*uid as i64))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    delete_cached_messages_matching(
+        state,
+        doc! {
+            "owner_id": owner_id,
+            "account_id": account_id,
+            "folder_id": folder_id,
+            "uid": uid_filter,
+        },
+    )
+    .await
 }
 
 async fn record_folder_sync_error(
@@ -1553,21 +1633,49 @@ async fn sync_one_folder(
         }
     };
 
+    let mut removed_messages = 0usize;
     if remote.uid_validity_changed {
-        state
-            .db
-            .collection::<MailMessage>(MESSAGES)
-            .delete_many(doc! {
+        removed_messages += delete_cached_messages_matching(
+            state,
+            doc! {
                 "owner_id": owner_id,
                 "account_id": account.id,
                 "folder_id": folder.id,
-            })
+            },
+        )
+        .await?;
+    } else if remote.status.exists == Some(0) {
+        removed_messages += delete_cached_messages_matching(
+            state,
+            doc! {
+                "owner_id": owner_id,
+                "account_id": account.id,
+                "folder_id": folder.id,
+            },
+        )
+        .await?;
+    } else {
+        for range in &remote.synced_uid_ranges {
+            removed_messages += delete_cached_messages_missing_from_uid_range(
+                state,
+                owner_id,
+                account.id,
+                folder.id,
+                *range,
+                &remote.messages,
+            )
             .await?;
+        }
     }
 
     let now = Utc::now();
+    let mut new_messages = 0usize;
+    let mut refreshed_messages = 0usize;
     for message in &remote.messages {
-        store_message_summary(state, owner_id, account.id, folder, message, now).await?;
+        match store_message_summary(state, owner_id, account.id, folder, message, now).await? {
+            StoreMessageSummaryResult::Inserted => new_messages += 1,
+            StoreMessageSummaryResult::Refreshed => refreshed_messages += 1,
+        }
     }
 
     let lowest_synced_uid = remote.lowest_synced_uid;
@@ -1611,6 +1719,9 @@ async fn sync_one_folder(
         folder_path: folder.path.clone(),
         fetched_messages: remote.messages.len(),
         stored_messages: remote.messages.len(),
+        new_messages,
+        refreshed_messages,
+        removed_messages,
         uid_validity: remote.status.uid_validity,
         uid_next: remote.status.uid_next,
         exists: remote.status.exists,
@@ -1678,6 +1789,9 @@ pub async fn sync_account(
                 folder_path: folder.path.clone(),
                 fetched_messages: 0,
                 stored_messages: 0,
+                new_messages: 0,
+                refreshed_messages: 0,
+                removed_messages: 0,
                 uid_validity: folder.uid_validity,
                 uid_next: folder.uid_next,
                 exists: folder.exists,
@@ -1697,6 +1811,18 @@ pub async fn sync_account(
     let stored_messages = folder_results
         .iter()
         .map(|folder| folder.stored_messages)
+        .sum();
+    let new_messages = folder_results
+        .iter()
+        .map(|folder| folder.new_messages)
+        .sum();
+    let refreshed_messages = folder_results
+        .iter()
+        .map(|folder| folder.refreshed_messages)
+        .sum();
+    let removed_messages = folder_results
+        .iter()
+        .map(|folder| folder.removed_messages)
         .sum();
     let errors = folder_results
         .iter()
@@ -1722,6 +1848,9 @@ pub async fn sync_account(
         account_id: account.id.to_hex(),
         fetched_messages,
         stored_messages,
+        new_messages,
+        refreshed_messages,
+        removed_messages,
         errors,
         folders: folder_results,
     }))
@@ -2536,6 +2665,17 @@ mod tests {
         folder.uid_next = Some(12);
         folder.lowest_synced_uid = Some(1);
         folder.highest_synced_uid = Some(11);
+
+        assert!(folder_to_response(&folder).sync_completed);
+    }
+
+    #[test]
+    fn folder_response_marks_empty_folder_completed() {
+        let mut folder = test_folder("INBOX", MailFolderRoleSource::Inferred, None);
+        folder.uid_next = Some(500);
+        folder.exists = Some(0);
+        folder.lowest_synced_uid = None;
+        folder.highest_synced_uid = None;
 
         assert!(folder_to_response(&folder).sync_completed);
     }

@@ -558,12 +558,36 @@ where
     } else {
         highest_synced_uid
     };
-    let plan = next_uid_sync_plan(effective_lowest, effective_highest, mailbox.uid_next, limit);
 
-    let messages = if let Some(plan) = plan {
-        let start = plan.start;
-        let end = plan.end;
-        let uid_set = format!("{start}:{end}");
+    if mailbox.exists == 0 {
+        let _ = session.logout().await;
+        return Ok(RemoteMailboxSync {
+            status: RemoteMailboxStatus {
+                uid_validity: mailbox.uid_validity,
+                uid_next: mailbox.uid_next,
+                exists: Some(mailbox.exists),
+                unseen: mailbox.unseen,
+            },
+            uid_validity_changed,
+            synced_uid_ranges: Vec::new(),
+            lowest_synced_uid: None,
+            highest_synced_uid: None,
+            completed: true,
+            messages: Vec::new(),
+        });
+    }
+
+    let plan = next_uid_sync_plan(effective_lowest, effective_highest, mailbox.uid_next, limit);
+    let fetch_plans = sync_fetch_plans(plan, effective_lowest, effective_highest, limit);
+
+    let messages = if fetch_plans.is_empty() {
+        Vec::new()
+    } else {
+        let uid_set = fetch_plans
+            .iter()
+            .map(|plan| format!("{}:{}", plan.start, plan.end))
+            .collect::<Vec<_>>()
+            .join(",");
         let fetch_stream = imap_timeout(
             "IMAP UID FETCH",
             session.uid_fetch(
@@ -578,11 +602,16 @@ where
             .await?
             .map_err(|e| AppError::Internal(format!("IMAP UID FETCH read failed: {e}")))?;
         fetches.iter().filter_map(remote_message_summary).collect()
-    } else {
-        Vec::new()
     };
 
     let _ = session.logout().await;
+    let synced_uid_ranges = fetch_plans
+        .iter()
+        .map(|plan| RemoteUidRange {
+            start: plan.start,
+            end: plan.end,
+        })
+        .collect();
     let (lowest_synced_uid, highest_synced_uid) =
         updated_uid_cursors(effective_lowest, effective_highest, plan);
     let completed = sync_completed(lowest_synced_uid, highest_synced_uid, mailbox.uid_next);
@@ -595,6 +624,7 @@ where
             unseen: mailbox.unseen,
         },
         uid_validity_changed,
+        synced_uid_ranges,
         lowest_synced_uid,
         highest_synced_uid,
         completed,
@@ -869,10 +899,17 @@ pub struct RemoteMailboxStatus {
 pub struct RemoteMailboxSync {
     pub status: RemoteMailboxStatus,
     pub uid_validity_changed: bool,
+    pub synced_uid_ranges: Vec<RemoteUidRange>,
     pub lowest_synced_uid: Option<u32>,
     pub highest_synced_uid: Option<u32>,
     pub completed: bool,
     pub messages: Vec<RemoteMessageSummary>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteUidRange {
+    pub start: u32,
+    pub end: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -979,6 +1016,7 @@ enum UidSyncDirection {
     Latest,
     Newer,
     Older,
+    Refresh,
 }
 
 fn next_uid_sync_plan(
@@ -1020,7 +1058,13 @@ fn next_uid_sync_plan(
 
     let lowest = lowest_synced_uid?;
     if lowest <= 1 {
-        return None;
+        let end = last_available;
+        let start = end.saturating_sub(limit.saturating_sub(1)).max(1);
+        return Some(UidSyncPlan {
+            start,
+            end,
+            direction: UidSyncDirection::Refresh,
+        });
     }
     let end = lowest.saturating_sub(1);
     let start = end.saturating_sub(limit.saturating_sub(1)).max(1);
@@ -1029,6 +1073,57 @@ fn next_uid_sync_plan(
         end,
         direction: UidSyncDirection::Older,
     })
+}
+
+fn latest_cached_refresh_plan(
+    lowest_synced_uid: Option<u32>,
+    highest_synced_uid: Option<u32>,
+    limit: u32,
+) -> Option<UidSyncPlan> {
+    let limit = limit.max(1);
+    let lowest = lowest_synced_uid?;
+    let highest = highest_synced_uid?;
+    if lowest > highest {
+        return None;
+    }
+
+    let end = highest;
+    let start = end.saturating_sub(limit.saturating_sub(1)).max(lowest);
+    Some(UidSyncPlan {
+        start,
+        end,
+        direction: UidSyncDirection::Refresh,
+    })
+}
+
+fn sync_fetch_plans(
+    primary: Option<UidSyncPlan>,
+    lowest_synced_uid: Option<u32>,
+    highest_synced_uid: Option<u32>,
+    limit: u32,
+) -> Vec<UidSyncPlan> {
+    let mut plans = primary.into_iter().collect::<Vec<_>>();
+    let refresh_needed = primary
+        .map(|plan| {
+            !matches!(
+                plan.direction,
+                UidSyncDirection::Latest | UidSyncDirection::Refresh
+            )
+        })
+        .unwrap_or(false);
+    if refresh_needed {
+        if let Some(refresh) =
+            latest_cached_refresh_plan(lowest_synced_uid, highest_synced_uid, limit)
+        {
+            if !plans
+                .iter()
+                .any(|plan| plan.start == refresh.start && plan.end == refresh.end)
+            {
+                plans.push(refresh);
+            }
+        }
+    }
+    plans
 }
 
 fn updated_uid_cursors(
@@ -1044,6 +1139,7 @@ fn updated_uid_cursors(
         UidSyncDirection::Latest => (Some(plan.start), Some(plan.end)),
         UidSyncDirection::Newer => (current_lowest, Some(plan.end)),
         UidSyncDirection::Older => (Some(plan.start), current_highest),
+        UidSyncDirection::Refresh => (current_lowest, current_highest),
     }
 }
 
@@ -1347,9 +1443,10 @@ fn normalize_plain_text(input: &str) -> String {
 mod tests {
     use super::{
         bodystructure_has_attachment, build_plain_text_message, display_name, flag_store_query,
-        mailbox_from_address, next_uid_sync_plan, parent_path, parse_message_body,
-        quoted_imap_search_string, sync_completed, updated_uid_cursors, RemoteMailAddress,
-        RemoteMessageFlag, RemoteOutgoingMessage, UidSyncDirection, UidSyncPlan,
+        latest_cached_refresh_plan, mailbox_from_address, next_uid_sync_plan, parent_path,
+        parse_message_body, quoted_imap_search_string, sync_completed, sync_fetch_plans,
+        updated_uid_cursors, RemoteMailAddress, RemoteMessageFlag, RemoteOutgoingMessage,
+        UidSyncDirection, UidSyncPlan,
     };
     use imap_proto::types::{
         BodyContentCommon, BodyContentSinglePart, BodyStructure, ContentDisposition,
@@ -1577,7 +1674,64 @@ mod tests {
                 direction: UidSyncDirection::Older,
             })
         );
-        assert_eq!(next_uid_sync_plan(Some(1), Some(105), Some(106), 3), None);
+    }
+
+    #[test]
+    fn next_uid_sync_plan_refreshes_latest_window_when_complete() {
+        assert_eq!(
+            next_uid_sync_plan(Some(1), Some(105), Some(106), 3),
+            Some(UidSyncPlan {
+                start: 103,
+                end: 105,
+                direction: UidSyncDirection::Refresh,
+            })
+        );
+    }
+
+    #[test]
+    fn latest_cached_refresh_plan_stays_inside_cached_window() {
+        assert_eq!(
+            latest_cached_refresh_plan(Some(91), Some(105), 10),
+            Some(UidSyncPlan {
+                start: 96,
+                end: 105,
+                direction: UidSyncDirection::Refresh,
+            })
+        );
+        assert_eq!(
+            latest_cached_refresh_plan(Some(101), Some(105), 10),
+            Some(UidSyncPlan {
+                start: 101,
+                end: 105,
+                direction: UidSyncDirection::Refresh,
+            })
+        );
+        assert_eq!(latest_cached_refresh_plan(None, Some(105), 10), None);
+    }
+
+    #[test]
+    fn sync_fetch_plans_refresh_latest_cached_window_during_backfill() {
+        let primary = Some(UidSyncPlan {
+            start: 81,
+            end: 90,
+            direction: UidSyncDirection::Older,
+        });
+
+        assert_eq!(
+            sync_fetch_plans(primary, Some(91), Some(105), 3),
+            vec![
+                UidSyncPlan {
+                    start: 81,
+                    end: 90,
+                    direction: UidSyncDirection::Older,
+                },
+                UidSyncPlan {
+                    start: 103,
+                    end: 105,
+                    direction: UidSyncDirection::Refresh,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1617,6 +1771,18 @@ mod tests {
                 })
             ),
             (Some(81), Some(105))
+        );
+        assert_eq!(
+            updated_uid_cursors(
+                Some(1),
+                Some(105),
+                Some(UidSyncPlan {
+                    start: 103,
+                    end: 105,
+                    direction: UidSyncDirection::Refresh,
+                })
+            ),
+            (Some(1), Some(105))
         );
         assert!(sync_completed(Some(1), Some(105), Some(106)));
         assert!(!sync_completed(Some(2), Some(105), Some(106)));
