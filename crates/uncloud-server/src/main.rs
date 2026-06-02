@@ -627,6 +627,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     state.processing.recover(state.clone()).await;
+    uncloud_server::routes::mail::spawn_mail_sync_scheduler(state.clone());
 
     // Spawn trash auto-purge background task
     {

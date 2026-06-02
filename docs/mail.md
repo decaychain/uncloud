@@ -100,6 +100,11 @@ the account's SMTP settings.
 - Manual read-only message summary sync for one folder or all cached selectable
   folders included in account sync. Each sync fetches a bounded UID window of
   envelope, flags, internal date, and RFC822 size metadata.
+- Background read-only account sync for enabled accounts with stored
+  credentials and account sync enabled. The scheduler is controlled by
+  `mail_sync.enabled`, `mail_sync.interval_secs`,
+  `mail_sync.startup_delay_secs`, and `mail_sync.limit_per_folder`.
+  Individual accounts can override the default interval from Account settings.
 - Message summary sync refreshes cached rows in fetched UID windows, so
   read/unread, starred, size, envelope, and attachment-presence metadata changed
   by another client are reflected locally. Cached messages missing from a
@@ -163,7 +168,8 @@ the account's SMTP settings.
   fails, Uncloud reports the failure and does not append, to avoid creating a
   duplicate when the provider may have saved the message already.
 - Account-level manual sync refreshes folders first, then syncs selectable
-  folders one-by-one. It is intentionally simple and not yet a scheduler.
+  folders one-by-one. The background scheduler uses the same path and skips an
+  account when another manual or scheduled sync is already running for it.
 - Without CONDSTORE/QRESYNC, complete old-folder reconciliation still requires
   bounded rescans. The current implementation refreshes fetched windows and the
   latest cached window, but does not yet rotate through every previously cached
@@ -243,7 +249,12 @@ Remaining credential work before scheduler/background sync:
   the newest cached UID window so visible flag changes and vanished messages do
   not wait for the full backfill to finish.
 - Manual sync responses report new, refreshed, and removed message counts.
-- Next: add a scheduler/queue to run this strategy automatically.
+- A lightweight background scheduler runs the same account sync strategy
+  periodically for enabled accounts with stored credentials. Each account can
+  use the server default interval or a per-account override. The scheduler uses
+  an in-memory per-account lock, so scheduled and manual sync do not overlap.
+- Next: replace the lightweight loop with a queue if we need cross-process
+  coordination or finer per-folder scheduling.
 - Fetch raw RFC822 bodies only when needed, or in bounded batches.
 - Store raw messages and parsed body sidecars in Uncloud storage, not MongoDB.
   `mail_messages.mail_storage_id` records the actual backend used so default
@@ -261,6 +272,10 @@ Remaining credential work before scheduler/background sync:
 - The UI progressively appends cached pages. When it reaches the cached edge
   for a folder whose UID window is not complete, it can trigger one bounded
   folder sync/backfill and then append any newly cached older messages.
+- Manual account/folder sync is quiet on success in the UI. While sync is
+  running, the Mail view shows a compact bottom overlay progress indicator;
+  failed folder syncs and account syncs with per-folder errors still surface in
+  the error alert.
 - Add inline CID image handling and a stronger policy for which attachment
   content can be previewed in the reader.
 - Add an explicit remote image loading/proxy policy. Direct remote image URLs

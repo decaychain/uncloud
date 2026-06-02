@@ -34,11 +34,15 @@ pub struct MailAccount {
     #[serde(default)]
     pub sync_enabled: bool,
     #[serde(default)]
+    pub sync_interval_secs: Option<u64>,
+    #[serde(default)]
     pub credential_configured: bool,
     #[serde(default)]
     pub credential: Option<EncryptedMailCredential>,
     #[serde(default)]
     pub mail_storage_id: Option<ObjectId>,
+    #[serde(default, with = "crate::models::opt_dt")]
+    pub last_sync_attempt_at: Option<DateTime<Utc>>,
     #[serde(default, with = "crate::models::opt_dt")]
     pub last_sync_at: Option<DateTime<Utc>>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]

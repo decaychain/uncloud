@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use uncloud_common::{
     CreateMailAccountRequest, FolderResponse, MailAccountResponse, MailAccountSyncResponse,
     MailAddressDto, MailAttachmentResponse, MailFolderResponse, MailFolderRole,
-    MailFolderRoleSource, MailFolderSyncResponse, MailIdentityResponse, MailMessageDetailResponse,
+    MailFolderRoleSource, MailIdentityResponse, MailMessageDetailResponse,
     MailMessageMutationAction, MailMessageSummaryResponse, MailSecurity, MailSentCopyStatus,
     MailServerSettings, SendMailMessageRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
 };
@@ -10,13 +10,16 @@ use uncloud_common::{
 use crate::components::icons::{
     IconArchive, IconChevronRight, IconDownload, IconEye, IconFileText, IconFolder, IconFolderOpen,
     IconMail, IconMoveRight, IconPaperclip, IconPlus, IconRefreshCw, IconSend, IconSettings,
-    IconStar, IconTrash,
+    IconStar, IconTrash, IconX,
 };
 use crate::components::scroll_sentinel::ScrollSentinel;
 use crate::hooks::{use_files, use_mail};
 
 const MAIL_MESSAGE_PAGE_SIZE: u32 = 50;
 const MAIL_BACKFILL_PAGE_SIZE: u32 = 50;
+const MAIL_STATUS_POLL_MS: u32 = 15_000;
+const MAIL_MIN_SYNC_INTERVAL_MINUTES: u64 = 1;
+const MAIL_MAX_SYNC_INTERVAL_MINUTES: u64 = 7 * 24 * 60;
 
 #[component]
 pub fn MailPage() -> Element {
@@ -37,6 +40,7 @@ pub fn MailPage() -> Element {
     let mut move_target_folder = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
     let mut notice = use_signal(|| None::<String>);
+    let mut sync_status = use_signal(|| None::<String>);
     let mut show_setup = use_signal(|| false);
     let mut show_compose = use_signal(|| false);
     let mut sending_message = use_signal(|| false);
@@ -64,6 +68,7 @@ pub fn MailPage() -> Element {
     let mut account_password = use_signal(String::new);
     let mut account_enabled = use_signal(|| true);
     let mut account_sync_enabled = use_signal(|| false);
+    let mut account_sync_interval_minutes = use_signal(String::new);
     let mut saving_account_settings = use_signal(|| false);
     let mut confirming_account_delete = use_signal(|| false);
     let mut deleting_account = use_signal(|| false);
@@ -136,6 +141,72 @@ pub fn MailPage() -> Element {
         });
     });
 
+    use_effect(move || {
+        let account_id = selected_account();
+        if account_id.is_empty() {
+            return;
+        }
+
+        spawn(async move {
+            loop {
+                gloo_timers::future::TimeoutFuture::new(MAIL_STATUS_POLL_MS).await;
+                if selected_account.peek().as_str() != account_id {
+                    break;
+                }
+
+                let was_syncing = accounts
+                    .peek()
+                    .iter()
+                    .any(|account| account.id == account_id && account.sync_in_progress)
+                    || folders
+                        .peek()
+                        .iter()
+                        .any(|folder| folder.account_id == account_id && folder.sync_in_progress);
+                let mut now_syncing = was_syncing;
+
+                if let Ok(rows) = use_mail::list_accounts().await {
+                    now_syncing = rows
+                        .iter()
+                        .any(|account| account.id == account_id && account.sync_in_progress);
+                    accounts.set(rows);
+                }
+                if let Ok(rows) = use_mail::list_folders(&account_id).await {
+                    now_syncing = now_syncing
+                        || rows
+                            .iter()
+                            .any(|folder| folder.account_id == account_id && folder.sync_in_progress);
+                    folders.set(rows);
+                }
+
+                if was_syncing
+                    && !now_syncing
+                    && !*syncing.peek()
+                    && !*backfilling_messages.peek()
+                    && !*loading_more_messages.peek()
+                {
+                    let folder_id = selected_folder.peek().clone();
+                    if !folder_id.is_empty() {
+                        if let Ok(page) =
+                            use_mail::list_messages(&account_id, &folder_id, MAIL_MESSAGE_PAGE_SIZE, None)
+                                .await
+                        {
+                            let selected = selected_message.peek().clone();
+                            let still_selected =
+                                page.messages.iter().any(|message| message.id == selected);
+                            messages.set(page.messages);
+                            message_next_cursor.set(page.next_cursor);
+                            message_has_more.set(page.has_more);
+                            if !selected.is_empty() && !still_selected {
+                                selected_message.set(String::new());
+                                detail.set(None);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    });
+
     let accounts_snapshot = accounts();
     let identities_snapshot = identities();
     let folders_snapshot = sorted_mail_folders(&folders());
@@ -161,6 +232,35 @@ pub fn MailPage() -> Element {
         .as_ref()
         .map(|folder| folder.selectable && !folder.sync_completed)
         .unwrap_or(false);
+    let background_sync_in_progress = active_account
+        .as_ref()
+        .map(|account| account.sync_in_progress)
+        .unwrap_or(false)
+        || folders_snapshot
+            .iter()
+            .any(|folder| folder.sync_in_progress);
+    let sync_status_message = sync_status()
+        .or_else(|| {
+            if backfilling_messages() {
+                Some("Syncing older messages".to_string())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            if syncing() {
+                Some("Syncing mail".to_string())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            if background_sync_in_progress {
+                Some("Syncing mail".to_string())
+            } else {
+                None
+            }
+        });
 
     let trigger_load_more_messages = move || {
         if *syncing.peek() || *loading_more_messages.peek() || *backfilling_messages.peek() {
@@ -208,6 +308,7 @@ pub fn MailPage() -> Element {
         let last_cached_cursor = messages.peek().last().map(|message| message.uid.to_string());
         spawn(async move {
             backfilling_messages.set(true);
+            sync_status.set(Some("Syncing older messages".to_string()));
             error.set(None);
             match use_mail::sync_folder(&account_id, &folder_id, Some(MAIL_BACKFILL_PAGE_SIZE)).await {
                 Ok(_) => {
@@ -233,6 +334,7 @@ pub fn MailPage() -> Element {
                 Err(e) => error.set(Some(e)),
             }
             backfilling_messages.set(false);
+            sync_status.set(None);
         });
     };
 
@@ -263,6 +365,12 @@ pub fn MailPage() -> Element {
                                         account_password.set(String::new());
                                         account_enabled.set(account.enabled);
                                         account_sync_enabled.set(account.sync_enabled);
+                                        account_sync_interval_minutes.set(
+                                            account
+                                                .sync_interval_secs
+                                                .map(sync_interval_minutes_value)
+                                                .unwrap_or_default(),
+                                        );
                                         confirming_account_delete.set(false);
                                         account_settings.set(Some(account.clone()));
                                     }
@@ -300,10 +408,13 @@ pub fn MailPage() -> Element {
                             }
                             spawn(async move {
                                 syncing.set(true);
+                                sync_status.set(Some("Syncing account".to_string()));
                                 error.set(None);
                                 match use_mail::sync_account(&account_id, Some(25)).await {
                                     Ok(result) => {
-                                        notice.set(Some(account_sync_notice(&result)));
+                                        if let Some(message) = account_sync_error_notice(&result) {
+                                            error.set(Some(message));
+                                        }
                                         if let Ok(rows) = use_mail::list_folders(&account_id).await {
                                             folders.set(rows);
                                         }
@@ -325,6 +436,7 @@ pub fn MailPage() -> Element {
                                     Err(e) => error.set(Some(e)),
                                 }
                                 syncing.set(false);
+                                sync_status.set(None);
                             });
                         },
                         if syncing() {
@@ -385,7 +497,15 @@ pub fn MailPage() -> Element {
                 div { class: "alert alert-error py-2 text-sm", "{e}" }
             }
             if let Some(message) = notice() {
-                div { class: "alert alert-info py-2 text-sm", "{message}" }
+                div { class: "alert alert-info flex items-center justify-between gap-3 py-2 text-sm",
+                    span { class: "min-w-0 flex-1", "{message}" }
+                    button {
+                        class: "btn btn-ghost btn-xs h-7 min-h-7 w-7 p-0",
+                        title: "Dismiss",
+                        onclick: move |_| notice.set(None),
+                        IconX { class: "h-4 w-4".to_string() }
+                    }
+                }
             }
 
             if loading() {
@@ -520,6 +640,7 @@ pub fn MailPage() -> Element {
                                                                 message_has_more.set(page.has_more);
                                                                 if should_auto_sync {
                                                                     backfilling_messages.set(true);
+                                                                    sync_status.set(Some("Syncing messages".to_string()));
                                                                     match use_mail::sync_folder(&account_id, &folder_id, Some(MAIL_BACKFILL_PAGE_SIZE)).await {
                                                                         Ok(_) => {
                                                                             if let Ok(rows) = use_mail::list_folders(&account_id).await {
@@ -537,6 +658,7 @@ pub fn MailPage() -> Element {
                                                                         Err(e) => error.set(Some(e)),
                                                                     }
                                                                     backfilling_messages.set(false);
+                                                                    sync_status.set(None);
                                                                 }
                                                             }
                                                             Err(e) => error.set(Some(e)),
@@ -608,10 +730,13 @@ pub fn MailPage() -> Element {
                                         }
                                         spawn(async move {
                                             syncing.set(true);
+                                            sync_status.set(Some("Syncing folder".to_string()));
                                             error.set(None);
                                             match use_mail::sync_folder(&account_id, &folder_id, Some(50)).await {
                                                 Ok(result) => {
-                                                    notice.set(Some(folder_sync_notice(&result)));
+                                                    if let Some(message) = result.error {
+                                                        error.set(Some(message));
+                                                    }
                                                     if let Ok(rows) = use_mail::list_folders(&account_id).await {
                                                         folders.set(rows);
                                                     }
@@ -630,6 +755,7 @@ pub fn MailPage() -> Element {
                                                 Err(e) => error.set(Some(e)),
                                             }
                                             syncing.set(false);
+                                            sync_status.set(None);
                                         });
                                     },
                                     if syncing() {
@@ -1485,6 +1611,7 @@ pub fn MailPage() -> Element {
                                             },
                                             enabled: true,
                                             sync_enabled: false,
+                                            sync_interval_secs: None,
                                         };
                                         match use_mail::create_account(&req).await {
                                             Ok(account) => {
@@ -1659,6 +1786,19 @@ pub fn MailPage() -> Element {
                                             span { class: "block text-xs text-base-content/60", "Manual sync remains available from the mail view." }
                                         }
                                     }
+                                    label { class: "form-control",
+                                        span { class: "label-text", "Sync interval" }
+                                        input {
+                                            class: "input input-bordered",
+                                            r#type: "number",
+                                            min: "{MAIL_MIN_SYNC_INTERVAL_MINUTES}",
+                                            max: "{MAIL_MAX_SYNC_INTERVAL_MINUTES}",
+                                            value: "{account_sync_interval_minutes()}",
+                                            placeholder: "Server default",
+                                            oninput: move |e| account_sync_interval_minutes.set(e.value()),
+                                        }
+                                        span { class: "label-text-alt text-base-content/60", "Minutes; blank uses the server default." }
+                                    }
                                 }
 
                                 div { class: "modal-action items-center justify-between",
@@ -1754,6 +1894,15 @@ pub fn MailPage() -> Element {
                                                     let pass = account_password();
                                                     let enabled = account_enabled();
                                                     let sync_enabled = account_sync_enabled();
+                                                    let sync_interval_secs = match sync_interval_secs_from_minutes(
+                                                        &account_sync_interval_minutes(),
+                                                    ) {
+                                                        Ok(value) => value,
+                                                        Err(e) => {
+                                                            error.set(Some(e));
+                                                            return;
+                                                        }
+                                                    };
                                                     spawn(async move {
                                                         saving_account_settings.set(true);
                                                         error.set(None);
@@ -1775,6 +1924,7 @@ pub fn MailPage() -> Element {
                                                             }),
                                                             enabled: Some(enabled),
                                                             sync_enabled: Some(sync_enabled),
+                                                            sync_interval_secs: Some(sync_interval_secs),
                                                         };
                                                         match use_mail::update_account(&account_id, &req).await {
                                                             Ok(updated) => {
@@ -1916,6 +2066,15 @@ pub fn MailPage() -> Element {
                             }
                             div { class: "modal-backdrop", onclick: move |_| settings_folder.set(None) }
                         }
+                    }
+                }
+            }
+
+            if let Some(message) = sync_status_message {
+                div { class: "pointer-events-none fixed inset-x-0 bottom-0 z-50",
+                    div { class: "pointer-events-auto flex w-full min-w-0 items-center gap-2 border-y border-info/30 bg-base-100/95 px-4 py-2 text-sm text-info shadow-lg backdrop-blur",
+                        span { class: "loading loading-spinner loading-xs" }
+                        span { class: "truncate", "{message}" }
                     }
                 }
             }
@@ -2084,25 +2243,53 @@ fn append_unique_messages(
     current
 }
 
-fn folder_sync_notice(result: &MailFolderSyncResponse) -> String {
-    format!(
-        "Folder sync finished: {} new, {} refreshed, {} removed",
-        result.new_messages, result.refreshed_messages, result.removed_messages
-    )
+fn sync_interval_minutes_value(seconds: u64) -> String {
+    seconds.div_ceil(60).to_string()
 }
 
-fn account_sync_notice(result: &MailAccountSyncResponse) -> String {
-    if result.errors == 0 {
-        format!(
-            "Account sync finished: {} new, {} refreshed, {} removed",
-            result.new_messages, result.refreshed_messages, result.removed_messages
-        )
-    } else {
-        format!(
-            "Account sync finished with {} error(s): {} new, {} refreshed, {} removed",
-            result.errors, result.new_messages, result.refreshed_messages, result.removed_messages
-        )
+fn sync_interval_secs_from_minutes(input: &str) -> Result<Option<u64>, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
     }
+
+    let minutes = trimmed
+        .parse::<u64>()
+        .map_err(|_| "Sync interval must be a whole number of minutes".to_string())?;
+    if !(MAIL_MIN_SYNC_INTERVAL_MINUTES..=MAIL_MAX_SYNC_INTERVAL_MINUTES).contains(&minutes) {
+        return Err(format!(
+            "Sync interval must be between {} minute and {} minutes",
+            MAIL_MIN_SYNC_INTERVAL_MINUTES, MAIL_MAX_SYNC_INTERVAL_MINUTES
+        ));
+    }
+    Ok(Some(minutes * 60))
+}
+
+fn account_sync_error_notice(result: &MailAccountSyncResponse) -> Option<String> {
+    if result.errors == 0 {
+        return None;
+    }
+
+    let failed_folders = result
+        .folders
+        .iter()
+        .filter_map(|folder| {
+            folder
+                .error
+                .as_ref()
+                .map(|error| format!("{}: {}", folder.folder_path, error))
+        })
+        .take(3)
+        .collect::<Vec<_>>();
+    let details = if failed_folders.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", failed_folders.join("; "))
+    };
+    Some(format!(
+        "Account sync finished with {} folder error(s).{}",
+        result.errors, details
+    ))
 }
 
 fn message_subject(message: &MailMessageSummaryResponse) -> String {

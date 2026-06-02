@@ -1,6 +1,10 @@
-use std::fmt;
-use std::future::Future;
-use std::time::Duration;
+use std::{
+    collections::HashSet,
+    fmt,
+    future::Future,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_imap::types::{Capability, Flag};
 use async_imap::{Client, Session};
@@ -15,6 +19,7 @@ use lettre::transport::smtp::{
 };
 use lettre::{message::Mailbox, AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use mail_parser::{MessageParser, MimeHeaders, PartType};
+use mongodb::bson::oid::ObjectId;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -26,11 +31,49 @@ use crate::models::MailServerConfig;
 const MAIL_OP_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Default)]
-pub struct MailService;
+pub struct MailService {
+    syncing_accounts: Arc<Mutex<HashSet<ObjectId>>>,
+}
+
+pub struct MailAccountSyncGuard {
+    account_id: ObjectId,
+    syncing_accounts: Arc<Mutex<HashSet<ObjectId>>>,
+}
+
+impl Drop for MailAccountSyncGuard {
+    fn drop(&mut self) {
+        let mut syncing = self
+            .syncing_accounts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        syncing.remove(&self.account_id);
+    }
+}
 
 impl MailService {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    pub fn try_begin_account_sync(&self, account_id: ObjectId) -> Option<MailAccountSyncGuard> {
+        let mut syncing = self
+            .syncing_accounts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !syncing.insert(account_id) {
+            return None;
+        }
+        Some(MailAccountSyncGuard {
+            account_id,
+            syncing_accounts: self.syncing_accounts.clone(),
+        })
+    }
+
+    pub fn is_account_syncing(&self, account_id: ObjectId) -> bool {
+        self.syncing_accounts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&account_id)
     }
 
     pub async fn test_imap_password(
@@ -1446,13 +1489,28 @@ mod tests {
         latest_cached_refresh_plan, mailbox_from_address, next_uid_sync_plan, parent_path,
         parse_message_body, quoted_imap_search_string, sync_completed, sync_fetch_plans,
         updated_uid_cursors, RemoteMailAddress, RemoteMessageFlag, RemoteOutgoingMessage,
-        UidSyncDirection, UidSyncPlan,
+        MailService, UidSyncDirection, UidSyncPlan,
     };
     use imap_proto::types::{
         BodyContentCommon, BodyContentSinglePart, BodyStructure, ContentDisposition,
         ContentEncoding, ContentType,
     };
+    use mongodb::bson::oid::ObjectId;
     use std::borrow::Cow;
+
+    #[test]
+    fn account_sync_guard_prevents_overlap_until_dropped() {
+        let service = MailService::new();
+        let account_id = ObjectId::new();
+
+        let guard = service.try_begin_account_sync(account_id).unwrap();
+        assert!(service.is_account_syncing(account_id));
+        assert!(service.try_begin_account_sync(account_id).is_none());
+
+        drop(guard);
+        assert!(!service.is_account_syncing(account_id));
+        assert!(service.try_begin_account_sync(account_id).is_some());
+    }
 
     #[test]
     fn folder_display_name_uses_hierarchy_delimiter() {

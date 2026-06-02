@@ -47,6 +47,8 @@ pub struct MailAccountResponse {
     pub smtp: MailServerSettings,
     pub enabled: bool,
     pub sync_enabled: bool,
+    pub sync_interval_secs: Option<u64>,
+    pub sync_in_progress: bool,
     pub credential_configured: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -63,6 +65,8 @@ pub struct CreateMailAccountRequest {
     pub enabled: bool,
     #[serde(default)]
     pub sync_enabled: bool,
+    #[serde(default)]
+    pub sync_interval_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -73,6 +77,7 @@ pub struct UpdateMailAccountRequest {
     pub smtp: Option<MailServerSettings>,
     pub enabled: Option<bool>,
     pub sync_enabled: Option<bool>,
+    pub sync_interval_secs: Option<Option<u64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -122,6 +127,7 @@ pub struct MailFolderResponse {
     pub role_source: MailFolderRoleSource,
     pub selectable: bool,
     pub sync_enabled: bool,
+    pub sync_in_progress: bool,
     pub attributes: Vec<String>,
     pub uid_validity: Option<u32>,
     pub uid_next: Option<u32>,

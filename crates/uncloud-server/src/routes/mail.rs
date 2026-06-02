@@ -12,7 +12,7 @@ use axum::{
     Json,
 };
 use bson::doc;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{self, oid::ObjectId};
 use serde::Deserialize;
@@ -61,6 +61,9 @@ const DEFAULT_MESSAGE_LIST_LIMIT: i64 = 100;
 const MAX_MESSAGE_LIST_LIMIT: i64 = 500;
 const SENT_COPY_DETECT_ATTEMPTS: usize = 3;
 const SENT_COPY_DETECT_DELAY: Duration = Duration::from_millis(750);
+const MIN_ACCOUNT_SYNC_INTERVAL_SECS: u64 = 60;
+const MAX_ACCOUNT_SYNC_INTERVAL_SECS: u64 = 7 * 24 * 60 * 60;
+const BACKGROUND_SYNC_TICK_SECS: u64 = 60;
 
 #[derive(Debug, Deserialize)]
 pub struct MailMessageListQuery {
@@ -138,7 +141,7 @@ fn server_to_response(input: &MailServerConfig) -> MailServerSettings {
     }
 }
 
-fn account_to_response(account: &MailAccount) -> MailAccountResponse {
+fn account_to_response(account: &MailAccount, sync_in_progress: bool) -> MailAccountResponse {
     MailAccountResponse {
         id: account.id.to_hex(),
         display_name: account.display_name.clone(),
@@ -147,6 +150,8 @@ fn account_to_response(account: &MailAccount) -> MailAccountResponse {
         smtp: server_to_response(&account.smtp),
         enabled: account.enabled,
         sync_enabled: account.sync_enabled,
+        sync_interval_secs: account.sync_interval_secs,
+        sync_in_progress,
         credential_configured: account.credential_configured || account.credential.is_some(),
         created_at: account.created_at.to_rfc3339(),
         updated_at: account.updated_at.to_rfc3339(),
@@ -195,7 +200,7 @@ fn folder_sync_completed(folder: &MailFolder) -> bool {
     lowest <= 1 && highest.saturating_add(1) >= uid_next
 }
 
-fn folder_to_response(folder: &MailFolder) -> MailFolderResponse {
+fn folder_to_response(folder: &MailFolder, sync_in_progress: bool) -> MailFolderResponse {
     MailFolderResponse {
         id: folder.id.to_hex(),
         account_id: folder.account_id.to_hex(),
@@ -207,6 +212,7 @@ fn folder_to_response(folder: &MailFolder) -> MailFolderResponse {
         role_source: folder.role_source,
         selectable: folder.selectable,
         sync_enabled: folder.sync_enabled,
+        sync_in_progress,
         attributes: folder.attributes.clone(),
         uid_validity: folder.uid_validity,
         uid_next: folder.uid_next,
@@ -393,6 +399,45 @@ fn sync_limit(input: Option<u32>) -> u32 {
     input
         .unwrap_or(DEFAULT_SYNC_LIMIT_PER_FOLDER)
         .clamp(1, MAX_SYNC_LIMIT_PER_FOLDER)
+}
+
+fn validate_account_sync_interval(input: Option<u64>) -> Result<Option<u64>> {
+    match input {
+        Some(value) => {
+            if value < MIN_ACCOUNT_SYNC_INTERVAL_SECS || value > MAX_ACCOUNT_SYNC_INTERVAL_SECS {
+                return Err(AppError::BadRequest(format!(
+                    "mail account sync interval must be between {} and {} seconds",
+                    MIN_ACCOUNT_SYNC_INTERVAL_SECS, MAX_ACCOUNT_SYNC_INTERVAL_SECS
+                )));
+            }
+            Ok(Some(value))
+        }
+        None => Ok(None),
+    }
+}
+
+fn effective_account_sync_interval_secs(account: &MailAccount, default_interval: u64) -> u64 {
+    account
+        .sync_interval_secs
+        .unwrap_or(default_interval)
+        .clamp(
+            MIN_ACCOUNT_SYNC_INTERVAL_SECS,
+            MAX_ACCOUNT_SYNC_INTERVAL_SECS,
+        )
+}
+
+fn account_due_for_scheduled_sync(
+    account: &MailAccount,
+    now: DateTime<Utc>,
+    default_interval: u64,
+) -> bool {
+    let interval = effective_account_sync_interval_secs(account, default_interval);
+    let last_attempt = account.last_sync_attempt_at.or(account.last_sync_at);
+    let Some(last_attempt) = last_attempt else {
+        return true;
+    };
+    now.signed_duration_since(last_attempt)
+        >= chrono::Duration::seconds(interval.min(i64::MAX as u64) as i64)
 }
 
 fn message_list_limit(input: Option<i64>) -> i64 {
@@ -596,7 +641,10 @@ pub async fn list_accounts(
         .await?;
     let mut out = Vec::new();
     while let Some(account) = cursor.try_next().await? {
-        out.push(account_to_response(&account));
+        out.push(account_to_response(
+            &account,
+            state.mail.is_account_syncing(account.id),
+        ));
     }
     Ok(Json(out))
 }
@@ -617,9 +665,11 @@ pub async fn create_account(
         smtp: validate_server(req.smtp)?,
         enabled: req.enabled,
         sync_enabled: req.sync_enabled,
+        sync_interval_secs: validate_account_sync_interval(req.sync_interval_secs)?,
         credential_configured: false,
         credential: None,
         mail_storage_id: None,
+        last_sync_attempt_at: None,
         last_sync_at: None,
         created_at: now,
         updated_at: now,
@@ -636,7 +686,13 @@ pub async fn create_account(
                 AppError::from(e)
             }
         })?;
-    Ok((StatusCode::CREATED, Json(account_to_response(&account))))
+    Ok((
+        StatusCode::CREATED,
+        Json(account_to_response(
+            &account,
+            state.mail.is_account_syncing(account.id),
+        )),
+    ))
 }
 
 pub async fn update_account(
@@ -650,6 +706,7 @@ pub async fn update_account(
     let _ = find_account(&state, user.id, id).await?;
 
     let mut set = doc! { "updated_at": bson::DateTime::from_chrono(Utc::now()) };
+    let mut unset = doc! {};
     if let Some(value) = req.display_name {
         set.insert("display_name", validate_label(&value, "display name")?);
     }
@@ -676,18 +733,32 @@ pub async fn update_account(
     if let Some(value) = req.sync_enabled {
         set.insert("sync_enabled", value);
     }
+    if let Some(value) = req.sync_interval_secs {
+        match validate_account_sync_interval(value)? {
+            Some(interval) => {
+                set.insert("sync_interval_secs", bson::Bson::Int64(interval as i64));
+            }
+            None => {
+                unset.insert("sync_interval_secs", "");
+            }
+        }
+    }
 
+    let update = if unset.is_empty() {
+        doc! { "$set": set }
+    } else {
+        doc! { "$set": set, "$unset": unset }
+    };
     state
         .db
         .collection::<MailAccount>(ACCOUNTS)
-        .update_one(
-            doc! { "_id": id, "owner_id": user.id },
-            doc! { "$set": set },
-        )
+        .update_one(doc! { "_id": id, "owner_id": user.id }, update)
         .await?;
 
+    let account = find_account(&state, user.id, id).await?;
     Ok(Json(account_to_response(
-        &find_account(&state, user.id, id).await?,
+        &account,
+        state.mail.is_account_syncing(account.id),
     )))
 }
 
@@ -1238,7 +1309,10 @@ pub async fn list_folders(
         .await?;
     let mut out = Vec::new();
     while let Some(folder) = cursor.try_next().await? {
-        out.push(folder_to_response(&folder));
+        out.push(folder_to_response(
+            &folder,
+            state.mail.is_account_syncing(folder.account_id),
+        ));
     }
     Ok(Json(out))
 }
@@ -1275,7 +1349,10 @@ pub async fn update_folder(
     }
 
     if set.is_empty() {
-        return Ok(Json(folder_to_response(&folder)));
+        return Ok(Json(folder_to_response(
+            &folder,
+            state.mail.is_account_syncing(folder.account_id),
+        )));
     }
 
     let now = Utc::now();
@@ -1290,7 +1367,10 @@ pub async fn update_folder(
         .await?;
 
     let updated = find_folder(&state, user.id, account_id, folder.id).await?;
-    Ok(Json(folder_to_response(&updated)))
+    Ok(Json(folder_to_response(
+        &updated,
+        state.mail.is_account_syncing(updated.account_id),
+    )))
 }
 
 async fn upsert_remote_folders(
@@ -1411,7 +1491,13 @@ pub async fn refresh_folders(
         .await?;
 
     let folders = upsert_remote_folders(&state, user.id, account_id, remote).await?;
-    Ok(Json(folders.iter().map(folder_to_response).collect()))
+    let sync_in_progress = state.mail.is_account_syncing(account_id);
+    Ok(Json(
+        folders
+            .iter()
+            .map(|folder| folder_to_response(folder, sync_in_progress))
+            .collect(),
+    ))
 }
 
 async fn store_message_summary(
@@ -1733,55 +1819,39 @@ async fn sync_one_folder(
     })
 }
 
-pub async fn sync_folder(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-    Path((account_id, folder_id)): Path<(String, String)>,
-    Json(req): Json<MailSyncRequest>,
-) -> Result<Json<MailFolderSyncResponse>> {
-    require_mail(&state)?;
-    let account_id = parse_oid(&account_id, "mail account id")?;
-    let folder_id = parse_oid(&folder_id, "mail folder id")?;
-    let account = find_account(&state, user.id, account_id).await?;
-    let folder = find_folder(&state, user.id, account_id, folder_id).await?;
-    let password = resolve_mail_password(&state, &account, req.password.as_deref())?;
-    Ok(Json(
-        sync_one_folder(
-            &state,
-            user.id,
-            &account,
-            &folder,
-            &password,
-            sync_limit(req.limit_per_folder),
+async fn sync_account_inner(
+    state: &AppState,
+    owner_id: ObjectId,
+    account: &MailAccount,
+    password: &str,
+    limit: u32,
+) -> Result<MailAccountSyncResponse> {
+    let started_at = Utc::now();
+    state
+        .db
+        .collection::<MailAccount>(ACCOUNTS)
+        .update_one(
+            doc! { "_id": account.id, "owner_id": owner_id },
+            doc! {
+                "$set": {
+                    "last_sync_attempt_at": bson::DateTime::from_chrono(started_at),
+                }
+            },
         )
-        .await?,
-    ))
-}
-
-pub async fn sync_account(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-    Path(account_id): Path<String>,
-    Json(req): Json<MailSyncRequest>,
-) -> Result<Json<MailAccountSyncResponse>> {
-    require_mail(&state)?;
-    let account_id = parse_oid(&account_id, "mail account id")?;
-    let account = find_account(&state, user.id, account_id).await?;
-    let password = resolve_mail_password(&state, &account, req.password.as_deref())?;
-    let limit = sync_limit(req.limit_per_folder);
+        .await?;
 
     let remote = state
         .mail
-        .list_imap_mailboxes(&account.imap, &password)
+        .list_imap_mailboxes(&account.imap, password)
         .await?;
-    let folders = upsert_remote_folders(&state, user.id, account_id, remote).await?;
+    let folders = upsert_remote_folders(state, owner_id, account.id, remote).await?;
 
     let mut folder_results = Vec::new();
     for folder in folders
         .iter()
         .filter(|folder| folder.selectable && folder.sync_enabled)
     {
-        match sync_one_folder(&state, user.id, &account, folder, &password, limit).await {
+        match sync_one_folder(state, owner_id, account, folder, password, limit).await {
             Ok(result) => folder_results.push(result),
             Err(err) => folder_results.push(MailFolderSyncResponse {
                 account_id: account.id.to_hex(),
@@ -1833,7 +1903,7 @@ pub async fn sync_account(
             .db
             .collection::<MailAccount>(ACCOUNTS)
             .update_one(
-                doc! { "_id": account.id, "owner_id": user.id },
+                doc! { "_id": account.id, "owner_id": owner_id },
                 doc! {
                     "$set": {
                         "last_sync_at": bson::DateTime::from_chrono(Utc::now()),
@@ -1844,7 +1914,7 @@ pub async fn sync_account(
             .await?;
     }
 
-    Ok(Json(MailAccountSyncResponse {
+    Ok(MailAccountSyncResponse {
         account_id: account.id.to_hex(),
         fetched_messages,
         stored_messages,
@@ -1853,7 +1923,208 @@ pub async fn sync_account(
         removed_messages,
         errors,
         folders: folder_results,
-    }))
+    })
+}
+
+fn account_sync_conflict() -> AppError {
+    AppError::Conflict("Mail sync already in progress for this account".to_string())
+}
+
+pub async fn sync_folder(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((account_id, folder_id)): Path<(String, String)>,
+    Json(req): Json<MailSyncRequest>,
+) -> Result<Json<MailFolderSyncResponse>> {
+    require_mail(&state)?;
+    let account_id = parse_oid(&account_id, "mail account id")?;
+    let folder_id = parse_oid(&folder_id, "mail folder id")?;
+    let account = find_account(&state, user.id, account_id).await?;
+    let folder = find_folder(&state, user.id, account_id, folder_id).await?;
+    let password = resolve_mail_password(&state, &account, req.password.as_deref())?;
+    let _guard = state
+        .mail
+        .try_begin_account_sync(account.id)
+        .ok_or_else(account_sync_conflict)?;
+    Ok(Json(
+        sync_one_folder(
+            &state,
+            user.id,
+            &account,
+            &folder,
+            &password,
+            sync_limit(req.limit_per_folder),
+        )
+        .await?,
+    ))
+}
+
+pub async fn sync_account(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(account_id): Path<String>,
+    Json(req): Json<MailSyncRequest>,
+) -> Result<Json<MailAccountSyncResponse>> {
+    require_mail(&state)?;
+    let account_id = parse_oid(&account_id, "mail account id")?;
+    let account = find_account(&state, user.id, account_id).await?;
+    let password = resolve_mail_password(&state, &account, req.password.as_deref())?;
+    let limit = sync_limit(req.limit_per_folder);
+    let _guard = state
+        .mail
+        .try_begin_account_sync(account.id)
+        .ok_or_else(account_sync_conflict)?;
+    Ok(Json(
+        sync_account_inner(&state, user.id, &account, &password, limit).await?,
+    ))
+}
+
+pub fn spawn_mail_sync_scheduler(state: Arc<AppState>) {
+    if !state.config.features.mail || !state.config.mail_sync.enabled {
+        tracing::debug!("mail background sync scheduler disabled");
+        return;
+    }
+
+    let default_interval = state.config.mail_sync.interval_secs.clamp(
+        MIN_ACCOUNT_SYNC_INTERVAL_SECS,
+        MAX_ACCOUNT_SYNC_INTERVAL_SECS,
+    );
+    let tick_interval = Duration::from_secs(BACKGROUND_SYNC_TICK_SECS);
+    let startup_delay = Duration::from_secs(state.config.mail_sync.startup_delay_secs);
+    tracing::info!(
+        "mail background sync scheduler enabled: default_interval={}s, tick={}s, startup_delay={}s",
+        default_interval,
+        tick_interval.as_secs(),
+        startup_delay.as_secs()
+    );
+
+    tokio::spawn(async move {
+        if !startup_delay.is_zero() {
+            sleep(startup_delay).await;
+        }
+
+        loop {
+            if let Err(err) = run_scheduled_mail_sync_tick(state.clone()).await {
+                tracing::warn!("mail background sync tick failed: {}", err);
+            }
+            sleep(tick_interval).await;
+        }
+    });
+}
+
+pub async fn run_scheduled_mail_sync_tick(state: Arc<AppState>) -> Result<usize> {
+    require_mail(&state)?;
+    let now = Utc::now();
+    let default_interval = state.config.mail_sync.interval_secs.clamp(
+        MIN_ACCOUNT_SYNC_INTERVAL_SECS,
+        MAX_ACCOUNT_SYNC_INTERVAL_SECS,
+    );
+    let limit = sync_limit(Some(state.config.mail_sync.limit_per_folder));
+    let mut cursor = state
+        .db
+        .collection::<MailAccount>(ACCOUNTS)
+        .find(doc! {
+            "enabled": true,
+            "sync_enabled": true,
+        })
+        .sort(doc! { "email_address": 1 })
+        .await?;
+    let mut synced_accounts = 0usize;
+
+    while let Some(account) = cursor.try_next().await? {
+        if !account_due_for_scheduled_sync(&account, now, default_interval) {
+            continue;
+        }
+        if account.credential.is_none() {
+            continue;
+        }
+        if !mail_sync_owner_enabled(&state, account.owner_id).await? {
+            continue;
+        }
+        let Some(_guard) = state.mail.try_begin_account_sync(account.id) else {
+            tracing::debug!(
+                account_id = %account.id,
+                email = %account.email_address,
+                "mail background sync skipped account already in progress"
+            );
+            continue;
+        };
+        let password = match resolve_mail_password(&state, &account, None) {
+            Ok(password) => password,
+            Err(err) => {
+                tracing::warn!(
+                    account_id = %account.id,
+                    email = %account.email_address,
+                    "mail background sync skipped account credential error: {}",
+                    err
+                );
+                continue;
+            }
+        };
+
+        match sync_account_inner(&state, account.owner_id, &account, &password, limit).await {
+            Ok(result) => {
+                synced_accounts += 1;
+                log_scheduled_sync_result(&account, &result);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    account_id = %account.id,
+                    email = %account.email_address,
+                    "mail background sync failed: {}",
+                    err
+                );
+            }
+        }
+    }
+
+    Ok(synced_accounts)
+}
+
+async fn mail_sync_owner_enabled(state: &AppState, owner_id: ObjectId) -> Result<bool> {
+    let user = state
+        .db
+        .collection::<User>("users")
+        .find_one(doc! { "_id": owner_id })
+        .await?;
+    let Some(user) = user else {
+        return Ok(false);
+    };
+    Ok(user.is_active()
+        && !user
+            .disabled_features
+            .iter()
+            .any(|feature| feature == "mail"))
+}
+
+fn log_scheduled_sync_result(account: &MailAccount, result: &MailAccountSyncResponse) {
+    let changes = result.new_messages + result.refreshed_messages + result.removed_messages;
+    if result.errors > 0 {
+        tracing::warn!(
+            account_id = %account.id,
+            email = %account.email_address,
+            errors = result.errors,
+            new_messages = result.new_messages,
+            refreshed_messages = result.refreshed_messages,
+            removed_messages = result.removed_messages,
+            "mail background sync completed with folder errors"
+        );
+    } else if changes > 0 {
+        tracing::info!(
+            account_id = %account.id,
+            email = %account.email_address,
+            new_messages = result.new_messages,
+            refreshed_messages = result.refreshed_messages,
+            removed_messages = result.removed_messages,
+            "mail background sync completed"
+        );
+    } else {
+        tracing::debug!(
+            account_id = %account.id,
+            email = %account.email_address,
+            "mail background sync completed with no changes"
+        );
+    }
 }
 
 pub async fn list_messages(
@@ -2647,7 +2918,7 @@ mod tests {
         let folder = test_folder("INBOX", MailFolderRoleSource::Inferred, None);
 
         assert_eq!(
-            folder_to_response(&folder).role,
+            folder_to_response(&folder, false).role,
             Some(MailFolderRole::Inbox)
         );
     }
@@ -2656,7 +2927,7 @@ mod tests {
     fn folder_response_preserves_user_cleared_role() {
         let folder = test_folder("INBOX", MailFolderRoleSource::User, None);
 
-        assert_eq!(folder_to_response(&folder).role, None);
+        assert_eq!(folder_to_response(&folder, false).role, None);
     }
 
     #[test]
@@ -2666,7 +2937,7 @@ mod tests {
         folder.lowest_synced_uid = Some(1);
         folder.highest_synced_uid = Some(11);
 
-        assert!(folder_to_response(&folder).sync_completed);
+        assert!(folder_to_response(&folder, false).sync_completed);
     }
 
     #[test]
@@ -2677,7 +2948,7 @@ mod tests {
         folder.lowest_synced_uid = None;
         folder.highest_synced_uid = None;
 
-        assert!(folder_to_response(&folder).sync_completed);
+        assert!(folder_to_response(&folder, false).sync_completed);
     }
 
     #[test]

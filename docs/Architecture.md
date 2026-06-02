@@ -651,6 +651,12 @@ features:
   finance: true
   mail: true                       # experimental IMAP/SMTP mail client foundation
 
+mail_sync:
+  enabled: true                    # background sync for enabled mail accounts with credentials
+  interval_secs: 300               # default per-account interval, overridable in Mail settings
+  startup_delay_secs: 60           # delay after server startup before the first tick
+  limit_per_folder: 50             # bounded UID window per folder per tick
+
 logging:
   # tracing_subscriber EnvFilter directive. RUST_LOG env var, when set, always overrides.
   # Default: `uncloud_server=info,tower_http=info` in release, debug in debug builds.

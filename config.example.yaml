@@ -112,6 +112,17 @@ features:
   finance: true
   mail: true
 
+# Background mail sync. Only enabled mail accounts with stored credentials and
+# per-account sync enabled are synced. Accounts can override interval_secs in
+# Mail account settings.
+mail_sync:
+  enabled: true
+  # Default scheduled sync interval, in seconds, for accounts without an
+  # explicit per-account override.
+  interval_secs: 300
+  startup_delay_secs: 60
+  limit_per_folder: 50
+
 # Server-side encrypted secrets. Mail credential storage requires a stable
 # 32-byte master key. Generate one with: openssl rand -base64 32
 secrets:

@@ -127,6 +127,7 @@ impl TestApp {
             logging: uncloud_server::config::LoggingConfig::default(),
             secrets: uncloud_server::config::SecretsConfig::default(),
             sync_audit: uncloud_server::config::SyncAuditConfig::default(),
+            mail_sync: uncloud_server::config::MailSyncConfig::default(),
             backup: uncloud_server::backup::config::BackupConfig::default(),
         };
 
@@ -342,6 +343,7 @@ impl BoundTestApp {
             logging: uncloud_server::config::LoggingConfig::default(),
             secrets: uncloud_server::config::SecretsConfig::default(),
             sync_audit: uncloud_server::config::SyncAuditConfig::default(),
+            mail_sync: uncloud_server::config::MailSyncConfig::default(),
             backup: uncloud_server::backup::config::BackupConfig::default(),
         };
 
