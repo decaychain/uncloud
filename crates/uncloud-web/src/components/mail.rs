@@ -18,6 +18,7 @@ use crate::hooks::{use_files, use_mail};
 const MAIL_MESSAGE_PAGE_SIZE: u32 = 50;
 const MAIL_BACKFILL_PAGE_SIZE: u32 = 50;
 const MAIL_STATUS_POLL_MS: u32 = 15_000;
+const MAIL_NOTICE_TOAST_TIMEOUT_MS: u32 = 6_000;
 const MAIL_MIN_SYNC_INTERVAL_MINUTES: u64 = 1;
 const MAIL_MAX_SYNC_INTERVAL_MINUTES: u64 = 7 * 24 * 60;
 
@@ -40,6 +41,7 @@ pub fn MailPage() -> Element {
     let mut move_target_folder = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
     let mut notice = use_signal(|| None::<String>);
+    let mut notice_auto_dismiss_token = use_signal(|| 0u64);
     let mut sync_status = use_signal(|| None::<String>);
     let mut show_setup = use_signal(|| false);
     let mut show_compose = use_signal(|| false);
@@ -93,6 +95,25 @@ pub fn MailPage() -> Element {
     let mut smtp_username = use_signal(String::new);
     let mut password = use_signal(String::new);
     let mut creating = use_signal(|| false);
+
+    use_effect(move || {
+        let Some(message) = notice() else {
+            return;
+        };
+        let token = *notice_auto_dismiss_token.peek() + 1;
+        notice_auto_dismiss_token.set(token);
+        spawn(async move {
+            gloo_timers::future::TimeoutFuture::new(MAIL_NOTICE_TOAST_TIMEOUT_MS).await;
+            let should_clear = {
+                let current_notice = notice.peek();
+                *notice_auto_dismiss_token.peek() == token
+                    && current_notice.as_ref() == Some(&message)
+            };
+            if should_clear {
+                notice.set(None);
+            }
+        });
+    });
 
     use_effect(move || {
         spawn(async move {
@@ -261,6 +282,17 @@ pub fn MailPage() -> Element {
                 None
             }
         });
+    let toast_stack_class = if sync_status_message.is_some() {
+        concat!(
+            "pointer-events-none fixed bottom-14 right-4 z-[60] flex ",
+            "w-[min(28rem,calc(100vw-2rem))] flex-col gap-2",
+        )
+    } else {
+        concat!(
+            "pointer-events-none fixed bottom-4 right-4 z-[60] flex ",
+            "w-[min(28rem,calc(100vw-2rem))] flex-col gap-2",
+        )
+    };
 
     let trigger_load_more_messages = move || {
         if *syncing.peek() || *loading_more_messages.peek() || *backfilling_messages.peek() {
@@ -489,21 +521,6 @@ pub fn MailPage() -> Element {
                         onclick: move |_| show_setup.set(true),
                         IconPlus { class: "w-4 h-4".to_string() }
                         span { "Add account" }
-                    }
-                }
-            }
-
-            if let Some(e) = error() {
-                div { class: "alert alert-error py-2 text-sm", "{e}" }
-            }
-            if let Some(message) = notice() {
-                div { class: "alert alert-info flex items-center justify-between gap-3 py-2 text-sm",
-                    span { class: "min-w-0 flex-1", "{message}" }
-                    button {
-                        class: "btn btn-ghost btn-xs h-7 min-h-7 w-7 p-0",
-                        title: "Dismiss",
-                        onclick: move |_| notice.set(None),
-                        IconX { class: "h-4 w-4".to_string() }
                     }
                 }
             }
@@ -2065,6 +2082,43 @@ pub fn MailPage() -> Element {
                                 }
                             }
                             div { class: "modal-backdrop", onclick: move |_| settings_folder.set(None) }
+                        }
+                    }
+                }
+            }
+
+            if error().is_some() || notice().is_some() {
+                div { class: "{toast_stack_class}",
+                    if let Some(e) = error() {
+                        div { class: "pointer-events-auto rounded-xl bg-error p-3 text-sm text-error-content shadow-xl",
+                            div { class: "flex items-start gap-3",
+                                div { class: "min-w-0 flex-1",
+                                    div { class: "font-medium", "Error" }
+                                    div { class: "mt-1 whitespace-pre-wrap break-words", "{e}" }
+                                }
+                                button {
+                                    class: "btn btn-ghost btn-xs h-7 min-h-7 w-7 shrink-0 p-0 text-error-content",
+                                    title: "Close",
+                                    onclick: move |_| error.set(None),
+                                    IconX { class: "h-4 w-4".to_string() }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(message) = notice() {
+                        div { class: "pointer-events-auto rounded-xl bg-info p-3 text-sm text-info-content shadow-xl",
+                            div { class: "flex items-start gap-3",
+                                div { class: "min-w-0 flex-1",
+                                    div { class: "font-medium", "Notice" }
+                                    div { class: "mt-1 whitespace-pre-wrap break-words", "{message}" }
+                                }
+                                button {
+                                    class: "btn btn-ghost btn-xs h-7 min-h-7 w-7 shrink-0 p-0 text-info-content",
+                                    title: "Close",
+                                    onclick: move |_| notice.set(None),
+                                    IconX { class: "h-4 w-4".to_string() }
+                                }
+                            }
                         }
                     }
                 }

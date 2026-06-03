@@ -136,6 +136,9 @@ the account's SMTP settings.
   account setup/settings, IMAP/SMTP tests, folder settings, manual
   account/folder sync, cached message list, reader pane, and basic message
   mutation/compose controls.
+- Mail notices and errors use a consistent bottom-right toast overlay. Errors
+  stay visible until dismissed; non-error notices auto-dismiss after a short
+  timeout and always remain manually dismissible.
 - Mongo indexes for account, identity, folder, message, and attachment metadata.
 - Server-wide `features.mail` toggle plus per-user opt-out through
   `disabled_features`.
@@ -230,8 +233,12 @@ Remaining credential work before scheduler/background sync:
 
 - IMAP STARTTLS and explicit plaintext support are wired.
 - SMTP connection/authentication testing with `lettre` is wired.
-- Normalize provider error mapping so bad credentials return a clear 400/401-ish
-  response while network/server failures remain operational errors.
+- IMAP/SMTP provider error mapping distinguishes user/provider rejections from
+  operational provider failures: bad credentials and unsupported provider
+  commands are client-facing errors, network/provider failures are 502, and
+  provider timeouts are 504.
+- Continue adding provider-specific behavior only where the generic IMAP/SMTP
+  path proves ambiguous against real providers.
 
 ### 3. Read-Only Message Sync
 
@@ -285,9 +292,16 @@ Remaining credential work before scheduler/background sync:
 
 - Mark read/unread, star/unstar, archive, move, and move-to-trash are wired as
   manual actions.
-- Reflect remote flag/folder changes discovered outside Uncloud locally.
-- Decide whether to support providers without `UID MOVE`, and if so, how to do
-  it without unsafe expunge behavior.
+- Sync reflects remote flag/folder changes discovered outside Uncloud locally
+  as refreshed or removed cached rows when the relevant UID ranges are fetched.
+- Flag mutations use provider-confirmed `UID STORE` results before updating the
+  local cache.
+- Move/archive/trash require provider support for `UID MOVE`; providers that do
+  not advertise `MOVE` return a clear unsupported-provider error. There is
+  deliberately no copy-plus-expunge fallback yet, because expunge semantics can
+  be risky across clients.
+- Repeated move/archive/trash requests targeting the current folder are treated
+  as successful no-ops.
 - Add permanent delete semantics for Trash after the folder role model has been
   tested against real providers.
 - Make mutations idempotent where possible and record failures clearly.
@@ -313,6 +327,8 @@ data before adding write actions:
 - Folder list, sync status, role labels, and per-folder settings.
 - Read-only message list.
 - Message reader with sanitized HTML and plain-text fallback.
+- Consistent bottom-right toast notifications for Mail errors and notices, with
+  sticky errors and auto-dismissing non-error notices.
 - After the first prototype lands, extract the Files copy/move destination
   picker into a shared component and reuse it for attachment saves so mail gets
   folder creation without duplicating picker logic.

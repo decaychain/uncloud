@@ -2,10 +2,12 @@ use std::{
     collections::HashSet,
     fmt,
     future::Future,
+    io,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
+use async_imap::error::Error as ImapError;
 use async_imap::types::{Capability, Flag};
 use async_imap::{Client, Session};
 use async_native_tls::TlsConnector;
@@ -425,7 +427,7 @@ where
 {
     timeout(MAIL_OP_TIMEOUT, future)
         .await
-        .map_err(|_| AppError::Internal(format!("{operation} timed out after 30s")))
+        .map_err(|_| AppError::ExternalTimeout(format!("{operation} timed out after 30s")))
 }
 
 async fn connect_imap_tcp(settings: &MailServerConfig) -> Result<TcpStream> {
@@ -434,7 +436,7 @@ async fn connect_imap_tcp(settings: &MailServerConfig) -> Result<TcpStream> {
         TcpStream::connect((settings.host.as_str(), settings.port)),
     )
     .await?
-    .map_err(|e| AppError::Internal(format!("IMAP TCP connection failed: {e}")))
+    .map_err(|e| map_io_provider_error(e, "IMAP TCP connection"))
 }
 
 async fn connect_imap_plain(settings: &MailServerConfig) -> Result<Client<TcpStream>> {
@@ -453,7 +455,11 @@ async fn connect_imap_tls(
         TlsConnector::new().connect(settings.host.as_str(), tcp),
     )
     .await?
-    .map_err(|e| AppError::Internal(format!("IMAP TLS handshake failed: {e}")))?;
+    .map_err(|e| {
+        AppError::ExternalService(format!(
+            "IMAP TLS handshake failed with the mail provider: {e}"
+        ))
+    })?;
     let mut client = Client::new(tls);
     if read_greeting {
         read_imap_greeting(&mut client).await?;
@@ -470,14 +476,18 @@ async fn connect_imap_starttls(
         client.run_command_and_check_ok("STARTTLS", None),
     )
     .await?
-    .map_err(|e| AppError::BadRequest(format!("IMAP STARTTLS failed: {e}")))?;
+    .map_err(|e| map_imap_command_error(e, "IMAP STARTTLS"))?;
     let tcp = client.into_inner();
     let tls = imap_timeout(
         "IMAP STARTTLS handshake",
         TlsConnector::new().connect(settings.host.as_str(), tcp),
     )
     .await?
-    .map_err(|e| AppError::Internal(format!("IMAP STARTTLS handshake failed: {e}")))?;
+    .map_err(|e| {
+        AppError::ExternalService(format!(
+            "IMAP STARTTLS handshake failed with the mail provider: {e}"
+        ))
+    })?;
     Ok(Client::new(tls))
 }
 
@@ -487,7 +497,7 @@ where
 {
     imap_timeout("IMAP greeting", client.read_response())
         .await?
-        .map_err(|e| AppError::Internal(format!("IMAP greeting failed: {e}")))?;
+        .map_err(|e| map_io_provider_error(e, "IMAP greeting"))?;
     Ok(())
 }
 
@@ -501,7 +511,47 @@ where
 {
     imap_timeout("IMAP login", client.login(&settings.username, password))
         .await?
-        .map_err(|(e, _)| AppError::BadRequest(format!("IMAP login failed: {e}")))
+        .map_err(|(e, _)| map_imap_login_error(e))
+}
+
+fn map_io_provider_error(err: io::Error, operation: &str) -> AppError {
+    AppError::ExternalService(format!(
+        "{operation} failed because the mail provider connection failed: {err}"
+    ))
+}
+
+fn map_imap_login_error(err: ImapError) -> AppError {
+    match err {
+        ImapError::Bad(message) | ImapError::No(message) => AppError::BadRequest(format!(
+            "IMAP authentication failed: provider rejected the username or password: {message}"
+        )),
+        other => map_imap_command_error(other, "IMAP login"),
+    }
+}
+
+fn map_imap_command_error(err: ImapError, operation: &str) -> AppError {
+    match err {
+        ImapError::Bad(message) => AppError::BadRequest(format!(
+            "{operation} rejected by the mail provider with BAD response: {message}"
+        )),
+        ImapError::No(message) => AppError::BadRequest(format!(
+            "{operation} rejected by the mail provider with NO response: {message}"
+        )),
+        ImapError::Validate(err) => AppError::BadRequest(format!(
+            "{operation} contains invalid IMAP input: {err}"
+        )),
+        ImapError::Io(err) => map_io_provider_error(err, operation),
+        ImapError::ConnectionLost => AppError::ExternalService(format!(
+            "{operation} failed because the mail provider connection was lost"
+        )),
+        ImapError::Parse(err) => AppError::ExternalService(format!(
+            "{operation} failed because the mail provider returned an unexpected response: {err}"
+        )),
+        ImapError::Append => AppError::ExternalService(format!(
+            "{operation} failed while appending the message to the mail provider"
+        )),
+        other => AppError::ExternalService(format!("{operation} failed: {other}")),
+    }
 }
 
 async fn test_imap_client<T>(
@@ -515,7 +565,7 @@ where
     let mut session = login_imap_client(client, settings, password).await?;
     let capabilities = imap_timeout("IMAP CAPABILITY", session.capabilities())
         .await?
-        .map_err(|e| AppError::Internal(format!("IMAP CAPABILITY failed: {e}")))?
+        .map_err(|e| map_imap_command_error(e, "IMAP CAPABILITY"))?
         .iter()
         .map(capability_name)
         .collect();
@@ -535,11 +585,11 @@ where
 
     let names_stream = imap_timeout("IMAP LIST", session.list(None, Some("*")))
         .await?
-        .map_err(|e| AppError::Internal(format!("IMAP LIST failed: {e}")))?
+        .map_err(|e| map_imap_command_error(e, "IMAP LIST"))?
         .try_collect();
     let names: Vec<_> = imap_timeout("IMAP LIST read", names_stream)
         .await?
-        .map_err(|e| AppError::Internal(format!("IMAP LIST read failed: {e}")))?;
+        .map_err(|e| map_imap_command_error(e, "IMAP LIST read"))?;
 
     let mut out = Vec::with_capacity(names.len());
     for name in names {
@@ -581,7 +631,7 @@ where
     let mut session = login_imap_client(client, settings, password).await?;
     let mailbox = imap_timeout("IMAP EXAMINE", session.examine(folder_path))
         .await?
-        .map_err(|e| AppError::Internal(format!("IMAP EXAMINE failed: {e}")))?;
+        .map_err(|e| map_imap_command_error(e, "IMAP EXAMINE"))?;
     if mailbox.exists > 0 && (mailbox.uid_next.is_none() || mailbox.uid_validity.is_none()) {
         let _ = session.logout().await;
         return Err(AppError::Internal(
@@ -639,11 +689,11 @@ where
             ),
         )
         .await?
-        .map_err(|e| AppError::Internal(format!("IMAP UID FETCH failed: {e}")))?
+        .map_err(|e| map_imap_command_error(e, "IMAP UID FETCH"))?
         .try_collect();
         let fetches: Vec<_> = imap_timeout("IMAP UID FETCH read", fetch_stream)
             .await?
-            .map_err(|e| AppError::Internal(format!("IMAP UID FETCH read failed: {e}")))?;
+            .map_err(|e| map_imap_command_error(e, "IMAP UID FETCH read"))?;
         fetches.iter().filter_map(remote_message_summary).collect()
     };
 
@@ -688,18 +738,18 @@ where
     let mut session = login_imap_client(client, settings, password).await?;
     imap_timeout("IMAP EXAMINE", session.examine(folder_path))
         .await?
-        .map_err(|e| AppError::Internal(format!("IMAP EXAMINE failed: {e}")))?;
+        .map_err(|e| map_imap_command_error(e, "IMAP EXAMINE"))?;
 
     let fetch_stream = imap_timeout(
         "IMAP UID FETCH body",
         session.uid_fetch(uid.to_string(), "(UID BODY.PEEK[])"),
     )
     .await?
-    .map_err(|e| AppError::Internal(format!("IMAP UID FETCH body failed: {e}")))?
+    .map_err(|e| map_imap_command_error(e, "IMAP UID FETCH body"))?
     .try_collect();
     let fetches: Vec<_> = imap_timeout("IMAP UID FETCH body read", fetch_stream)
         .await?
-        .map_err(|e| AppError::Internal(format!("IMAP UID FETCH body read failed: {e}")))?;
+        .map_err(|e| map_imap_command_error(e, "IMAP UID FETCH body read"))?;
     let body = fetches
         .iter()
         .find_map(|fetch| fetch.body().map(|body| body.to_vec()))
@@ -723,18 +773,18 @@ where
     let mut session = login_imap_client(client, settings, password).await?;
     imap_timeout("IMAP SELECT", session.select(folder_path))
         .await?
-        .map_err(|e| AppError::Internal(format!("IMAP SELECT failed: {e}")))?;
+        .map_err(|e| map_imap_command_error(e, "IMAP SELECT"))?;
 
     {
         let query = flag_store_query(flag, enabled);
         let updates_stream =
             imap_timeout("IMAP UID STORE", session.uid_store(uid.to_string(), query))
                 .await?
-                .map_err(|e| AppError::BadRequest(format!("IMAP UID STORE failed: {e}")))?
+                .map_err(|e| map_imap_command_error(e, "IMAP UID STORE"))?
                 .try_collect();
         let _updates: Vec<_> = imap_timeout("IMAP UID STORE read", updates_stream)
             .await?
-            .map_err(|e| AppError::Internal(format!("IMAP UID STORE read failed: {e}")))?;
+            .map_err(|e| map_imap_command_error(e, "IMAP UID STORE read"))?;
     }
 
     let flags = fetch_imap_message_flags(&mut session, uid).await?;
@@ -754,15 +804,23 @@ where
     T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
 {
     let mut session = login_imap_client(client, settings, password).await?;
+    let capabilities = imap_timeout("IMAP CAPABILITY", session.capabilities())
+        .await?
+        .map_err(|e| map_imap_command_error(e, "IMAP CAPABILITY"))?;
+    if !capabilities.has_str("MOVE") {
+        let _ = session.logout().await;
+        return Err(AppError::BadRequest(mail_move_unsupported_message()));
+    }
+
     imap_timeout("IMAP SELECT", session.select(source_folder_path))
         .await?
-        .map_err(|e| AppError::Internal(format!("IMAP SELECT failed: {e}")))?;
+        .map_err(|e| map_imap_command_error(e, "IMAP SELECT"))?;
     imap_timeout(
         "IMAP UID MOVE",
         session.uid_mv(uid.to_string(), destination_folder_path),
     )
     .await?
-    .map_err(|e| AppError::BadRequest(format!("IMAP UID MOVE failed: {e}")))?;
+    .map_err(|e| map_imap_command_error(e, "IMAP UID MOVE"))?;
     let _ = session.logout().await;
     Ok(())
 }
@@ -776,11 +834,11 @@ where
         session.uid_fetch(uid.to_string(), "(UID FLAGS)"),
     )
     .await?
-    .map_err(|e| AppError::Internal(format!("IMAP UID FETCH flags failed: {e}")))?
+    .map_err(|e| map_imap_command_error(e, "IMAP UID FETCH flags"))?
     .try_collect();
     let fetches: Vec<_> = imap_timeout("IMAP UID FETCH flags read", fetch_stream)
         .await?
-        .map_err(|e| AppError::Internal(format!("IMAP UID FETCH flags read failed: {e}")))?;
+        .map_err(|e| map_imap_command_error(e, "IMAP UID FETCH flags read"))?;
     fetches
         .iter()
         .find(|fetch| fetch.uid == Some(uid))
@@ -801,14 +859,14 @@ where
     let mut session = login_imap_client(client, settings, password).await?;
     imap_timeout("IMAP EXAMINE", session.examine(folder_path))
         .await?
-        .map_err(|e| AppError::Internal(format!("IMAP EXAMINE failed: {e}")))?;
+        .map_err(|e| map_imap_command_error(e, "IMAP EXAMINE"))?;
     let query = format!(
         "HEADER Message-ID {}",
         quoted_imap_search_string(message_id)?
     );
     let uids = imap_timeout("IMAP UID SEARCH", session.uid_search(query))
         .await?
-        .map_err(|e| AppError::Internal(format!("IMAP UID SEARCH failed: {e}")))?;
+        .map_err(|e| map_imap_command_error(e, "IMAP UID SEARCH"))?;
     let _ = session.logout().await;
     Ok(!uids.is_empty())
 }
@@ -829,7 +887,7 @@ where
         session.append(folder_path, Some("(\\Seen)"), None, raw_message),
     )
     .await?
-    .map_err(|e| AppError::Internal(format!("IMAP APPEND failed: {e}")))?;
+    .map_err(|e| map_imap_command_error(e, "IMAP APPEND"))?;
     let _ = session.logout().await;
     Ok(())
 }
@@ -843,8 +901,14 @@ fn map_smtp_error(err: lettre::transport::smtp::Error, operation: &str) -> AppEr
     if err.is_client() || err.is_response() || err.is_permanent() {
         AppError::BadRequest(format!("{operation} failed: {err}"))
     } else {
-        AppError::Internal(format!("{operation} failed: {err}"))
+        AppError::ExternalService(format!("{operation} failed with the mail provider: {err}"))
     }
+}
+
+fn mail_move_unsupported_message() -> String {
+    "IMAP server does not advertise MOVE; move, archive, and trash actions are not supported for \
+     this account yet"
+        .to_string()
 }
 
 fn build_plain_text_message(message: RemoteOutgoingMessage) -> Result<Message> {
@@ -1486,11 +1550,14 @@ fn normalize_plain_text(input: &str) -> String {
 mod tests {
     use super::{
         bodystructure_has_attachment, build_plain_text_message, display_name, flag_store_query,
-        latest_cached_refresh_plan, mailbox_from_address, next_uid_sync_plan, parent_path,
+        latest_cached_refresh_plan, mail_move_unsupported_message, mailbox_from_address,
+        map_imap_command_error, map_imap_login_error, next_uid_sync_plan, parent_path,
         parse_message_body, quoted_imap_search_string, sync_completed, sync_fetch_plans,
-        updated_uid_cursors, RemoteMailAddress, RemoteMessageFlag, RemoteOutgoingMessage,
-        MailService, UidSyncDirection, UidSyncPlan,
+        updated_uid_cursors, MailService, RemoteMailAddress, RemoteMessageFlag,
+        RemoteOutgoingMessage, UidSyncDirection, UidSyncPlan,
     };
+    use crate::error::AppError;
+    use async_imap::error::Error as ImapError;
     use imap_proto::types::{
         BodyContentCommon, BodyContentSinglePart, BodyStructure, ContentDisposition,
         ContentEncoding, ContentType,
@@ -1548,6 +1615,40 @@ mod tests {
             flag_store_query(RemoteMessageFlag::Flagged, false),
             "-FLAGS.SILENT (\\Flagged)"
         );
+    }
+
+    #[test]
+    fn imap_login_rejection_is_client_facing() {
+        let err = map_imap_login_error(ImapError::No("authentication failed".to_string()));
+
+        match err {
+            AppError::BadRequest(message) => {
+                assert!(message.contains("authentication failed"));
+                assert!(message.contains("username or password"));
+            }
+            other => panic!("expected bad request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn imap_connection_loss_is_external_service_error() {
+        let err = map_imap_command_error(ImapError::ConnectionLost, "IMAP UID FETCH");
+
+        match err {
+            AppError::ExternalService(message) => {
+                assert!(message.contains("IMAP UID FETCH"));
+                assert!(message.contains("connection was lost"));
+            }
+            other => panic!("expected external service error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn imap_move_unsupported_message_is_explicit() {
+        let message = mail_move_unsupported_message();
+
+        assert!(message.contains("does not advertise MOVE"));
+        assert!(message.contains("not supported"));
     }
 
     #[test]

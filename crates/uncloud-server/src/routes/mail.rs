@@ -2782,9 +2782,12 @@ pub async fn mutate_message(
             let destination =
                 mutation_destination_folder(&state, user.id, account.id, &req).await?;
             if destination.id == folder.id {
-                return Err(AppError::BadRequest(
-                    "message is already in the target folder".into(),
-                ));
+                return Ok(Json(MailMessageMutationResponse {
+                    message: Some(message_to_response(&message)),
+                    removed_from_folder: false,
+                    destination_folder_id: Some(destination.id.to_hex()),
+                    destination_folder_path: Some(destination.path),
+                }));
             }
 
             state
