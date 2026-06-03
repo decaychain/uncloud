@@ -30,6 +30,16 @@ pub enum MailFolderRoleSource {
     User,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MailComposeMode {
+    #[default]
+    New,
+    Reply,
+    ReplyAll,
+    Forward,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MailServerSettings {
     pub host: String,
@@ -168,6 +178,8 @@ pub struct MailMessageSummaryResponse {
     pub uid: u32,
     pub message_id: Option<String>,
     pub thread_id: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
     pub subject: Option<String>,
     pub from: Vec<MailAddressDto>,
     pub to: Vec<MailAddressDto>,
@@ -226,6 +238,8 @@ pub struct MailMessageMutationResponse {
 pub struct SendMailMessageRequest {
     #[serde(default)]
     pub identity_id: Option<String>,
+    #[serde(default)]
+    pub draft_id: Option<String>,
     pub to: Vec<MailAddressDto>,
     #[serde(default)]
     pub cc: Vec<MailAddressDto>,
@@ -233,6 +247,52 @@ pub struct SendMailMessageRequest {
     pub bcc: Vec<MailAddressDto>,
     pub subject: String,
     pub body_text: String,
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    #[serde(default)]
+    pub references: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailDraftResponse {
+    pub id: String,
+    pub account_id: String,
+    pub identity_id: Option<String>,
+    pub mode: MailComposeMode,
+    pub source_message_id: Option<String>,
+    pub to: Vec<MailAddressDto>,
+    pub cc: Vec<MailAddressDto>,
+    pub bcc: Vec<MailAddressDto>,
+    pub subject: String,
+    pub body_text: String,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct UpsertMailDraftRequest {
+    #[serde(default)]
+    pub identity_id: Option<String>,
+    #[serde(default)]
+    pub mode: MailComposeMode,
+    #[serde(default)]
+    pub source_message_id: Option<String>,
+    #[serde(default)]
+    pub to: Vec<MailAddressDto>,
+    #[serde(default)]
+    pub cc: Vec<MailAddressDto>,
+    #[serde(default)]
+    pub bcc: Vec<MailAddressDto>,
+    #[serde(default)]
+    pub subject: String,
+    #[serde(default)]
+    pub body_text: String,
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    #[serde(default)]
+    pub references: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

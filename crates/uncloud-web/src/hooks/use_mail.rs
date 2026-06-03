@@ -1,15 +1,16 @@
 //! HTTP wrappers for the experimental mail client surface.
 
+use uncloud_common::FileResponse;
 use uncloud_common::{
     CreateMailAccountRequest, MailAccountResponse, MailAccountSyncResponse,
-    MailConnectionTestResponse, MailCredentialStatusResponse, MailFolderResponse,
-    MailFolderSyncResponse, MailIdentityResponse, MailMessageDetailResponse,
+    MailConnectionTestResponse, MailCredentialStatusResponse, MailDraftResponse,
+    MailFolderResponse, MailFolderSyncResponse, MailIdentityResponse, MailMessageDetailResponse,
     MailMessageListResponse, MailMessageMutationAction, MailMessageMutationRequest,
-    MailMessageMutationResponse, MailPasswordAuthRequest, MailSyncRequest, SendMailMessageRequest,
-    SaveMailAttachmentRequest, SaveMailAttachmentResponse, SendMailMessageResponse,
-    SetMailCredentialRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
+    MailMessageMutationResponse, MailPasswordAuthRequest, MailSyncRequest,
+    SaveMailAttachmentRequest, SaveMailAttachmentResponse, SendMailMessageRequest,
+    SendMailMessageResponse, SetMailCredentialRequest, UpdateMailAccountRequest,
+    UpdateMailFolderRequest, UpsertMailDraftRequest,
 };
-use uncloud_common::FileResponse;
 
 use super::api;
 
@@ -118,6 +119,70 @@ pub async fn send_message(
         r.json::<SendMailMessageResponse>()
             .await
             .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn list_drafts(account_id: &str) -> Result<Vec<MailDraftResponse>, String> {
+    let r = api::get(&format!("/mail/accounts/{account_id}/drafts"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<Vec<MailDraftResponse>>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn create_draft(
+    account_id: &str,
+    req: &UpsertMailDraftRequest,
+) -> Result<MailDraftResponse, String> {
+    let r = api::post(&format!("/mail/accounts/{account_id}/drafts"))
+        .json(req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() || r.status() == 201 {
+        r.json::<MailDraftResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn update_draft(
+    draft_id: &str,
+    req: &UpsertMailDraftRequest,
+) -> Result<MailDraftResponse, String> {
+    let r = api::put(&format!("/mail/drafts/{draft_id}"))
+        .json(req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<MailDraftResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn delete_draft(draft_id: &str) -> Result<(), String> {
+    let r = api::delete(&format!("/mail/drafts/{draft_id}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() || r.status() == 204 {
+        Ok(())
     } else {
         Err(extract_error(r).await)
     }
@@ -262,10 +327,7 @@ pub async fn list_messages(
         path.push_str("&cursor=");
         path.push_str(cursor);
     }
-    let r = api::get(&path)
-    .send()
-    .await
-    .map_err(|e| e.to_string())?;
+    let r = api::get(&path).send().await.map_err(|e| e.to_string())?;
     if r.ok() {
         r.json::<MailMessageListResponse>()
             .await

@@ -2,7 +2,7 @@ use bson::serde_helpers::chrono_datetime_as_bson_datetime;
 use chrono::{DateTime, Utc};
 use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
-use uncloud_common::{MailFolderRole, MailFolderRoleSource, MailSecurity};
+use uncloud_common::{MailComposeMode, MailFolderRole, MailFolderRoleSource, MailSecurity};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MailServerConfig {
@@ -206,6 +206,36 @@ pub struct MailAttachment {
     pub storage_path: Option<String>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MailDraft {
+    #[serde(rename = "_id")]
+    pub id: ObjectId,
+    pub owner_id: ObjectId,
+    pub account_id: ObjectId,
+    #[serde(default)]
+    pub identity_id: Option<ObjectId>,
+    #[serde(default)]
+    pub mode: MailComposeMode,
+    #[serde(default)]
+    pub source_message_id: Option<ObjectId>,
+    #[serde(default)]
+    pub to: Vec<MailAddress>,
+    #[serde(default)]
+    pub cc: Vec<MailAddress>,
+    #[serde(default)]
+    pub bcc: Vec<MailAddress>,
+    pub subject: String,
+    pub body_text: String,
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    #[serde(default)]
+    pub references: Vec<String>,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
+    pub updated_at: DateTime<Utc>,
 }
 
 fn default_true() -> bool {

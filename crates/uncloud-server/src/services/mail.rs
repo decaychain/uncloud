@@ -19,7 +19,13 @@ use lettre::transport::smtp::{
     client::{Tls, TlsParameters},
     response::Response,
 };
-use lettre::{message::Mailbox, AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+use lettre::{
+    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+    message::{
+        Mailbox,
+        header::{HeaderName, HeaderValue},
+    },
+};
 use mail_parser::{MessageParser, MimeHeaders, PartType};
 use mongodb::bson::oid::ObjectId;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -537,9 +543,9 @@ fn map_imap_command_error(err: ImapError, operation: &str) -> AppError {
         ImapError::No(message) => AppError::BadRequest(format!(
             "{operation} rejected by the mail provider with NO response: {message}"
         )),
-        ImapError::Validate(err) => AppError::BadRequest(format!(
-            "{operation} contains invalid IMAP input: {err}"
-        )),
+        ImapError::Validate(err) => {
+            AppError::BadRequest(format!("{operation} contains invalid IMAP input: {err}"))
+        }
         ImapError::Io(err) => map_io_provider_error(err, operation),
         ImapError::ConnectionLost => AppError::ExternalService(format!(
             "{operation} failed because the mail provider connection was lost"
@@ -929,10 +935,49 @@ fn build_plain_text_message(message: RemoteOutgoingMessage) -> Result<Message> {
     for recipient in message.bcc {
         builder = builder.bcc(mailbox_from_address(&recipient)?);
     }
+    if let Some(in_reply_to) = clean_message_header_value(message.in_reply_to.as_deref())? {
+        builder = builder.raw_header(HeaderValue::new(
+            HeaderName::new_from_ascii_str("In-Reply-To"),
+            in_reply_to,
+        ));
+    }
+    let references = clean_references_header_value(&message.references)?;
+    if let Some(references) = references {
+        builder = builder.raw_header(HeaderValue::new(
+            HeaderName::new_from_ascii_str("References"),
+            references,
+        ));
+    }
 
     builder
         .body(message.body_text)
         .map_err(|e| AppError::BadRequest(format!("mail message could not be built: {e}")))
+}
+
+fn clean_message_header_value(value: Option<&str>) -> Result<Option<String>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.contains('\r') || value.contains('\n') {
+        return Err(AppError::BadRequest(
+            "mail message header values cannot contain line breaks".into(),
+        ));
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn clean_references_header_value(values: &[String]) -> Result<Option<String>> {
+    let mut out = Vec::new();
+    for value in values {
+        if let Some(value) = clean_message_header_value(Some(value))? {
+            out.push(value);
+        }
+    }
+    if out.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(out.join(" ")))
+    }
 }
 
 fn mailbox_from_address(address: &RemoteMailAddress) -> Result<Mailbox> {
@@ -1035,6 +1080,8 @@ pub struct RemoteOutgoingMessage {
     pub bcc: Vec<RemoteMailAddress>,
     pub subject: String,
     pub body_text: String,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1388,17 +1435,17 @@ fn body_common_has_attachment(common: &BodyContentCommon<'_>) -> bool {
 fn body_params_has_key(params: &BodyParams<'_>, key: &str) -> bool {
     params
         .as_ref()
-        .map(|params| params.iter().any(|(name, _)| name.eq_ignore_ascii_case(key)))
+        .map(|params| {
+            params
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(key))
+        })
         .unwrap_or(false)
 }
 
 fn decode_bytes(bytes: &[u8]) -> Option<String> {
     let value = String::from_utf8_lossy(bytes).trim().to_string();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn parse_envelope_date(bytes: &[u8]) -> Option<DateTime<Utc>> {
@@ -1549,12 +1596,12 @@ fn normalize_plain_text(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        bodystructure_has_attachment, build_plain_text_message, display_name, flag_store_query,
-        latest_cached_refresh_plan, mail_move_unsupported_message, mailbox_from_address,
-        map_imap_command_error, map_imap_login_error, next_uid_sync_plan, parent_path,
-        parse_message_body, quoted_imap_search_string, sync_completed, sync_fetch_plans,
-        updated_uid_cursors, MailService, RemoteMailAddress, RemoteMessageFlag,
-        RemoteOutgoingMessage, UidSyncDirection, UidSyncPlan,
+        MailService, RemoteMailAddress, RemoteMessageFlag, RemoteOutgoingMessage, UidSyncDirection,
+        UidSyncPlan, bodystructure_has_attachment, build_plain_text_message, display_name,
+        flag_store_query, latest_cached_refresh_plan, mail_move_unsupported_message,
+        mailbox_from_address, map_imap_command_error, map_imap_login_error, next_uid_sync_plan,
+        parent_path, parse_message_body, quoted_imap_search_string, sync_completed,
+        sync_fetch_plans, updated_uid_cursors,
     };
     use crate::error::AppError;
     use async_imap::error::Error as ImapError;
@@ -1750,6 +1797,8 @@ mod tests {
             bcc: Vec::new(),
             subject: "Test".to_string(),
             body_text: "Body".to_string(),
+            in_reply_to: None,
+            references: Vec::new(),
         })
         .unwrap_err();
 
@@ -1776,12 +1825,44 @@ mod tests {
             }],
             subject: "Test".to_string(),
             body_text: "Body".to_string(),
+            in_reply_to: None,
+            references: Vec::new(),
         })
         .unwrap();
         let formatted = String::from_utf8(message.formatted()).unwrap();
 
         assert!(!formatted.contains("Bcc:"));
         assert!(!formatted.contains("hidden@example.com"));
+    }
+
+    #[test]
+    fn build_plain_text_message_includes_reply_chain_headers() {
+        let message = build_plain_text_message(RemoteOutgoingMessage {
+            message_id: "<test@uncloud.local>".to_string(),
+            from: RemoteMailAddress {
+                name: Some("Sender".to_string()),
+                address: "sender@example.com".to_string(),
+            },
+            reply_to: None,
+            to: vec![RemoteMailAddress {
+                name: None,
+                address: "visible@example.com".to_string(),
+            }],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Re: Test".to_string(),
+            body_text: "Body".to_string(),
+            in_reply_to: Some("<original@example.com>".to_string()),
+            references: vec![
+                "<root@example.com>".to_string(),
+                "<original@example.com>".to_string(),
+            ],
+        })
+        .unwrap();
+        let formatted = String::from_utf8(message.formatted()).unwrap();
+
+        assert!(formatted.contains("In-Reply-To: <original@example.com>"));
+        assert!(formatted.contains("References: <root@example.com> <original@example.com>"));
     }
 
     #[test]

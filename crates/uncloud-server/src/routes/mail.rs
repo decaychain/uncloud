@@ -5,11 +5,11 @@ use std::{
 };
 
 use axum::{
+    Json,
     body::Body,
     extract::{Path, Query, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::Response,
-    Json,
 };
 use bson::doc;
 use chrono::{DateTime, Utc};
@@ -21,40 +21,40 @@ use tokio::time::sleep;
 use tokio_util::io::ReaderStream;
 use uncloud_common::{
     CreateMailAccountRequest, CreateMailIdentityRequest, MailAccountResponse,
-    MailAccountSyncResponse, MailAddressDto, MailAttachmentResponse, MailConnectionTestResponse,
-    MailCredentialStatusResponse, MailFolderResponse, MailFolderRole, MailFolderRoleSource,
-    MailFolderSyncResponse, MailIdentityResponse, MailMessageDetailResponse,
-    MailMessageListResponse, MailMessageMutationAction, MailMessageMutationRequest,
-    MailMessageMutationResponse, MailMessageSummaryResponse, MailPasswordAuthRequest,
-    MailSentCopyStatus, MailServerSettings, MailSyncRequest, SaveMailAttachmentRequest,
-    SaveMailAttachmentResponse, SendMailMessageRequest, SendMailMessageResponse,
-    SetMailCredentialRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
-    UpdateMailIdentityRequest,
+    MailAccountSyncResponse, MailAddressDto, MailAttachmentResponse, MailComposeMode,
+    MailConnectionTestResponse, MailCredentialStatusResponse, MailDraftResponse,
+    MailFolderResponse, MailFolderRole, MailFolderRoleSource, MailFolderSyncResponse,
+    MailIdentityResponse, MailMessageDetailResponse, MailMessageListResponse,
+    MailMessageMutationAction, MailMessageMutationRequest, MailMessageMutationResponse,
+    MailMessageSummaryResponse, MailPasswordAuthRequest, MailSentCopyStatus, MailServerSettings,
+    MailSyncRequest, SaveMailAttachmentRequest, SaveMailAttachmentResponse, SendMailMessageRequest,
+    SendMailMessageResponse, SetMailCredentialRequest, UpdateMailAccountRequest,
+    UpdateMailFolderRequest, UpdateMailIdentityRequest, UpsertMailDraftRequest,
 };
 
+use crate::AppState;
 use crate::error::{AppError, Result};
 use crate::middleware::{AuthUser, RequestMeta};
 use crate::models::{
-    File, Folder, MailAccount, MailAddress, MailAttachment, MailFolder, MailIdentity, MailMessage,
-    MailServerConfig,
-    User,
+    File, Folder, MailAccount, MailAddress, MailAttachment, MailDraft, MailFolder, MailIdentity,
+    MailMessage, MailServerConfig, User,
 };
-use crate::routes::apps::{deliver_webhooks, EVENT_FILE_CREATED};
+use crate::routes::apps::{EVENT_FILE_CREATED, deliver_webhooks};
 use crate::routes::files::{check_name_conflict, file_to_response, resolve_storage_path};
+use crate::services::SecretCipher;
 use crate::services::mail::{
     RemoteMailAddress, RemoteMailbox, RemoteMessageBody, RemoteMessageFlag, RemoteMessageSummary,
     RemoteOutgoingMessage, RemoteUidRange,
 };
-use crate::services::mail_blob::{read_cached_message_body, store_message_body, StoredMailBody};
+use crate::services::mail_blob::{StoredMailBody, read_cached_message_body, store_message_body};
 use crate::services::sharing::check_folder_access;
-use crate::services::SecretCipher;
-use crate::AppState;
 
 const ACCOUNTS: &str = "mail_accounts";
 const IDENTITIES: &str = "mail_identities";
 const FOLDERS: &str = "mail_folders";
 const MESSAGES: &str = "mail_messages";
 const ATTACHMENTS: &str = "mail_attachments";
+const DRAFTS: &str = "mail_drafts";
 const DEFAULT_SYNC_LIMIT_PER_FOLDER: u32 = 250;
 const MAX_SYNC_LIMIT_PER_FOLDER: u32 = 1_000;
 const DEFAULT_MESSAGE_LIST_LIMIT: i64 = 100;
@@ -173,6 +173,25 @@ fn identity_to_response(identity: &MailIdentity) -> MailIdentityResponse {
     }
 }
 
+fn draft_to_response(draft: &MailDraft) -> MailDraftResponse {
+    MailDraftResponse {
+        id: draft.id.to_hex(),
+        account_id: draft.account_id.to_hex(),
+        identity_id: draft.identity_id.map(|id| id.to_hex()),
+        mode: draft.mode,
+        source_message_id: draft.source_message_id.map(|id| id.to_hex()),
+        to: draft.to.iter().map(address_to_response).collect(),
+        cc: draft.cc.iter().map(address_to_response).collect(),
+        bcc: draft.bcc.iter().map(address_to_response).collect(),
+        subject: draft.subject.clone(),
+        body_text: draft.body_text.clone(),
+        in_reply_to: draft.in_reply_to.clone(),
+        references: draft.references.clone(),
+        created_at: draft.created_at.to_rfc3339(),
+        updated_at: draft.updated_at.to_rfc3339(),
+    }
+}
+
 fn folder_effective_role(folder: &MailFolder) -> Option<MailFolderRole> {
     if folder.role_source == MailFolderRoleSource::User {
         folder.role
@@ -257,6 +276,8 @@ fn message_to_response(message: &MailMessage) -> MailMessageSummaryResponse {
         uid: message.uid,
         message_id: message.message_id.clone(),
         thread_id: message.thread_id.clone(),
+        in_reply_to: message.in_reply_to.clone(),
+        references: message.references.clone(),
         subject: message.subject.clone(),
         from: message.from.iter().map(address_to_response).collect(),
         to: message.to.iter().map(address_to_response).collect(),
@@ -300,6 +321,20 @@ async fn find_message(state: &AppState, owner_id: ObjectId, id: ObjectId) -> Res
         .find_one(doc! { "_id": id, "owner_id": owner_id })
         .await?
         .ok_or_else(|| AppError::NotFound("Mail message".into()))
+}
+
+async fn find_draft(
+    state: &AppState,
+    owner_id: ObjectId,
+    account_id: ObjectId,
+    id: ObjectId,
+) -> Result<MailDraft> {
+    state
+        .db
+        .collection::<MailDraft>(DRAFTS)
+        .find_one(doc! { "_id": id, "owner_id": owner_id, "account_id": account_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Mail draft".into()))
 }
 
 async fn list_message_attachments(
@@ -479,6 +514,49 @@ fn response_address_to_remote(address: &MailAddressDto) -> RemoteMailAddress {
     }
 }
 
+fn response_address_to_model(address: &MailAddressDto) -> MailAddress {
+    MailAddress {
+        name: address
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        address: address.address.trim().to_string(),
+    }
+}
+
+fn clean_optional_message_header_value(
+    value: Option<String>,
+    name: &str,
+) -> Result<Option<String>> {
+    let Some(value) = value.map(|value| value.trim().to_string()) else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.contains('\r') || value.contains('\n') {
+        return Err(AppError::BadRequest(format!(
+            "{name} cannot contain line breaks"
+        )));
+    }
+    Ok(Some(value))
+}
+
+fn clean_message_header_values(values: Vec<String>, name: &str) -> Result<Vec<String>> {
+    values
+        .into_iter()
+        .filter_map(
+            |value| match clean_optional_message_header_value(Some(value), name) {
+                Ok(Some(value)) => Some(Ok(value)),
+                Ok(None) => None,
+                Err(err) => Some(Err(err)),
+            },
+        )
+        .collect()
+}
+
 fn recipient_count(req: &SendMailMessageRequest) -> usize {
     req.to.len() + req.cc.len() + req.bcc.len()
 }
@@ -501,6 +579,8 @@ fn validate_send_request(req: &SendMailMessageRequest) -> Result<()> {
             "mail subject must be 998 characters or fewer".into(),
         ));
     }
+    clean_optional_message_header_value(req.in_reply_to.clone(), "In-Reply-To")?;
+    clean_message_header_values(req.references.clone(), "References")?;
     Ok(())
 }
 
@@ -924,6 +1004,19 @@ struct SentCopyResult {
     error: Option<String>,
 }
 
+struct NormalizedDraftPayload {
+    identity_id: Option<ObjectId>,
+    mode: MailComposeMode,
+    source_message_id: Option<ObjectId>,
+    to: Vec<MailAddress>,
+    cc: Vec<MailAddress>,
+    bcc: Vec<MailAddress>,
+    subject: String,
+    body_text: String,
+    in_reply_to: Option<String>,
+    references: Vec<String>,
+}
+
 async fn resolve_send_identity(
     state: &AppState,
     owner_id: ObjectId,
@@ -1073,6 +1166,84 @@ async fn wait_for_provider_sent_copy(
     Ok(false)
 }
 
+async fn normalize_draft_payload(
+    state: &AppState,
+    owner_id: ObjectId,
+    account_id: ObjectId,
+    req: UpsertMailDraftRequest,
+) -> Result<NormalizedDraftPayload> {
+    if req.subject.len() > 998 {
+        return Err(AppError::BadRequest(
+            "mail subject must be 998 characters or fewer".into(),
+        ));
+    }
+
+    let identity_id = match req
+        .identity_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => {
+            let id = parse_oid(value, "mail identity id")?;
+            let _ = find_identity(state, owner_id, account_id, id).await?;
+            Some(id)
+        }
+        None => None,
+    };
+
+    let source_message_id = match req
+        .source_message_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => {
+            let id = parse_oid(value, "mail source message id")?;
+            let message = find_message(state, owner_id, id).await?;
+            if message.account_id != account_id {
+                return Err(AppError::BadRequest(
+                    "mail source message belongs to a different account".into(),
+                ));
+            }
+            Some(id)
+        }
+        None => None,
+    };
+
+    Ok(NormalizedDraftPayload {
+        identity_id,
+        mode: req.mode,
+        source_message_id,
+        to: req.to.iter().map(response_address_to_model).collect(),
+        cc: req.cc.iter().map(response_address_to_model).collect(),
+        bcc: req.bcc.iter().map(response_address_to_model).collect(),
+        subject: req.subject,
+        body_text: req.body_text,
+        in_reply_to: clean_optional_message_header_value(req.in_reply_to, "In-Reply-To")?,
+        references: clean_message_header_values(req.references, "References")?,
+    })
+}
+
+async fn delete_sent_draft(
+    state: &AppState,
+    owner_id: ObjectId,
+    account_id: ObjectId,
+    draft_id: Option<ObjectId>,
+) {
+    let Some(draft_id) = draft_id else {
+        return;
+    };
+    if let Err(err) = state
+        .db
+        .collection::<MailDraft>(DRAFTS)
+        .delete_one(doc! { "_id": draft_id, "owner_id": owner_id, "account_id": account_id })
+        .await
+    {
+        tracing::warn!(%draft_id, "failed to delete sent mail draft: {err}");
+    }
+}
+
 pub async fn send_account_message(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -1083,6 +1254,19 @@ pub async fn send_account_message(
     validate_send_request(&req)?;
     let id = parse_oid(&id, "mail account id")?;
     let account = find_account(&state, user.id, id).await?;
+    let draft_id = match req
+        .draft_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => {
+            let id = parse_oid(value, "mail draft id")?;
+            let _ = find_draft(&state, user.id, account.id, id).await?;
+            Some(id)
+        }
+        None => None,
+    };
     let password = resolve_mail_password(&state, &account, None)?;
     let identity =
         resolve_send_identity(&state, user.id, &account, req.identity_id.as_deref()).await?;
@@ -1103,6 +1287,8 @@ pub async fn send_account_message(
         bcc: req.bcc.iter().map(response_address_to_remote).collect(),
         subject: req.subject,
         body_text: req.body_text,
+        in_reply_to: clean_optional_message_header_value(req.in_reply_to, "In-Reply-To")?,
+        references: clean_message_header_values(req.references, "References")?,
     };
     let sent = state
         .mail
@@ -1117,6 +1303,7 @@ pub async fn send_account_message(
         &sent.raw_message,
     )
     .await;
+    delete_sent_draft(&state, user.id, account.id, draft_id).await;
 
     Ok(Json(SendMailMessageResponse {
         account_id: account.id.to_hex(),
@@ -1289,6 +1476,145 @@ pub async fn delete_identity(
         .await?;
     if result.deleted_count == 0 {
         return Err(AppError::NotFound("Mail identity".into()));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn list_drafts(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(account_id): Path<String>,
+) -> Result<Json<Vec<MailDraftResponse>>> {
+    require_mail(&state)?;
+    let account_id = parse_oid(&account_id, "mail account id")?;
+    let _ = find_account(&state, user.id, account_id).await?;
+    let mut cursor = state
+        .db
+        .collection::<MailDraft>(DRAFTS)
+        .find(doc! { "owner_id": user.id, "account_id": account_id })
+        .sort(doc! { "updated_at": -1 })
+        .await?;
+    let mut out = Vec::new();
+    while let Some(draft) = cursor.try_next().await? {
+        out.push(draft_to_response(&draft));
+    }
+    Ok(Json(out))
+}
+
+pub async fn create_draft(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(account_id): Path<String>,
+    Json(req): Json<UpsertMailDraftRequest>,
+) -> Result<(StatusCode, Json<MailDraftResponse>)> {
+    require_mail(&state)?;
+    let account_id = parse_oid(&account_id, "mail account id")?;
+    let _ = find_account(&state, user.id, account_id).await?;
+    let payload = normalize_draft_payload(&state, user.id, account_id, req).await?;
+    let now = Utc::now();
+    let draft = MailDraft {
+        id: ObjectId::new(),
+        owner_id: user.id,
+        account_id,
+        identity_id: payload.identity_id,
+        mode: payload.mode,
+        source_message_id: payload.source_message_id,
+        to: payload.to,
+        cc: payload.cc,
+        bcc: payload.bcc,
+        subject: payload.subject,
+        body_text: payload.body_text,
+        in_reply_to: payload.in_reply_to,
+        references: payload.references,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .collection::<MailDraft>(DRAFTS)
+        .insert_one(&draft)
+        .await?;
+    Ok((StatusCode::CREATED, Json(draft_to_response(&draft))))
+}
+
+pub async fn update_draft(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    Json(req): Json<UpsertMailDraftRequest>,
+) -> Result<Json<MailDraftResponse>> {
+    require_mail(&state)?;
+    let id = parse_oid(&id, "mail draft id")?;
+    let draft = state
+        .db
+        .collection::<MailDraft>(DRAFTS)
+        .find_one(doc! { "_id": id, "owner_id": user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Mail draft".into()))?;
+    let payload = normalize_draft_payload(&state, user.id, draft.account_id, req).await?;
+    let now = Utc::now();
+    let mode = bson::to_bson(&payload.mode)
+        .map_err(|e| AppError::Internal(format!("mail draft mode could not be serialized: {e}")))?;
+    let to = bson::to_bson(&payload.to).map_err(|e| {
+        AppError::Internal(format!(
+            "mail draft recipients could not be serialized: {e}"
+        ))
+    })?;
+    let cc = bson::to_bson(&payload.cc).map_err(|e| {
+        AppError::Internal(format!(
+            "mail draft cc recipients could not be serialized: {e}"
+        ))
+    })?;
+    let bcc = bson::to_bson(&payload.bcc).map_err(|e| {
+        AppError::Internal(format!(
+            "mail draft bcc recipients could not be serialized: {e}"
+        ))
+    })?;
+    state
+        .db
+        .collection::<MailDraft>(DRAFTS)
+        .update_one(
+            doc! { "_id": id, "owner_id": user.id },
+            doc! {
+                "$set": {
+                    "identity_id": payload.identity_id.map(bson::Bson::ObjectId).unwrap_or(bson::Bson::Null),
+                    "mode": mode,
+                    "source_message_id": payload.source_message_id.map(bson::Bson::ObjectId).unwrap_or(bson::Bson::Null),
+                    "to": to,
+                    "cc": cc,
+                    "bcc": bcc,
+                    "subject": payload.subject,
+                    "body_text": payload.body_text,
+                    "in_reply_to": payload.in_reply_to.map(bson::Bson::String).unwrap_or(bson::Bson::Null),
+                    "references": payload.references,
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }
+            },
+        )
+        .await?;
+    let updated = state
+        .db
+        .collection::<MailDraft>(DRAFTS)
+        .find_one(doc! { "_id": id, "owner_id": user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Mail draft".into()))?;
+    Ok(Json(draft_to_response(&updated)))
+}
+
+pub async fn delete_draft(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    require_mail(&state)?;
+    let id = parse_oid(&id, "mail draft id")?;
+    let result = state
+        .db
+        .collection::<MailDraft>(DRAFTS)
+        .delete_one(doc! { "_id": id, "owner_id": user.id })
+        .await?;
+    if result.deleted_count == 0 {
+        return Err(AppError::NotFound("Mail draft".into()));
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2519,7 +2845,10 @@ async fn stream_attachment_response(
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("attachment");
-    let content_disposition = format!("{disposition}; filename=\"{}\"", filename.replace('"', "\\\""));
+    let content_disposition = format!(
+        "{disposition}; filename=\"{}\"",
+        filename.replace('"', "\\\"")
+    );
     let content_type = attachment
         .content_type
         .as_deref()
@@ -2633,7 +2962,10 @@ pub async fn save_attachment_to_files(
     let size = file_data.len() as i64;
     {
         let users_coll = state.db.collection::<User>("users");
-        if let Some(owner) = users_coll.find_one(doc! { "_id": effective_owner_id }).await? {
+        if let Some(owner) = users_coll
+            .find_one(doc! { "_id": effective_owner_id })
+            .await?
+        {
             if !owner.has_quota_space(size) {
                 return Err(AppError::Forbidden("Quota exceeded".into()));
             }
@@ -2689,8 +3021,14 @@ pub async fn save_attachment_to_files(
         return Err(err.into());
     }
 
-    state.auth.update_user_bytes(effective_owner_id, size).await?;
-    state.events.emit_file_created(effective_owner_id, &file).await;
+    state
+        .auth
+        .update_user_bytes(effective_owner_id, size)
+        .await?;
+    state
+        .events
+        .emit_file_created(effective_owner_id, &file)
+        .await;
     state
         .sync_log
         .record(super::audit::file_event(
@@ -2870,11 +3208,14 @@ mod tests {
     fn validate_send_request_requires_recipient() {
         let req = SendMailMessageRequest {
             identity_id: None,
+            draft_id: None,
             to: Vec::new(),
             cc: Vec::new(),
             bcc: Vec::new(),
             subject: "Test".to_string(),
             body_text: "Body".to_string(),
+            in_reply_to: None,
+            references: Vec::new(),
         };
 
         assert!(validate_send_request(&req).is_err());

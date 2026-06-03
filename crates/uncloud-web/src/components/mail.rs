@@ -1,16 +1,17 @@
 use dioxus::prelude::*;
 use uncloud_common::{
     CreateMailAccountRequest, FolderResponse, MailAccountResponse, MailAccountSyncResponse,
-    MailAddressDto, MailAttachmentResponse, MailFolderResponse, MailFolderRole,
-    MailFolderRoleSource, MailIdentityResponse, MailMessageDetailResponse,
+    MailAddressDto, MailAttachmentResponse, MailComposeMode, MailDraftResponse, MailFolderResponse,
+    MailFolderRole, MailFolderRoleSource, MailIdentityResponse, MailMessageDetailResponse,
     MailMessageMutationAction, MailMessageSummaryResponse, MailSecurity, MailSentCopyStatus,
     MailServerSettings, SendMailMessageRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
+    UpsertMailDraftRequest,
 };
 
 use crate::components::icons::{
     IconArchive, IconChevronRight, IconDownload, IconEye, IconFileText, IconFolder, IconFolderOpen,
-    IconMail, IconMoveRight, IconPaperclip, IconPlus, IconRefreshCw, IconSend, IconSettings,
-    IconStar, IconTrash, IconX,
+    IconForward, IconMail, IconMoveRight, IconPaperclip, IconPlus, IconRefreshCw, IconReply,
+    IconReplyAll, IconSend, IconSettings, IconStar, IconTrash, IconX,
 };
 use crate::components::scroll_sentinel::ScrollSentinel;
 use crate::hooks::{use_files, use_mail};
@@ -27,6 +28,7 @@ pub fn MailPage() -> Element {
     let mut accounts = use_signal(Vec::<MailAccountResponse>::new);
     let mut identities = use_signal(Vec::<MailIdentityResponse>::new);
     let mut folders = use_signal(Vec::<MailFolderResponse>::new);
+    let mut drafts = use_signal(Vec::<MailDraftResponse>::new);
     let mut messages = use_signal(Vec::<MailMessageSummaryResponse>::new);
     let mut detail = use_signal(|| None::<MailMessageDetailResponse>);
     let mut selected_account = use_signal(String::new);
@@ -46,12 +48,19 @@ pub fn MailPage() -> Element {
     let mut show_setup = use_signal(|| false);
     let mut show_compose = use_signal(|| false);
     let mut sending_message = use_signal(|| false);
+    let mut saving_draft = use_signal(|| false);
+    let mut compose_autosave_token = use_signal(|| 0u64);
+    let mut compose_draft_id = use_signal(String::new);
+    let mut compose_mode = use_signal(|| MailComposeMode::New);
+    let mut compose_source_message_id = use_signal(String::new);
     let mut compose_identity_id = use_signal(String::new);
     let mut compose_to = use_signal(String::new);
     let mut compose_cc = use_signal(String::new);
     let mut compose_bcc = use_signal(String::new);
     let mut compose_subject = use_signal(String::new);
     let mut compose_body = use_signal(String::new);
+    let mut compose_in_reply_to = use_signal(String::new);
+    let mut compose_references = use_signal(Vec::<String>::new);
     let mut settings_folder = use_signal(|| None::<MailFolderResponse>);
     let mut folder_role_value = use_signal(|| "auto".to_string());
     let mut folder_sync_enabled = use_signal(|| true);
@@ -132,6 +141,10 @@ pub fn MailPage() -> Element {
                             Ok(rows) => folders.set(rows),
                             Err(e) => error.set(Some(e)),
                         }
+                        match use_mail::list_drafts(&first).await {
+                            Ok(rows) => drafts.set(rows),
+                            Err(e) => error.set(Some(e)),
+                        }
                     }
                 }
                 Err(e) => error.set(Some(e)),
@@ -159,6 +172,76 @@ pub fn MailPage() -> Element {
                 None => attachment_save_breadcrumb.set(Vec::new()),
             }
             attachment_save_loading.set(false);
+        });
+    });
+
+    use_effect(move || {
+        if !show_compose() || *sending_message.peek() || *saving_draft.peek() {
+            return;
+        }
+        let account_id = selected_account();
+        if account_id.is_empty() {
+            return;
+        }
+        let identity_id = compose_identity_id();
+        let draft_id = compose_draft_id.peek().clone();
+        let mode = compose_mode();
+        let source_message_id = compose_source_message_id();
+        let to = compose_to();
+        let cc = compose_cc();
+        let bcc = compose_bcc();
+        let subject = compose_subject();
+        let body = compose_body();
+        let in_reply_to = compose_in_reply_to();
+        let references = compose_references();
+        let has_content = !draft_id.trim().is_empty()
+            || !to.trim().is_empty()
+            || !cc.trim().is_empty()
+            || !bcc.trim().is_empty()
+            || !subject.trim().is_empty()
+            || !body.trim().is_empty();
+        if !has_content {
+            return;
+        }
+
+        let token = *compose_autosave_token.peek() + 1;
+        compose_autosave_token.set(token);
+        spawn(async move {
+            gloo_timers::future::TimeoutFuture::new(1_200).await;
+            if *compose_autosave_token.peek() != token
+                || !*show_compose.peek()
+                || *sending_message.peek()
+                || *saving_draft.peek()
+            {
+                return;
+            }
+
+            let req = UpsertMailDraftRequest {
+                identity_id: nonempty_string(identity_id),
+                mode,
+                source_message_id: nonempty_string(source_message_id),
+                to: parse_compose_addresses(&to),
+                cc: parse_compose_addresses(&cc),
+                bcc: parse_compose_addresses(&bcc),
+                subject,
+                body_text: body,
+                in_reply_to: nonempty_string(in_reply_to),
+                references,
+            };
+            saving_draft.set(true);
+            let result = if draft_id.trim().is_empty() {
+                use_mail::create_draft(&account_id, &req).await
+            } else {
+                use_mail::update_draft(&draft_id, &req).await
+            };
+            match result {
+                Ok(saved) => {
+                    compose_draft_id.set(saved.id.clone());
+                    drafts.set(upsert_draft(drafts(), saved));
+                }
+                Err(e) => error.set(Some(format!("Draft autosave failed: {e}"))),
+            }
+            saving_draft.set(false);
         });
     });
 
@@ -193,9 +276,9 @@ pub fn MailPage() -> Element {
                 }
                 if let Ok(rows) = use_mail::list_folders(&account_id).await {
                     now_syncing = now_syncing
-                        || rows
-                            .iter()
-                            .any(|folder| folder.account_id == account_id && folder.sync_in_progress);
+                        || rows.iter().any(|folder| {
+                            folder.account_id == account_id && folder.sync_in_progress
+                        });
                     folders.set(rows);
                 }
 
@@ -207,9 +290,13 @@ pub fn MailPage() -> Element {
                 {
                     let folder_id = selected_folder.peek().clone();
                     if !folder_id.is_empty() {
-                        if let Ok(page) =
-                            use_mail::list_messages(&account_id, &folder_id, MAIL_MESSAGE_PAGE_SIZE, None)
-                                .await
+                        if let Ok(page) = use_mail::list_messages(
+                            &account_id,
+                            &folder_id,
+                            MAIL_MESSAGE_PAGE_SIZE,
+                            None,
+                        )
+                        .await
                         {
                             let selected = selected_message.peek().clone();
                             let still_selected =
@@ -231,6 +318,7 @@ pub fn MailPage() -> Element {
     let accounts_snapshot = accounts();
     let identities_snapshot = identities();
     let folders_snapshot = sorted_mail_folders(&folders());
+    let drafts_snapshot = drafts();
     let messages_snapshot = messages();
     let detail_snapshot = detail();
     let selected_account_id = selected_account();
@@ -337,12 +425,17 @@ pub fn MailPage() -> Element {
         if !should_backfill {
             return;
         }
-        let last_cached_cursor = messages.peek().last().map(|message| message.uid.to_string());
+        let last_cached_cursor = messages
+            .peek()
+            .last()
+            .map(|message| message.uid.to_string());
         spawn(async move {
             backfilling_messages.set(true);
             sync_status.set(Some("Syncing older messages".to_string()));
             error.set(None);
-            match use_mail::sync_folder(&account_id, &folder_id, Some(MAIL_BACKFILL_PAGE_SIZE)).await {
+            match use_mail::sync_folder(&account_id, &folder_id, Some(MAIL_BACKFILL_PAGE_SIZE))
+                .await
+            {
                 Ok(_) => {
                     if let Ok(rows) = use_mail::list_folders(&account_id).await {
                         folders.set(rows);
@@ -419,12 +512,17 @@ pub fn MailPage() -> Element {
                         class: "btn btn-sm btn-primary gap-2",
                         disabled: selected_account_id.is_empty(),
                         onclick: move |_| {
+                            compose_draft_id.set(String::new());
+                            compose_mode.set(MailComposeMode::New);
+                            compose_source_message_id.set(String::new());
                             compose_identity_id.set(String::new());
                             compose_to.set(String::new());
                             compose_cc.set(String::new());
                             compose_bcc.set(String::new());
                             compose_subject.set(String::new());
                             compose_body.set(String::new());
+                            compose_in_reply_to.set(String::new());
+                            compose_references.set(Vec::new());
                             show_compose.set(true);
                         },
                         IconSend { class: "w-4 h-4".to_string() }
@@ -569,6 +667,7 @@ pub fn MailPage() -> Element {
                                                     selected_message.set(String::new());
                                                     move_target_folder.set(String::new());
                                                     messages.set(Vec::new());
+                                                    drafts.set(Vec::new());
                                                     message_next_cursor.set(None);
                                                     message_has_more.set(false);
                                                     detail.set(None);
@@ -577,10 +676,90 @@ pub fn MailPage() -> Element {
                                                         Ok(rows) => folders.set(rows),
                                                         Err(e) => error.set(Some(e)),
                                                     }
+                                                    match use_mail::list_drafts(&account_id).await {
+                                                        Ok(rows) => drafts.set(rows),
+                                                        Err(e) => error.set(Some(e)),
+                                                    }
                                                 });
                                             },
                                             div { class: "truncate text-sm font-medium", "{account.display_name}" }
                                             div { class: "truncate text-xs text-base-content/60", "{account.email_address}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if !drafts_snapshot.is_empty() {
+                            div { class: "border-b border-base-300",
+                                div { class: "flex items-center justify-between px-3 py-2",
+                                    div { class: "text-xs font-semibold uppercase text-base-content/60", "Local drafts" }
+                                    span { class: "badge badge-ghost badge-sm", "{drafts_snapshot.len()}" }
+                                }
+                                div { class: "max-h-40 overflow-y-auto p-1",
+                                    for draft in drafts_snapshot.clone() {
+                                        {
+                                            let draft_id = draft.id.clone();
+                                            let draft_for_open = draft.clone();
+                                            let draft_subject = draft_subject_label(&draft);
+                                            let draft_meta = draft.updated_at.clone();
+                                            rsx! {
+                                                div {
+                                                    key: "{draft_id}",
+                                                    class: "group flex items-center gap-1 text-sm hover:bg-base-200",
+                                                    button {
+                                                        class: "min-w-0 flex-1 px-2 py-1.5 text-left",
+                                                        onclick: move |_| {
+                                                            compose_draft_id.set(draft_for_open.id.clone());
+                                                            compose_mode.set(draft_for_open.mode);
+                                                            compose_source_message_id.set(
+                                                                draft_for_open.source_message_id.clone().unwrap_or_default(),
+                                                            );
+                                                            compose_identity_id.set(
+                                                                draft_for_open.identity_id.clone().unwrap_or_default(),
+                                                            );
+                                                            compose_to.set(compose_address_line(&draft_for_open.to));
+                                                            compose_cc.set(compose_address_line(&draft_for_open.cc));
+                                                            compose_bcc.set(compose_address_line(&draft_for_open.bcc));
+                                                            compose_subject.set(draft_for_open.subject.clone());
+                                                            compose_body.set(draft_for_open.body_text.clone());
+                                                            compose_in_reply_to.set(
+                                                                draft_for_open.in_reply_to.clone().unwrap_or_default(),
+                                                            );
+                                                            compose_references.set(draft_for_open.references.clone());
+                                                            show_compose.set(true);
+                                                        },
+                                                        div { class: "truncate font-medium", "{draft_subject}" }
+                                                        div { class: "truncate text-xs text-base-content/50",
+                                                            "{short_date(Some(draft_meta.as_str()))}"
+                                                        }
+                                                    }
+                                                    button {
+                                                        class: "btn btn-ghost btn-xs h-7 min-h-7 w-7 p-0 opacity-0 group-hover:opacity-100",
+                                                        title: "Delete draft",
+                                                        onclick: {
+                                                            let draft_id = draft_id.clone();
+                                                            move |_| {
+                                                                let draft_id = draft_id.clone();
+                                                                spawn(async move {
+                                                                    error.set(None);
+                                                                    match use_mail::delete_draft(&draft_id).await {
+                                                                        Ok(()) => {
+                                                                            drafts.set(
+                                                                                drafts()
+                                                                                    .into_iter()
+                                                                                    .filter(|draft| draft.id != draft_id)
+                                                                                    .collect(),
+                                                                            );
+                                                                        }
+                                                                        Err(e) => error.set(Some(e)),
+                                                                    }
+                                                                });
+                                                            }
+                                                        },
+                                                        IconX { class: "h-3.5 w-3.5".to_string() }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -933,6 +1112,8 @@ pub fn MailPage() -> Element {
                                 let account_id = row.message.account_id.clone();
                                 let seen_label = if is_seen { "Unread" } else { "Read" };
                                 let star_label = if is_flagged { "Unstar" } else { "Star" };
+                                let own_addresses =
+                                    mail_own_addresses(active_account.as_ref(), &active_identities);
                                 rsx! {
                                     div { class: "border-b border-base-300 px-4 py-3",
                                         div { class: "flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between",
@@ -945,6 +1126,81 @@ pub fn MailPage() -> Element {
                                                 }
                                             }
                                             div { class: "flex flex-wrap items-center gap-1",
+                                                button {
+                                                    class: "btn btn-ghost btn-sm h-8 min-h-8 gap-1",
+                                                    title: "Reply",
+                                                    onclick: {
+                                                        let row = row.clone();
+                                                        move |_| {
+                                                            compose_draft_id.set(String::new());
+                                                            compose_mode.set(MailComposeMode::Reply);
+                                                            compose_source_message_id.set(row.message.id.clone());
+                                                            compose_identity_id.set(String::new());
+                                                            compose_to.set(compose_address_line(&row.message.from));
+                                                            compose_cc.set(String::new());
+                                                            compose_bcc.set(String::new());
+                                                            compose_subject.set(reply_subject(&message_subject(&row.message)));
+                                                            compose_body.set(reply_body(&row));
+                                                            compose_in_reply_to.set(
+                                                                row.message.message_id.clone().unwrap_or_default(),
+                                                            );
+                                                            compose_references.set(reply_references(&row.message));
+                                                            show_compose.set(true);
+                                                        }
+                                                    },
+                                                    IconReply { class: "h-4 w-4".to_string() }
+                                                    span { "Reply" }
+                                                }
+                                                button {
+                                                    class: "btn btn-ghost btn-sm h-8 min-h-8 gap-1",
+                                                    title: "Reply all",
+                                                    onclick: {
+                                                        let row = row.clone();
+                                                        let own_addresses = own_addresses.clone();
+                                                        move |_| {
+                                                            let (to, cc) = reply_all_recipients(&row.message, &own_addresses);
+                                                            compose_draft_id.set(String::new());
+                                                            compose_mode.set(MailComposeMode::ReplyAll);
+                                                            compose_source_message_id.set(row.message.id.clone());
+                                                            compose_identity_id.set(String::new());
+                                                            compose_to.set(compose_address_line(&to));
+                                                            compose_cc.set(compose_address_line(&cc));
+                                                            compose_bcc.set(String::new());
+                                                            compose_subject.set(reply_subject(&message_subject(&row.message)));
+                                                            compose_body.set(reply_body(&row));
+                                                            compose_in_reply_to.set(
+                                                                row.message.message_id.clone().unwrap_or_default(),
+                                                            );
+                                                            compose_references.set(reply_references(&row.message));
+                                                            show_compose.set(true);
+                                                        }
+                                                    },
+                                                    IconReplyAll { class: "h-4 w-4".to_string() }
+                                                    span { "All" }
+                                                }
+                                                button {
+                                                    class: "btn btn-ghost btn-sm h-8 min-h-8 gap-1",
+                                                    title: "Forward",
+                                                    onclick: {
+                                                        let row = row.clone();
+                                                        move |_| {
+                                                            compose_draft_id.set(String::new());
+                                                            compose_mode.set(MailComposeMode::Forward);
+                                                            compose_source_message_id.set(row.message.id.clone());
+                                                            compose_identity_id.set(String::new());
+                                                            compose_to.set(String::new());
+                                                            compose_cc.set(String::new());
+                                                            compose_bcc.set(String::new());
+                                                            compose_subject.set(forward_subject(&message_subject(&row.message)));
+                                                            compose_body.set(forward_body(&row));
+                                                            compose_in_reply_to.set(String::new());
+                                                            compose_references.set(Vec::new());
+                                                            show_compose.set(true);
+                                                        }
+                                                    },
+                                                    IconForward { class: "h-4 w-4".to_string() }
+                                                    span { "Forward" }
+                                                }
                                                 button {
                                                     class: "btn btn-ghost btn-sm h-8 min-h-8 gap-1",
                                                     title: if is_seen { "Mark unread" } else { "Mark read" },
@@ -1391,11 +1647,26 @@ pub fn MailPage() -> Element {
                         let account_from_label =
                             format!("{} <{}>", account.display_name, account.email_address);
                         let active_identities = active_identities.clone();
+                        let compose_title = compose_title(compose_mode());
+                        let draft_status = if saving_draft() {
+                            "Saving draft"
+                        } else if compose_draft_id().is_empty() {
+                            ""
+                        } else {
+                            "Draft saved"
+                        };
                         rsx! {
                             div { class: "modal modal-open",
                                 div { class: "modal-box max-w-3xl",
-                                    h2 { class: "text-xl font-semibold", "Compose" }
-                                    div { class: "mt-1 truncate text-sm text-base-content/60", "{account.email_address}" }
+                                    div { class: "flex items-start justify-between gap-3",
+                                        div { class: "min-w-0",
+                                            h2 { class: "text-xl font-semibold", "{compose_title}" }
+                                            div { class: "mt-1 truncate text-sm text-base-content/60", "{account.email_address}" }
+                                        }
+                                        if !draft_status.is_empty() {
+                                            div { class: "shrink-0 text-xs text-base-content/50", "{draft_status}" }
+                                        }
+                                    }
 
                                     div { class: "mt-4 grid gap-3",
                                         label { class: "form-control",
@@ -1464,25 +1735,118 @@ pub fn MailPage() -> Element {
                                     }
 
                                     div { class: "modal-action",
-                                        button {
-                                            class: "btn",
-                                            disabled: sending_message(),
-                                            onclick: move |_| show_compose.set(false),
-                                            "Cancel"
+                                        if !compose_draft_id().is_empty()
+                                            || !compose_to().trim().is_empty()
+                                            || !compose_subject().trim().is_empty()
+                                            || !compose_body().trim().is_empty()
+                                        {
+                                            button {
+                                                class: "btn btn-ghost text-error",
+                                                disabled: sending_message() || saving_draft(),
+                                                onclick: move |_| {
+                                                    let draft_id = compose_draft_id();
+                                                    spawn(async move {
+                                                        error.set(None);
+                                                        if !draft_id.trim().is_empty() {
+                                                            match use_mail::delete_draft(&draft_id).await {
+                                                                Ok(()) => {
+                                                                    drafts.set(
+                                                                        drafts()
+                                                                            .into_iter()
+                                                                            .filter(|draft| draft.id != draft_id)
+                                                                            .collect(),
+                                                                    );
+                                                                }
+                                                                Err(e) => {
+                                                                    error.set(Some(e));
+                                                                    return;
+                                                                }
+                                                            }
+                                                        }
+                                                        compose_draft_id.set(String::new());
+                                                        show_compose.set(false);
+                                                    });
+                                                },
+                                                "Discard"
+                                            }
                                         }
                                         button {
-                                            class: "btn btn-primary gap-2",
-                                            disabled: sending_message(),
+                                            class: "btn",
+                                            disabled: sending_message() || saving_draft(),
                                             onclick: {
                                                 let account_id = account_id.clone();
                                                 move |_| {
                                                     let account_id = account_id.clone();
+                                                    let draft_id = compose_draft_id();
                                                     let identity_id = compose_identity_id();
+                                                    let mode = compose_mode();
+                                                    let source_message_id = compose_source_message_id();
                                                     let to = compose_to();
                                                     let cc = compose_cc();
                                                     let bcc = compose_bcc();
                                                     let subject = compose_subject();
                                                     let body = compose_body();
+                                                    let in_reply_to = compose_in_reply_to();
+                                                    let references = compose_references();
+                                                    spawn(async move {
+                                                        saving_draft.set(true);
+                                                        error.set(None);
+                                                        notice.set(None);
+                                                        let req = UpsertMailDraftRequest {
+                                                            identity_id: nonempty_string(identity_id),
+                                                            mode,
+                                                            source_message_id: nonempty_string(source_message_id),
+                                                            to: parse_compose_addresses(&to),
+                                                            cc: parse_compose_addresses(&cc),
+                                                            bcc: parse_compose_addresses(&bcc),
+                                                            subject,
+                                                            body_text: body,
+                                                            in_reply_to: nonempty_string(in_reply_to),
+                                                            references,
+                                                        };
+                                                        match if draft_id.trim().is_empty() {
+                                                            use_mail::create_draft(&account_id, &req).await
+                                                        } else {
+                                                            use_mail::update_draft(&draft_id, &req).await
+                                                        } {
+                                                            Ok(saved) => {
+                                                                compose_draft_id.set(saved.id.clone());
+                                                                drafts.set(upsert_draft(drafts(), saved));
+                                                                notice.set(Some("Draft saved".to_string()));
+                                                            }
+                                                            Err(e) => error.set(Some(e)),
+                                                        }
+                                                        saving_draft.set(false);
+                                                    });
+                                                }
+                                            },
+                                            if saving_draft() {
+                                                span { class: "loading loading-spinner loading-xs" }
+                                            }
+                                            "Save draft"
+                                        }
+                                        button {
+                                            class: "btn",
+                                            disabled: sending_message(),
+                                            onclick: move |_| show_compose.set(false),
+                                            "Close"
+                                        }
+                                        button {
+                                            class: "btn btn-primary gap-2",
+                                            disabled: sending_message() || saving_draft(),
+                                            onclick: {
+                                                let account_id = account_id.clone();
+                                                move |_| {
+                                                    let account_id = account_id.clone();
+                                                    let identity_id = compose_identity_id();
+                                                    let draft_id = compose_draft_id();
+                                                    let to = compose_to();
+                                                    let cc = compose_cc();
+                                                    let bcc = compose_bcc();
+                                                    let subject = compose_subject();
+                                                    let body = compose_body();
+                                                    let in_reply_to = compose_in_reply_to();
+                                                    let references = compose_references();
                                                     spawn(async move {
                                                         sending_message.set(true);
                                                         error.set(None);
@@ -1493,11 +1857,14 @@ pub fn MailPage() -> Element {
                                                             } else {
                                                                 Some(identity_id)
                                                             },
+                                                            draft_id: nonempty_string(draft_id.clone()),
                                                             to: parse_compose_addresses(&to),
                                                             cc: parse_compose_addresses(&cc),
                                                             bcc: parse_compose_addresses(&bcc),
                                                             subject,
                                                             body_text: body,
+                                                            in_reply_to: nonempty_string(in_reply_to),
+                                                            references,
                                                         };
                                                         match use_mail::send_message(&account_id, &req).await {
                                                             Ok(sent) => {
@@ -1505,6 +1872,15 @@ pub fn MailPage() -> Element {
                                                                     "Message sent ({})",
                                                                     sent_copy_status_label(sent.sent_copy_status),
                                                                 )));
+                                                                if !draft_id.trim().is_empty() {
+                                                                    drafts.set(
+                                                                        drafts()
+                                                                            .into_iter()
+                                                                            .filter(|draft| draft.id != draft_id)
+                                                                            .collect(),
+                                                                    );
+                                                                }
+                                                                compose_draft_id.set(String::new());
                                                                 show_compose.set(false);
                                                             }
                                                             Err(e) => error.set(Some(e)),
@@ -2344,6 +2720,235 @@ fn account_sync_error_notice(result: &MailAccountSyncResponse) -> Option<String>
         "Account sync finished with {} folder error(s).{}",
         result.errors, details
     ))
+}
+
+fn nonempty_string(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn upsert_draft(
+    mut current: Vec<MailDraftResponse>,
+    incoming: MailDraftResponse,
+) -> Vec<MailDraftResponse> {
+    if let Some(existing) = current.iter_mut().find(|draft| draft.id == incoming.id) {
+        *existing = incoming;
+    } else {
+        current.push(incoming);
+    }
+    current.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    current
+}
+
+fn compose_title(mode: MailComposeMode) -> &'static str {
+    match mode {
+        MailComposeMode::New => "Compose",
+        MailComposeMode::Reply => "Reply",
+        MailComposeMode::ReplyAll => "Reply all",
+        MailComposeMode::Forward => "Forward",
+    }
+}
+
+fn draft_subject_label(draft: &MailDraftResponse) -> String {
+    draft
+        .subject
+        .trim()
+        .is_empty()
+        .then(|| "(no subject)".to_string())
+        .unwrap_or_else(|| draft.subject.clone())
+}
+
+fn compose_address_line(addresses: &[MailAddressDto]) -> String {
+    addresses
+        .iter()
+        .map(format_mail_address)
+        .filter(|value| !value.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn mail_own_addresses(
+    account: Option<&MailAccountResponse>,
+    identities: &[MailIdentityResponse],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(account) = account {
+        push_unique_address_key(&mut out, &account.email_address);
+    }
+    for identity in identities {
+        push_unique_address_key(&mut out, &identity.email_address);
+    }
+    out
+}
+
+fn push_unique_address_key(out: &mut Vec<String>, address: &str) {
+    let key = address_key(address);
+    if !key.is_empty() && !out.iter().any(|existing| existing == &key) {
+        out.push(key);
+    }
+}
+
+fn address_key(address: &str) -> String {
+    address.trim().to_ascii_lowercase()
+}
+
+fn reply_all_recipients(
+    message: &MailMessageSummaryResponse,
+    own_addresses: &[String],
+) -> (Vec<MailAddressDto>, Vec<MailAddressDto>) {
+    let mut to = Vec::new();
+    let mut cc = Vec::new();
+    for address in &message.from {
+        push_reply_recipient(&mut to, &cc, own_addresses, address);
+    }
+    if to.is_empty() {
+        for address in &message.to {
+            push_reply_recipient(&mut to, &cc, own_addresses, address);
+        }
+    } else {
+        for address in &message.to {
+            push_reply_recipient(&mut cc, &to, own_addresses, address);
+        }
+    }
+    for address in &message.cc {
+        push_reply_recipient(&mut cc, &to, own_addresses, address);
+    }
+    (to, cc)
+}
+
+fn push_reply_recipient(
+    target: &mut Vec<MailAddressDto>,
+    other: &[MailAddressDto],
+    own_addresses: &[String],
+    address: &MailAddressDto,
+) {
+    let key = address_key(&address.address);
+    if key.is_empty()
+        || own_addresses.iter().any(|own| own == &key)
+        || target
+            .iter()
+            .any(|existing| address_key(&existing.address) == key)
+        || other
+            .iter()
+            .any(|existing| address_key(&existing.address) == key)
+    {
+        return;
+    }
+    target.push(address.clone());
+}
+
+fn reply_subject(subject: &str) -> String {
+    let trimmed = subject.trim();
+    if trimmed
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("re:"))
+    {
+        trimmed.to_string()
+    } else {
+        format!("Re: {trimmed}")
+    }
+}
+
+fn forward_subject(subject: &str) -> String {
+    let trimmed = subject.trim();
+    if trimmed
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("fwd:"))
+        || trimmed
+            .get(..3)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("fw:"))
+    {
+        trimmed.to_string()
+    } else {
+        format!("Fwd: {trimmed}")
+    }
+}
+
+fn reply_references(message: &MailMessageSummaryResponse) -> Vec<String> {
+    let mut references = message.references.clone();
+    if references.is_empty() {
+        if let Some(in_reply_to) = message
+            .in_reply_to
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            references.push(in_reply_to.to_string());
+        }
+    }
+    if let Some(message_id) = message
+        .message_id
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        if !references.iter().any(|value| value == message_id) {
+            references.push(message_id.to_string());
+        }
+    }
+    references
+}
+
+fn reply_body(row: &MailMessageDetailResponse) -> String {
+    let source = plain_reply_source(row);
+    let quoted = quote_plain_text(&source);
+    let date = short_date(
+        row.message
+            .internal_date
+            .as_deref()
+            .or(row.message.date.as_deref()),
+    );
+    let sender = message_sender(&row.message);
+    format!("\n\nOn {date}, {sender} wrote:\n{quoted}")
+}
+
+fn forward_body(row: &MailMessageDetailResponse) -> String {
+    let source = plain_reply_source(row);
+    let mut out = String::from("\n\n---------- Forwarded message ---------\n");
+    out.push_str(&format!("From: {}\n", message_sender(&row.message)));
+    out.push_str(&format!(
+        "Date: {}\n",
+        short_date(
+            row.message
+                .internal_date
+                .as_deref()
+                .or(row.message.date.as_deref())
+        )
+    ));
+    out.push_str(&format!("Subject: {}\n", message_subject(&row.message)));
+    out.push_str(&format!("To: {}\n\n", message_recipients(&row.message)));
+    out.push_str(&source);
+    out
+}
+
+fn plain_reply_source(row: &MailMessageDetailResponse) -> String {
+    row.body_text
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .or_else(|| row.message.snippet.clone())
+        .unwrap_or_default()
+}
+
+fn quote_plain_text(input: &str) -> String {
+    if input.trim().is_empty() {
+        return ">".to_string();
+    }
+    input
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                ">".to_string()
+            } else {
+                format!("> {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn message_subject(message: &MailMessageSummaryResponse) -> String {

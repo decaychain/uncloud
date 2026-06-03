@@ -67,6 +67,7 @@ pub const COLLECTION_ALLOWLIST: &[&str] = &[
     "mail_folders",
     "mail_messages",
     "mail_attachments",
+    "mail_drafts",
 ];
 
 /// Top-level schema version stamped into `/database/manifest.json`.

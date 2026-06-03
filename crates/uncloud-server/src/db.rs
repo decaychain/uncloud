@@ -861,6 +861,22 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         )
         .await?;
 
+    let mail_drafts = db.collection::<mongodb::bson::Document>("mail_drafts");
+    mail_drafts
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "account_id": 1, "updated_at": -1 })
+                .build(),
+        )
+        .await?;
+    mail_drafts
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "source_message_id": 1 })
+                .build(),
+        )
+        .await?;
+
     tracing::info!("Database indexes created successfully");
     Ok(())
 }

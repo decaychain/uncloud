@@ -84,6 +84,7 @@ const RESTORE_COLLECTIONS: &[&str] = &[
     "mail_folders",
     "mail_messages",
     "mail_attachments",
+    "mail_drafts",
 ];
 
 pub async fn run(args: RestoreArgs) -> Result<(), Box<dyn std::error::Error>> {

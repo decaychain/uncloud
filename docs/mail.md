@@ -40,6 +40,7 @@ Collections:
 - `mail_folders`
 - `mail_messages`
 - `mail_attachments`
+- `mail_drafts`
 
 ## API Surface
 
@@ -56,6 +57,10 @@ Authenticated routes are mounted under both `/api` and `/api/v1`:
 - `POST /mail/accounts/{id}/test-smtp`
 - `POST /mail/accounts/{id}/send`
 - `POST /mail/accounts/{id}/sync`
+- `GET /mail/accounts/{id}/drafts`
+- `POST /mail/accounts/{id}/drafts`
+- `PUT /mail/drafts/{id}`
+- `DELETE /mail/drafts/{id}`
 - `GET /mail/accounts/{account_id}/folders`
 - `POST /mail/accounts/{account_id}/folders/refresh`
 - `PUT /mail/accounts/{account_id}/folders/{folder_id}`
@@ -127,8 +132,12 @@ the account's SMTP settings.
   folder choice and normal Files quota/audit/event handling.
 - Manual message mutations for the first write-path spike: mark read/unread,
   star/unstar, move to a selected folder, archive, and move to trash.
-- Minimal SMTP send through a selected identity or account fallback. The first
-  compose path sends plain text only and uses the stored account credential.
+- Minimal SMTP send through a selected identity or account fallback. The compose
+  path sends plain text only, uses the stored account credential, and can attach
+  `In-Reply-To` / `References` headers for replies.
+- Local draft storage in MongoDB through `mail_drafts`, with list/create/update
+  and delete endpoints. Drafts are local-only for now and are removed after a
+  successful send when the send request references the draft id.
 - Sent-copy handling for basic sends: after SMTP accepts the message, Uncloud
   checks the configured Sent folder by `Message-ID`; if the provider did not
   save it, Uncloud appends the exact RFC822 payload to Sent.
@@ -136,6 +145,8 @@ the account's SMTP settings.
   account setup/settings, IMAP/SMTP tests, folder settings, manual
   account/folder sync, cached message list, reader pane, and basic message
   mutation/compose controls.
+- Compose v2 UI basics: reply, reply-all, forward, local draft autosave, manual
+  save/discard, and a local drafts list per account.
 - Mail notices and errors use a consistent bottom-right toast overlay. Errors
   stay visible until dismissed; non-error notices auto-dismiss after a short
   timeout and always remain manually dismissible.
@@ -163,10 +174,11 @@ the account's SMTP settings.
   The destination copy is discovered by the next sync because IMAP move changes
   the destination UID and the foundation does not yet consume UIDPLUS response
   codes.
-- Compose, search, threading, permanent delete, and draft handling are not fully
-  implemented. Compose currently means "send a plain-text message now" with no
-  drafts, outgoing attachments, rich editor, reply/forward headers, or
-  provider-specific sent-copy policy.
+- Compose, search, threading, permanent delete, and provider-side Drafts upload
+  are not fully implemented. Compose currently supports plain-text send,
+  reply/reply-all/forward prefilling, local drafts, and reply-chain headers, but
+  still has no outgoing attachments, rich editor, HTML send, IMAP Drafts upload,
+  or provider-specific sent-copy policy.
 - Sent-copy detection is intentionally conservative. If checking the Sent folder
   fails, Uncloud reports the failure and does not append, to avoid creating a
   duplicate when the provider may have saved the message already.
@@ -312,11 +324,19 @@ Remaining credential work before scheduler/background sync:
 - Basic compose/send route using an identity and SMTP settings is wired.
 - Sent-copy handling checks for provider-saved messages and appends to Sent when
   needed.
+- Reply/reply-all/forward prefilling is wired in the UI, and outgoing SMTP
+  messages can include `In-Reply-To` and `References` headers.
+- Local draft storage, autosave, manual save/discard, and draft removal after
+  successful send are wired.
 - Support HTML body after plain-text send has been tested with real providers.
+- Add outgoing attachments after the local draft and reply flow has been tested
+  against real accounts.
+- Decide whether to upload drafts to the provider Drafts folder or keep local
+  drafts as the first-version behavior.
 - Add a user/provider setting for sent-copy policy once we know how common
   providers behave.
-- Add reply/forward metadata handling.
-- Add draft storage after basic send works.
+- Add richer compose editor behavior after plain text reply/forward proves
+  stable.
 
 ### 7. UI
 
@@ -327,6 +347,8 @@ data before adding write actions:
 - Folder list, sync status, role labels, and per-folder settings.
 - Read-only message list.
 - Message reader with sanitized HTML and plain-text fallback.
+- Compose modal with reply/reply-all/forward prefilling and local draft
+  autosave.
 - Consistent bottom-right toast notifications for Mail errors and notices, with
   sticky errors and auto-dismissing non-error notices.
 - After the first prototype lands, extract the Files copy/move destination

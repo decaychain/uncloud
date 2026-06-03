@@ -298,6 +298,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/mail/accounts/{id}/test-smtp", post(mail::test_account_smtp))
         .route("/mail/accounts/{id}/send", post(mail::send_account_message))
         .route("/mail/accounts/{id}/sync", post(mail::sync_account))
+        .route(
+            "/mail/accounts/{id}/drafts",
+            get(mail::list_drafts).post(mail::create_draft),
+        )
+        .route(
+            "/mail/drafts/{id}",
+            put(mail::update_draft).delete(mail::delete_draft),
+        )
         .route("/mail/accounts/{account_id}/folders", get(mail::list_folders))
         .route("/mail/accounts/{account_id}/folders/refresh", post(mail::refresh_folders))
         .route(
