@@ -39,7 +39,8 @@ use std::sync::Arc;
 use crate::AppState;
 use crate::middleware::{
     admin_meta_middleware, admin_middleware, auth_middleware, request_meta_middleware,
-    require_files_delete, require_files_write, require_tasks_feature, sigv4_middleware,
+    require_files_delete, require_files_write, require_music_feature, require_tasks_feature,
+    sigv4_middleware,
 };
 
 pub fn create_router(state: Arc<AppState>) -> Router {
@@ -166,6 +167,43 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             require_tasks_feature,
         ));
 
+    let music_api = Router::new()
+        .route("/music/tracks", get(music::list_music_tracks))
+        .route("/music/folders", get(music::list_music_folders))
+        .route("/music/artists", get(music::list_artists))
+        .route(
+            "/music/artists/{name}/albums",
+            get(music::list_artist_albums),
+        )
+        .route(
+            "/music/albums/{artist}/{album}/tracks",
+            get(music::list_album_tracks),
+        )
+        .route(
+            "/music/categories",
+            get(music::list_categories).post(music::create_category),
+        )
+        .route(
+            "/music/categories/{id}",
+            put(music::update_category).delete(music::delete_category),
+        )
+        .route("/music/search", get(music::search_music))
+        .route("/playlists", get(playlists::list_playlists))
+        .route("/playlists", post(playlists::create_playlist))
+        .route("/playlists/{id}", get(playlists::get_playlist))
+        .route("/playlists/{id}", put(playlists::update_playlist))
+        .route("/playlists/{id}", delete(playlists::delete_playlist))
+        .route("/playlists/{id}/tracks", post(playlists::add_tracks))
+        .route("/playlists/{id}/tracks", delete(playlists::remove_tracks))
+        .route(
+            "/playlists/{id}/tracks/reorder",
+            put(playlists::reorder_tracks),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_music_feature,
+        ));
+
     // -- Authenticated routes defined once, nested under /api and /api/v1 --
     let auth_api = Router::new()
         // Auth
@@ -272,39 +310,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Gallery
         .route("/gallery", get(files::list_gallery))
         .route("/gallery/albums", get(files::list_gallery_albums))
-        // Music
-        .route("/music/tracks", get(music::list_music_tracks))
-        .route("/music/folders", get(music::list_music_folders))
-        .route("/music/artists", get(music::list_artists))
-        .route(
-            "/music/artists/{name}/albums",
-            get(music::list_artist_albums),
-        )
-        .route(
-            "/music/albums/{artist}/{album}/tracks",
-            get(music::list_album_tracks),
-        )
-        .route(
-            "/music/categories",
-            get(music::list_categories).post(music::create_category),
-        )
-        .route(
-            "/music/categories/{id}",
-            put(music::update_category).delete(music::delete_category),
-        )
-        .route("/music/search", get(music::search_music))
-        // Playlists
-        .route("/playlists", get(playlists::list_playlists))
-        .route("/playlists", post(playlists::create_playlist))
-        .route("/playlists/{id}", get(playlists::get_playlist))
-        .route("/playlists/{id}", put(playlists::update_playlist))
-        .route("/playlists/{id}", delete(playlists::delete_playlist))
-        .route("/playlists/{id}/tracks", post(playlists::add_tracks))
-        .route("/playlists/{id}/tracks", delete(playlists::remove_tracks))
-        .route(
-            "/playlists/{id}/tracks/reorder",
-            put(playlists::reorder_tracks),
-        )
         // Users (non-admin)
         .route("/users/names", get(users::list_usernames))
         // Shares
@@ -420,6 +425,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         // Tasks
         .merge(tasks_api)
+        // Music + playlists
+        .merge(music_api)
         // Sync audit log
         .route("/sync-events", get(sync_events::list_sync_events))
         // Duplicate detection

@@ -460,6 +460,7 @@ pub async fn update_my_features(
         (crate::config::FEATURE_FINANCE, body.finance),
         (crate::config::FEATURE_MAIL, body.mail),
         (crate::config::FEATURE_TASKS, body.tasks),
+        (crate::config::FEATURE_MUSIC, body.music),
     ];
 
     for (feature, enabled) in updates {

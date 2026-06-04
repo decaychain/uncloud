@@ -149,4 +149,6 @@ pub struct UpdateFeaturesRequest {
     pub mail: Option<bool>,
     #[serde(default)]
     pub tasks: Option<bool>,
+    #[serde(default)]
+    pub music: Option<bool>,
 }

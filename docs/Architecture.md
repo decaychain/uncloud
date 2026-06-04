@@ -169,7 +169,7 @@ Uncloud/
             artist_view.rs     ← Artist detail (albums for an artist)
             album_grid.rs      ← Album grid display
             album_view.rs      ← Album detail (track listing)
-            folder_view.rs     ← Browse music by folder
+            folder_tree.rs     ← Lazy music folder browser with inline tracks
             playlist_list.rs   ← Playlist index
             playlist_view.rs   ← Playlist detail (track list + reorder)
             playlist_panel.rs  ← Persistent right-side playlist panel
@@ -436,7 +436,7 @@ All authenticated routes are mounted under both `/api/...` and `/api/v1/...`. Th
 | `/api/gallery` | GET | Gallery images (timeline) |
 | `/api/gallery/albums` | GET | Gallery album tree |
 | `/api/music/tracks` | GET | All audio tracks |
-| `/api/music/folders` | GET | Folders with audio |
+| `/api/music/folders` | GET | Folders with audio; accepts `root=true`, `parent_id`, or comma-separated `folder_ids` for lazy/filtered folder browsing |
 | `/api/music/artists` | GET | Artist list |
 | `/api/music/artists/{name}/albums` | GET | Albums by artist |
 | `/api/music/albums/{artist}/{album}/tracks` | GET | Tracks in album |
@@ -650,6 +650,7 @@ features:                          # server-wide built-in app availability
   finance: true
   mail: true                       # experimental IMAP/SMTP mail client foundation
   tasks: true
+  music: true                      # music library + playlists
 
 mail_sync:
   enabled: true                    # background sync for enabled mail accounts with credentials

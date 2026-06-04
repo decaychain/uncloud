@@ -8,11 +8,13 @@ pub const FEATURE_SHOPPING: &str = "shopping";
 pub const FEATURE_FINANCE: &str = "finance";
 pub const FEATURE_MAIL: &str = "mail";
 pub const FEATURE_TASKS: &str = "tasks";
+pub const FEATURE_MUSIC: &str = "music";
 pub const OPTIONAL_FEATURES: &[&str] = &[
     FEATURE_SHOPPING,
     FEATURE_FINANCE,
     FEATURE_MAIL,
     FEATURE_TASKS,
+    FEATURE_MUSIC,
 ];
 
 #[derive(Debug, Clone, Deserialize)]
@@ -394,6 +396,8 @@ pub struct FeaturesConfig {
     pub mail: bool,
     #[serde(default = "default_true")]
     pub tasks: bool,
+    #[serde(default = "default_true")]
+    pub music: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -478,6 +482,7 @@ impl Default for FeaturesConfig {
             finance: true,
             mail: true,
             tasks: true,
+            music: true,
         }
     }
 }
@@ -489,6 +494,7 @@ impl FeaturesConfig {
             FEATURE_FINANCE => self.finance,
             FEATURE_MAIL => self.mail,
             FEATURE_TASKS => self.tasks,
+            FEATURE_MUSIC => self.music,
             _ => false,
         }
     }

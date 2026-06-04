@@ -78,11 +78,7 @@ pub fn App() -> Element {
         })
         .unwrap_or_default();
 
-    let initial_expand_depth: u32 =
-        LocalStorage::get::<u32>("uncloud_music_expand_depth").unwrap_or(1);
-
     use_context_provider(|| Signal::new(initial_view_mode));
-    use_context_provider(|| Signal::new(initial_expand_depth));
     use_context_provider(|| Signal::new(PlayerState::default()));
     use_context_provider(|| Signal::new(HighlightTarget::default()));
     use_context_provider(|| Signal::new(VaultOpenTarget::default()));

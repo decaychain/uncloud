@@ -45,6 +45,9 @@ pub struct MusicFolderResponse {
     pub track_count: i64,
     /// File ID of the most recent audio file for cover display.
     pub cover_file_id: Option<String>,
+    /// True when this folder has child folders in the music library tree.
+    #[serde(default)]
+    pub has_children: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

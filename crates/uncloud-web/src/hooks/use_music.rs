@@ -77,6 +77,46 @@ pub async fn list_music_folders() -> Result<Vec<MusicFolderResponse>, String> {
     }
 }
 
+pub async fn list_music_root_folders() -> Result<Vec<MusicFolderResponse>, String> {
+    list_music_folder_url("/music/folders?root=true").await
+}
+
+pub async fn list_music_child_folders(
+    parent_id: &str,
+) -> Result<Vec<MusicFolderResponse>, String> {
+    let url = format!("/music/folders?parent_id={}", encode(parent_id));
+    list_music_folder_url(&url).await
+}
+
+pub async fn list_music_folders_by_ids(
+    folder_ids: &[String],
+) -> Result<Vec<MusicFolderResponse>, String> {
+    if folder_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let ids = folder_ids
+        .iter()
+        .map(|id| encode(id))
+        .collect::<Vec<_>>()
+        .join(",");
+    let url = format!("/music/folders?folder_ids={ids}");
+    list_music_folder_url(&url).await
+}
+
+async fn list_music_folder_url(url: &str) -> Result<Vec<MusicFolderResponse>, String> {
+    let response = api::get(url).send().await.map_err(|e| e.to_string())?;
+
+    if response.ok() {
+        response
+            .json::<Vec<MusicFolderResponse>>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err("Failed to load music folders".to_string())
+    }
+}
+
 pub async fn list_artists_scoped(scope: &LibraryScope) -> Result<Vec<ArtistResponse>, String> {
     let url = format!("/music/artists{}", scope.query_string());
     let response = api::get(&url).send().await.map_err(|e| e.to_string())?;

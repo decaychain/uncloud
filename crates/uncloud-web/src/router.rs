@@ -11,7 +11,7 @@ use crate::components::{
     layout::Layout,
     mail::MailPage,
     music::{
-        Music, MusicAlbumView as MusicAlbumViewComp, MusicArtistView, MusicFolderView,
+        FolderTreeView, Music, MusicAlbumView as MusicAlbumViewComp, MusicArtistView,
         MusicPlaylistView, MusicScopeCategoryView, MusicScopeFolderView,
     },
     oauth_consent::OAuthConsent,
@@ -253,9 +253,18 @@ fn MusicAlbum(artist: String, album: String) -> Element {
 
 #[component]
 fn MusicFolder(id: String) -> Element {
+    let scoped_id = id.clone();
     rsx! {
-        div { class: "p-4",
-            MusicFolderView { key: "{id}", folder_id: id }
+        div { class: "p-4 space-y-4",
+            div { class: "flex flex-wrap items-center justify-between gap-3",
+                h1 { class: "text-2xl font-bold", "Music" }
+                Link {
+                    to: Route::MusicScopeFolder { id: scoped_id },
+                    class: "btn btn-ghost btn-sm",
+                    "Library view"
+                }
+            }
+            FolderTreeView { key: "{id}", root_folder_id: Some(id) }
         }
     }
 }

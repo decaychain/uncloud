@@ -28,3 +28,15 @@ pub async fn require_tasks_feature(
     }
     next.run(request).await
 }
+
+pub async fn require_music_feature(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !user_feature_enabled(&state, &user, crate::config::FEATURE_MUSIC) {
+        return crate::error::AppError::Forbidden("Access denied".into()).into_response();
+    }
+    next.run(request).await
+}

@@ -81,6 +81,7 @@ Photo gallery with timeline view and album organization.
 
 Music library with artist/album aggregation, folder browsing, playlist management, and in-browser playback.
 
+- **Feature gate**: server-wide `features.music`; users can also opt out in Settings. The gate covers both `/api/music/*` and `/api/playlists/*`.
 - **Audio metadata**: `AudioMetadataProcessor` extracts ID3/Vorbis tags on upload and stores artist, album, track name, year, genre, duration, track number on the file document; also extracts embedded cover art as thumbnail
 - **Server API**:
   - `GET /api/music/tracks` — all audio files for user
@@ -97,11 +98,11 @@ Music library with artist/album aggregation, folder browsing, playlist managemen
   - `DELETE /api/playlists/{id}/tracks` — remove tracks
   - `PUT /api/playlists/{id}/tracks/reorder` — reorder tracks
 - **DB**: `Playlist` model with `tracks: Vec<PlaylistTrack>` (each has `file_id` and `position`); `MusicCategory` model `{ owner_id, name, folder_ids }` for user-defined library scopes
-- **Music Categories**: user labels attached to one or more music folders. The Library tab shows a category dropdown + live filter; clicking a categorized folder in the sidebar opens the library scoped to that folder's subtree (file browser still reachable via "Browse files"). Categories are managed from a folder's "⋮ → Manage categories…" menu.
+- **Music Categories**: user labels attached to one or more music folders. The Library view shows a category dropdown + live filter; categorized folders are the only folders shown in the Music sidebar and open the library scoped to that folder's subtree. Categories are managed from a folder's "⋮ → Manage categories…" menu.
 - **Frontend**:
-  - Music page with tabs: Library (search + category filter), Artists, Albums, Folders, Playlists
+  - Music page with Library and Folders view modes. Library handles search + category filtering; Folders renders a lazy, expand-on-demand folder tree in the main content area and opens track lists inline. `/music/folder/:id` uses the same browser rooted at that folder.
   - Sub-pages: `/music/artist/:name`, `/music/album/:artist/:album`, `/music/folder/:id`, `/music/scope/folder/:id`, `/music/scope/category/:id`, `/music/playlist/:id`
-  - Components in `components/music/`: `artist_list`, `artist_view`, `album_grid`, `album_view`, `folder_view`, `playlist_list`, `playlist_view`, `playlist_panel` (persistent right-side), `track_list`, `manage_categories`
+  - Components in `components/music/`: `artist_list`, `artist_view`, `album_grid`, `album_view`, `folder_tree`, `playlist_list`, `playlist_view`, `playlist_panel` (persistent right-side), `track_list`, `manage_categories`
   - `player.rs`: persistent audio player bar with play/pause, skip, queue display, progress
   - `PlayerState` context with queue, current index, playing state
   - **Lock-screen / OS controls**: `hooks/media_session.rs` integrates with the browser MediaSession API; `hooks/native_audio.rs` is the Tauri/Android bridge for background playback
