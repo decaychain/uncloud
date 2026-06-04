@@ -22,6 +22,8 @@ use crate::components::icons::{
 };
 use crate::components::scroll_sentinel::ScrollSentinel;
 use crate::hooks::{use_files, use_mail};
+use crate::router::Route;
+use crate::state::MailAccountDirtyTick;
 
 const MAIL_MESSAGE_PAGE_SIZE: u32 = 50;
 const MAIL_BACKFILL_PAGE_SIZE: u32 = 50;
@@ -46,7 +48,9 @@ impl Drop for MailEditorListener {
 }
 
 #[component]
-pub fn MailPage() -> Element {
+pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
+    let nav = use_navigator();
+    let mut account_dirty = use_context::<Signal<MailAccountDirtyTick>>();
     let mut accounts = use_signal(Vec::<MailAccountResponse>::new);
     let mut identities = use_signal(Vec::<MailIdentityResponse>::new);
     let mut folders = use_signal(Vec::<MailFolderResponse>::new);
@@ -59,6 +63,7 @@ pub fn MailPage() -> Element {
     let mut selected_message = use_signal(String::new);
     let mut loading = use_signal(|| true);
     let mut syncing = use_signal(|| false);
+    let mut refreshing_folders = use_signal(|| false);
     let mut loading_more_messages = use_signal(|| false);
     let mut backfilling_messages = use_signal(|| false);
     let mut loading_detail = use_signal(|| false);
@@ -202,23 +207,42 @@ pub fn MailPage() -> Element {
     });
 
     use_effect(move || {
+        let requested_account_id = route_account_id.clone().unwrap_or_default();
         spawn(async move {
             loading.set(true);
             match use_mail::list_accounts().await {
                 Ok(list) => {
                     let first = list.first().map(|a| a.id.clone()).unwrap_or_default();
+                    let selected = if !requested_account_id.is_empty()
+                        && list
+                            .iter()
+                            .any(|account| account.id == requested_account_id)
+                    {
+                        requested_account_id.clone()
+                    } else {
+                        first.clone()
+                    };
                     accounts.set(list);
-                    selected_account.set(first.clone());
+                    selected_account.set(selected.clone());
+                    if requested_account_id != selected {
+                        if selected.is_empty() {
+                            nav.replace(Route::Mail {});
+                        } else {
+                            nav.replace(Route::MailAccount {
+                                account_id: selected.clone(),
+                            });
+                        }
+                    }
                     match use_mail::list_identities().await {
                         Ok(rows) => identities.set(rows),
                         Err(e) => error.set(Some(e)),
                     }
-                    if !first.is_empty() {
-                        match use_mail::list_folders(&first).await {
+                    if !selected.is_empty() {
+                        match use_mail::list_folders(&selected).await {
                             Ok(rows) => folders.set(rows),
                             Err(e) => error.set(Some(e)),
                         }
-                        match use_mail::list_drafts(&first).await {
+                        match use_mail::list_drafts(&selected).await {
                             Ok(rows) => drafts.set(rows),
                             Err(e) => error.set(Some(e)),
                         }
@@ -630,7 +654,7 @@ pub fn MailPage() -> Element {
                     }
                     button {
                         class: "btn btn-sm btn-outline gap-2",
-                        disabled: syncing() || selected_account_id.is_empty(),
+                        disabled: syncing() || refreshing_folders() || selected_account_id.is_empty(),
                         onclick: move |_| {
                             let account_id = selected_account();
                             if account_id.is_empty() {
@@ -705,52 +729,6 @@ pub fn MailPage() -> Element {
             } else {
                 div { class: "grid min-h-0 grid-cols-1 gap-3 lg:h-[calc(100vh-9rem)] lg:grid-cols-[18rem_minmax(22rem,30rem)_minmax(0,1fr)]",
                     section { class: "flex min-h-[18rem] flex-col border border-base-300 bg-base-100 lg:min-h-0",
-                        div { class: "border-b border-base-300 px-3 py-2",
-                            div { class: "text-xs font-semibold uppercase text-base-content/60", "Accounts" }
-                        }
-                        div { class: "max-h-52 overflow-y-auto border-b border-base-300 lg:max-h-60",
-                            for account in accounts_snapshot.clone() {
-                                {
-                                    let id = account.id.clone();
-                                    let active = id == selected_account_id;
-                                    rsx! {
-                                        button {
-                                            key: "{id}",
-                                            class: if active {
-                                                "block w-full border-l-4 border-primary bg-primary/10 px-3 py-2 text-left"
-                                            } else {
-                                                "block w-full border-l-4 border-transparent px-3 py-2 text-left hover:bg-base-200"
-                                            },
-                                            onclick: move |_| {
-                                                let account_id = id.clone();
-                                                spawn(async move {
-                                                    selected_account.set(account_id.clone());
-                                                    selected_folder.set(String::new());
-                                                    selected_message.set(String::new());
-                                                    move_target_folder.set(String::new());
-                                                    messages.set(Vec::new());
-                                                    drafts.set(Vec::new());
-                                                    message_next_cursor.set(None);
-                                                    message_has_more.set(false);
-                                                    detail.set(None);
-                                                    error.set(None);
-                                                    match use_mail::list_folders(&account_id).await {
-                                                        Ok(rows) => folders.set(rows),
-                                                        Err(e) => error.set(Some(e)),
-                                                    }
-                                                    match use_mail::list_drafts(&account_id).await {
-                                                        Ok(rows) => drafts.set(rows),
-                                                        Err(e) => error.set(Some(e)),
-                                                    }
-                                                });
-                                            },
-                                            div { class: "truncate text-sm font-medium", "{account.display_name}" }
-                                            div { class: "truncate text-xs text-base-content/60", "{account.email_address}" }
-                                        }
-                                    }
-                                }
-                            }
-                        }
                         if !drafts_snapshot.is_empty() {
                             div { class: "border-b border-base-300",
                                 div { class: "flex items-center justify-between px-3 py-2",
@@ -841,21 +819,29 @@ pub fn MailPage() -> Element {
                             div { class: "text-xs font-semibold uppercase text-base-content/60", "Folders" }
                             button {
                                 class: "btn btn-ghost btn-xs",
-                                disabled: selected_account_id.is_empty(),
+                                disabled: selected_account_id.is_empty() || syncing() || refreshing_folders(),
                                 onclick: move |_| {
                                     let account_id = selected_account();
                                     if account_id.is_empty() {
                                         return;
                                     }
                                     spawn(async move {
+                                        refreshing_folders.set(true);
+                                        sync_status.set(Some("Refreshing folders".to_string()));
                                         error.set(None);
                                         match use_mail::refresh_folders(&account_id).await {
                                             Ok(rows) => folders.set(rows),
                                             Err(e) => error.set(Some(e)),
                                         }
+                                        refreshing_folders.set(false);
+                                        sync_status.set(None);
                                     });
                                 },
-                                IconRefreshCw { class: "w-4 h-4".to_string() }
+                                if refreshing_folders() {
+                                    span { class: "loading loading-spinner loading-xs" }
+                                } else {
+                                    IconRefreshCw { class: "w-4 h-4".to_string() }
+                                }
                             }
                         }
                         div { class: "min-h-0 flex-1 overflow-y-auto p-1",
@@ -989,7 +975,10 @@ pub fn MailPage() -> Element {
                                 }
                                 button {
                                     class: "btn btn-sm btn-outline gap-2",
-                                    disabled: selected_account_id.is_empty() || selected_folder_id.is_empty() || syncing(),
+                                    disabled: selected_account_id.is_empty()
+                                        || selected_folder_id.is_empty()
+                                        || syncing()
+                                        || refreshing_folders(),
                                     onclick: move |_| {
                                         let account_id = selected_account();
                                         let folder_id = selected_folder();
@@ -2366,6 +2355,8 @@ pub fn MailPage() -> Element {
                                                 if let Ok(list) = use_mail::list_accounts().await {
                                                     accounts.set(list);
                                                 }
+                                                let next = account_dirty.peek().0 + 1;
+                                                account_dirty.set(MailAccountDirtyTick(next));
                                                 if let Ok(rows) = use_mail::list_identities().await {
                                                     identities.set(rows);
                                                 }
@@ -2374,6 +2365,9 @@ pub fn MailPage() -> Element {
                                                     Err(e) => error.set(Some(e)),
                                                 }
                                                 show_setup.set(false);
+                                                nav.replace(Route::MailAccount {
+                                                    account_id: account.id.clone(),
+                                                });
                                             }
                                             Err(e) => error.set(Some(e)),
                                         }
@@ -3081,6 +3075,8 @@ pub fn MailPage() -> Element {
                                                                 Ok(list) => {
                                                                     let next = list.first().map(|a| a.id.clone()).unwrap_or_default();
                                                                     accounts.set(list);
+                                                                    let next_dirty = account_dirty.peek().0 + 1;
+                                                                    account_dirty.set(MailAccountDirtyTick(next_dirty));
                                                                     if let Ok(rows) = use_mail::list_identities().await {
                                                                         identities.set(rows);
                                                                     }
@@ -3104,6 +3100,13 @@ pub fn MailPage() -> Element {
                                                                     identity_editor_open.set(false);
                                                                     identity_editing_id.set(String::new());
                                                                     notice.set(Some("Mail account deleted".to_string()));
+                                                                    if next.is_empty() {
+                                                                        nav.replace(Route::Mail {});
+                                                                    } else {
+                                                                        nav.replace(Route::MailAccount {
+                                                                            account_id: next.clone(),
+                                                                        });
+                                                                    }
                                                                 }
                                                                 Err(e) => error.set(Some(e)),
                                                             }
@@ -3202,6 +3205,8 @@ pub fn MailPage() -> Element {
                                                                     }
                                                                 }
                                                                 accounts.set(current);
+                                                                let next = account_dirty.peek().0 + 1;
+                                                                account_dirty.set(MailAccountDirtyTick(next));
                                                                 selected_account.set(updated.id.clone());
                                                                 account_settings.set(None);
                                                                 notice.set(Some("Account settings saved".to_string()));

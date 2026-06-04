@@ -1,9 +1,9 @@
-use dioxus::prelude::*;
-use uncloud_common::ServerEvent;
-use crate::hooks::use_events::use_events;
 use crate::components::icons::IconMenu;
 use crate::hooks::tauri;
+use crate::hooks::use_events::use_events;
 use crate::hooks::use_storages::{RescanConflict, RescanJob, RescanStatus};
+use dioxus::prelude::*;
+use uncloud_common::ServerEvent;
 
 fn parse_rescan_status(status: &str) -> RescanStatus {
     match status {
@@ -13,8 +13,8 @@ fn parse_rescan_status(status: &str) -> RescanStatus {
         _ => RescanStatus::Running,
     }
 }
-use crate::state::{AuthState, PinnedPlaylistState, PlayerState, RescanState, ThemeState};
 use crate::router::Route;
+use crate::state::{AuthState, PinnedPlaylistState, PlayerState, RescanState, ThemeState};
 
 #[component]
 pub fn Layout() -> Element {
@@ -151,7 +151,10 @@ pub fn Layout() -> Element {
     let pinned = use_context::<Signal<PinnedPlaylistState>>();
     let on_music_route = matches!(
         route,
-        Route::Music {} | Route::MusicArtist { .. } | Route::MusicAlbum { .. } | Route::MusicFolder { .. }
+        Route::Music {}
+            | Route::MusicArtist { .. }
+            | Route::MusicAlbum { .. }
+            | Route::MusicFolder { .. }
     );
     let show_playlist_panel = on_music_route && pinned().0.is_some();
 
@@ -161,8 +164,11 @@ pub fn Layout() -> Element {
     let page_title = match route {
         Route::Dashboard {} => "Uncloud - Dashboard",
         Route::Gallery {} | Route::GalleryAlbum { .. } => "Uncloud - Gallery",
-        Route::Music {} | Route::MusicArtist { .. } | Route::MusicAlbum { .. }
-            | Route::MusicFolder { .. } | Route::MusicPlaylist { .. } => "Uncloud - Music",
+        Route::Music {}
+        | Route::MusicArtist { .. }
+        | Route::MusicAlbum { .. }
+        | Route::MusicFolder { .. }
+        | Route::MusicPlaylist { .. } => "Uncloud - Music",
         Route::Shopping {} | Route::ShoppingList { .. } => "Uncloud - Shopping",
         Route::Finance {}
         | Route::FinanceAccounts {}
@@ -170,7 +176,7 @@ pub fn Layout() -> Element {
         | Route::FinanceSchemas {}
         | Route::FinanceImports {}
         | Route::FinanceRules {} => "Uncloud - Finance",
-        Route::Mail {} => "Uncloud - Mail",
+        Route::Mail {} | Route::MailAccount { .. } => "Uncloud - Mail",
         Route::Tasks {} | Route::TasksAssigned {} | Route::TasksProject { .. } => "Uncloud - Tasks",
         Route::Passwords {} => "Uncloud - Passwords",
         Route::Settings {} | Route::SettingsTab { .. } => "Uncloud - Settings",
@@ -236,7 +242,12 @@ fn Navbar() -> Element {
         .map(|u| u.username.clone())
         .unwrap_or_default();
 
-    let initial = username.chars().next().unwrap_or('?').to_uppercase().to_string();
+    let initial = username
+        .chars()
+        .next()
+        .unwrap_or('?')
+        .to_uppercase()
+        .to_string();
 
     let on_logout = move |_| {
         spawn(async move {
@@ -249,7 +260,14 @@ fn Navbar() -> Element {
         "Dashboard"
     } else if matches!(route, Route::Gallery {} | Route::GalleryAlbum { .. }) {
         "Gallery"
-    } else if matches!(route, Route::Music {} | Route::MusicArtist { .. } | Route::MusicAlbum { .. } | Route::MusicFolder { .. } | Route::MusicPlaylist { .. }) {
+    } else if matches!(
+        route,
+        Route::Music {}
+            | Route::MusicArtist { .. }
+            | Route::MusicAlbum { .. }
+            | Route::MusicFolder { .. }
+            | Route::MusicPlaylist { .. }
+    ) {
         "Music"
     } else if matches!(route, Route::Shopping {} | Route::ShoppingList { .. }) {
         "Shopping"
@@ -263,9 +281,12 @@ fn Navbar() -> Element {
             | Route::FinanceRules {},
     ) {
         "Finance"
-    } else if matches!(route, Route::Mail {}) {
+    } else if matches!(route, Route::Mail {} | Route::MailAccount { .. }) {
         "Mail"
-    } else if matches!(route, Route::Tasks {} | Route::TasksAssigned {} | Route::TasksProject { .. }) {
+    } else if matches!(
+        route,
+        Route::Tasks {} | Route::TasksAssigned {} | Route::TasksProject { .. }
+    ) {
         "Tasks"
     } else if matches!(route, Route::Passwords {}) {
         "Passwords"

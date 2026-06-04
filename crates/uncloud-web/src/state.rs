@@ -169,7 +169,6 @@ pub struct VaultOpenTarget {
     pub file_name: Option<String>,
 }
 
-
 /// App-level live state for the admin storage rescan. Lifted out of the
 /// Settings component so it survives navigation away from the settings
 /// page — the SSE stream keeps updating it from anywhere.
@@ -199,6 +198,12 @@ pub struct PlaylistDirtyTick(pub u32);
 /// no server-side category SSE event.
 #[derive(Clone, Default, PartialEq)]
 pub struct MusicCategoryDirtyTick(pub u32);
+
+/// Bumped whenever a mail account is created, updated, or deleted. The Mail
+/// sidebar listens to this because mail account mutations happen inside the
+/// Mail page, while the account list now lives in the global app sidebar.
+#[derive(Clone, Default, PartialEq)]
+pub struct MailAccountDirtyTick(pub u32);
 
 impl PlayerState {
     pub fn current_track(&self) -> Option<&TrackResponse> {

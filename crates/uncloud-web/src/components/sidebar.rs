@@ -1,16 +1,19 @@
-use dioxus::prelude::*;
-use wasm_bindgen::JsCast;
-use uncloud_common::{AlbumResponse, MusicFolderResponse, PlaylistSummary, TaskProjectResponse};
-use crate::hooks::tauri as tauri_hook;
 use crate::components::icons::{
-    IconCheckSquare, IconFileText, IconFolder, IconHistory, IconImage, IconKey, IconLayoutGrid,
-    IconLink, IconList, IconListMusic, IconMail, IconMusic, IconPalette, IconCopy, IconRefreshCw,
-    IconSettings, IconShield, IconShoppingCart, IconTrash, IconUser, IconUsers, IconWallet,
+    IconCheckSquare, IconCopy, IconFileText, IconFolder, IconHistory, IconImage, IconKey,
+    IconLayoutGrid, IconLink, IconList, IconListMusic, IconMail, IconMusic, IconPalette,
+    IconRefreshCw, IconSettings, IconShield, IconShoppingCart, IconTrash, IconUser, IconUsers,
+    IconWallet,
 };
-use crate::hooks::{use_apps, use_files, use_music, use_playlists, use_tasks};
+use crate::hooks::tauri as tauri_hook;
 use crate::hooks::use_apps::AppEntry;
+use crate::hooks::{use_apps, use_files, use_mail, use_music, use_playlists, use_tasks};
 use crate::router::Route;
-use crate::state::{AuthState, PlaylistDirtyTick};
+use crate::state::{AuthState, MailAccountDirtyTick, PlaylistDirtyTick};
+use dioxus::prelude::*;
+use uncloud_common::{
+    AlbumResponse, MailAccountResponse, MusicFolderResponse, PlaylistSummary, TaskProjectResponse,
+};
+use wasm_bindgen::JsCast;
 
 const LOGO: Asset = asset!("/assets/favicon-32.png");
 
@@ -44,11 +47,14 @@ pub fn Sidebar() -> Element {
             | Route::MusicPlaylist { .. },
     ) {
         "music"
-    } else if matches!(route, Route::Tasks {} | Route::TasksAssigned {} | Route::TasksProject { .. }) {
+    } else if matches!(
+        route,
+        Route::Tasks {} | Route::TasksAssigned {} | Route::TasksProject { .. }
+    ) {
         "tasks"
     } else if matches!(route, Route::Shopping {} | Route::ShoppingList { .. }) {
         "shopping"
-    } else if matches!(route, Route::Mail {}) {
+    } else if matches!(route, Route::Mail {} | Route::MailAccount { .. }) {
         "mail"
     } else if matches!(
         route,
@@ -322,7 +328,8 @@ pub fn Sidebar() -> Element {
                             }
                         },
                         "mail" => rsx! {
-                            li { class: "menu-title", span { "Mail" } }
+                            li { class: "menu-title", span { "Accounts" } }
+                            MailSidebarAccounts {}
                         },
                         "passwords" => rsx! {
                             li { class: "menu-title", span { "Passwords" } }
@@ -497,6 +504,79 @@ fn SidebarApps() -> Element {
                                 }
                             },
                             "{app_icon} {app_label}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn MailSidebarAccounts() -> Element {
+    let mut accounts: Signal<Vec<MailAccountResponse>> = use_signal(Vec::new);
+    let mut loading = use_signal(|| true);
+    let dirty = use_context::<Signal<MailAccountDirtyTick>>();
+    let route = use_route::<Route>();
+
+    use_effect(use_reactive!(|(dirty)| {
+        let _ = dirty().0;
+        spawn(async move {
+            loading.set(true);
+            if let Ok(rows) = use_mail::list_accounts().await {
+                accounts.set(rows);
+            }
+            loading.set(false);
+        });
+    }));
+
+    let active_account_id = match &route {
+        Route::MailAccount { account_id } => Some(account_id.as_str()),
+        _ => None,
+    };
+    let account_list = accounts();
+
+    rsx! {
+        if loading() {
+            li {
+                div { class: "justify-start gap-2 text-base-content/60",
+                    span { class: "loading loading-spinner loading-xs" }
+                    span { "Loading accounts" }
+                }
+            }
+        } else if account_list.is_empty() {
+            li {
+                div { class: "text-sm text-base-content/60", "No accounts" }
+            }
+        } else {
+            for account in account_list {
+                {
+                    let id = account.id.clone();
+                    let is_active = active_account_id == Some(id.as_str());
+                    rsx! {
+                        li {
+                            Link {
+                                to: Route::MailAccount { account_id: account.id.clone() },
+                                class: if is_active {
+                                    "active flex items-start gap-2 min-w-0"
+                                } else {
+                                    "flex items-start gap-2 min-w-0"
+                                },
+                                onclick: move |_| close_drawer(),
+                                IconMail { class: "mt-0.5 h-4 w-4 shrink-0".to_string() }
+                                span { class: "min-w-0 flex-1",
+                                    span { class: "block truncate text-sm", "{account.display_name}" }
+                                    span { class: "block truncate text-xs opacity-60", "{account.email_address}" }
+                                    if !account.enabled {
+                                        span { class: "badge badge-ghost badge-xs mt-1", "Disabled" }
+                                    } else if account.sync_in_progress {
+                                        span { class: "mt-1 inline-flex items-center gap-1 text-xs opacity-60",
+                                            span { class: "loading loading-spinner loading-xs" }
+                                            span { "Syncing" }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -716,8 +796,7 @@ fn MusicSidebarFolders() -> Element {
         let _ = cat_dirty();
         spawn(async move {
             if let Ok(cats) = crate::hooks::use_music_categories::list_categories().await {
-                let mut set: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
+                let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
                 for c in cats {
                     for fid in c.folder_ids {
                         set.insert(fid);

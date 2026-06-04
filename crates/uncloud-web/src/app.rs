@@ -1,8 +1,11 @@
-use dioxus::prelude::*;
-use gloo_storage::{LocalStorage, Storage};
 use crate::hooks::{use_auth, use_search, use_storages};
 use crate::router::Route;
-use crate::state::{AuthState, FontScale, HighlightTarget, PinnedPlaylistState, PlayerState, PlaylistDirtyTick, RescanState, ThemeState, VaultOpenTarget, ViewMode};
+use crate::state::{
+    AuthState, FontScale, HighlightTarget, MailAccountDirtyTick, PinnedPlaylistState, PlayerState,
+    PlaylistDirtyTick, RescanState, ThemeState, VaultOpenTarget, ViewMode,
+};
+use dioxus::prelude::*;
+use gloo_storage::{LocalStorage, Storage};
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
 const MAIL_EDITOR: Asset = asset!("/assets/mail-editor.js");
@@ -13,7 +16,12 @@ const APPLE_TOUCH_ICON: Asset = asset!("/assets/apple-touch-icon.png");
 #[component]
 pub fn App() -> Element {
     // Start in loading state; check for an existing session before rendering.
-    let mut auth_state = use_context_provider(|| Signal::new(AuthState { loading: true, user: None }));
+    let mut auth_state = use_context_provider(|| {
+        Signal::new(AuthState {
+            loading: true,
+            user: None,
+        })
+    });
     let mut search_enabled = use_context_provider(|| Signal::new(false));
 
     use_effect(move || {
@@ -61,10 +69,17 @@ pub fn App() -> Element {
 
     let initial_view_mode = LocalStorage::get::<String>("uncloud_view_mode")
         .ok()
-        .and_then(|s| if s == "list" { Some(ViewMode::List) } else { None })
+        .and_then(|s| {
+            if s == "list" {
+                Some(ViewMode::List)
+            } else {
+                None
+            }
+        })
         .unwrap_or_default();
 
-    let initial_expand_depth: u32 = LocalStorage::get::<u32>("uncloud_music_expand_depth").unwrap_or(1);
+    let initial_expand_depth: u32 =
+        LocalStorage::get::<u32>("uncloud_music_expand_depth").unwrap_or(1);
 
     use_context_provider(|| Signal::new(initial_view_mode));
     use_context_provider(|| Signal::new(initial_expand_depth));
@@ -73,20 +88,20 @@ pub fn App() -> Element {
     use_context_provider(|| Signal::new(VaultOpenTarget::default()));
     let mut rescan_state = use_context_provider(|| Signal::new(RescanState::default()));
 
-    let pinned_initial: Option<String> = LocalStorage::get::<String>("uncloud_pinned_playlist").ok();
+    let pinned_initial: Option<String> =
+        LocalStorage::get::<String>("uncloud_pinned_playlist").ok();
     let pinned_state = use_context_provider(|| Signal::new(PinnedPlaylistState(pinned_initial)));
-    use_effect(move || {
-        match pinned_state().0 {
-            Some(id) => {
-                let _ = LocalStorage::set("uncloud_pinned_playlist", id);
-            }
-            None => {
-                LocalStorage::delete("uncloud_pinned_playlist");
-            }
+    use_effect(move || match pinned_state().0 {
+        Some(id) => {
+            let _ = LocalStorage::set("uncloud_pinned_playlist", id);
+        }
+        None => {
+            LocalStorage::delete("uncloud_pinned_playlist");
         }
     });
     use_context_provider(|| Signal::new(PlaylistDirtyTick::default()));
     use_context_provider(|| Signal::new(crate::state::MusicCategoryDirtyTick::default()));
+    use_context_provider(|| Signal::new(MailAccountDirtyTick::default()));
     use_context_provider(|| Signal::new(crate::state::VaultSession::default()));
 
     // Hydrate the live rescan panel when the logged-in user is an admin.
