@@ -57,6 +57,7 @@ Authenticated routes are mounted under both `/api` and `/api/v1`:
 - `DELETE /mail/accounts/{id}/credential`
 - `POST /mail/accounts/{id}/test-imap`
 - `POST /mail/accounts/{id}/test-smtp`
+- `POST /mail/accounts/{id}/diagnostics`
 - `POST /mail/accounts/{id}/send`
 - `POST /mail/accounts/{id}/sync`
 - `GET /mail/accounts/{id}/drafts`
@@ -104,6 +105,10 @@ the account's SMTP settings.
 - IMAP folder discovery through `POST /mail/accounts/{account_id}/folders/refresh`.
 - SMTP connection/authentication testing through
   `POST /mail/accounts/{id}/test-smtp`.
+- Account/provider diagnostics through
+  `POST /mail/accounts/{id}/diagnostics`, including live IMAP/SMTP check
+  results when credentials are available, IMAP capabilities, cached folder role
+  mapping, sent-copy readiness, and recent folder/provider errors.
 - Folder/subfolder persistence using remote path, hierarchy delimiter, parent
   path, attributes, selectable state, role mapping, and account-sync inclusion.
 - Folder refresh upserts by `(owner_id, account_id, path)`, preserving stable
@@ -158,8 +163,8 @@ the account's SMTP settings.
   save it, Uncloud appends the exact RFC822 payload to Sent.
 - First experimental web UI iteration at `/mail`: account/folder navigation,
   account setup/settings, sender identity management, IMAP/SMTP tests, folder
-  settings, manual account/folder sync, cached message list, reader pane, and
-  message mutation/compose controls.
+  settings, provider diagnostics, manual account/folder sync, cached message
+  list, reader pane, and message mutation/compose controls.
 - Compose v2 UI basics: reply, reply-all, forward, local draft autosave, manual
   save/discard, and a local drafts list per account.
 - Rich compose prototype: a locally bundled Tiptap editor is embedded in the
@@ -274,8 +279,9 @@ Remaining credential work:
   operational provider failures: bad credentials and unsupported provider
   commands are client-facing errors, network/provider failures are 502, and
   provider timeouts are 504.
-- Add an account/provider diagnostics view that surfaces detected capabilities,
-  folder role inference, sent-copy status, and recent provider errors.
+- Account/provider diagnostics surface live check results, detected IMAP
+  capabilities, folder role inference, sent-copy readiness, and recent provider
+  errors from Account settings.
 - Continue adding provider-specific behavior only where the generic IMAP/SMTP
   path proves ambiguous against real providers.
 

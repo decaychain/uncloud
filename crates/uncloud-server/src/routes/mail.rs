@@ -27,10 +27,12 @@ use uncloud_common::{
     MailFolderSyncResponse, MailIdentityResponse, MailMessageDetailResponse,
     MailMessageListResponse, MailMessageMutationAction, MailMessageMutationRequest,
     MailMessageMutationResponse, MailMessageSummaryResponse, MailPasswordAuthRequest,
-    MailSentCopyStatus, MailServerSettings, MailSyncRequest, SaveMailAttachmentRequest,
-    SaveMailAttachmentResponse, SendMailMessageRequest, SendMailMessageResponse,
-    SetMailCredentialRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
-    UpdateMailIdentityRequest, UpsertMailDraftRequest,
+    MailProviderDiagnosticsResponse, MailProviderEndpointDiagnostics, MailProviderErrorDiagnostic,
+    MailProviderFolderDiagnostic, MailProviderRoleDiagnostic, MailProviderRoleStatus,
+    MailSentCopyDiagnosticStatus, MailSentCopyDiagnostics, MailSentCopyStatus, MailServerSettings,
+    MailSyncRequest, SaveMailAttachmentRequest, SaveMailAttachmentResponse, SendMailMessageRequest,
+    SendMailMessageResponse, SetMailCredentialRequest, UpdateMailAccountRequest,
+    UpdateMailFolderRequest, UpdateMailIdentityRequest, UpsertMailDraftRequest,
 };
 
 use crate::error::{AppError, Result};
@@ -69,6 +71,15 @@ const MIN_ACCOUNT_SYNC_INTERVAL_SECS: u64 = 60;
 const MAX_ACCOUNT_SYNC_INTERVAL_SECS: u64 = 7 * 24 * 60 * 60;
 const BACKGROUND_SYNC_TICK_SECS: u64 = 60;
 const MAX_DRAFT_ATTACHMENT_TOTAL_BYTES: u64 = 20 * 1024 * 1024;
+const DIAGNOSTIC_FOLDER_ROLES: [MailFolderRole; 7] = [
+    MailFolderRole::Inbox,
+    MailFolderRole::Sent,
+    MailFolderRole::Drafts,
+    MailFolderRole::Archive,
+    MailFolderRole::Trash,
+    MailFolderRole::Spam,
+    MailFolderRole::AllMail,
+];
 
 #[derive(Debug, Deserialize)]
 pub struct MailMessageListQuery {
@@ -458,6 +469,24 @@ async fn find_optional_folder_by_role(
     Ok(None)
 }
 
+async fn load_account_folders(
+    state: &AppState,
+    owner_id: ObjectId,
+    account_id: ObjectId,
+) -> Result<Vec<MailFolder>> {
+    let mut cursor = state
+        .db
+        .collection::<MailFolder>(FOLDERS)
+        .find(doc! { "owner_id": owner_id, "account_id": account_id })
+        .sort(doc! { "path": 1 })
+        .await?;
+    let mut out = Vec::new();
+    while let Some(folder) = cursor.try_next().await? {
+        out.push(folder);
+    }
+    Ok(out)
+}
+
 fn role_list_label(roles: &[MailFolderRole]) -> String {
     roles
         .iter()
@@ -479,6 +508,115 @@ fn credential_status(account: &MailAccount) -> MailCredentialStatusResponse {
         account_id: account.id.to_hex(),
         credential_configured: account.credential_configured || account.credential.is_some(),
     }
+}
+
+fn provider_endpoint_diagnostics(settings: &MailServerConfig) -> MailProviderEndpointDiagnostics {
+    MailProviderEndpointDiagnostics {
+        host: settings.host.clone(),
+        port: settings.port,
+        security: settings.security,
+        username: settings.username.clone(),
+        ok: None,
+        capabilities: Vec::new(),
+        error: None,
+    }
+}
+
+fn folder_to_provider_diagnostics(folder: &MailFolder) -> MailProviderFolderDiagnostic {
+    MailProviderFolderDiagnostic {
+        folder_id: folder.id.to_hex(),
+        path: folder.path.clone(),
+        name: folder.name.clone(),
+        role: folder_effective_role(folder),
+        role_source: folder.role_source,
+        selectable: folder.selectable,
+        sync_enabled: folder.sync_enabled,
+        attributes: folder.attributes.clone(),
+        last_sync_finished_at: folder.last_sync_finished_at.map(|dt| dt.to_rfc3339()),
+        last_sync_error: folder.last_sync_error.clone(),
+    }
+}
+
+fn first_selectable_folder_for_role(
+    folders: &[MailFolder],
+    role: MailFolderRole,
+) -> Option<&MailFolder> {
+    folders
+        .iter()
+        .find(|folder| folder.selectable && folder_effective_role(folder) == Some(role))
+}
+
+fn role_diagnostics(folders: &[MailFolder]) -> Vec<MailProviderRoleDiagnostic> {
+    DIAGNOSTIC_FOLDER_ROLES
+        .iter()
+        .map(|role| {
+            let folder = first_selectable_folder_for_role(folders, *role);
+            MailProviderRoleDiagnostic {
+                role: *role,
+                status: if folder.is_some() {
+                    MailProviderRoleStatus::Found
+                } else {
+                    MailProviderRoleStatus::Missing
+                },
+                folder_id: folder.map(|folder| folder.id.to_hex()),
+                folder_path: folder.map(|folder| folder.path.clone()),
+                role_source: folder.map(|folder| folder.role_source),
+            }
+        })
+        .collect()
+}
+
+fn sent_copy_diagnostics(folders: &[MailFolder]) -> MailSentCopyDiagnostics {
+    if let Some(folder) = first_selectable_folder_for_role(folders, MailFolderRole::Sent) {
+        MailSentCopyDiagnostics {
+            status: MailSentCopyDiagnosticStatus::Ready,
+            sent_folder_id: Some(folder.id.to_hex()),
+            sent_folder_path: Some(folder.path.clone()),
+            provider_saved_detection: true,
+            append_fallback: true,
+            detail: "Sent folder is configured; provider-saved detection and append fallback are enabled.".to_string(),
+        }
+    } else {
+        MailSentCopyDiagnostics {
+            status: MailSentCopyDiagnosticStatus::MissingSentFolder,
+            sent_folder_id: None,
+            sent_folder_path: None,
+            provider_saved_detection: false,
+            append_fallback: false,
+            detail: "No selectable folder is configured as Sent; sent copies will be skipped."
+                .to_string(),
+        }
+    }
+}
+
+fn provider_error_diagnostic(
+    scope: &str,
+    operation: &str,
+    message: String,
+    at: Option<String>,
+) -> MailProviderErrorDiagnostic {
+    MailProviderErrorDiagnostic {
+        scope: scope.to_string(),
+        operation: operation.to_string(),
+        folder_id: None,
+        folder_path: None,
+        message,
+        at,
+    }
+}
+
+fn folder_error_diagnostic(folder: &MailFolder) -> Option<MailProviderErrorDiagnostic> {
+    folder
+        .last_sync_error
+        .as_ref()
+        .map(|message| MailProviderErrorDiagnostic {
+            scope: "folder".to_string(),
+            operation: "sync".to_string(),
+            folder_id: Some(folder.id.to_hex()),
+            folder_path: Some(folder.path.clone()),
+            message: message.clone(),
+            at: folder.last_sync_finished_at.map(|dt| dt.to_rfc3339()),
+        })
 }
 
 fn sync_limit(input: Option<u32>) -> u32 {
@@ -1113,6 +1251,99 @@ pub async fn test_account_smtp(
             .test_smtp_password(&account.smtp, &password)
             .await?,
     ))
+}
+
+pub async fn diagnose_account_provider(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    Json(req): Json<MailPasswordAuthRequest>,
+) -> Result<Json<MailProviderDiagnosticsResponse>> {
+    require_mail(&state)?;
+    let id = parse_oid(&id, "mail account id")?;
+    let account = find_account(&state, user.id, id).await?;
+    let folders = load_account_folders(&state, user.id, account.id).await?;
+    let generated_at = Utc::now().to_rfc3339();
+    let mut imap = provider_endpoint_diagnostics(&account.imap);
+    let mut smtp = provider_endpoint_diagnostics(&account.smtp);
+    let mut recent_errors = folders
+        .iter()
+        .filter_map(folder_error_diagnostic)
+        .collect::<Vec<_>>();
+
+    match resolve_mail_password(&state, &account, req.password.as_deref()) {
+        Ok(password) => {
+            match state
+                .mail
+                .test_imap_password(&account.imap, &password)
+                .await
+            {
+                Ok(result) => {
+                    imap.ok = Some(result.ok);
+                    imap.capabilities = result.capabilities;
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    imap.ok = Some(false);
+                    imap.error = Some(message.clone());
+                    recent_errors.push(provider_error_diagnostic(
+                        "imap",
+                        "connection_test",
+                        message,
+                        Some(generated_at.clone()),
+                    ));
+                }
+            }
+
+            match state
+                .mail
+                .test_smtp_password(&account.smtp, &password)
+                .await
+            {
+                Ok(result) => {
+                    smtp.ok = Some(result.ok);
+                    smtp.capabilities = result.capabilities;
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    smtp.ok = Some(false);
+                    smtp.error = Some(message.clone());
+                    recent_errors.push(provider_error_diagnostic(
+                        "smtp",
+                        "connection_test",
+                        message,
+                        Some(generated_at.clone()),
+                    ));
+                }
+            }
+        }
+        Err(err) => {
+            let message = err.to_string();
+            imap.error = Some(message.clone());
+            smtp.error = Some(message);
+        }
+    }
+
+    recent_errors.sort_by(|a, b| {
+        b.at.cmp(&a.at)
+            .then_with(|| a.scope.cmp(&b.scope))
+            .then_with(|| a.operation.cmp(&b.operation))
+    });
+    recent_errors.truncate(10);
+
+    Ok(Json(MailProviderDiagnosticsResponse {
+        account_id: account.id.to_hex(),
+        generated_at,
+        credential_configured: account.credential_configured || account.credential.is_some(),
+        sync_in_progress: state.mail.is_account_syncing(account.id),
+        last_sync_at: account.last_sync_at.map(|dt| dt.to_rfc3339()),
+        imap,
+        smtp,
+        roles: role_diagnostics(&folders),
+        folders: folders.iter().map(folder_to_provider_diagnostics).collect(),
+        sent_copy: sent_copy_diagnostics(&folders),
+        recent_errors,
+    }))
 }
 
 struct ResolvedSendIdentity {
@@ -2081,20 +2312,14 @@ pub async fn list_folders(
     require_mail(&state)?;
     let account_id = parse_oid(&account_id, "mail account id")?;
     let _ = find_account(&state, user.id, account_id).await?;
-    let mut cursor = state
-        .db
-        .collection::<MailFolder>(FOLDERS)
-        .find(doc! { "owner_id": user.id, "account_id": account_id })
-        .sort(doc! { "path": 1 })
-        .await?;
-    let mut out = Vec::new();
-    while let Some(folder) = cursor.try_next().await? {
-        out.push(folder_to_response(
-            &folder,
-            state.mail.is_account_syncing(folder.account_id),
-        ));
-    }
-    Ok(Json(out))
+    let sync_in_progress = state.mail.is_account_syncing(account_id);
+    Ok(Json(
+        load_account_folders(&state, user.id, account_id)
+            .await?
+            .iter()
+            .map(|folder| folder_to_response(folder, sync_in_progress))
+            .collect(),
+    ))
 }
 
 pub async fn update_folder(
@@ -3749,6 +3974,51 @@ mod tests {
         folder.highest_synced_uid = None;
 
         assert!(folder_to_response(&folder, false).sync_completed);
+    }
+
+    #[test]
+    fn provider_role_diagnostics_report_inferred_folders() {
+        let folders = vec![
+            test_folder("INBOX", MailFolderRoleSource::Inferred, None),
+            test_folder("Sent Mail", MailFolderRoleSource::Inferred, None),
+        ];
+
+        let rows = role_diagnostics(&folders);
+        let sent = rows
+            .iter()
+            .find(|row| row.role == MailFolderRole::Sent)
+            .unwrap();
+        let archive = rows
+            .iter()
+            .find(|row| row.role == MailFolderRole::Archive)
+            .unwrap();
+
+        assert_eq!(sent.status, MailProviderRoleStatus::Found);
+        assert_eq!(sent.folder_path.as_deref(), Some("Sent Mail"));
+        assert_eq!(archive.status, MailProviderRoleStatus::Missing);
+        assert!(archive.folder_path.is_none());
+    }
+
+    #[test]
+    fn sent_copy_diagnostics_require_sent_folder() {
+        let folders = vec![test_folder(
+            "Sent Mail",
+            MailFolderRoleSource::Inferred,
+            None,
+        )];
+
+        let ready = sent_copy_diagnostics(&folders);
+        assert_eq!(ready.status, MailSentCopyDiagnosticStatus::Ready);
+        assert!(ready.provider_saved_detection);
+        assert!(ready.append_fallback);
+
+        let missing = sent_copy_diagnostics(&[]);
+        assert_eq!(
+            missing.status,
+            MailSentCopyDiagnosticStatus::MissingSentFolder
+        );
+        assert!(!missing.provider_saved_detection);
+        assert!(!missing.append_fallback);
     }
 
     #[test]

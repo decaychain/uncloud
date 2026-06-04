@@ -296,6 +296,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/mail/accounts/{id}/test-imap", post(mail::test_account_imap))
         .route("/mail/accounts/{id}/test-smtp", post(mail::test_account_smtp))
+        .route(
+            "/mail/accounts/{id}/diagnostics",
+            post(mail::diagnose_account_provider),
+        )
         .route("/mail/accounts/{id}/send", post(mail::send_account_message))
         .route("/mail/accounts/{id}/sync", post(mail::sync_account))
         .route(

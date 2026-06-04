@@ -422,6 +422,89 @@ pub struct MailConnectionTestResponse {
     pub capabilities: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailProviderDiagnosticsResponse {
+    pub account_id: String,
+    pub generated_at: String,
+    pub credential_configured: bool,
+    pub sync_in_progress: bool,
+    pub last_sync_at: Option<String>,
+    pub imap: MailProviderEndpointDiagnostics,
+    pub smtp: MailProviderEndpointDiagnostics,
+    pub roles: Vec<MailProviderRoleDiagnostic>,
+    pub folders: Vec<MailProviderFolderDiagnostic>,
+    pub sent_copy: MailSentCopyDiagnostics,
+    pub recent_errors: Vec<MailProviderErrorDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailProviderEndpointDiagnostics {
+    pub host: String,
+    pub port: u16,
+    pub security: MailSecurity,
+    pub username: String,
+    pub ok: Option<bool>,
+    pub capabilities: Vec<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MailProviderRoleStatus {
+    Found,
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailProviderRoleDiagnostic {
+    pub role: MailFolderRole,
+    pub status: MailProviderRoleStatus,
+    pub folder_id: Option<String>,
+    pub folder_path: Option<String>,
+    pub role_source: Option<MailFolderRoleSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailProviderFolderDiagnostic {
+    pub folder_id: String,
+    pub path: String,
+    pub name: String,
+    pub role: Option<MailFolderRole>,
+    pub role_source: MailFolderRoleSource,
+    pub selectable: bool,
+    pub sync_enabled: bool,
+    pub attributes: Vec<String>,
+    pub last_sync_finished_at: Option<String>,
+    pub last_sync_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MailSentCopyDiagnosticStatus {
+    Ready,
+    MissingSentFolder,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailSentCopyDiagnostics {
+    pub status: MailSentCopyDiagnosticStatus,
+    pub sent_folder_id: Option<String>,
+    pub sent_folder_path: Option<String>,
+    pub provider_saved_detection: bool,
+    pub append_fallback: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailProviderErrorDiagnostic {
+    pub scope: String,
+    pub operation: String,
+    pub folder_id: Option<String>,
+    pub folder_path: Option<String>,
+    pub message: String,
+    pub at: Option<String>,
+}
+
 fn default_true() -> bool {
     true
 }

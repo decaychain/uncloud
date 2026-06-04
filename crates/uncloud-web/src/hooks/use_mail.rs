@@ -7,10 +7,10 @@ use uncloud_common::{
     MailDraftAttachmentResponse, MailDraftResponse, MailFolderResponse, MailFolderSyncResponse,
     MailIdentityResponse, MailMessageDetailResponse, MailMessageListResponse,
     MailMessageMutationAction, MailMessageMutationRequest, MailMessageMutationResponse,
-    MailPasswordAuthRequest, MailSyncRequest, SaveMailAttachmentRequest,
-    SaveMailAttachmentResponse, SendMailMessageRequest, SendMailMessageResponse,
-    SetMailCredentialRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
-    UpdateMailIdentityRequest, UpsertMailDraftRequest,
+    MailPasswordAuthRequest, MailProviderDiagnosticsResponse, MailSyncRequest,
+    SaveMailAttachmentRequest, SaveMailAttachmentResponse, SendMailMessageRequest,
+    SendMailMessageResponse, SetMailCredentialRequest, UpdateMailAccountRequest,
+    UpdateMailFolderRequest, UpdateMailIdentityRequest, UpsertMailDraftRequest,
 };
 use wasm_bindgen::{JsCast, JsValue};
 
@@ -105,6 +105,22 @@ pub async fn test_imap(account_id: &str) -> Result<MailConnectionTestResponse, S
 
 pub async fn test_smtp(account_id: &str) -> Result<MailConnectionTestResponse, String> {
     provider_test(&format!("/mail/accounts/{account_id}/test-smtp")).await
+}
+
+pub async fn diagnostics(account_id: &str) -> Result<MailProviderDiagnosticsResponse, String> {
+    let r = api::post(&format!("/mail/accounts/{account_id}/diagnostics"))
+        .json(&MailPasswordAuthRequest { password: None })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<MailProviderDiagnosticsResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
 }
 
 pub async fn send_message(

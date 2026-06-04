@@ -6,7 +6,8 @@ use uncloud_common::{
     MailAccountSyncResponse, MailAddressDto, MailAttachmentResponse, MailComposeMode,
     MailDraftAttachmentResponse, MailDraftResponse, MailFolderResponse, MailFolderRole,
     MailFolderRoleSource, MailIdentityResponse, MailMessageDetailResponse,
-    MailMessageMutationAction, MailMessageSummaryResponse, MailSecurity, MailSentCopyStatus,
+    MailMessageMutationAction, MailMessageSummaryResponse, MailProviderDiagnosticsResponse,
+    MailProviderRoleStatus, MailSecurity, MailSentCopyDiagnosticStatus, MailSentCopyStatus,
     MailServerSettings, SendMailMessageRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
     UpdateMailIdentityRequest, UpsertMailDraftRequest,
 };
@@ -108,6 +109,8 @@ pub fn MailPage() -> Element {
     let mut saving_account_settings = use_signal(|| false);
     let mut confirming_account_delete = use_signal(|| false);
     let mut deleting_account = use_signal(|| false);
+    let mut provider_diagnostics = use_signal(|| None::<MailProviderDiagnosticsResponse>);
+    let mut loading_provider_diagnostics = use_signal(|| false);
     let mut identity_editor_open = use_signal(|| false);
     let mut identity_editing_id = use_signal(String::new);
     let mut identity_display_name = use_signal(String::new);
@@ -576,6 +579,8 @@ pub fn MailPage() -> Element {
                                                 .unwrap_or_default(),
                                         );
                                         confirming_account_delete.set(false);
+                                        provider_diagnostics.set(None);
+                                        loading_provider_diagnostics.set(false);
                                         identity_editor_open.set(false);
                                         identity_editing_id.set(String::new());
                                         identity_display_name.set(String::new());
@@ -2430,6 +2435,10 @@ pub fn MailPage() -> Element {
                         .filter(|identity| identity.account_id == account_id)
                         .cloned()
                         .collect::<Vec<_>>();
+                    let diagnostics_for_account = {
+                        let id = account_id.clone();
+                        provider_diagnostics().filter(|diagnostics| diagnostics.account_id == id)
+                    };
                     rsx! {
                         div { class: "modal modal-open",
                             div { class: "modal-box max-w-4xl",
@@ -2574,6 +2583,210 @@ pub fn MailPage() -> Element {
                                             oninput: move |e| account_sync_interval_minutes.set(e.value()),
                                         }
                                         span { class: "label-text-alt text-base-content/60", "Minutes; blank uses the server default." }
+                                    }
+                                }
+
+                                div { class: "mt-6 border-t border-base-300 pt-5",
+                                    div { class: "flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between",
+                                        div {
+                                            div { class: "text-sm font-semibold", "Provider diagnostics" }
+                                        }
+                                        button {
+                                            class: "btn btn-sm btn-outline gap-2",
+                                            disabled: loading_provider_diagnostics(),
+                                            onclick: {
+                                                let account_id = account_id.clone();
+                                                move |_| {
+                                                    let account_id = account_id.clone();
+                                                    spawn(async move {
+                                                        loading_provider_diagnostics.set(true);
+                                                        error.set(None);
+                                                        notice.set(None);
+                                                        match use_mail::diagnostics(&account_id).await {
+                                                            Ok(result) => provider_diagnostics.set(Some(result)),
+                                                            Err(e) => error.set(Some(e)),
+                                                        }
+                                                        loading_provider_diagnostics.set(false);
+                                                    });
+                                                }
+                                            },
+                                            if loading_provider_diagnostics() {
+                                                span { class: "loading loading-spinner loading-xs" }
+                                            } else {
+                                                IconRefreshCw { class: "h-4 w-4".to_string() }
+                                            }
+                                            span { "Run diagnostics" }
+                                        }
+                                    }
+
+                                    if loading_provider_diagnostics() && diagnostics_for_account.is_none() {
+                                        div { class: "mt-3 rounded border border-base-300 px-3 py-4 text-sm text-base-content/60",
+                                            span { class: "loading loading-spinner loading-xs mr-2" }
+                                            "Checking provider settings"
+                                        }
+                                    }
+
+                                    if let Some(diagnostics) = diagnostics_for_account.as_ref() {
+                                        {
+                                            let imap_capabilities = diagnostics
+                                                .imap
+                                                .capabilities
+                                                .iter()
+                                                .take(12)
+                                                .cloned()
+                                                .collect::<Vec<_>>();
+                                            let smtp_capabilities = diagnostics
+                                                .smtp
+                                                .capabilities
+                                                .iter()
+                                                .take(12)
+                                                .cloned()
+                                                .collect::<Vec<_>>();
+                                            let role_rows = diagnostics.roles.clone();
+                                            let folder_rows = diagnostics.folders.clone();
+                                            let recent_errors = diagnostics.recent_errors.clone();
+                                            rsx! {
+                                                div { class: "mt-3 grid gap-3 md:grid-cols-2",
+                                                    div { class: "rounded border border-base-300 bg-base-100 p-3",
+                                                        div { class: "flex items-center justify-between gap-3",
+                                                            div { class: "text-sm font-medium", "IMAP" }
+                                                            span { class: "{provider_status_badge_class(diagnostics.imap.ok)}",
+                                                                "{provider_status_label(diagnostics.imap.ok)}"
+                                                            }
+                                                        }
+                                                        div { class: "mt-1 truncate text-xs text-base-content/60",
+                                                            "{diagnostics.imap.username}@{diagnostics.imap.host}:{diagnostics.imap.port} ({security_label(diagnostics.imap.security)})"
+                                                        }
+                                                        if let Some(message) = diagnostics.imap.error.as_ref() {
+                                                            div { class: "mt-2 whitespace-pre-wrap break-words text-xs text-error", "{message}" }
+                                                        }
+                                                        if !imap_capabilities.is_empty() {
+                                                            div { class: "mt-2 flex flex-wrap gap-1",
+                                                                for capability in imap_capabilities {
+                                                                    span { class: "badge badge-ghost badge-sm", "{capability}" }
+                                                                }
+                                                                if diagnostics.imap.capabilities.len() > 12 {
+                                                                    span { class: "badge badge-ghost badge-sm",
+                                                                        "+{diagnostics.imap.capabilities.len() - 12}"
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    div { class: "rounded border border-base-300 bg-base-100 p-3",
+                                                        div { class: "flex items-center justify-between gap-3",
+                                                            div { class: "text-sm font-medium", "SMTP" }
+                                                            span { class: "{provider_status_badge_class(diagnostics.smtp.ok)}",
+                                                                "{provider_status_label(diagnostics.smtp.ok)}"
+                                                            }
+                                                        }
+                                                        div { class: "mt-1 truncate text-xs text-base-content/60",
+                                                            "{diagnostics.smtp.username}@{diagnostics.smtp.host}:{diagnostics.smtp.port} ({security_label(diagnostics.smtp.security)})"
+                                                        }
+                                                        if let Some(message) = diagnostics.smtp.error.as_ref() {
+                                                            div { class: "mt-2 whitespace-pre-wrap break-words text-xs text-error", "{message}" }
+                                                        }
+                                                        if !smtp_capabilities.is_empty() {
+                                                            div { class: "mt-2 flex flex-wrap gap-1",
+                                                                for capability in smtp_capabilities {
+                                                                    span { class: "badge badge-ghost badge-sm", "{capability}" }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                div { class: "mt-3 rounded border border-base-300 bg-base-100 p-3",
+                                                    div { class: "flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between",
+                                                        div {
+                                                            div { class: "text-sm font-medium", "Sent copy" }
+                                                            div { class: "mt-1 text-xs text-base-content/60",
+                                                                "{diagnostics.sent_copy.detail}"
+                                                            }
+                                                        }
+                                                        span { class: "{sent_copy_diagnostics_badge_class(diagnostics.sent_copy.status)}",
+                                                            "{sent_copy_diagnostics_label(diagnostics.sent_copy.status)}"
+                                                        }
+                                                    }
+                                                    if let Some(path) = diagnostics.sent_copy.sent_folder_path.as_ref() {
+                                                        div { class: "mt-2 truncate text-xs text-base-content/60", "Folder: {path}" }
+                                                    }
+                                                }
+
+                                                div { class: "mt-3 rounded border border-base-300 bg-base-100 p-3",
+                                                    div { class: "text-sm font-medium", "Folder roles" }
+                                                    div { class: "mt-2 flex flex-wrap gap-1.5",
+                                                        for row in role_rows {
+                                                            span { class: "{role_diagnostics_badge_class(row.status)}",
+                                                                if let Some(path) = row.folder_path.as_ref() {
+                                                                    "{folder_role_name(row.role)}: {path}"
+                                                                } else {
+                                                                    "{folder_role_name(row.role)}: missing"
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    details { class: "mt-3",
+                                                        summary { class: "cursor-pointer text-xs font-medium text-base-content/70",
+                                                            "Folder inference ({folder_rows.len()} cached)"
+                                                        }
+                                                        div { class: "mt-2 max-h-44 overflow-auto rounded border border-base-300",
+                                                            for folder in folder_rows {
+                                                                div { class: "grid grid-cols-[minmax(0,1fr)_auto] gap-2 border-b border-base-300 px-2 py-1.5 text-xs last:border-b-0",
+                                                                    div { class: "min-w-0",
+                                                                        div { class: "truncate", "{folder.path}" }
+                                                                        if !folder.attributes.is_empty() {
+                                                                            div { class: "truncate text-base-content/50", "{folder.attributes.join(\", \")}" }
+                                                                        }
+                                                                    }
+                                                                    div { class: "text-right text-base-content/60",
+                                                                        if let Some(role) = folder.role {
+                                                                            "{folder_role_name(role)}"
+                                                                        } else {
+                                                                            "None"
+                                                                        }
+                                                                        span { " / {folder_role_source_label(folder.role_source)}" }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                div { class: "mt-3 rounded border border-base-300 bg-base-100 p-3",
+                                                    div { class: "text-sm font-medium", "Recent provider errors" }
+                                                    if recent_errors.is_empty() {
+                                                        div { class: "mt-2 text-xs text-base-content/60", "No recent provider errors are recorded." }
+                                                    } else {
+                                                        div { class: "mt-2 grid gap-2",
+                                                            for item in recent_errors {
+                                                                div { class: "rounded bg-base-200/60 px-2 py-1.5 text-xs",
+                                                                    div { class: "flex flex-wrap items-center gap-2 text-base-content/60",
+                                                                        span { class: "font-medium text-base-content/80", "{item.scope}" }
+                                                                        span { "{item.operation}" }
+                                                                        if let Some(at) = item.at.as_ref() {
+                                                                            span { "{short_date(Some(at))}" }
+                                                                        }
+                                                                        if let Some(path) = item.folder_path.as_ref() {
+                                                                            span { class: "truncate", "{path}" }
+                                                                        }
+                                                                    }
+                                                                    div { class: "mt-1 whitespace-pre-wrap break-words text-error", "{item.message}" }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                div { class: "mt-2 text-xs text-base-content/50",
+                                                    "Generated {short_date(Some(&diagnostics.generated_at))}"
+                                                    if diagnostics.sync_in_progress {
+                                                        span { " while sync is in progress" }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
 
@@ -3214,6 +3427,58 @@ fn security_to_value(value: MailSecurity) -> &'static str {
         MailSecurity::StartTls => "start_tls",
         MailSecurity::Plain => "plain",
         MailSecurity::Tls => "tls",
+    }
+}
+
+fn security_label(value: MailSecurity) -> &'static str {
+    match value {
+        MailSecurity::StartTls => "STARTTLS",
+        MailSecurity::Plain => "Plain",
+        MailSecurity::Tls => "TLS",
+    }
+}
+
+fn provider_status_badge_class(ok: Option<bool>) -> &'static str {
+    match ok {
+        Some(true) => "badge badge-success badge-sm",
+        Some(false) => "badge badge-error badge-sm",
+        None => "badge badge-ghost badge-sm",
+    }
+}
+
+fn provider_status_label(ok: Option<bool>) -> &'static str {
+    match ok {
+        Some(true) => "Connected",
+        Some(false) => "Failed",
+        None => "Not checked",
+    }
+}
+
+fn role_diagnostics_badge_class(status: MailProviderRoleStatus) -> &'static str {
+    match status {
+        MailProviderRoleStatus::Found => "badge badge-outline badge-sm",
+        MailProviderRoleStatus::Missing => "badge badge-warning badge-sm",
+    }
+}
+
+fn sent_copy_diagnostics_badge_class(status: MailSentCopyDiagnosticStatus) -> &'static str {
+    match status {
+        MailSentCopyDiagnosticStatus::Ready => "badge badge-success badge-sm",
+        MailSentCopyDiagnosticStatus::MissingSentFolder => "badge badge-warning badge-sm",
+    }
+}
+
+fn sent_copy_diagnostics_label(status: MailSentCopyDiagnosticStatus) -> &'static str {
+    match status {
+        MailSentCopyDiagnosticStatus::Ready => "Ready",
+        MailSentCopyDiagnosticStatus::MissingSentFolder => "No Sent folder",
+    }
+}
+
+fn folder_role_source_label(source: MailFolderRoleSource) -> &'static str {
+    match source {
+        MailFolderRoleSource::Inferred => "auto",
+        MailFolderRoleSource::User => "manual",
     }
 }
 
