@@ -157,6 +157,8 @@ pub fn Layout() -> Element {
             | Route::MusicFolder { .. }
     );
     let show_playlist_panel = on_music_route && pinned().0.is_some();
+    let disabled_route_feature =
+        route_feature_id(&route).filter(|feature| !auth_state().feature_enabled(feature));
 
     // NOTE: when adding a new top-level Route, add it here AND in
     // `section_title` below AND in the sidebar section-matcher. Missing one
@@ -198,7 +200,11 @@ pub fn Layout() -> Element {
                         main { class: "{main_class}",
                             div { class: "flex gap-4 min-w-0",
                                 div { class: "flex-1 min-w-0",
-                                    Outlet::<Route> {}
+                                    if let Some(feature) = disabled_route_feature {
+                                        FeatureDisabled { feature }
+                                    } else {
+                                        Outlet::<Route> {}
+                                    }
                                 }
                                 if show_playlist_panel {
                                     div { class: "hidden xl:block w-80 shrink-0",
@@ -209,7 +215,11 @@ pub fn Layout() -> Element {
                         }
                     } else {
                         main { class: main_class,
-                            Outlet::<Route> {}
+                            if let Some(feature) = disabled_route_feature {
+                                FeatureDisabled { feature }
+                            } else {
+                                Outlet::<Route> {}
+                            }
                         }
                     }
                 }
@@ -226,6 +236,46 @@ pub fn Layout() -> Element {
             crate::components::player::Player {}
             crate::components::download_toast::DownloadToast {}
             crate::components::session_toast::SessionExpiredToast {}
+        }
+    }
+}
+
+fn route_feature_id(route: &Route) -> Option<&'static str> {
+    match route {
+        Route::Shopping {} | Route::ShoppingList { .. } => Some("shopping"),
+        Route::Finance {}
+        | Route::FinanceAccounts {}
+        | Route::FinanceCategories {}
+        | Route::FinanceSchemas {}
+        | Route::FinanceImports {}
+        | Route::FinanceRules {} => Some("finance"),
+        Route::Mail {} | Route::MailAccount { .. } => Some("mail"),
+        Route::Tasks {} | Route::TasksAssigned {} | Route::TasksProject { .. } => Some("tasks"),
+        _ => None,
+    }
+}
+
+fn feature_label(feature: &str) -> &'static str {
+    match feature {
+        "finance" => "Finance",
+        "shopping" => "Shopping",
+        "mail" => "Mail",
+        "tasks" => "Tasks",
+        _ => "Feature",
+    }
+}
+
+#[component]
+fn FeatureDisabled(feature: &'static str) -> Element {
+    let label = feature_label(feature);
+    rsx! {
+        div { class: "max-w-lg",
+            div { class: "alert alert-warning",
+                div {
+                    h2 { class: "font-semibold", "{label} is disabled" }
+                    p { class: "text-sm", "Enable it in Settings, or ask an administrator to enable it for this server." }
+                }
+            }
         }
     }
 }

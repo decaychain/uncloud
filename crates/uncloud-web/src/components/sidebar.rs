@@ -32,7 +32,7 @@ fn close_drawer() {
 pub fn Sidebar() -> Element {
     let route = use_route::<Route>();
 
-    let section = if matches!(route, Route::Dashboard {}) {
+    let raw_section = if matches!(route, Route::Dashboard {}) {
         "dashboard"
     } else if matches!(route, Route::Gallery {} | Route::GalleryAlbum { .. }) {
         "gallery"
@@ -75,21 +75,17 @@ pub fn Sidebar() -> Element {
     };
 
     let auth_state = use_context::<Signal<AuthState>>();
-    let shopping_enabled = auth_state()
-        .user
-        .as_ref()
-        .map(|u| u.features_enabled.contains(&"shopping".to_string()))
-        .unwrap_or(false);
-    let finance_enabled = auth_state()
-        .user
-        .as_ref()
-        .map(|u| u.features_enabled.contains(&"finance".to_string()))
-        .unwrap_or(false);
-    let mail_enabled = auth_state()
-        .user
-        .as_ref()
-        .map(|u| u.features_enabled.contains(&"mail".to_string()))
-        .unwrap_or(false);
+    let tasks_enabled = auth_state().feature_enabled("tasks");
+    let shopping_enabled = auth_state().feature_enabled("shopping");
+    let finance_enabled = auth_state().feature_enabled("finance");
+    let mail_enabled = auth_state().feature_enabled("mail");
+    let section = match raw_section {
+        "tasks" if !tasks_enabled => "files",
+        "shopping" if !shopping_enabled => "files",
+        "finance" if !finance_enabled => "files",
+        "mail" if !mail_enabled => "files",
+        _ => raw_section,
+    };
 
     rsx! {
         aside { class: "min-h-full w-64 bg-base-200 flex flex-col",
@@ -140,13 +136,15 @@ pub fn Sidebar() -> Element {
                         span { "Music" }
                     }
                 }
-                li {
-                    Link {
-                        to: Route::Tasks {},
-                        class: if section == "tasks" { "active" } else { "" },
-                        onclick: move |_| close_drawer(),
-                        IconCheckSquare {}
-                        span { "Tasks" }
+                if tasks_enabled {
+                    li {
+                        Link {
+                            to: Route::Tasks {},
+                            class: if section == "tasks" { "active" } else { "" },
+                            onclick: move |_| close_drawer(),
+                            IconCheckSquare {}
+                            span { "Tasks" }
+                        }
                     }
                 }
                 if shopping_enabled {

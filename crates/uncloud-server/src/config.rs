@@ -4,6 +4,17 @@ use std::path::PathBuf;
 
 pub use uncloud_common::RegistrationMode;
 
+pub const FEATURE_SHOPPING: &str = "shopping";
+pub const FEATURE_FINANCE: &str = "finance";
+pub const FEATURE_MAIL: &str = "mail";
+pub const FEATURE_TASKS: &str = "tasks";
+pub const OPTIONAL_FEATURES: &[&str] = &[
+    FEATURE_SHOPPING,
+    FEATURE_FINANCE,
+    FEATURE_MAIL,
+    FEATURE_TASKS,
+];
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
@@ -381,6 +392,8 @@ pub struct FeaturesConfig {
     pub finance: bool,
     #[serde(default = "default_true")]
     pub mail: bool,
+    #[serde(default = "default_true")]
+    pub tasks: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -464,7 +477,29 @@ impl Default for FeaturesConfig {
             shopping: true,
             finance: true,
             mail: true,
+            tasks: true,
         }
+    }
+}
+
+impl FeaturesConfig {
+    pub fn is_enabled(&self, feature: &str) -> bool {
+        match feature {
+            FEATURE_SHOPPING => self.shopping,
+            FEATURE_FINANCE => self.finance,
+            FEATURE_MAIL => self.mail,
+            FEATURE_TASKS => self.tasks,
+            _ => false,
+        }
+    }
+
+    pub fn enabled_feature_ids(&self) -> Vec<String> {
+        OPTIONAL_FEATURES
+            .iter()
+            .copied()
+            .filter(|feature| self.is_enabled(feature))
+            .map(str::to_string)
+            .collect()
     }
 }
 

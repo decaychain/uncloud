@@ -180,7 +180,7 @@ the account's SMTP settings.
   timeout and always remain manually dismissible.
 - Mongo indexes for account, identity, folder, message, and attachment metadata.
 - Server-wide `features.mail` toggle plus per-user opt-out through
-  `disabled_features`.
+  `PUT /api/v1/auth/me/features` and `disabled_features`.
 
 ## Known Limits
 

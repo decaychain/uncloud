@@ -111,6 +111,7 @@ features:
   shopping: true
   finance: true
   mail: true
+  tasks: true
 
 # Background mail sync. Only enabled mail accounts with stored credentials and
 # per-account sync enabled are synced. Accounts can override interval_secs in

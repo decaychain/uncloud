@@ -64,16 +64,9 @@ fn tile_route(id: &str) -> Option<Route> {
 pub fn DashboardPage() -> Element {
     let auth_state = use_context::<Signal<AuthState>>();
 
-    let shopping_enabled = auth_state()
-        .user
-        .as_ref()
-        .map(|u| u.features_enabled.contains(&"shopping".to_string()))
-        .unwrap_or(false);
-    let mail_enabled = auth_state()
-        .user
-        .as_ref()
-        .map(|u| u.features_enabled.contains(&"mail".to_string()))
-        .unwrap_or(false);
+    let tasks_enabled = auth_state().feature_enabled("tasks");
+    let shopping_enabled = auth_state().feature_enabled("shopping");
+    let mail_enabled = auth_state().feature_enabled("mail");
 
     // Resolve enabled tiles: user's preference, or the default set.
     // Drop any ids we no longer render (e.g. "shares"/"trash" from older prefs),
@@ -92,6 +85,7 @@ pub fn DashboardPage() -> Element {
         let known: std::collections::HashSet<&str> = all_tile_ids().iter().copied().collect();
         base.into_iter()
             .filter(|id| known.contains(id.as_str()))
+            .filter(|id| id != "tasks" || tasks_enabled)
             .filter(|id| id != "shopping" || shopping_enabled)
             .filter(|id| id != "mail" || mail_enabled)
             .collect()

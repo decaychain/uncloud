@@ -7,20 +7,21 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use bson::doc;
 use chrono::{DateTime, TimeZone, Utc};
 use futures::TryStreamExt;
-use mongodb::bson::oid::ObjectId;
 use mongodb::bson::Bson;
+use mongodb::bson::oid::ObjectId;
 use mongodb::options::FindOptions;
 
 use sha2::{Digest, Sha256};
 
+use crate::AppState;
 use crate::error::{AppError, Result};
-use crate::finance_import::{self, sparkasse_camt_v8, ParseError, ParsedRow};
+use crate::finance_import::{self, ParseError, ParsedRow, sparkasse_camt_v8};
 use crate::finance_rules::{self, RuleEngine};
 use crate::middleware::AuthUser;
 use crate::models::{
@@ -29,7 +30,6 @@ use crate::models::{
     ImportRunError as ModelImportRunError, ImportRunStatus, ImportRunSummary, ImportSchema,
     ImportSource, ImportSourceKind, RulePatternKind, TransactionLeg,
 };
-use crate::AppState;
 use uncloud_common::{
     AccountBalanceResponse, AccountResponse, ApplyRulesResponse, BalanceSnapshotResponse,
     CategorySummaryItem, CategorySummaryResponse, CreateAccountRequest,
@@ -52,9 +52,17 @@ const RECONCILIATION_CATEGORY: &str = "Reconciliation";
 
 const ALLOWED_CURRENCY_LEN: usize = 3;
 
-fn require_finance(state: &AppState) -> Result<()> {
-    if !state.config.features.finance {
-        return Err(AppError::Forbidden("Finance feature disabled".into()));
+fn require_finance(state: &AppState, user: &AuthUser) -> Result<()> {
+    if !state
+        .config
+        .features
+        .is_enabled(crate::config::FEATURE_FINANCE)
+        || user
+            .disabled_features
+            .iter()
+            .any(|feature| feature == crate::config::FEATURE_FINANCE)
+    {
+        return Err(AppError::Forbidden("Access denied".into()));
     }
     Ok(())
 }
@@ -165,7 +173,7 @@ pub async fn list_accounts(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<Json<Vec<AccountResponse>>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let coll = state.db.collection::<FinanceAccount>(ACCOUNTS);
     let mut cursor = coll
         .find(doc! { "owner_id": user.id })
@@ -183,7 +191,7 @@ pub async fn create_account(
     user: AuthUser,
     Json(req): Json<CreateAccountRequest>,
 ) -> Result<(StatusCode, Json<AccountResponse>)> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let name = req.name.trim().to_string();
     if name.is_empty() {
         return Err(AppError::BadRequest("Account name is required".into()));
@@ -224,7 +232,7 @@ pub async fn update_account(
     Path(id): Path<String>,
     Json(req): Json<UpdateAccountRequest>,
 ) -> Result<Json<AccountResponse>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let id = parse_oid(&id, "account id")?;
     let existing = find_account(&state, user.id, id).await?;
 
@@ -282,7 +290,7 @@ pub async fn delete_account(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let id = parse_oid(&id, "account id")?;
     find_account(&state, user.id, id).await?;
     let txns = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
@@ -307,7 +315,7 @@ pub async fn get_account_balance(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<AccountBalanceResponse>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let id = parse_oid(&id, "account id")?;
     let account = find_account(&state, user.id, id).await?;
     let txns = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
@@ -345,7 +353,7 @@ pub async fn list_categories(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<Json<Vec<FinanceCategoryResponse>>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let coll = state.db.collection::<FinanceCategory>(CATEGORIES);
     let mut cursor = coll
         .find(doc! { "owner_id": user.id })
@@ -363,7 +371,7 @@ pub async fn create_category(
     user: AuthUser,
     Json(req): Json<CreateFinanceCategoryRequest>,
 ) -> Result<(StatusCode, Json<FinanceCategoryResponse>)> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let name = req.name.trim().to_string();
     if name.is_empty() {
         return Err(AppError::BadRequest("Category name is required".into()));
@@ -411,7 +419,7 @@ pub async fn update_category(
     Path(id): Path<String>,
     Json(req): Json<UpdateFinanceCategoryRequest>,
 ) -> Result<Json<FinanceCategoryResponse>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let id = parse_oid(&id, "category id")?;
     let coll = state.db.collection::<FinanceCategory>(CATEGORIES);
     let _existing = coll
@@ -489,7 +497,7 @@ pub async fn delete_category(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let id = parse_oid(&id, "category id")?;
     let coll = state.db.collection::<FinanceCategory>(CATEGORIES);
     let _existing = coll
@@ -593,7 +601,7 @@ pub async fn list_transactions(
     user: AuthUser,
     Query(q): Query<ListTransactionsQuery>,
 ) -> Result<Json<TransactionListResponse>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let filter = build_tx_filter(&state, &user, &q).await?;
 
     let coll = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
@@ -623,7 +631,7 @@ pub async fn transaction_category_summary(
     user: AuthUser,
     Query(q): Query<ListTransactionsQuery>,
 ) -> Result<Json<CategorySummaryResponse>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let filter = build_tx_filter(&state, &user, &q).await?;
 
     let coll = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
@@ -677,7 +685,7 @@ pub async fn create_transaction(
     user: AuthUser,
     Json(req): Json<CreateTransactionRequest>,
 ) -> Result<(StatusCode, Json<TransactionResponse>)> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let account_id = parse_oid(&req.account_id, "account_id")?;
     let account = find_account(&state, user.id, account_id).await?;
     let date = parse_date(&req.date)?;
@@ -724,11 +732,7 @@ pub async fn create_transaction(
         raw_bank_category: None,
         notes: req.notes.and_then(|n| {
             let t = n.trim().to_string();
-            if t.is_empty() {
-                None
-            } else {
-                Some(t)
-            }
+            if t.is_empty() { None } else { Some(t) }
         }),
         tags: vec![],
         legs: vec![leg],
@@ -751,7 +755,7 @@ pub async fn update_transaction(
     Path(id): Path<String>,
     Json(req): Json<UpdateTransactionRequest>,
 ) -> Result<Json<TransactionResponse>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let id = parse_oid(&id, "transaction id")?;
     let coll = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
     let existing = coll
@@ -834,7 +838,7 @@ pub async fn delete_transaction(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let id = parse_oid(&id, "transaction id")?;
     let coll = state.db.collection::<FinanceTransaction>(TRANSACTIONS);
     let result = coll
@@ -1002,7 +1006,7 @@ pub async fn list_import_schemas(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<Json<Vec<ImportSchemaResponse>>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     ensure_builtin_schemas(&state, user.id).await?;
     let coll = state.db.collection::<ImportSchema>(IMPORT_SCHEMAS);
     let mut cursor = coll
@@ -1021,7 +1025,7 @@ pub async fn create_import_schema(
     user: AuthUser,
     Json(req): Json<ImportSchemaRequest>,
 ) -> Result<(StatusCode, Json<ImportSchemaResponse>)> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     validate_schema_request(&req)?;
     let now = Utc::now();
     let mut schema = ImportSchema {
@@ -1061,7 +1065,7 @@ pub async fn update_import_schema(
     Path(id): Path<String>,
     Json(req): Json<ImportSchemaRequest>,
 ) -> Result<Json<ImportSchemaResponse>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let schema_oid = parse_oid(&id, "schema id")?;
     let mut schema = find_schema(&state, user.id, schema_oid).await?;
     if schema.is_builtin {
@@ -1081,7 +1085,7 @@ pub async fn delete_import_schema(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let schema_oid = parse_oid(&id, "schema id")?;
     let schema = find_schema(&state, user.id, schema_oid).await?;
     if schema.is_builtin {
@@ -1099,7 +1103,7 @@ pub async fn clone_import_schema(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<ImportSchemaResponse>)> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let schema_oid = parse_oid(&id, "schema id")?;
     let source = find_schema(&state, user.id, schema_oid).await?;
     let now = Utc::now();
@@ -1138,7 +1142,7 @@ pub async fn import_csv(
     user: AuthUser,
     mut multipart: Multipart,
 ) -> Result<Json<ImportCsvResponse>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
 
     let mut account_id_str: Option<String> = None;
     let mut schema_id_str: Option<String> = None;
@@ -1489,7 +1493,7 @@ pub async fn list_import_runs(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<Json<Vec<ImportRunResponse>>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let coll = state.db.collection::<ImportRun>(IMPORT_RUNS);
     let mut cursor = coll
         .find(doc! { "owner_id": user.id })
@@ -1507,7 +1511,7 @@ pub async fn revert_import_run(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<ImportRunResponse>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let run_oid = parse_oid(&id, "run id")?;
     let runs = state.db.collection::<ImportRun>(IMPORT_RUNS);
     let mut run = runs
@@ -1613,7 +1617,7 @@ pub async fn reconcile_preview(
     Path(id): Path<String>,
     Json(req): Json<ReconcileRequest>,
 ) -> Result<Json<ReconcilePreviewResponse>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let account_oid = parse_oid(&id, "account id")?;
     let account = find_account(&state, user.id, account_oid).await?;
     let on_date = parse_iso_date(&req.on_date)?;
@@ -1635,7 +1639,7 @@ pub async fn reconcile_apply(
     Path(id): Path<String>,
     Json(req): Json<ReconcileRequest>,
 ) -> Result<(StatusCode, Json<BalanceSnapshotResponse>)> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let account_oid = parse_oid(&id, "account id")?;
     let account = find_account(&state, user.id, account_oid).await?;
     let on_date = parse_iso_date(&req.on_date)?;
@@ -1755,7 +1759,7 @@ pub async fn list_account_snapshots(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<BalanceSnapshotResponse>>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let account_oid = parse_oid(&id, "account id")?;
     let _ = find_account(&state, user.id, account_oid).await?;
     let coll = state.db.collection::<BalanceSnapshot>(BALANCE_SNAPSHOTS);
@@ -1776,7 +1780,7 @@ pub async fn recompute_snapshot(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<BalanceSnapshotResponse>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let snap_oid = parse_oid(&id, "snapshot id")?;
     let snapshots = state.db.collection::<BalanceSnapshot>(BALANCE_SNAPSHOTS);
     let snapshot = snapshots
@@ -1816,7 +1820,7 @@ pub async fn delete_snapshot(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let snap_oid = parse_oid(&id, "snapshot id")?;
     let snapshots = state.db.collection::<BalanceSnapshot>(BALANCE_SNAPSHOTS);
     let snapshot = snapshots
@@ -1892,7 +1896,7 @@ pub async fn list_rules(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<Json<Vec<FinanceRuleResponse>>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let coll = state.db.collection::<FinanceRule>(RULES);
     let mut cursor = coll
         .find(doc! { "owner_id": user.id })
@@ -1937,7 +1941,7 @@ pub async fn create_rule(
     user: AuthUser,
     Json(req): Json<FinanceRuleRequest>,
 ) -> Result<(StatusCode, Json<FinanceRuleResponse>)> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     validate_rule_request(&req)?;
     let kind = parse_rule_pattern_kind(&req.pattern_kind)?;
     let category_id = validate_rule_category(&state, user.id, &req.category_id).await?;
@@ -1973,7 +1977,7 @@ pub async fn update_rule(
     Path(id): Path<String>,
     Json(req): Json<FinanceRuleRequest>,
 ) -> Result<Json<FinanceRuleResponse>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     validate_rule_request(&req)?;
     let kind = parse_rule_pattern_kind(&req.pattern_kind)?;
     let oid = parse_oid(&id, "rule id")?;
@@ -2003,7 +2007,7 @@ pub async fn delete_rule(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let oid = parse_oid(&id, "rule id")?;
     let r = state
         .db
@@ -2021,7 +2025,7 @@ pub async fn reorder_rules(
     user: AuthUser,
     Json(req): Json<ReorderRulesRequest>,
 ) -> Result<StatusCode> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let ids: Vec<ObjectId> = req
         .rule_ids
         .iter()
@@ -2073,7 +2077,7 @@ pub async fn apply_rules(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<Json<ApplyRulesResponse>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let rules = load_user_rules(&state, user.id).await?;
     let (engine, _errs) = RuleEngine::build(&rules);
 
@@ -2157,7 +2161,7 @@ pub async fn test_rule(
     user: AuthUser,
     Json(req): Json<TestRuleRequest>,
 ) -> Result<Json<TestRuleResponse>> {
-    require_finance(&state)?;
+    require_finance(&state, &user)?;
     let kind = parse_rule_pattern_kind(&req.pattern_kind)?;
     let matcher = finance_rules::compile_pattern(&req.pattern, kind, req.case_insensitive)
         .map_err(|e| AppError::BadRequest(format!("Invalid pattern: {e}")))?;

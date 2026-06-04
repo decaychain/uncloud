@@ -115,6 +115,24 @@ impl AuthState {
             .map(|u| u.role == uncloud_common::UserRole::Admin)
             .unwrap_or(false)
     }
+
+    pub fn feature_available(&self, feature: &str) -> bool {
+        self.user
+            .as_ref()
+            .map(|u| {
+                u.features_available
+                    .iter()
+                    .any(|enabled| enabled == feature)
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn feature_enabled(&self, feature: &str) -> bool {
+        self.user
+            .as_ref()
+            .map(|u| u.features_enabled.iter().any(|enabled| enabled == feature))
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]

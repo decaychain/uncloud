@@ -2,7 +2,7 @@ use uncloud_common::{
     AdminResetPasswordRequest, ChangePasswordRequest, ChangeRoleRequest, CreateInviteRequest,
     InviteInfoResponse, InviteResponse, LoginRequest, LoginResponse, RegisterRequest,
     ServerInfoResponse, TotpDisableRequest, TotpEnableRequest, TotpSetupResponse,
-    TotpVerifyRequest, UserResponse,
+    TotpVerifyRequest, UpdateFeaturesRequest, UserResponse,
 };
 
 use super::api;
@@ -174,6 +174,25 @@ pub async fn me() -> Result<UserResponse, String> {
             .map_err(|e| e.to_string())
     } else {
         Err("Not authenticated".to_string())
+    }
+}
+
+pub async fn update_my_features(req: UpdateFeaturesRequest) -> Result<UserResponse, String> {
+    let response = api::put_v1("/auth/me/features")
+        .json(&req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if response.ok() {
+        response
+            .json::<UserResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        let text = response.text().await.unwrap_or_default();
+        Err(extract_error(&text))
     }
 }
 

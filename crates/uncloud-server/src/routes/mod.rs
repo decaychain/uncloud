@@ -29,18 +29,18 @@ pub mod vault_recents;
 pub mod versions;
 
 use axum::{
+    Router,
     extract::DefaultBodyLimit,
     middleware,
     routing::{any, delete, get, post, put},
-    Router,
 };
 use std::sync::Arc;
 
+use crate::AppState;
 use crate::middleware::{
     admin_meta_middleware, admin_middleware, auth_middleware, request_meta_middleware,
-    require_files_delete, require_files_write, sigv4_middleware,
+    require_files_delete, require_files_write, require_tasks_feature, sigv4_middleware,
 };
-use crate::AppState;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     // -- Public routes (no auth) defined once, nested under /api and /api/v1 --
@@ -85,6 +85,86 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .nest("/api", public_api.clone())
         .nest("/api/v1", public_api.merge(public_v1_only))
         .merge(oauth_public_routes);
+
+    let tasks_api = Router::new()
+        .route(
+            "/tasks/projects",
+            get(tasks::list_projects).post(tasks::create_project),
+        )
+        .route(
+            "/tasks/projects/{id}",
+            get(tasks::get_project)
+                .put(tasks::update_project)
+                .delete(tasks::delete_project),
+        )
+        .route(
+            "/tasks/projects/{id}/members",
+            post(tasks::add_project_member),
+        )
+        .route(
+            "/tasks/projects/{id}/members/{user_id}",
+            put(tasks::update_project_member).delete(tasks::remove_project_member),
+        )
+        .route(
+            "/tasks/projects/{id}/sections",
+            get(tasks::list_sections).post(tasks::create_section),
+        )
+        .route(
+            "/tasks/projects/{id}/sections/reorder",
+            put(tasks::reorder_sections),
+        )
+        .route(
+            "/tasks/projects/{id}/labels",
+            get(tasks::list_labels).post(tasks::create_label),
+        )
+        .route(
+            "/tasks/projects/{id}/tasks",
+            get(task_items::list_tasks).post(task_items::create_task),
+        )
+        .route(
+            "/tasks/projects/{id}/tasks/reorder",
+            put(task_items::reorder_tasks),
+        )
+        .route(
+            "/tasks/sections/{id}",
+            put(tasks::update_section).delete(tasks::delete_section),
+        )
+        .route(
+            "/tasks/labels/{id}",
+            put(tasks::update_label).delete(tasks::delete_label),
+        )
+        .route(
+            "/tasks/{id}",
+            get(task_items::get_task)
+                .put(task_items::update_task)
+                .delete(task_items::delete_task),
+        )
+        .route("/tasks/{id}/status", put(task_items::update_task_status))
+        .route(
+            "/tasks/{id}/completion-history",
+            delete(task_items::clear_completion_history),
+        )
+        .route("/tasks/{id}/subtasks", post(task_items::create_subtask))
+        .route("/tasks/{id}/promote", post(task_items::promote_subtask))
+        .route("/tasks/{id}/attachments", post(task_items::attach_files))
+        .route(
+            "/tasks/{id}/attachments/{file_id}",
+            delete(task_items::detach_file),
+        )
+        .route(
+            "/tasks/{id}/comments",
+            get(task_items::list_comments).post(task_items::create_comment),
+        )
+        .route(
+            "/tasks/comments/{id}",
+            put(task_items::update_comment).delete(task_items::delete_comment),
+        )
+        .route("/tasks/schedule", get(task_items::get_schedule))
+        .route("/tasks/assigned-to-me", get(task_items::get_assigned_to_me))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_tasks_feature,
+        ));
 
     // -- Authenticated routes defined once, nested under /api and /api/v1 --
     let auth_api = Router::new()
@@ -339,80 +419,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             put(folder_shares::update_share).delete(folder_shares::delete_share),
         )
         // Tasks
-        .route(
-            "/tasks/projects",
-            get(tasks::list_projects).post(tasks::create_project),
-        )
-        .route(
-            "/tasks/projects/{id}",
-            get(tasks::get_project)
-                .put(tasks::update_project)
-                .delete(tasks::delete_project),
-        )
-        .route(
-            "/tasks/projects/{id}/members",
-            post(tasks::add_project_member),
-        )
-        .route(
-            "/tasks/projects/{id}/members/{user_id}",
-            put(tasks::update_project_member).delete(tasks::remove_project_member),
-        )
-        .route(
-            "/tasks/projects/{id}/sections",
-            get(tasks::list_sections).post(tasks::create_section),
-        )
-        .route(
-            "/tasks/projects/{id}/sections/reorder",
-            put(tasks::reorder_sections),
-        )
-        .route(
-            "/tasks/projects/{id}/labels",
-            get(tasks::list_labels).post(tasks::create_label),
-        )
-        .route(
-            "/tasks/projects/{id}/tasks",
-            get(task_items::list_tasks).post(task_items::create_task),
-        )
-        .route(
-            "/tasks/projects/{id}/tasks/reorder",
-            put(task_items::reorder_tasks),
-        )
-        .route(
-            "/tasks/sections/{id}",
-            put(tasks::update_section).delete(tasks::delete_section),
-        )
-        .route(
-            "/tasks/labels/{id}",
-            put(tasks::update_label).delete(tasks::delete_label),
-        )
-        .route(
-            "/tasks/{id}",
-            get(task_items::get_task)
-                .put(task_items::update_task)
-                .delete(task_items::delete_task),
-        )
-        .route("/tasks/{id}/status", put(task_items::update_task_status))
-        .route(
-            "/tasks/{id}/completion-history",
-            delete(task_items::clear_completion_history),
-        )
-        .route("/tasks/{id}/subtasks", post(task_items::create_subtask))
-        .route("/tasks/{id}/promote", post(task_items::promote_subtask))
-        .route("/tasks/{id}/attachments", post(task_items::attach_files))
-        .route(
-            "/tasks/{id}/attachments/{file_id}",
-            delete(task_items::detach_file),
-        )
-        .route(
-            "/tasks/{id}/comments",
-            get(task_items::list_comments).post(task_items::create_comment),
-        )
-        .route(
-            "/tasks/comments/{id}",
-            put(task_items::update_comment).delete(task_items::delete_comment),
-        )
-        .route("/tasks/schedule", get(task_items::get_schedule))
-        .route("/tasks/assigned-to-me", get(task_items::get_assigned_to_me))
+        .merge(tasks_api)
         // Sync audit log
         .route("/sync-events", get(sync_events::list_sync_events))
         // Duplicate detection

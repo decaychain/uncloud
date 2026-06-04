@@ -645,11 +645,11 @@ sync_audit:
   retention_days: 7                # MongoDB TTL for sync_event rows
   max_records_per_user: 10000      # hard cap; older rows pruned past this
 
-features:
-  shopping: true                   # server-wide shopping feature toggle (per-user opt-out
-                                   # via User.disabled_features)
+features:                          # server-wide built-in app availability
+  shopping: true                   # users can also opt out via User.disabled_features
   finance: true
   mail: true                       # experimental IMAP/SMTP mail client foundation
+  tasks: true
 
 mail_sync:
   enabled: true                    # background sync for enabled mail accounts with credentials

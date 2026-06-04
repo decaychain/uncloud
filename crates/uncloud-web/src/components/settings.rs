@@ -8,10 +8,11 @@ use crate::hooks::use_preferences;
 use crate::hooks::use_processing;
 use crate::hooks::use_s3;
 use crate::hooks::use_search;
-use crate::hooks::use_shopping;
 use crate::hooks::use_storages;
 use crate::state::{AuthState, FontScale, RescanState, ThemeState};
-use uncloud_common::{CreateInviteRequest, UpdatePreferencesRequest, UserRole, UserStatus};
+use uncloud_common::{
+    CreateInviteRequest, UpdateFeaturesRequest, UpdatePreferencesRequest, UserRole, UserStatus,
+};
 
 #[component]
 pub fn SettingsPage(tab: String) -> Element {
@@ -146,12 +147,6 @@ fn DashboardTilesSection() -> Element {
     let mut saving = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
 
-    let shopping_enabled = auth_state()
-        .user
-        .as_ref()
-        .map(|u| u.features_enabled.contains(&"shopping".to_string()))
-        .unwrap_or(false);
-
     // Current enabled set: user's stored preference, or defaults if unset.
     let enabled: Vec<String> = {
         let configured = auth_state()
@@ -205,7 +200,9 @@ fn DashboardTilesSection() -> Element {
                         {
                             let id_s = id.to_string();
                             let is_on = enabled.iter().any(|x| x == id);
-                            let disabled_for_feature = *id == "shopping" && !shopping_enabled;
+                            let disabled_for_feature = tile_feature_id(id)
+                                .map(|feature| !auth_state().feature_enabled(feature))
+                                .unwrap_or(false);
                             let enabled_now = enabled.clone();
                             let save = save.clone();
                             rsx! {
@@ -247,59 +244,129 @@ fn DashboardTilesSection() -> Element {
 #[component]
 fn OptionalFeaturesSection() -> Element {
     let mut auth_state = use_context::<Signal<AuthState>>();
-    let mut toggling = use_signal(|| false);
-
-    let shopping_enabled = auth_state()
-        .user
-        .as_ref()
-        .map(|u| u.features_enabled.contains(&"shopping".to_string()))
-        .unwrap_or(false);
+    let mut toggling = use_signal(|| None::<String>);
+    let mut error = use_signal(|| None::<String>);
 
     rsx! {
         div { class: "card bg-base-100 shadow",
             div { class: "card-body gap-4",
                 h2 { class: "card-title text-lg", "Optional Features" }
 
-                div { class: "flex items-center justify-between gap-4",
-                    div {
-                        p { class: "font-medium text-sm", "Shopping Lists" }
-                        p { class: "text-base-content/60 text-xs mt-0.5",
-                            "Manage shopping lists with a shared item catalogue."
-                        }
-                    }
-                    div { class: "flex items-center gap-2",
-                        if toggling() {
-                            span { class: "loading loading-spinner loading-xs" }
-                        }
-                        input {
-                            r#type: "checkbox",
-                            class: "toggle toggle-primary",
-                            checked: shopping_enabled,
-                            disabled: toggling(),
-                            onchange: move |_| {
-                                let new_val = !shopping_enabled;
-                                spawn(async move {
-                                    toggling.set(true);
-                                    let req = uncloud_common::UpdateFeaturesRequest {
-                                        shopping: Some(new_val),
-                                        mail: None,
-                                    };
-                                    match use_shopping::update_my_features(req).await {
-                                        Ok(updated_user) => {
-                                            auth_state.write().user = Some(updated_user);
-                                        }
-                                        Err(_) => {
-                                            // Silently fail — toggle will revert on next render
-                                        }
+                if let Some(msg) = error() {
+                    div { class: "alert alert-error text-sm", "{msg}" }
+                }
+
+                for feature in optional_feature_ids().iter().copied() {
+                    {
+                        let id = feature.to_string();
+                        let available = auth_state().feature_available(feature);
+                        let enabled = auth_state().feature_enabled(feature);
+                        let row_toggling = toggling()
+                            .as_ref()
+                            .map(|current| current == feature)
+                            .unwrap_or(false);
+                        let busy = toggling().is_some();
+                        rsx! {
+                            div { class: "flex items-center justify-between gap-4",
+                                div {
+                                    p { class: "font-medium text-sm", "{optional_feature_label(feature)}" }
+                                    p { class: "text-base-content/60 text-xs mt-0.5",
+                                        "{optional_feature_description(feature)}"
                                     }
-                                    toggling.set(false);
-                                });
-                            },
+                                    if !available {
+                                        p { class: "text-warning text-xs mt-1", "Disabled by the server administrator." }
+                                    }
+                                }
+                                div { class: "flex items-center gap-2",
+                                    if row_toggling {
+                                        span { class: "loading loading-spinner loading-xs" }
+                                    }
+                                    input {
+                                        r#type: "checkbox",
+                                        class: "toggle toggle-primary",
+                                        checked: enabled,
+                                        disabled: !available || busy,
+                                        onchange: move |_| {
+                                            let feature = id.clone();
+                                            let new_val = !enabled;
+                                            spawn(async move {
+                                                toggling.set(Some(feature.clone()));
+                                                error.set(None);
+                                                let req = update_feature_request(&feature, new_val);
+                                                match use_auth::update_my_features(req).await {
+                                                    Ok(updated_user) => {
+                                                        auth_state.write().user = Some(updated_user);
+                                                    }
+                                                    Err(e) => {
+                                                        error.set(Some(e));
+                                                    }
+                                                }
+                                                toggling.set(None);
+                                            });
+                                        },
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+fn optional_feature_ids() -> &'static [&'static str] {
+    &["finance", "shopping", "mail", "tasks"]
+}
+
+fn optional_feature_label(feature: &str) -> &'static str {
+    match feature {
+        "finance" => "Finance",
+        "shopping" => "Shopping Lists",
+        "mail" => "Mail",
+        "tasks" => "Tasks",
+        _ => "Unknown",
+    }
+}
+
+fn optional_feature_description(feature: &str) -> &'static str {
+    match feature {
+        "finance" => "Track accounts, imports, categories, and transaction rules.",
+        "shopping" => "Manage shopping lists with a shared item catalogue.",
+        "mail" => "Use the experimental IMAP/SMTP mail client.",
+        "tasks" => "Manage projects, task boards, schedules, and assignments.",
+        _ => "",
+    }
+}
+
+fn tile_feature_id(tile_id: &str) -> Option<&'static str> {
+    match tile_id {
+        "tasks" => Some("tasks"),
+        "shopping" => Some("shopping"),
+        "mail" => Some("mail"),
+        _ => None,
+    }
+}
+
+fn update_feature_request(feature: &str, enabled: bool) -> UpdateFeaturesRequest {
+    match feature {
+        "finance" => UpdateFeaturesRequest {
+            finance: Some(enabled),
+            ..Default::default()
+        },
+        "shopping" => UpdateFeaturesRequest {
+            shopping: Some(enabled),
+            ..Default::default()
+        },
+        "mail" => UpdateFeaturesRequest {
+            mail: Some(enabled),
+            ..Default::default()
+        },
+        "tasks" => UpdateFeaturesRequest {
+            tasks: Some(enabled),
+            ..Default::default()
+        },
+        _ => UpdateFeaturesRequest::default(),
     }
 }
 
@@ -1687,11 +1754,7 @@ fn InviteManagementSection() -> Element {
         evt.prevent_default();
         let comment = {
             let c = invite_comment().trim().to_string();
-            if c.is_empty() {
-                None
-            } else {
-                Some(c)
-            }
+            if c.is_empty() { None } else { Some(c) }
         };
         let role = match invite_role().as_str() {
             "admin" => Some(UserRole::Admin),

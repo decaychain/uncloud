@@ -98,6 +98,143 @@ async fn invite_only_rejects_without_token() {
 }
 
 // =============================================================================
+// Optional built-in app features
+// =============================================================================
+
+fn json_string_array_contains(value: &serde_json::Value, item: &str) -> bool {
+    value
+        .as_array()
+        .map(|items| items.iter().any(|v| v.as_str() == Some(item)))
+        .unwrap_or(false)
+}
+
+#[tokio::test]
+async fn users_can_opt_out_of_builtin_app_features() {
+    let app = TestApp::new().await;
+    app.register_and_login("alice").await;
+
+    let me: serde_json::Value = app.server.get("/api/auth/me").await.json();
+    for feature in ["finance", "shopping", "mail", "tasks"] {
+        assert!(
+            json_string_array_contains(&me["features_available"], feature),
+            "{feature} should be server-available by default"
+        );
+        assert!(
+            json_string_array_contains(&me["features_enabled"], feature),
+            "{feature} should be user-enabled by default"
+        );
+    }
+
+    let disabled = app
+        .server
+        .put("/api/v1/auth/me/features")
+        .json(&serde_json::json!({
+            "finance": false,
+            "shopping": false,
+            "mail": false,
+            "tasks": false
+        }))
+        .await;
+    disabled.assert_status_ok();
+    let body: serde_json::Value = disabled.json();
+    for feature in ["finance", "shopping", "mail", "tasks"] {
+        assert!(json_string_array_contains(
+            &body["features_available"],
+            feature
+        ));
+        assert!(!json_string_array_contains(
+            &body["features_enabled"],
+            feature
+        ));
+    }
+
+    app.server
+        .get("/api/finance/accounts")
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    app.server
+        .get("/api/shopping/lists")
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    app.server
+        .get("/api/mail/accounts")
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    app.server
+        .get("/api/tasks/projects")
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+
+    let enabled = app
+        .server
+        .put("/api/v1/auth/me/features")
+        .json(&serde_json::json!({
+            "finance": true,
+            "shopping": true,
+            "mail": true,
+            "tasks": true
+        }))
+        .await;
+    enabled.assert_status_ok();
+    let body: serde_json::Value = enabled.json();
+    for feature in ["finance", "shopping", "mail", "tasks"] {
+        assert!(json_string_array_contains(
+            &body["features_enabled"],
+            feature
+        ));
+    }
+
+    app.server
+        .get("/api/tasks/projects")
+        .await
+        .assert_status_ok();
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn server_disabled_builtin_app_features_are_not_advertised() {
+    let app = TestApp::with_config(|config| {
+        config.features.finance = false;
+        config.features.shopping = false;
+        config.features.mail = false;
+        config.features.tasks = false;
+    })
+    .await;
+    app.register_and_login("alice").await;
+
+    let me: serde_json::Value = app.server.get("/api/auth/me").await.json();
+    for feature in ["finance", "shopping", "mail", "tasks"] {
+        assert!(!json_string_array_contains(
+            &me["features_available"],
+            feature
+        ));
+        assert!(!json_string_array_contains(
+            &me["features_enabled"],
+            feature
+        ));
+    }
+
+    app.server
+        .get("/api/finance/accounts")
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    app.server
+        .get("/api/shopping/lists")
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    app.server
+        .get("/api/mail/accounts")
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    app.server
+        .get("/api/tasks/projects")
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+
+    app.cleanup().await;
+}
+
+// =============================================================================
 // Optional email
 // =============================================================================
 

@@ -1,18 +1,18 @@
 use axum::{
-    extract::{Path, State},
-    http::{header::SET_COOKIE, HeaderMap, StatusCode},
-    response::IntoResponse,
     Json,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode, header::SET_COOKIE},
+    response::IntoResponse,
 };
 use mongodb::bson::{doc, oid::ObjectId};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::AppState;
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
 use crate::models::{User, UserRole};
 use crate::services::auth::LoginOutcome;
-use crate::AppState;
 
 const SESSION_COOKIE: &str = "session";
 
@@ -28,17 +28,15 @@ fn samesite_for(headers: &HeaderMap) -> &'static str {
 }
 
 fn compute_features_enabled(config: &crate::config::Config, disabled: &[String]) -> Vec<String> {
-    let mut enabled = Vec::new();
-    if config.features.shopping && !disabled.contains(&"shopping".to_string()) {
-        enabled.push("shopping".to_string());
-    }
-    if config.features.finance && !disabled.contains(&"finance".to_string()) {
-        enabled.push("finance".to_string());
-    }
-    if config.features.mail && !disabled.contains(&"mail".to_string()) {
-        enabled.push("mail".to_string());
-    }
-    enabled
+    crate::config::OPTIONAL_FEATURES
+        .iter()
+        .copied()
+        .filter(|feature| {
+            config.features.is_enabled(feature)
+                && !disabled.iter().any(|disabled| disabled == feature)
+        })
+        .map(str::to_string)
+        .collect()
 }
 
 fn user_to_response(user: &User, config: &crate::config::Config) -> UserResponse {
@@ -51,6 +49,7 @@ fn user_to_response(user: &User, config: &crate::config::Config) -> UserResponse
         quota_bytes: user.quota_bytes,
         used_bytes: user.used_bytes,
         totp_enabled: user.totp_enabled,
+        features_available: config.features.enabled_feature_ids(),
         features_enabled: compute_features_enabled(config, &user.disabled_features),
         preferences: user.preferences.clone(),
         session_token: None,
@@ -83,6 +82,7 @@ pub struct UserResponse {
     pub quota_bytes: Option<i64>,
     pub used_bytes: i64,
     pub totp_enabled: bool,
+    pub features_available: Vec<String>,
     pub features_enabled: Vec<String>,
     pub preferences: uncloud_common::UserPreferences,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -455,37 +455,22 @@ pub async fn update_my_features(
 ) -> Result<Json<UserResponse>> {
     let users_coll = state.db.collection::<User>("users");
 
-    if let Some(enabled) = body.shopping {
-        if enabled {
+    let updates = [
+        (crate::config::FEATURE_SHOPPING, body.shopping),
+        (crate::config::FEATURE_FINANCE, body.finance),
+        (crate::config::FEATURE_MAIL, body.mail),
+        (crate::config::FEATURE_TASKS, body.tasks),
+    ];
+
+    for (feature, enabled) in updates {
+        if let Some(enabled) = enabled {
+            let update = if enabled {
+                doc! { "$pull": { "disabled_features": feature } }
+            } else {
+                doc! { "$addToSet": { "disabled_features": feature } }
+            };
             users_coll
-                .update_one(
-                    doc! { "_id": user.id },
-                    doc! { "$pull": { "disabled_features": "shopping" } },
-                )
-                .await?;
-        } else {
-            users_coll
-                .update_one(
-                    doc! { "_id": user.id },
-                    doc! { "$addToSet": { "disabled_features": "shopping" } },
-                )
-                .await?;
-        }
-    }
-    if let Some(enabled) = body.mail {
-        if enabled {
-            users_coll
-                .update_one(
-                    doc! { "_id": user.id },
-                    doc! { "$pull": { "disabled_features": "mail" } },
-                )
-                .await?;
-        } else {
-            users_coll
-                .update_one(
-                    doc! { "_id": user.id },
-                    doc! { "$addToSet": { "disabled_features": "mail" } },
-                )
+                .update_one(doc! { "_id": user.id }, update)
                 .await?;
         }
     }

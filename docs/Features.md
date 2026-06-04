@@ -242,6 +242,7 @@ Todoist-style task manager with projects, sections, subtasks, comments, attachme
   - `TaskComment { task_id, author_id, body, created_at }`
   - `TaskLabel { project_id, name, color }`
 - **Server API** (full): projects CRUD + members, sections CRUD + reorder, labels CRUD, tasks CRUD + reorder, subtasks (`POST /tasks/{id}/subtasks`), promote subtask to top-level, status update, comments CRUD, file attachments (link/unlink existing files), schedule (`GET /tasks/schedule` — date-grouped upcoming tasks), assigned-to-me feed.
+- **Feature flag**: all `/tasks/...` handlers are behind the Tasks feature gate: `features.tasks` must be enabled server-wide and the user must not have `tasks` in `disabled_features`.
 - **Frontend** (`components/tasks/`):
   - `mod.rs` — page shell + project list
   - `board_view.rs` — Kanban: sections as columns, drag-drop tasks between columns
@@ -386,7 +387,7 @@ A lightweight shopping-list companion app that shares the Uncloud session. Users
   - `shopping_lists` — `ShoppingList { owner_id, name, shared_with: Vec<ObjectId> }`
   - `shopping_list_items` — `ShoppingListItem { list_id, item_id, checked, recurring, quantity, position }` (join row; `recurring` items stay on the list when "remove purchased" is invoked)
 - **Access control**: `list_access_filter` lets either the owner or any user in `shared_with` read/mutate a list's rows; catalogue (categories/shops/items) is always owner-scoped.
-- **Feature flag**: `require_shopping` gate at the top of every handler checks `config.features.shopping` (server-wide) AND `user.disabled_features` (per-user opt-out via `PUT /api/auth/me/features` `{ "shopping": false }`). Disabled users get 404.
+- **Feature flag**: `require_shopping` checks `features.shopping` (server-wide) and `user.disabled_features` (per-user opt-out via `PUT /api/auth/me/features` `{ "shopping": false }`).
 - **Frontend**: `components/shopping.rs` provides `ShoppingPage` (list index + shops/categories/items management) and `ShoppingListView` (per-list view with check/uncheck, inline item inlet, drag-to-reorder, "remove purchased" bulk action); routes `/shopping` and `/shopping/list/:id`.
 - **Marking as purchased**: `PATCH /api/shopping/lists/{id}/items/{item_id}` with `{ "checked": true }`; bulk cleanup via `POST /api/shopping/lists/{id}/remove-purchased` which deletes all checked non-recurring rows.
 
@@ -405,7 +406,7 @@ A self-hosted personal expense tracker — multi-account, multi-currency (per-cu
 - **Money**: stored as `i64` minor units; v0 assumes two-decimal currencies (EUR, USD, GBP, …). JPY-style zero-decimal currencies are unsupported.
 - **Splits**: each transaction embeds a `legs: Vec<TransactionLeg>` array. v0 writes a single leg per transaction (the importer, rules engine, and reconciliation all touch `legs[0]`), but the aggregation routes already `$unwind` legs so a future split UI gets correct per-leg category attribution for free.
 - **Provenance**: each leg carries `category_source: Unset | User | Rule` plus `rule_id` so re-runs and re-imports leave manual categorisations alone.
-- **Feature flag**: `require_finance` gate checks `config.features.finance` server-wide.
+- **Feature flag**: `require_finance` checks `features.finance` server-wide and `user.disabled_features` per-user.
 - **CSV import**: `POST /api/finance/import` accepts a multipart upload (`account_id?`, `schema_id`, `csv`) and runs the bytes through the generic schema-driven parser in `crates/uncloud-server/src/finance_import/`. `account_id` is optional when the schema declares an `iban_column` — the importer either matches an existing account by IBAN or creates one (`Account •••<last-4>`) and returns it via `auto_created_account`. Each row runs through the user's rules before insertion (first-match wins, ordered by `(priority, _id)`).
 - **Idempotent re-imports**: each parsed row produces a deterministic `source_ref` (SHA-256 prefix over the row's fields, or the bank-ref column when the schema declares one). The partial unique index on `(account_id, source_ref)` lets a duplicate insert fall through silently — re-uploading the same file imports zero new rows. The created ImportRun is still recorded with `skipped_duplicate` counts.
 - **Reconciliation**: `POST /finance/accounts/{id}/reconcile/preview` computes the balance through `on_date` from history; `apply` creates a BalanceSnapshot + an auto-generated "Reconciliation" adjustment transaction tagged with `source_snapshot_id`. `GET /finance/accounts/{id}/snapshots` reports `drift_minor` (re-derived at read time against the current history minus the linked adjustment); `POST /finance/snapshots/{id}/recompute` re-balances the adjustment to match the snapshot after late imports. The "Reconciliation" category is seeded per user on first apply. The list-transactions route hides `source_snapshot_id`-tagged rows unless `include_reconciliations=true`.

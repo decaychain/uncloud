@@ -6,10 +6,11 @@ use std::sync::OnceLock;
 use axum_test::{TestServer, TestServerConfig};
 use serde_json::Value;
 use tempfile::TempDir;
-use testcontainers::{runners::AsyncRunner, GenericImage, ImageExt};
+use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
 use uncloud_client::Client;
 
 use uncloud_server::{
+    AppState,
     config::{
         AppsConfig, AuthConfig, Config, DatabaseConfig, FeaturesConfig, ProcessingConfig,
         SearchConfig, ServerConfig, StorageConfig, UploadConfig, VersioningConfig,
@@ -18,7 +19,6 @@ use uncloud_server::{
     processing::ProcessingService,
     routes,
     services::{AuthService, EventService, RescanService, SearchService, StorageService},
-    AppState,
 };
 
 // Shared MongoDB container — started once per test binary, port stored here.
@@ -87,7 +87,7 @@ impl TestApp {
     }
 
     /// Create a TestApp with custom config modifications.
-    async fn with_config(customize: impl FnOnce(&mut Config)) -> Self {
+    pub async fn with_config(customize: impl FnOnce(&mut Config)) -> Self {
         let permit = db_semaphore()
             .acquire_owned()
             .await

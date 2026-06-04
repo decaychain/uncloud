@@ -2,8 +2,8 @@ use uncloud_common::{
     AddShoppingListItemRequest, CategoryResponse, CreateCategoryRequest, CreateShopRequest,
     CreateShoppingListRequest, PatchShoppingListItemRequest, RenameShoppingListRequest,
     ShareListRequest, ShopResponse, ShoppingItemResponse, ShoppingListItemResponse,
-    ShoppingListResponse, ShoppingListSummary, UpdateCategoryRequest, UpdateFeaturesRequest,
-    UpdatePositionRequest, UpdateShopRequest, UpdateShoppingItemRequest, UserResponse,
+    ShoppingListResponse, ShoppingListSummary, UpdateCategoryRequest, UpdatePositionRequest,
+    UpdateShopRequest, UpdateShoppingItemRequest,
 };
 
 use super::api;
@@ -455,22 +455,4 @@ pub async fn list_usernames() -> Result<Vec<String>, String> {
     list_user_entries()
         .await
         .map(|entries| entries.into_iter().map(|e| e.username).collect())
-}
-
-pub async fn update_my_features(req: UpdateFeaturesRequest) -> Result<UserResponse, String> {
-    let response = api::put_v1("/auth/me/features")
-        .json(&req)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if response.ok() {
-        response
-            .json::<UserResponse>()
-            .await
-            .map_err(|e| e.to_string())
-    } else {
-        Err("Failed to update features".to_string())
-    }
 }

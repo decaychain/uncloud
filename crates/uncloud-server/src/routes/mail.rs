@@ -5,11 +5,11 @@ use std::{
 };
 
 use axum::{
+    Json,
     body::Body,
     extract::{Multipart, Path, Query, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::Response,
-    Json,
 };
 use bson::doc;
 use chrono::{DateTime, Utc};
@@ -36,24 +36,24 @@ use uncloud_common::{
     UpdateMailFolderRequest, UpdateMailIdentityRequest, UpsertMailDraftRequest,
 };
 
+use crate::AppState;
 use crate::error::{AppError, Result};
 use crate::middleware::{AuthUser, RequestMeta};
 use crate::models::{
     File, Folder, MailAccount, MailAddress, MailAttachment, MailDraft, MailDraftAttachment,
     MailFolder, MailIdentity, MailMessage, MailServerConfig, User,
 };
-use crate::routes::apps::{deliver_webhooks, EVENT_FILE_CREATED};
+use crate::routes::apps::{EVENT_FILE_CREATED, deliver_webhooks};
 use crate::routes::files::{check_name_conflict, file_to_response, resolve_storage_path};
+use crate::services::SecretCipher;
 use crate::services::mail::{
     RemoteMailAddress, RemoteMailbox, RemoteMessageBody, RemoteMessageFlag, RemoteMessageSummary,
     RemoteOutgoingAttachment, RemoteOutgoingMessage, RemoteUidRange,
 };
 use crate::services::mail_blob::{
-    read_cached_message_body, store_draft_attachment, store_message_body, StoredMailBody,
+    StoredMailBody, read_cached_message_body, store_draft_attachment, store_message_body,
 };
 use crate::services::sharing::check_folder_access;
-use crate::services::SecretCipher;
-use crate::AppState;
 
 const ACCOUNTS: &str = "mail_accounts";
 const IDENTITIES: &str = "mail_identities";
@@ -90,9 +90,25 @@ pub struct MailMessageListQuery {
     cursor: Option<String>,
 }
 
-fn require_mail(state: &AppState) -> Result<()> {
-    if !state.config.features.mail {
-        return Err(AppError::Forbidden("Mail feature disabled".into()));
+fn require_mail_available(state: &AppState) -> Result<()> {
+    if !state
+        .config
+        .features
+        .is_enabled(crate::config::FEATURE_MAIL)
+    {
+        return Err(AppError::Forbidden("Access denied".into()));
+    }
+    Ok(())
+}
+
+fn require_mail(state: &AppState, user: &AuthUser) -> Result<()> {
+    require_mail_available(state)?;
+    if user
+        .disabled_features
+        .iter()
+        .any(|feature| feature == crate::config::FEATURE_MAIL)
+    {
+        return Err(AppError::Forbidden("Access denied".into()));
     }
     Ok(())
 }
@@ -1051,7 +1067,7 @@ pub async fn list_accounts(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<Json<Vec<MailAccountResponse>>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let mut cursor = state
         .db
         .collection::<MailAccount>(ACCOUNTS)
@@ -1073,7 +1089,7 @@ pub async fn create_account(
     user: AuthUser,
     Json(req): Json<CreateMailAccountRequest>,
 ) -> Result<(StatusCode, Json<MailAccountResponse>)> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let now = Utc::now();
     let display_name = validate_label(&req.display_name, "display name")?;
     let email_address = validate_email(&req.email_address, "email address")?;
@@ -1139,7 +1155,7 @@ pub async fn update_account(
     Path(id): Path<String>,
     Json(req): Json<UpdateMailAccountRequest>,
 ) -> Result<Json<MailAccountResponse>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let id = parse_oid(&id, "mail account id")?;
     let _ = find_account(&state, user.id, id).await?;
 
@@ -1205,7 +1221,7 @@ pub async fn delete_account(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let id = parse_oid(&id, "mail account id")?;
     let result = state
         .db
@@ -1243,7 +1259,7 @@ pub async fn get_account_credential(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<MailCredentialStatusResponse>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let id = parse_oid(&id, "mail account id")?;
     let account = find_account(&state, user.id, id).await?;
     Ok(Json(credential_status(&account)))
@@ -1255,7 +1271,7 @@ pub async fn set_account_credential(
     Path(id): Path<String>,
     Json(req): Json<SetMailCredentialRequest>,
 ) -> Result<Json<MailCredentialStatusResponse>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let id = parse_oid(&id, "mail account id")?;
     let _ = find_account(&state, user.id, id).await?;
     let password = req.password.trim();
@@ -1291,7 +1307,7 @@ pub async fn clear_account_credential(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<MailCredentialStatusResponse>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let id = parse_oid(&id, "mail account id")?;
     let _ = find_account(&state, user.id, id).await?;
     state
@@ -1318,7 +1334,7 @@ pub async fn test_account_imap(
     Path(id): Path<String>,
     Json(req): Json<MailPasswordAuthRequest>,
 ) -> Result<Json<MailConnectionTestResponse>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let id = parse_oid(&id, "mail account id")?;
     let account = find_account(&state, user.id, id).await?;
     let password = resolve_mail_password(&state, &account, req.password.as_deref())?;
@@ -1336,7 +1352,7 @@ pub async fn test_account_smtp(
     Path(id): Path<String>,
     Json(req): Json<MailPasswordAuthRequest>,
 ) -> Result<Json<MailConnectionTestResponse>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let id = parse_oid(&id, "mail account id")?;
     let account = find_account(&state, user.id, id).await?;
     let password = resolve_mail_password(&state, &account, req.password.as_deref())?;
@@ -1354,7 +1370,7 @@ pub async fn diagnose_account_provider(
     Path(id): Path<String>,
     Json(req): Json<MailPasswordAuthRequest>,
 ) -> Result<Json<MailProviderDiagnosticsResponse>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let id = parse_oid(&id, "mail account id")?;
     let account = find_account(&state, user.id, id).await?;
     let folders = load_account_folders(&state, user.id, account.id).await?;
@@ -1809,7 +1825,7 @@ pub async fn send_account_message(
     Path(id): Path<String>,
     Json(req): Json<SendMailMessageRequest>,
 ) -> Result<Json<SendMailMessageResponse>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     validate_send_request(&req)?;
     let id = parse_oid(&id, "mail account id")?;
     let account = find_account(&state, user.id, id).await?;
@@ -1886,7 +1902,7 @@ pub async fn list_identities(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<Json<Vec<MailIdentityResponse>>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let mut cursor = state
         .db
         .collection::<MailIdentity>(IDENTITIES)
@@ -1905,7 +1921,7 @@ pub async fn create_identity(
     user: AuthUser,
     Json(req): Json<CreateMailIdentityRequest>,
 ) -> Result<(StatusCode, Json<MailIdentityResponse>)> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let account_id = parse_oid(&req.account_id, "mail account id")?;
     let _ = find_account(&state, user.id, account_id).await?;
     let existing_count = state
@@ -1963,7 +1979,7 @@ pub async fn update_identity(
     Path(id): Path<String>,
     Json(req): Json<UpdateMailIdentityRequest>,
 ) -> Result<Json<MailIdentityResponse>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let id = parse_oid(&id, "mail identity id")?;
     let existing = state
         .db
@@ -2046,7 +2062,7 @@ pub async fn delete_identity(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let id = parse_oid(&id, "mail identity id")?;
     let identity = state
         .db
@@ -2104,7 +2120,7 @@ pub async fn list_drafts(
     user: AuthUser,
     Path(account_id): Path<String>,
 ) -> Result<Json<Vec<MailDraftResponse>>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let account_id = parse_oid(&account_id, "mail account id")?;
     let _ = find_account(&state, user.id, account_id).await?;
     let mut cursor = state
@@ -2127,7 +2143,7 @@ pub async fn create_draft(
     Path(account_id): Path<String>,
     Json(req): Json<UpsertMailDraftRequest>,
 ) -> Result<(StatusCode, Json<MailDraftResponse>)> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let account_id = parse_oid(&account_id, "mail account id")?;
     let _ = find_account(&state, user.id, account_id).await?;
     let payload = normalize_draft_payload(&state, user.id, account_id, req).await?;
@@ -2167,7 +2183,7 @@ pub async fn update_draft(
     Path(id): Path<String>,
     Json(req): Json<UpsertMailDraftRequest>,
 ) -> Result<Json<MailDraftResponse>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let id = parse_oid(&id, "mail draft id")?;
     let draft = state
         .db
@@ -2232,7 +2248,7 @@ pub async fn delete_draft(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let id = parse_oid(&id, "mail draft id")?;
     let _ = find_draft_by_id(&state, user.id, id).await?;
     delete_draft_attachments(&state, user.id, id).await?;
@@ -2253,7 +2269,7 @@ pub async fn upload_draft_attachment(
     Path(id): Path<String>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<MailDraftAttachmentResponse>)> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let draft_id = parse_oid(&id, "mail draft id")?;
     let draft = find_draft_by_id(&state, user.id, draft_id).await?;
     let account = find_account(&state, user.id, draft.account_id).await?;
@@ -2350,7 +2366,7 @@ pub async fn delete_draft_attachment(
     user: AuthUser,
     Path((draft_id, attachment_id)): Path<(String, String)>,
 ) -> Result<StatusCode> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let draft_id = parse_oid(&draft_id, "mail draft id")?;
     let attachment_id = parse_oid(&attachment_id, "mail draft attachment id")?;
     let draft = find_draft_by_id(&state, user.id, draft_id).await?;
@@ -2404,7 +2420,7 @@ pub async fn list_folders(
     user: AuthUser,
     Path(account_id): Path<String>,
 ) -> Result<Json<Vec<MailFolderResponse>>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let account_id = parse_oid(&account_id, "mail account id")?;
     let _ = find_account(&state, user.id, account_id).await?;
     let sync_in_progress = state.mail.is_account_syncing(account_id);
@@ -2423,7 +2439,7 @@ pub async fn update_folder(
     Path((account_id, folder_id)): Path<(String, String)>,
     Json(req): Json<UpdateMailFolderRequest>,
 ) -> Result<Json<MailFolderResponse>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let account_id = parse_oid(&account_id, "mail account id")?;
     let folder_id = parse_oid(&folder_id, "mail folder id")?;
     let _ = find_account(&state, user.id, account_id).await?;
@@ -2581,7 +2597,7 @@ pub async fn refresh_folders(
     Path(account_id): Path<String>,
     Json(req): Json<MailPasswordAuthRequest>,
 ) -> Result<Json<Vec<MailFolderResponse>>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let account_id = parse_oid(&account_id, "mail account id")?;
     let account = find_account(&state, user.id, account_id).await?;
     let password = resolve_mail_password(&state, &account, req.password.as_deref())?;
@@ -3036,7 +3052,7 @@ pub async fn sync_folder(
     Path((account_id, folder_id)): Path<(String, String)>,
     Json(req): Json<MailSyncRequest>,
 ) -> Result<Json<MailFolderSyncResponse>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let account_id = parse_oid(&account_id, "mail account id")?;
     let folder_id = parse_oid(&folder_id, "mail folder id")?;
     let account = find_account(&state, user.id, account_id).await?;
@@ -3065,7 +3081,7 @@ pub async fn sync_account(
     Path(account_id): Path<String>,
     Json(req): Json<MailSyncRequest>,
 ) -> Result<Json<MailAccountSyncResponse>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let account_id = parse_oid(&account_id, "mail account id")?;
     let account = find_account(&state, user.id, account_id).await?;
     let password = resolve_mail_password(&state, &account, req.password.as_deref())?;
@@ -3080,7 +3096,12 @@ pub async fn sync_account(
 }
 
 pub fn spawn_mail_sync_scheduler(state: Arc<AppState>) {
-    if !state.config.features.mail || !state.config.mail_sync.enabled {
+    if !state
+        .config
+        .features
+        .is_enabled(crate::config::FEATURE_MAIL)
+        || !state.config.mail_sync.enabled
+    {
         tracing::debug!("mail background sync scheduler disabled");
         return;
     }
@@ -3113,7 +3134,7 @@ pub fn spawn_mail_sync_scheduler(state: Arc<AppState>) {
 }
 
 pub async fn run_scheduled_mail_sync_tick(state: Arc<AppState>) -> Result<usize> {
-    require_mail(&state)?;
+    require_mail_available(&state)?;
     let now = Utc::now();
     let default_interval = state.config.mail_sync.interval_secs.clamp(
         MIN_ACCOUNT_SYNC_INTERVAL_SECS,
@@ -3233,7 +3254,7 @@ pub async fn list_messages(
     Path((account_id, folder_id)): Path<(String, String)>,
     Query(query): Query<MailMessageListQuery>,
 ) -> Result<Json<MailMessageListResponse>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let account_id = parse_oid(&account_id, "mail account id")?;
     let folder_id = parse_oid(&folder_id, "mail folder id")?;
     let _ = find_account(&state, user.id, account_id).await?;
@@ -3479,7 +3500,7 @@ pub async fn get_message(
     user: AuthUser,
     Path(message_id): Path<String>,
 ) -> Result<Json<MailMessageDetailResponse>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let message_id = parse_oid(&message_id, "mail message id")?;
     let message = find_message(&state, user.id, message_id).await?;
     match read_cached_message_body(&state.storage, &message).await {
@@ -3574,7 +3595,7 @@ pub async fn download_attachment(
     user: AuthUser,
     Path(attachment_id): Path<String>,
 ) -> Result<Response> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     stream_attachment_response(&state, user.id, &attachment_id, "attachment").await
 }
 
@@ -3583,7 +3604,7 @@ pub async fn open_attachment(
     user: AuthUser,
     Path(attachment_id): Path<String>,
 ) -> Result<Response> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     stream_attachment_response(&state, user.id, &attachment_id, "inline").await
 }
 
@@ -3684,7 +3705,7 @@ pub async fn save_attachment_to_files(
     Path(attachment_id): Path<String>,
     Json(req): Json<SaveMailAttachmentRequest>,
 ) -> Result<Json<SaveMailAttachmentResponse>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let attachment_id = parse_oid(&attachment_id, "mail attachment id")?;
     let attachment = state
         .db
@@ -3848,7 +3869,7 @@ pub async fn mutate_message(
     Path(message_id): Path<String>,
     Json(req): Json<MailMessageMutationRequest>,
 ) -> Result<Json<MailMessageMutationResponse>> {
-    require_mail(&state)?;
+    require_mail(&state, &user)?;
     let message_id = parse_oid(&message_id, "mail message id")?;
     let message = find_message(&state, user.id, message_id).await?;
     let account = find_account(&state, user.id, message.account_id).await?;

@@ -104,6 +104,8 @@ pub struct UserResponse {
     #[serde(default)]
     pub totp_enabled: bool,
     #[serde(default)]
+    pub features_available: Vec<String>,
+    #[serde(default)]
     pub features_enabled: Vec<String>,
     #[serde(default)]
     pub preferences: UserPreferences,

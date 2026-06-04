@@ -139,9 +139,14 @@ pub struct UpdatePositionRequest {
     pub position: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateFeaturesRequest {
+    #[serde(default)]
     pub shopping: Option<bool>,
     #[serde(default)]
+    pub finance: Option<bool>,
+    #[serde(default)]
     pub mail: Option<bool>,
+    #[serde(default)]
+    pub tasks: Option<bool>,
 }
