@@ -53,6 +53,7 @@ pub fn MailPage() -> Element {
     let mut drafts = use_signal(Vec::<MailDraftResponse>::new);
     let mut messages = use_signal(Vec::<MailMessageSummaryResponse>::new);
     let mut detail = use_signal(|| None::<MailMessageDetailResponse>);
+    let remote_images_loaded_messages = use_signal(Vec::<String>::new);
     let mut selected_account = use_signal(String::new);
     let mut selected_folder = use_signal(String::new);
     let mut selected_message = use_signal(String::new);
@@ -674,44 +675,6 @@ pub fn MailPage() -> Element {
                             IconRefreshCw { class: "w-4 h-4".to_string() }
                         }
                         span { "Sync account" }
-                    }
-                    button {
-                        class: "btn btn-sm btn-outline",
-                        disabled: selected_account_id.is_empty() || syncing(),
-                        onclick: move |_| {
-                            let account_id = selected_account();
-                            if account_id.is_empty() {
-                                return;
-                            }
-                            spawn(async move {
-                                error.set(None);
-                                notice.set(None);
-                                match use_mail::test_imap(&account_id).await {
-                                    Ok(_) => notice.set(Some("IMAP test passed".to_string())),
-                                    Err(e) => error.set(Some(e)),
-                                }
-                            });
-                        },
-                        "Test IMAP"
-                    }
-                    button {
-                        class: "btn btn-sm btn-outline",
-                        disabled: selected_account_id.is_empty() || syncing(),
-                        onclick: move |_| {
-                            let account_id = selected_account();
-                            if account_id.is_empty() {
-                                return;
-                            }
-                            spawn(async move {
-                                error.set(None);
-                                notice.set(None);
-                                match use_mail::test_smtp(&account_id).await {
-                                    Ok(_) => notice.set(Some("SMTP test passed".to_string())),
-                                    Err(e) => error.set(Some(e)),
-                                }
-                            });
-                        },
-                        "Test SMTP"
                     }
                     button {
                         class: "btn btn-sm btn-primary gap-2",
@@ -2137,9 +2100,10 @@ pub fn MailPage() -> Element {
                                             }
                                         }
                                         if let Some(body) = row.body_html.as_ref() {
-                                            div {
-                                                class: "max-w-none break-words text-sm leading-6 [&_a]:text-primary [&_blockquote]:border-l-2 [&_blockquote]:border-base-300 [&_blockquote]:pl-3 [&_blockquote]:text-base-content/70 [&_img]:max-w-full [&_table]:max-w-full",
-                                                dangerous_inner_html: "{body}",
+                                            MailMessageHtmlBody {
+                                                body: body.clone(),
+                                                message_id: row.message.id.clone(),
+                                                remote_images_loaded_messages,
                                             }
                                         } else if let Some(body) = row.body_text.as_ref() {
                                             pre { class: "whitespace-pre-wrap break-words font-sans text-sm leading-6", "{body}" }
@@ -3414,6 +3378,42 @@ pub fn MailPage() -> Element {
     }
 }
 
+#[component]
+fn MailMessageHtmlBody(
+    body: String,
+    message_id: String,
+    mut remote_images_loaded_messages: Signal<Vec<String>>,
+) -> Element {
+    let has_remote_images = mail_html_has_blocked_remote_images(&body);
+    let remote_images_loaded =
+        mail_remote_images_loaded(&remote_images_loaded_messages(), &message_id);
+    let display_body = mail_body_html_for_display(&body, remote_images_loaded);
+
+    rsx! {
+        if has_remote_images && !remote_images_loaded {
+            div { class: "mb-4 flex flex-col gap-2 border border-base-300 bg-base-100 p-3 text-sm sm:flex-row sm:items-center sm:justify-between",
+                div { class: "text-base-content/70", "Remote images are blocked for this message." }
+                button {
+                    class: "btn btn-xs btn-outline gap-2 self-start sm:self-auto",
+                    onclick: move |_| {
+                        let mut loaded = remote_images_loaded_messages();
+                        if !loaded.iter().any(|id| id == &message_id) {
+                            loaded.push(message_id.clone());
+                        }
+                        remote_images_loaded_messages.set(loaded);
+                    },
+                    IconEye { class: "h-4 w-4".to_string() }
+                    span { "Load images" }
+                }
+            }
+        }
+        div {
+            class: "max-w-none break-words text-sm leading-6 [&_a]:text-primary [&_blockquote]:border-l-2 [&_blockquote]:border-base-300 [&_blockquote]:pl-3 [&_blockquote]:text-base-content/70 [&_img]:max-w-full [&_table]:max-w-full",
+            dangerous_inner_html: "{display_body}",
+        }
+    }
+}
+
 fn security_from_value(value: &str) -> MailSecurity {
     match value {
         "start_tls" => MailSecurity::StartTls,
@@ -4108,6 +4108,22 @@ fn mail_draft_attachment_meta(attachment: &MailDraftAttachmentResponse) -> Strin
         parts.push(attachment.content_type.clone());
     }
     parts.join(" | ")
+}
+
+fn mail_html_has_blocked_remote_images(body: &str) -> bool {
+    body.contains("data-uc-remote-src=")
+}
+
+fn mail_remote_images_loaded(message_ids: &[String], message_id: &str) -> bool {
+    message_ids.iter().any(|id| id == message_id)
+}
+
+fn mail_body_html_for_display(body: &str, load_remote_images: bool) -> String {
+    if load_remote_images {
+        body.replace("data-uc-remote-src=", "src=")
+    } else {
+        body.to_string()
+    }
 }
 
 fn message_sender(message: &MailMessageSummaryResponse) -> String {

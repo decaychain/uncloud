@@ -3,14 +3,14 @@
 use uncloud_common::FileResponse;
 use uncloud_common::{
     CreateMailAccountRequest, CreateMailIdentityRequest, MailAccountResponse,
-    MailAccountSyncResponse, MailConnectionTestResponse, MailCredentialStatusResponse,
-    MailDraftAttachmentResponse, MailDraftResponse, MailFolderResponse, MailFolderSyncResponse,
-    MailIdentityResponse, MailMessageDetailResponse, MailMessageListResponse,
-    MailMessageMutationAction, MailMessageMutationRequest, MailMessageMutationResponse,
-    MailPasswordAuthRequest, MailProviderDiagnosticsResponse, MailSyncRequest,
-    SaveMailAttachmentRequest, SaveMailAttachmentResponse, SendMailMessageRequest,
-    SendMailMessageResponse, SetMailCredentialRequest, UpdateMailAccountRequest,
-    UpdateMailFolderRequest, UpdateMailIdentityRequest, UpsertMailDraftRequest,
+    MailAccountSyncResponse, MailCredentialStatusResponse, MailDraftAttachmentResponse,
+    MailDraftResponse, MailFolderResponse, MailFolderSyncResponse, MailIdentityResponse,
+    MailMessageDetailResponse, MailMessageListResponse, MailMessageMutationAction,
+    MailMessageMutationRequest, MailMessageMutationResponse, MailPasswordAuthRequest,
+    MailProviderDiagnosticsResponse, MailSyncRequest, SaveMailAttachmentRequest,
+    SaveMailAttachmentResponse, SendMailMessageRequest, SendMailMessageResponse,
+    SetMailCredentialRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
+    UpdateMailIdentityRequest, UpsertMailDraftRequest,
 };
 use wasm_bindgen::{JsCast, JsValue};
 
@@ -97,14 +97,6 @@ pub async fn set_credential(
     } else {
         Err(extract_error(r).await)
     }
-}
-
-pub async fn test_imap(account_id: &str) -> Result<MailConnectionTestResponse, String> {
-    provider_test(&format!("/mail/accounts/{account_id}/test-imap")).await
-}
-
-pub async fn test_smtp(account_id: &str) -> Result<MailConnectionTestResponse, String> {
-    provider_test(&format!("/mail/accounts/{account_id}/test-smtp")).await
 }
 
 pub async fn diagnostics(account_id: &str) -> Result<MailProviderDiagnosticsResponse, String> {
@@ -239,22 +231,6 @@ pub async fn delete_draft_attachment(draft_id: &str, attachment_id: &str) -> Res
     .map_err(|e| e.to_string())?;
     if r.ok() || r.status() == 204 {
         Ok(())
-    } else {
-        Err(extract_error(r).await)
-    }
-}
-
-async fn provider_test(path: &str) -> Result<MailConnectionTestResponse, String> {
-    let r = api::post(path)
-        .json(&MailPasswordAuthRequest { password: None })
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if r.ok() {
-        r.json::<MailConnectionTestResponse>()
-            .await
-            .map_err(|e| e.to_string())
     } else {
         Err(extract_error(r).await)
     }

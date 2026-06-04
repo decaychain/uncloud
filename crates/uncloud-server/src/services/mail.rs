@@ -14,6 +14,7 @@ use async_native_tls::TlsConnector;
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use imap_proto::types::{BodyContentCommon, BodyParams, BodyStructure};
+use kuchikiki::traits::TendrilSink;
 use lettre::transport::smtp::{
     authentication::Credentials,
     client::{Tls, TlsParameters},
@@ -37,6 +38,7 @@ use crate::error::{AppError, Result};
 use crate::models::MailServerConfig;
 
 const MAIL_OP_TIMEOUT: Duration = Duration::from_secs(30);
+const MAIL_REMOTE_IMAGE_ATTR: &str = "data-uc-remote-src";
 
 #[derive(Debug, Clone, Default)]
 pub struct MailService {
@@ -1590,11 +1592,64 @@ fn content_type_label(content_type: &mail_parser::ContentType<'_>) -> String {
 fn sanitize_message_html(input: &str) -> String {
     let mut builder = ammonia::Builder::default();
     builder.url_relative(ammonia::UrlRelative::Deny);
+    builder.add_url_schemes(&["cid"]);
     builder.attribute_filter(|element, attribute, value| match (element, attribute) {
+        ("img", "src") if is_mail_image_src_allowed(value) => Some(value.into()),
         ("img", "src") | ("img", "srcset") | ("source", "src") | ("source", "srcset") => None,
         _ => Some(value.into()),
     });
-    builder.clean(input).to_string()
+    block_remote_mail_image_sources(&builder.clean(input).to_string())
+}
+
+fn is_mail_image_src_allowed(value: &str) -> bool {
+    let value = value.trim();
+    value
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("cid:"))
+        || url::Url::parse(value)
+            .ok()
+            .is_some_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
+fn is_remote_mail_image_src(value: &str) -> bool {
+    url::Url::parse(value.trim())
+        .ok()
+        .is_some_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
+fn block_remote_mail_image_sources(html: &str) -> String {
+    let document = kuchikiki::parse_html().one(html).document_node;
+    let Ok(body) = document.select_first("body") else {
+        return html.to_string();
+    };
+    let Ok(images) = body.as_node().select("img") else {
+        return html.to_string();
+    };
+
+    let mut changed = false;
+    for image in images {
+        let src = image.attributes.borrow().get("src").map(str::to_string);
+        let Some(src) = src.filter(|value| is_remote_mail_image_src(value)) else {
+            continue;
+        };
+        let mut attributes = image.attributes.borrow_mut();
+        attributes.remove("src");
+        attributes.insert(MAIL_REMOTE_IMAGE_ATTR, src);
+        changed = true;
+    }
+
+    if changed {
+        serialize_html_children(body.as_node())
+    } else {
+        html.to_string()
+    }
+}
+
+fn serialize_html_children(node: &kuchikiki::NodeRef) -> String {
+    node.children()
+        .map(|child| child.to_string())
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn raw_message_to_plain_text_fallback(raw: &[u8]) -> String {
@@ -2156,7 +2211,7 @@ mod tests {
 
     #[test]
     fn parse_message_body_decodes_text_and_sanitizes_html() {
-        let raw = b"Subject: Hi\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><p onclick=\"bad()\">Hello</p><script>alert(1)</script><img src=\"https://example.com/pixel.png\" srcset=\"https://example.com/large.png 2x\" alt=\"pixel\"><a href=\"/local\">Local</a><a href=\"https://example.com\">Example</a><p>World</p></body></html>";
+        let raw = b"Subject: Hi\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<html><body><p onclick=\"bad()\">Hello</p><script>alert(1)</script><img src=\"https://example.com/pixel.png\" srcset=\"https://example.com/large.png 2x\" alt=\"pixel\"><img src=\"cid:logo@example.com\" alt=\"logo\"><img src=\"javascript:alert(1)\" alt=\"bad\"><a href=\"/local\">Local</a><a href=\"https://example.com\">Example</a><p>World</p></body></html>";
         let body = parse_message_body(raw);
 
         let text = body.text.as_deref().unwrap_or_default();
@@ -2168,8 +2223,11 @@ mod tests {
         assert!(html.contains("World"));
         assert!(!html.contains("script"));
         assert!(!html.contains("onclick"));
-        assert!(!html.contains("src="));
+        assert!(!html.contains("<img src=\"https://example.com/pixel.png\""));
         assert!(!html.contains("srcset"));
+        assert!(html.contains("data-uc-remote-src=\"https://example.com/pixel.png\""));
+        assert!(html.contains("src=\"cid:logo@example.com\""));
+        assert!(!html.contains("javascript:alert"));
         assert!(!html.contains("/local"));
         assert!(html.contains("https://example.com"));
     }

@@ -43,6 +43,7 @@ async-native-tls = { version = "0.6", default-features = false, features = ["run
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls", "pool"] }
 mail-parser = "0.11"
 ammonia = "4"
+kuchikiki = "0.8.8-speedreader"
 aes-gcm = "0.10"
 
 # Additional server deps

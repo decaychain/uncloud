@@ -141,6 +141,11 @@ the account's SMTP settings.
   `mail_attachments`, message detail returns attachment metadata, and a download
   route streams cached attachment blobs. An inline open route is also available
   for attachment types the browser can render.
+- Inline CID images in sanitized HTML are rewritten to local authenticated
+  attachment open URLs when the matching cached attachment has a `Content-ID`.
+- Remote image URLs in sanitized HTML are retained as inert metadata and blocked
+  by default in the reader. The UI can load them explicitly for the current
+  message.
 - Cached attachments can be saved into user-visible Files storage through the
   mail UI or `POST /mail/attachments/{attachment_id}/save`, with a destination
   folder choice and normal Files quota/audit/event handling.
@@ -162,9 +167,9 @@ the account's SMTP settings.
   checks the configured Sent folder by `Message-ID`; if the provider did not
   save it, Uncloud appends the exact RFC822 payload to Sent.
 - First experimental web UI iteration at `/mail`: account/folder navigation,
-  account setup/settings, sender identity management, IMAP/SMTP tests, folder
-  settings, provider diagnostics, manual account/folder sync, cached message
-  list, reader pane, and message mutation/compose controls.
+  account setup/settings, sender identity management, folder settings, provider
+  diagnostics, manual account/folder sync, cached message list, reader pane,
+  and message mutation/compose controls.
 - Compose v2 UI basics: reply, reply-all, forward, local draft autosave, manual
   save/discard, and a local drafts list per account.
 - Rich compose prototype: a locally bundled Tiptap editor is embedded in the
@@ -190,7 +195,8 @@ the account's SMTP settings.
   namespace. They are not inserted into the user-visible `files` / `folders`
   catalog, and storage rescan skips `.uncloud`.
 - Body rendering prefers cached sanitized HTML when available and falls back to
-  plain text. Remote image URLs are stripped during sanitization.
+  plain text. Remote images are loaded directly only after an explicit reader
+  action; a proxy/cache policy is not implemented yet.
 - Move/archive/trash currently require provider support for `UID MOVE`. There is
   deliberately no copy-plus-expunge fallback yet, because expunge semantics can
   be risky across clients.
@@ -328,10 +334,10 @@ Remaining credential work:
   running, the Mail view shows a compact bottom overlay progress indicator;
   failed folder syncs and account syncs with per-folder errors still surface in
   the error alert.
-- Add inline CID image handling and a stronger policy for which attachment
-  content can be previewed in the reader.
-- Add an explicit remote image loading/proxy policy. Direct remote image URLs
-  are stripped from sanitized HTML for now.
+- Add a stronger policy for which attachment content can be previewed in the
+  reader.
+- Decide whether remote images should stay explicit direct loads or move behind
+  an Uncloud proxy/cache policy.
 
 ### 5. Mutations
 

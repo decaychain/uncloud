@@ -14,6 +14,7 @@ use axum::{
 use bson::doc;
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
+use kuchikiki::traits::TendrilSink;
 use mongodb::bson::{self, oid::ObjectId};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -415,6 +416,100 @@ async fn list_message_attachments(
         out.push(attachment);
     }
     Ok(out)
+}
+
+fn mail_body_html_for_response(
+    body_html: Option<String>,
+    attachments: &[MailAttachment],
+) -> Option<String> {
+    body_html
+        .map(|html| rewrite_cid_mail_images(&html, attachments))
+        .filter(|html| !html.trim().is_empty())
+}
+
+fn rewrite_cid_mail_images(html: &str, attachments: &[MailAttachment]) -> String {
+    let cid_urls = attachments
+        .iter()
+        .filter_map(|attachment| {
+            let key = normalize_mail_content_id(attachment.content_id.as_deref()?)?;
+            Some((
+                key,
+                format!("/api/mail/attachments/{}/open", attachment.id.to_hex()),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    if cid_urls.is_empty() {
+        return html.to_string();
+    }
+
+    let document = kuchikiki::parse_html().one(html).document_node;
+    let Ok(body) = document.select_first("body") else {
+        return html.to_string();
+    };
+    let Ok(images) = body.as_node().select("img") else {
+        return html.to_string();
+    };
+
+    let mut changed = false;
+    for image in images {
+        let src = image.attributes.borrow().get("src").map(str::to_string);
+        let Some(src) = src else {
+            continue;
+        };
+        let Some(content_id) = normalize_cid_url(&src) else {
+            continue;
+        };
+
+        let mut attributes = image.attributes.borrow_mut();
+        if let Some(url) = cid_urls.get(&content_id) {
+            attributes.insert("src", url.clone());
+        } else {
+            attributes.remove("src");
+        }
+        changed = true;
+    }
+
+    if changed {
+        serialize_html_children(body.as_node())
+    } else {
+        html.to_string()
+    }
+}
+
+fn normalize_cid_url(value: &str) -> Option<String> {
+    let value = value.trim();
+    let rest = value.get(..4).and_then(|prefix| {
+        if prefix.eq_ignore_ascii_case("cid:") {
+            Some(&value[4..])
+        } else {
+            None
+        }
+    })?;
+    normalize_mail_content_id(rest)
+}
+
+fn normalize_mail_content_id(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let decoded = urlencoding::decode(trimmed)
+        .map(|value| value.into_owned())
+        .unwrap_or_else(|_| trimmed.to_string());
+    let content_id = decoded
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .trim();
+    if content_id.is_empty() {
+        None
+    } else {
+        Some(content_id.to_ascii_lowercase())
+    }
+}
+
+fn serialize_html_children(node: &kuchikiki::NodeRef) -> String {
+    node.children()
+        .map(|child| child.to_string())
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 async fn find_identity(
@@ -3393,7 +3488,7 @@ pub async fn get_message(
             return Ok(Json(MailMessageDetailResponse {
                 message: message_to_response(&message),
                 body_text: body.text,
-                body_html: body.html,
+                body_html: mail_body_html_for_response(body.html, &attachments),
                 attachments: attachments.iter().map(attachment_to_response).collect(),
             }));
         }
@@ -3469,7 +3564,7 @@ pub async fn get_message(
     Ok(Json(MailMessageDetailResponse {
         message: message_to_response(&response_message),
         body_text: body.as_ref().and_then(|body| body.text.clone()),
-        body_html: body.and_then(|body| body.html),
+        body_html: mail_body_html_for_response(body.and_then(|body| body.html), &attachments),
         attachments: attachments.iter().map(attachment_to_response).collect(),
     }))
 }
@@ -3867,6 +3962,23 @@ mod tests {
         }
     }
 
+    fn test_attachment(content_id: Option<&str>) -> MailAttachment {
+        MailAttachment {
+            id: ObjectId::new(),
+            owner_id: ObjectId::new(),
+            account_id: ObjectId::new(),
+            message_id: ObjectId::new(),
+            filename: Some("logo.png".to_string()),
+            content_type: Some("image/png".to_string()),
+            content_id: content_id.map(str::to_string),
+            disposition: Some("inline".to_string()),
+            size_bytes: Some(42),
+            storage_id: Some(ObjectId::new()),
+            storage_path: Some("mail/logo.png".to_string()),
+            created_at: Utc::now(),
+        }
+    }
+
     #[test]
     fn infer_folder_role_prefers_inbox_exact_path() {
         assert_eq!(
@@ -3874,6 +3986,26 @@ mod tests {
             Some(MailFolderRole::Inbox)
         );
         assert_eq!(infer_folder_role("INBOX/Travel", "Travel", &[]), None);
+    }
+
+    #[test]
+    fn mail_body_html_response_rewrites_cid_images_to_attachment_urls() {
+        let attachment = test_attachment(Some("<logo@example.com>"));
+        let attachment_id = attachment.id.to_hex();
+        let html = mail_body_html_for_response(
+            Some(
+                "<p><img src=\"cid:logo%40example.com\" alt=\"logo\"><img src=\"cid:missing\" alt=\"missing\"></p>"
+                    .to_string(),
+            ),
+            &[attachment],
+        )
+        .unwrap();
+
+        assert!(html.contains(&format!(
+            "src=\"/api/mail/attachments/{attachment_id}/open\""
+        )));
+        assert!(!html.contains("cid:logo"));
+        assert!(!html.contains("cid:missing"));
     }
 
     #[test]
