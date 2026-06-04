@@ -3,14 +3,13 @@ use std::{
     fmt,
     future::Future,
     io,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 
 use async_imap::error::Error as ImapError;
 use async_imap::types::{Capability, Flag};
 use async_imap::{Client, Session};
-use async_native_tls::TlsConnector;
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use imap_proto::types::{BodyContentCommon, BodyParams, BodyStructure};
@@ -32,6 +31,9 @@ use mongodb::bson::oid::ObjectId;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
+use tokio_rustls::client::TlsStream as RustlsTlsStream;
+use tokio_rustls::rustls::{pki_types::ServerName, ClientConfig, RootCertStore};
+use tokio_rustls::TlsConnector;
 use uncloud_common::{MailConnectionTestResponse, MailSecurity};
 
 use crate::error::{AppError, Result};
@@ -39,6 +41,8 @@ use crate::models::MailServerConfig;
 
 const MAIL_OP_TIMEOUT: Duration = Duration::from_secs(30);
 const MAIL_REMOTE_IMAGE_ATTR: &str = "data-uc-remote-src";
+
+type ImapTlsStream = RustlsTlsStream<TcpStream>;
 
 #[derive(Debug, Clone, Default)]
 pub struct MailService {
@@ -456,11 +460,11 @@ async fn connect_imap_plain(settings: &MailServerConfig) -> Result<Client<TcpStr
 async fn connect_imap_tls(
     settings: &MailServerConfig,
     read_greeting: bool,
-) -> Result<Client<async_native_tls::TlsStream<TcpStream>>> {
+) -> Result<Client<ImapTlsStream>> {
     let tcp = connect_imap_tcp(settings).await?;
     let tls = imap_timeout(
         "IMAP TLS handshake",
-        TlsConnector::new().connect(settings.host.as_str(), tcp),
+        mail_tls_connector()?.connect(mail_server_name(settings)?, tcp),
     )
     .await?
     .map_err(|e| {
@@ -475,9 +479,7 @@ async fn connect_imap_tls(
     Ok(client)
 }
 
-async fn connect_imap_starttls(
-    settings: &MailServerConfig,
-) -> Result<Client<async_native_tls::TlsStream<TcpStream>>> {
+async fn connect_imap_starttls(settings: &MailServerConfig) -> Result<Client<ImapTlsStream>> {
     let mut client = connect_imap_plain(settings).await?;
     imap_timeout(
         "IMAP STARTTLS",
@@ -488,7 +490,7 @@ async fn connect_imap_starttls(
     let tcp = client.into_inner();
     let tls = imap_timeout(
         "IMAP STARTTLS handshake",
-        TlsConnector::new().connect(settings.host.as_str(), tcp),
+        mail_tls_connector()?.connect(mail_server_name(settings)?, tcp),
     )
     .await?
     .map_err(|e| {
@@ -497,6 +499,62 @@ async fn connect_imap_starttls(
         ))
     })?;
     Ok(Client::new(tls))
+}
+
+fn mail_tls_connector() -> Result<TlsConnector> {
+    static CONFIG: OnceLock<std::result::Result<Arc<ClientConfig>, String>> = OnceLock::new();
+
+    let config = CONFIG.get_or_init(|| {
+        let certs = rustls_native_certs::load_native_certs();
+        let mut roots = RootCertStore::empty();
+        let (valid, invalid) = roots.add_parsable_certificates(certs.certs);
+
+        if !certs.errors.is_empty() {
+            tracing::warn!(
+                errors = certs.errors.len(),
+                "some native TLS root certificates could not be loaded"
+            );
+        }
+        if invalid > 0 {
+            tracing::warn!(
+                invalid,
+                "some native TLS root certificates could not be parsed"
+            );
+        }
+        if valid == 0 {
+            let details = certs
+                .errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            let message = if details.is_empty() {
+                "no native TLS root certificates were loaded".to_string()
+            } else {
+                format!("no native TLS root certificates were loaded: {details}")
+            };
+            return Err(message);
+        }
+
+        let config = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        Ok(Arc::new(config))
+    });
+
+    config
+        .as_ref()
+        .map(|config| TlsConnector::from(config.clone()))
+        .map_err(|e| AppError::ExternalService(format!("IMAP TLS setup failed: {e}")))
+}
+
+fn mail_server_name(settings: &MailServerConfig) -> Result<ServerName<'static>> {
+    ServerName::try_from(settings.host.clone()).map_err(|_| {
+        AppError::Validation(format!(
+            "IMAP host `{}` is not a valid TLS server name",
+            settings.host
+        ))
+    })
 }
 
 async fn read_imap_greeting<T>(client: &mut Client<T>) -> Result<()>
