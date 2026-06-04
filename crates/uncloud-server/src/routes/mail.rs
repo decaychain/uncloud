@@ -842,11 +842,13 @@ pub async fn create_account(
 ) -> Result<(StatusCode, Json<MailAccountResponse>)> {
     require_mail(&state)?;
     let now = Utc::now();
+    let display_name = validate_label(&req.display_name, "display name")?;
+    let email_address = validate_email(&req.email_address, "email address")?;
     let account = MailAccount {
         id: ObjectId::new(),
         owner_id: user.id,
-        display_name: validate_label(&req.display_name, "display name")?,
-        email_address: validate_email(&req.email_address, "email address")?,
+        display_name: display_name.clone(),
+        email_address: email_address.clone(),
         imap: validate_server(req.imap)?,
         smtp: validate_server(req.smtp)?,
         enabled: req.enabled,
@@ -872,6 +874,23 @@ pub async fn create_account(
                 AppError::from(e)
             }
         })?;
+    let identity = MailIdentity {
+        id: ObjectId::new(),
+        owner_id: user.id,
+        account_id: account.id,
+        display_name,
+        email_address,
+        reply_to: None,
+        signature: None,
+        is_default: true,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .collection::<MailIdentity>(IDENTITIES)
+        .insert_one(&identity)
+        .await?;
     Ok((
         StatusCode::CREATED,
         Json(account_to_response(
@@ -1563,7 +1582,13 @@ pub async fn create_identity(
     require_mail(&state)?;
     let account_id = parse_oid(&req.account_id, "mail account id")?;
     let _ = find_account(&state, user.id, account_id).await?;
-    if req.is_default {
+    let existing_count = state
+        .db
+        .collection::<MailIdentity>(IDENTITIES)
+        .count_documents(doc! { "owner_id": user.id, "account_id": account_id })
+        .await?;
+    let make_default = req.is_default || existing_count == 0;
+    if make_default {
         state
             .db
             .collection::<MailIdentity>(IDENTITIES)
@@ -1585,7 +1610,7 @@ pub async fn create_identity(
             .map(|v| validate_email(&v, "reply-to"))
             .transpose()?,
         signature: req.signature,
-        is_default: req.is_default,
+        is_default: make_default,
         created_at: now,
         updated_at: now,
     };
@@ -1671,7 +1696,16 @@ pub async fn update_identity(
         .db
         .collection::<MailIdentity>(IDENTITIES)
         .update_one(doc! { "_id": id, "owner_id": user.id }, update)
-        .await?;
+        .await
+        .map_err(|e| {
+            if is_duplicate_key_error(&e) {
+                AppError::BadRequest(
+                    "Another identity on this account already uses this address".into(),
+                )
+            } else {
+                AppError::from(e)
+            }
+        })?;
     let identity = state
         .db
         .collection::<MailIdentity>(IDENTITIES)
@@ -1688,6 +1722,12 @@ pub async fn delete_identity(
 ) -> Result<StatusCode> {
     require_mail(&state)?;
     let id = parse_oid(&id, "mail identity id")?;
+    let identity = state
+        .db
+        .collection::<MailIdentity>(IDENTITIES)
+        .find_one(doc! { "_id": id, "owner_id": user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Mail identity".into()))?;
     let result = state
         .db
         .collection::<MailIdentity>(IDENTITIES)
@@ -1695,6 +1735,40 @@ pub async fn delete_identity(
         .await?;
     if result.deleted_count == 0 {
         return Err(AppError::NotFound("Mail identity".into()));
+    }
+    state
+        .db
+        .collection::<MailDraft>(DRAFTS)
+        .update_many(
+            doc! { "owner_id": user.id, "account_id": identity.account_id, "identity_id": id },
+            doc! { "$unset": { "identity_id": "" } },
+        )
+        .await?;
+    if identity.is_default {
+        if let Some(next) = state
+            .db
+            .collection::<MailIdentity>(IDENTITIES)
+            .find_one(doc! {
+                "owner_id": user.id,
+                "account_id": identity.account_id,
+            })
+            .sort(doc! { "email_address": 1 })
+            .await?
+        {
+            state
+                .db
+                .collection::<MailIdentity>(IDENTITIES)
+                .update_one(
+                    doc! { "_id": next.id, "owner_id": user.id },
+                    doc! {
+                        "$set": {
+                            "is_default": true,
+                            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                        }
+                    },
+                )
+                .await?;
+        }
     }
     Ok(StatusCode::NO_CONTENT)
 }

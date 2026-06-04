@@ -2,13 +2,13 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 use uncloud_common::{
-    CreateMailAccountRequest, FolderResponse, MailAccountResponse, MailAccountSyncResponse,
-    MailAddressDto, MailAttachmentResponse, MailComposeMode, MailDraftAttachmentResponse,
-    MailDraftResponse, MailFolderResponse, MailFolderRole, MailFolderRoleSource,
-    MailIdentityResponse, MailMessageDetailResponse, MailMessageMutationAction,
-    MailMessageSummaryResponse, MailSecurity, MailSentCopyStatus, MailServerSettings,
-    SendMailMessageRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
-    UpsertMailDraftRequest,
+    CreateMailAccountRequest, CreateMailIdentityRequest, FolderResponse, MailAccountResponse,
+    MailAccountSyncResponse, MailAddressDto, MailAttachmentResponse, MailComposeMode,
+    MailDraftAttachmentResponse, MailDraftResponse, MailFolderResponse, MailFolderRole,
+    MailFolderRoleSource, MailIdentityResponse, MailMessageDetailResponse,
+    MailMessageMutationAction, MailMessageSummaryResponse, MailSecurity, MailSentCopyStatus,
+    MailServerSettings, SendMailMessageRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
+    UpdateMailIdentityRequest, UpsertMailDraftRequest,
 };
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
@@ -16,8 +16,8 @@ use web_sys::HtmlInputElement;
 
 use crate::components::icons::{
     IconArchive, IconChevronRight, IconDownload, IconEye, IconFileText, IconFolder, IconFolderOpen,
-    IconForward, IconMail, IconMoveRight, IconPaperclip, IconPlus, IconRefreshCw, IconReply,
-    IconReplyAll, IconSend, IconSettings, IconStar, IconTrash, IconX,
+    IconForward, IconMail, IconMoveRight, IconPaperclip, IconPencil, IconPlus, IconRefreshCw,
+    IconReply, IconReplyAll, IconSend, IconSettings, IconStar, IconTrash, IconX,
 };
 use crate::components::scroll_sentinel::ScrollSentinel;
 use crate::hooks::{use_files, use_mail};
@@ -108,6 +108,15 @@ pub fn MailPage() -> Element {
     let mut saving_account_settings = use_signal(|| false);
     let mut confirming_account_delete = use_signal(|| false);
     let mut deleting_account = use_signal(|| false);
+    let mut identity_editor_open = use_signal(|| false);
+    let mut identity_editing_id = use_signal(String::new);
+    let mut identity_display_name = use_signal(String::new);
+    let mut identity_email_address = use_signal(String::new);
+    let mut identity_reply_to = use_signal(String::new);
+    let mut identity_signature = use_signal(String::new);
+    let mut identity_is_default = use_signal(|| false);
+    let mut saving_identity = use_signal(|| false);
+    let mut deleting_identity_id = use_signal(String::new);
     let mut message_next_cursor = use_signal(|| None::<String>);
     let mut message_has_more = use_signal(|| false);
     let mut saving_attachment = use_signal(|| None::<MailAttachmentResponse>);
@@ -406,6 +415,7 @@ pub fn MailPage() -> Element {
         .filter(|identity| identity.account_id == selected_account_id)
         .cloned()
         .collect::<Vec<_>>();
+    let active_default_identity_id = default_mail_identity_id(&active_identities);
     let can_backfill_active_folder = active_folder
         .as_ref()
         .map(|folder| folder.selectable && !folder.sync_completed)
@@ -566,6 +576,14 @@ pub fn MailPage() -> Element {
                                                 .unwrap_or_default(),
                                         );
                                         confirming_account_delete.set(false);
+                                        identity_editor_open.set(false);
+                                        identity_editing_id.set(String::new());
+                                        identity_display_name.set(String::new());
+                                        identity_email_address.set(String::new());
+                                        identity_reply_to.set(String::new());
+                                        identity_signature.set(String::new());
+                                        identity_is_default.set(false);
+                                        deleting_identity_id.set(String::new());
                                         account_settings.set(Some(account.clone()));
                                     }
                                 },
@@ -584,7 +602,11 @@ pub fn MailPage() -> Element {
                             compose_draft_id.set(String::new());
                             compose_mode.set(MailComposeMode::New);
                             compose_source_message_id.set(String::new());
-                            compose_identity_id.set(String::new());
+                            let account_id = selected_account.peek().clone();
+                            compose_identity_id.set(default_mail_identity_id_for_account(
+                                &identities.peek(),
+                                &account_id,
+                            ));
                             compose_to.set(String::new());
                             compose_cc.set(String::new());
                             compose_bcc.set(String::new());
@@ -1179,6 +1201,13 @@ pub fn MailPage() -> Element {
                                     let account_from_label =
                                         format!("{} <{}>", account.display_name, account.email_address);
                                     let active_identities = active_identities.clone();
+                                    let sender_select_value = if compose_identity_id().trim().is_empty()
+                                        && !active_default_identity_id.is_empty()
+                                    {
+                                        active_default_identity_id.clone()
+                                    } else {
+                                        compose_identity_id()
+                                    };
                                     let compose_title = compose_title(compose_mode());
                                     let draft_status = if saving_draft() {
                                         "Saving draft"
@@ -1313,9 +1342,11 @@ pub fn MailPage() -> Element {
                                                         span { class: "label-text", "From" }
                                                         select {
                                                             class: "select select-bordered",
-                                                            value: "{compose_identity_id()}",
+                                                            value: "{sender_select_value}",
                                                             onchange: move |e| compose_identity_id.set(e.value()),
-                                                            option { value: "", "{account_from_label}" }
+                                                            if active_identities.is_empty() {
+                                                                option { value: "", "{account_from_label}" }
+                                                            }
                                                             for identity in active_identities.clone() {
                                                                 {
                                                                     let identity_label = mail_identity_label(&identity);
@@ -1726,7 +1757,10 @@ pub fn MailPage() -> Element {
                                                             compose_draft_id.set(String::new());
                                                             compose_mode.set(MailComposeMode::Reply);
                                                             compose_source_message_id.set(row.message.id.clone());
-                                                            compose_identity_id.set(String::new());
+                                                            compose_identity_id.set(default_mail_identity_id_for_account(
+                                                                &identities.peek(),
+                                                                &row.message.account_id,
+                                                            ));
                                                             compose_to.set(compose_address_line(&row.message.from));
                                                             compose_cc.set(String::new());
                                                             compose_bcc.set(String::new());
@@ -1756,7 +1790,10 @@ pub fn MailPage() -> Element {
                                                             compose_draft_id.set(String::new());
                                                             compose_mode.set(MailComposeMode::ReplyAll);
                                                             compose_source_message_id.set(row.message.id.clone());
-                                                            compose_identity_id.set(String::new());
+                                                            compose_identity_id.set(default_mail_identity_id_for_account(
+                                                                &identities.peek(),
+                                                                &row.message.account_id,
+                                                            ));
                                                             compose_to.set(compose_address_line(&to));
                                                             compose_cc.set(compose_address_line(&cc));
                                                             compose_bcc.set(String::new());
@@ -1784,7 +1821,10 @@ pub fn MailPage() -> Element {
                                                             compose_draft_id.set(String::new());
                                                             compose_mode.set(MailComposeMode::Forward);
                                                             compose_source_message_id.set(row.message.id.clone());
-                                                            compose_identity_id.set(String::new());
+                                                            compose_identity_id.set(default_mail_identity_id_for_account(
+                                                                &identities.peek(),
+                                                                &row.message.account_id,
+                                                            ));
                                                             compose_to.set(String::new());
                                                             compose_cc.set(String::new());
                                                             compose_bcc.set(String::new());
@@ -2357,6 +2397,9 @@ pub fn MailPage() -> Element {
                                                 if let Ok(list) = use_mail::list_accounts().await {
                                                     accounts.set(list);
                                                 }
+                                                if let Ok(rows) = use_mail::list_identities().await {
+                                                    identities.set(rows);
+                                                }
                                                 match use_mail::refresh_folders(&account.id).await {
                                                     Ok(rows) => folders.set(rows),
                                                     Err(e) => error.set(Some(e)),
@@ -2382,6 +2425,11 @@ pub fn MailPage() -> Element {
             if let Some(account) = account_settings() {
                 {
                     let account_id = account.id.clone();
+                    let account_identities = identities_snapshot
+                        .iter()
+                        .filter(|identity| identity.account_id == account_id)
+                        .cloned()
+                        .collect::<Vec<_>>();
                     rsx! {
                         div { class: "modal modal-open",
                             div { class: "modal-box max-w-4xl",
@@ -2529,6 +2577,307 @@ pub fn MailPage() -> Element {
                                     }
                                 }
 
+                                div { class: "mt-6 border-t border-base-300 pt-5",
+                                    div { class: "flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between",
+                                        div {
+                                            div { class: "text-sm font-semibold", "Sender identities" }
+                                            div { class: "mt-1 text-xs text-base-content/60",
+                                                "Each identity can use a different From address, Reply-To, and signature."
+                                            }
+                                        }
+                                        button {
+                                            class: "btn btn-sm btn-outline gap-2",
+                                            disabled: saving_identity(),
+                                            onclick: {
+                                                let account = account.clone();
+                                                let account_identities = account_identities.clone();
+                                                move |_| {
+                                                    identity_editing_id.set(String::new());
+                                                    identity_display_name.set(account.display_name.clone());
+                                                    identity_email_address.set(account.email_address.clone());
+                                                    identity_reply_to.set(String::new());
+                                                    identity_signature.set(String::new());
+                                                    identity_is_default.set(account_identities.is_empty());
+                                                    identity_editor_open.set(true);
+                                                }
+                                            },
+                                            IconPlus { class: "h-4 w-4".to_string() }
+                                            span { "Add identity" }
+                                        }
+                                    }
+
+                                    div { class: "mt-3 grid gap-2",
+                                        if account_identities.is_empty() {
+                                            div { class: "rounded border border-dashed border-base-300 px-3 py-4 text-sm text-base-content/60",
+                                                "No sender identities yet. The account address will be used until one is added."
+                                            }
+                                        }
+                                        for identity in account_identities.clone() {
+                                            {
+                                                let identity_id = identity.id.clone();
+                                                let identity_for_edit = identity.clone();
+                                                let deleting_this_identity = deleting_identity_id() == identity_id;
+                                                rsx! {
+                                                    div {
+                                                        key: "{identity_id}",
+                                                        class: "flex flex-col gap-3 rounded border border-base-300 bg-base-100 px-3 py-2 sm:flex-row sm:items-center sm:justify-between",
+                                                        div { class: "min-w-0",
+                                                            div { class: "flex min-w-0 flex-wrap items-center gap-2",
+                                                                span { class: "truncate text-sm font-medium", "{mail_identity_label(&identity)}" }
+                                                                if identity.is_default {
+                                                                    span { class: "badge badge-primary badge-sm", "Default" }
+                                                                }
+                                                            }
+                                                            if let Some(reply_to) = identity.reply_to.as_ref().filter(|value| !value.trim().is_empty()) {
+                                                                div { class: "mt-1 truncate text-xs text-base-content/60", "Reply-To: {reply_to}" }
+                                                            }
+                                                            if identity.signature.as_ref().is_some_and(|value| !value.trim().is_empty()) {
+                                                                div { class: "mt-1 text-xs text-base-content/50", "Signature configured" }
+                                                            }
+                                                        }
+                                                        div { class: "flex shrink-0 items-center gap-1",
+                                                            if !identity.is_default {
+                                                                button {
+                                                                    class: "btn btn-ghost btn-xs",
+                                                                    disabled: saving_identity() || deleting_this_identity,
+                                                                    onclick: {
+                                                                        let identity_id = identity_id.clone();
+                                                                        move |_| {
+                                                                            let identity_id = identity_id.clone();
+                                                                            spawn(async move {
+                                                                                saving_identity.set(true);
+                                                                                error.set(None);
+                                                                                notice.set(None);
+                                                                                let req = UpdateMailIdentityRequest {
+                                                                                    display_name: None,
+                                                                                    email_address: None,
+                                                                                    reply_to: None,
+                                                                                    signature: None,
+                                                                                    is_default: Some(true),
+                                                                                };
+                                                                                match use_mail::update_identity(&identity_id, &req).await {
+                                                                                    Ok(_) => {
+                                                                                        match use_mail::list_identities().await {
+                                                                                            Ok(rows) => identities.set(rows),
+                                                                                            Err(e) => error.set(Some(e)),
+                                                                                        }
+                                                                                    }
+                                                                                    Err(e) => error.set(Some(e)),
+                                                                                }
+                                                                                saving_identity.set(false);
+                                                                            });
+                                                                        }
+                                                                    },
+                                                                    "Make default"
+                                                                }
+                                                            }
+                                                            button {
+                                                                class: "btn btn-ghost btn-xs h-8 min-h-8 w-8 p-0",
+                                                                title: "Edit identity",
+                                                                disabled: saving_identity() || deleting_this_identity,
+                                                                onclick: move |_| {
+                                                                    identity_editing_id.set(identity_for_edit.id.clone());
+                                                                    identity_display_name.set(identity_for_edit.display_name.clone());
+                                                                    identity_email_address.set(identity_for_edit.email_address.clone());
+                                                                    identity_reply_to.set(identity_for_edit.reply_to.clone().unwrap_or_default());
+                                                                    identity_signature.set(identity_for_edit.signature.clone().unwrap_or_default());
+                                                                    identity_is_default.set(identity_for_edit.is_default);
+                                                                    identity_editor_open.set(true);
+                                                                },
+                                                                IconPencil { class: "h-4 w-4".to_string() }
+                                                            }
+                                                            button {
+                                                                class: "btn btn-ghost btn-xs h-8 min-h-8 w-8 p-0 text-error",
+                                                                title: "Delete identity",
+                                                                disabled: saving_identity() || deleting_this_identity,
+                                                                onclick: {
+                                                                    let identity_id = identity_id.clone();
+                                                                    let account_id = account_id.clone();
+                                                                    move |_| {
+                                                                        let identity_id = identity_id.clone();
+                                                                        let account_id = account_id.clone();
+                                                                        spawn(async move {
+                                                                            deleting_identity_id.set(identity_id.clone());
+                                                                            error.set(None);
+                                                                            notice.set(None);
+                                                                            match use_mail::delete_identity(&identity_id).await {
+                                                                                Ok(()) => {
+                                                                                    match use_mail::list_identities().await {
+                                                                                        Ok(rows) => {
+                                                                                            let next_identity = default_mail_identity_id_for_account(
+                                                                                                &rows,
+                                                                                                &account_id,
+                                                                                            );
+                                                                                            identities.set(rows);
+                                                                                            if compose_identity_id.peek().as_str() == identity_id.as_str() {
+                                                                                                compose_identity_id.set(next_identity);
+                                                                                            }
+                                                                                            if identity_editing_id.peek().as_str() == identity_id.as_str() {
+                                                                                                identity_editor_open.set(false);
+                                                                                                identity_editing_id.set(String::new());
+                                                                                            }
+                                                                                            notice.set(Some("Identity deleted".to_string()));
+                                                                                        }
+                                                                                        Err(e) => error.set(Some(e)),
+                                                                                    }
+                                                                                }
+                                                                                Err(e) => error.set(Some(e)),
+                                                                            }
+                                                                            deleting_identity_id.set(String::new());
+                                                                        });
+                                                                    }
+                                                                },
+                                                                if deleting_this_identity {
+                                                                    span { class: "loading loading-spinner loading-xs" }
+                                                                } else {
+                                                                    IconTrash { class: "h-4 w-4".to_string() }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if identity_editor_open() {
+                                        div { class: "mt-4 rounded border border-base-300 bg-base-200/30 p-3",
+                                            div { class: "text-sm font-semibold",
+                                                if identity_editing_id().is_empty() {
+                                                    "New identity"
+                                                } else {
+                                                    "Edit identity"
+                                                }
+                                            }
+                                            div { class: "mt-3 grid gap-3 md:grid-cols-2",
+                                                label { class: "form-control",
+                                                    span { class: "label-text", "Display name" }
+                                                    input {
+                                                        class: "input input-bordered",
+                                                        value: "{identity_display_name()}",
+                                                        oninput: move |e| identity_display_name.set(e.value()),
+                                                    }
+                                                }
+                                                label { class: "form-control",
+                                                    span { class: "label-text", "Email address" }
+                                                    input {
+                                                        class: "input input-bordered",
+                                                        r#type: "email",
+                                                        value: "{identity_email_address()}",
+                                                        oninput: move |e| identity_email_address.set(e.value()),
+                                                    }
+                                                }
+                                                label { class: "form-control md:col-span-2",
+                                                    span { class: "label-text", "Reply-To" }
+                                                    input {
+                                                        class: "input input-bordered",
+                                                        r#type: "email",
+                                                        value: "{identity_reply_to()}",
+                                                        placeholder: "Optional",
+                                                        oninput: move |e| identity_reply_to.set(e.value()),
+                                                    }
+                                                }
+                                                label { class: "form-control md:col-span-2",
+                                                    span { class: "label-text", "Signature" }
+                                                    textarea {
+                                                        class: "textarea textarea-bordered",
+                                                        rows: 3,
+                                                        value: "{identity_signature()}",
+                                                        placeholder: "Optional",
+                                                        oninput: move |e| identity_signature.set(e.value()),
+                                                    }
+                                                }
+                                                label { class: "label cursor-pointer justify-start gap-3 rounded border border-base-300 px-3 md:col-span-2",
+                                                    input {
+                                                        class: "toggle toggle-sm",
+                                                        r#type: "checkbox",
+                                                        checked: identity_is_default(),
+                                                        onchange: move |e| identity_is_default.set(e.checked()),
+                                                    }
+                                                    span {
+                                                        span { class: "block text-sm font-medium", "Use as default sender" }
+                                                        span { class: "block text-xs text-base-content/60", "Compose uses this identity when no specific sender is selected." }
+                                                    }
+                                                }
+                                            }
+                                            div { class: "mt-3 flex justify-end gap-2",
+                                                button {
+                                                    class: "btn btn-sm",
+                                                    disabled: saving_identity(),
+                                                    onclick: move |_| {
+                                                        identity_editor_open.set(false);
+                                                        identity_editing_id.set(String::new());
+                                                    },
+                                                    "Cancel"
+                                                }
+                                                button {
+                                                    class: "btn btn-sm btn-primary",
+                                                    disabled: saving_identity(),
+                                                    onclick: {
+                                                        let account_id = account_id.clone();
+                                                        move |_| {
+                                                            let account_id = account_id.clone();
+                                                            let editing_id = identity_editing_id();
+                                                            let display = identity_display_name();
+                                                            let email = identity_email_address();
+                                                            let reply_to = nonempty_string(identity_reply_to());
+                                                            let signature = nonempty_string(identity_signature());
+                                                            let is_default = identity_is_default();
+                                                            spawn(async move {
+                                                                saving_identity.set(true);
+                                                                error.set(None);
+                                                                notice.set(None);
+                                                                let result = if editing_id.trim().is_empty() {
+                                                                    let req = CreateMailIdentityRequest {
+                                                                        account_id,
+                                                                        display_name: display,
+                                                                        email_address: email,
+                                                                        reply_to,
+                                                                        signature,
+                                                                        is_default,
+                                                                    };
+                                                                    use_mail::create_identity(&req).await
+                                                                } else {
+                                                                    let req = UpdateMailIdentityRequest {
+                                                                        display_name: Some(display),
+                                                                        email_address: Some(email),
+                                                                        reply_to: Some(reply_to),
+                                                                        signature: Some(signature),
+                                                                        is_default: if is_default { Some(true) } else { None },
+                                                                    };
+                                                                    use_mail::update_identity(&editing_id, &req).await
+                                                                };
+                                                                match result {
+                                                                    Ok(saved) => {
+                                                                        match use_mail::list_identities().await {
+                                                                            Ok(rows) => {
+                                                                                identities.set(rows);
+                                                                                if saved.is_default || compose_identity_id.peek().trim().is_empty() {
+                                                                                    compose_identity_id.set(saved.id.clone());
+                                                                                }
+                                                                            }
+                                                                            Err(e) => error.set(Some(e)),
+                                                                        }
+                                                                        identity_editor_open.set(false);
+                                                                        identity_editing_id.set(String::new());
+                                                                        notice.set(Some("Identity saved".to_string()));
+                                                                    }
+                                                                    Err(e) => error.set(Some(e)),
+                                                                }
+                                                                saving_identity.set(false);
+                                                            });
+                                                        }
+                                                    },
+                                                    if saving_identity() {
+                                                        span { class: "loading loading-spinner loading-xs" }
+                                                    }
+                                                    "Save identity"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 div { class: "modal-action items-center justify-between",
                                     button {
                                         class: if confirming_account_delete() {
@@ -2555,6 +2904,9 @@ pub fn MailPage() -> Element {
                                                                 Ok(list) => {
                                                                     let next = list.first().map(|a| a.id.clone()).unwrap_or_default();
                                                                     accounts.set(list);
+                                                                    if let Ok(rows) = use_mail::list_identities().await {
+                                                                        identities.set(rows);
+                                                                    }
                                                                     selected_account.set(next.clone());
                                                                     selected_folder.set(String::new());
                                                                     selected_message.set(String::new());
@@ -2572,6 +2924,8 @@ pub fn MailPage() -> Element {
                                                                         }
                                                                     }
                                                                     account_settings.set(None);
+                                                                    identity_editor_open.set(false);
+                                                                    identity_editing_id.set(String::new());
                                                                     notice.set(Some("Mail account deleted".to_string()));
                                                                 }
                                                                 Err(e) => error.set(Some(e)),
@@ -3159,6 +3513,31 @@ fn mail_own_addresses(
         push_unique_address_key(&mut out, &identity.email_address);
     }
     out
+}
+
+fn default_mail_identity_id(identities: &[MailIdentityResponse]) -> String {
+    identities
+        .iter()
+        .find(|identity| identity.is_default)
+        .or_else(|| identities.first())
+        .map(|identity| identity.id.clone())
+        .unwrap_or_default()
+}
+
+fn default_mail_identity_id_for_account(
+    identities: &[MailIdentityResponse],
+    account_id: &str,
+) -> String {
+    identities
+        .iter()
+        .find(|identity| identity.account_id == account_id && identity.is_default)
+        .or_else(|| {
+            identities
+                .iter()
+                .find(|identity| identity.account_id == account_id)
+        })
+        .map(|identity| identity.id.clone())
+        .unwrap_or_default()
 }
 
 fn push_unique_address_key(out: &mut Vec<String>, address: &str) {

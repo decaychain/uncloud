@@ -2,14 +2,15 @@
 
 use uncloud_common::FileResponse;
 use uncloud_common::{
-    CreateMailAccountRequest, MailAccountResponse, MailAccountSyncResponse,
-    MailConnectionTestResponse, MailCredentialStatusResponse, MailDraftAttachmentResponse,
-    MailDraftResponse, MailFolderResponse, MailFolderSyncResponse, MailIdentityResponse,
-    MailMessageDetailResponse, MailMessageListResponse, MailMessageMutationAction,
-    MailMessageMutationRequest, MailMessageMutationResponse, MailPasswordAuthRequest,
-    MailSyncRequest, SaveMailAttachmentRequest, SaveMailAttachmentResponse, SendMailMessageRequest,
-    SendMailMessageResponse, SetMailCredentialRequest, UpdateMailAccountRequest,
-    UpdateMailFolderRequest, UpsertMailDraftRequest,
+    CreateMailAccountRequest, CreateMailIdentityRequest, MailAccountResponse,
+    MailAccountSyncResponse, MailConnectionTestResponse, MailCredentialStatusResponse,
+    MailDraftAttachmentResponse, MailDraftResponse, MailFolderResponse, MailFolderSyncResponse,
+    MailIdentityResponse, MailMessageDetailResponse, MailMessageListResponse,
+    MailMessageMutationAction, MailMessageMutationRequest, MailMessageMutationResponse,
+    MailPasswordAuthRequest, MailSyncRequest, SaveMailAttachmentRequest,
+    SaveMailAttachmentResponse, SendMailMessageRequest, SendMailMessageResponse,
+    SetMailCredentialRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
+    UpdateMailIdentityRequest, UpsertMailDraftRequest,
 };
 use wasm_bindgen::{JsCast, JsValue};
 
@@ -266,6 +267,55 @@ pub async fn list_identities() -> Result<Vec<MailIdentityResponse>, String> {
         r.json::<Vec<MailIdentityResponse>>()
             .await
             .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn create_identity(
+    req: &CreateMailIdentityRequest,
+) -> Result<MailIdentityResponse, String> {
+    let r = api::post("/mail/identities")
+        .json(req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() || r.status() == 201 {
+        r.json::<MailIdentityResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn update_identity(
+    identity_id: &str,
+    req: &UpdateMailIdentityRequest,
+) -> Result<MailIdentityResponse, String> {
+    let r = api::put(&format!("/mail/identities/{identity_id}"))
+        .json(req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<MailIdentityResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn delete_identity(identity_id: &str) -> Result<(), String> {
+    let r = api::delete(&format!("/mail/identities/{identity_id}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() || r.status() == 204 {
+        Ok(())
     } else {
         Err(extract_error(r).await)
     }

@@ -5,9 +5,11 @@ is a mail client that connects to external providers over IMAP/SMTP, not a mail
 server.
 
 Status: experimental branch `experimental-mail-foundation`. The foundation has
-been manually verified against a real IMAP account: account creation works,
-`test-imap` authenticates successfully, and `folders/refresh` retrieves and
-stores the remote folder list.
+been manually verified against real IMAP/SMTP accounts: account creation,
+credential storage, folder discovery, latest-first sync, message reading,
+mutations, local drafts, rich compose, SMTP send, sent-copy handling, incoming
+attachments, saving attachments to Files, and outgoing draft attachments all
+work well enough for prototype validation.
 
 ## Scope
 
@@ -18,13 +20,12 @@ The foundation supports:
 - IMAP folders and subfolders, stored by remote path plus hierarchy delimiter.
 - Message and attachment metadata models for a cached mailbox.
 - A provider boundary backed initially by `async-imap`.
-- SMTP/MIME/sanitization dependencies selected for later send and render work:
-  `lettre`, `mail-parser`, and `ammonia`.
+- SMTP/MIME/sanitization dependencies: `lettre`, `mail-parser`, and `ammonia`.
 
-The first implementation now supports encrypted-at-rest IMAP password storage
-behind a deployment master key. Endpoints that need provider access still accept
-a transient password for manual testing, but can also use the stored account
-credential when the request body omits `password`.
+The first implementation supports encrypted-at-rest IMAP/app-password storage
+behind a deployment master key. Provider access uses the stored account
+credential when the request body omits `password`; a few manual test endpoints
+still accept a transient password for debugging.
 
 ## Backend Layout
 
@@ -87,8 +88,13 @@ the account's SMTP settings.
 ## What Works
 
 - Creating, listing, updating, and deleting mail account metadata.
-- Creating, listing, updating, and deleting sender identities.
-- Multiple accounts per user and multiple identities per account.
+- Creating, listing, updating, and deleting sender identities. Compose can send
+  through a selected identity, drafts remember the selected identity, and
+  Account settings can manage account-scoped identities.
+- Multiple accounts per user and multiple identities per account. The backend
+  creates a default identity for new accounts, makes the first manually created
+  identity default for old accounts, and promotes another identity when the
+  default is deleted.
 - Encrypted-at-rest IMAP password storage using `secrets.master_key`.
 - Credential status is exposed only as `credential_configured: true/false`.
 - IMAP implicit TLS, STARTTLS, or plaintext login with a transient password.
@@ -151,9 +157,9 @@ the account's SMTP settings.
   checks the configured Sent folder by `Message-ID`; if the provider did not
   save it, Uncloud appends the exact RFC822 payload to Sent.
 - First experimental web UI iteration at `/mail`: account/folder navigation,
-  account setup/settings, IMAP/SMTP tests, folder settings, manual
-  account/folder sync, cached message list, reader pane, and basic message
-  mutation/compose controls.
+  account setup/settings, sender identity management, IMAP/SMTP tests, folder
+  settings, manual account/folder sync, cached message list, reader pane, and
+  message mutation/compose controls.
 - Compose v2 UI basics: reply, reply-all, forward, local draft autosave, manual
   save/discard, and a local drafts list per account.
 - Rich compose prototype: a locally bundled Tiptap editor is embedded in the
@@ -170,8 +176,8 @@ the account's SMTP settings.
 
 - Stored credentials currently cover IMAP app passwords only. OAuth refresh
   tokens and SMTP credential handling still need a credential type model.
-- SMTP is wired for connection/authentication testing and plain-text or
-  HTML-plus-plain-text send.
+- SMTP is wired for connection/authentication testing and plain-text,
+  HTML-plus-plain-text, and attachment-bearing send.
 - Message sync stores summaries first. Message bodies are fetched on demand and
   cached after the first successful reader open.
 - Raw RFC822 bodies plus parsed text/html sidecars are stored through the
@@ -187,11 +193,12 @@ the account's SMTP settings.
   The destination copy is discovered by the next sync because IMAP move changes
   the destination UID and the foundation does not yet consume UIDPLUS response
   codes.
-- Compose, search, threading, permanent delete, and provider-side Drafts upload
-  are not fully implemented. Compose currently supports rich body editing,
-  plain-text/HTML alternative send, reply/reply-all/forward prefilling, local
-  drafts, and reply-chain headers, but still has no outgoing attachments, IMAP
-  Drafts upload, or provider-specific sent-copy policy.
+- Search, threading, permanent delete, signatures, and provider-side Drafts
+  upload are not fully implemented. Compose currently supports rich body
+  editing, plain-text/HTML alternative send, reply/reply-all/forward prefilling,
+  local drafts, reply-chain headers, and outgoing attachments, but still needs
+  UI polish, signature insertion, IMAP Drafts upload, and provider-specific
+  sent-copy policy.
 - Sent-copy detection is intentionally conservative. If checking the Sent folder
   fails, Uncloud reports the failure and does not append, to avoid creating a
   duplicate when the provider may have saved the message already.
@@ -230,10 +237,13 @@ the account's SMTP settings.
     `parent_id`, then verify it appears in the selected folder.
 14. Create or open a local draft, attach a small file in the compose pane, send
     it, and verify the recipient receives the attachment.
-15. Open `/mail` in the web UI and verify account/folder selection, sync
+15. Create a second sender identity for the account, select it in compose, send
+    a test message, and verify the From/Reply-To headers.
+16. Open `/mail` in the web UI and verify account/folder selection, sync
     controls, message list, and sanitized HTML/plain-text reader body.
 
-This is enough to validate the current protocol foundation before building UI.
+This is enough to validate the current protocol foundation and first UI
+prototype before provider-specific hardening.
 
 ## Next Work
 
@@ -248,7 +258,7 @@ Initial encrypted server-side secret storage is in place:
 - `test-imap` and `folders/refresh` use a transient password when provided, or
   the stored credential when `password` is omitted.
 
-Remaining credential work before scheduler/background sync:
+Remaining credential work:
 
 - Add credential types for OAuth refresh tokens and any SMTP-specific password
   split if providers need separate IMAP/SMTP secrets.
@@ -264,6 +274,8 @@ Remaining credential work before scheduler/background sync:
   operational provider failures: bad credentials and unsupported provider
   commands are client-facing errors, network/provider failures are 502, and
   provider timeouts are 504.
+- Add an account/provider diagnostics view that surfaces detected capabilities,
+  folder role inference, sent-copy status, and recent provider errors.
 - Continue adding provider-specific behavior only where the generic IMAP/SMTP
   path proves ambiguous against real providers.
 
@@ -337,6 +349,8 @@ Remaining credential work before scheduler/background sync:
 ### 6. Sending
 
 - Basic compose/send route using an identity and SMTP settings is wired.
+- Multiple sender identities are represented in `mail_identities`; send and
+  draft payloads can reference one identity per message.
 - Sent-copy handling checks for provider-saved messages and appends to Sent when
   needed.
 - Reply/reply-all/forward prefilling is wired in the UI, and outgoing SMTP
@@ -347,6 +361,8 @@ Remaining credential work before scheduler/background sync:
   server-side sanitization before draft persistence and SMTP send.
 - Outgoing draft attachments are stored locally, rendered in compose, removed on
   discard/send cleanup, and sent as `multipart/mixed`.
+- Identity signatures are stored but not inserted into compose automatically
+  yet.
 - Decide whether to upload drafts to the provider Drafts folder or keep local
   drafts as the first-version behavior.
 - Add a user/provider setting for sent-copy policy once we know how common
@@ -356,10 +372,11 @@ Remaining credential work before scheduler/background sync:
 
 ### 7. UI
 
-The first read-only UI shell exists. Continue improving it around real mailbox
-data before adding write actions:
+The first mailbox UI shell exists and now includes experimental write actions:
 
 - Account setup, settings, deletion, and connection testing.
+- Sender identity selection in compose and account-scoped identity management in
+  Account settings.
 - Folder list, sync status, role labels, and per-folder settings.
 - Read-only message list.
 - Message reader with sanitized HTML and plain-text fallback.
