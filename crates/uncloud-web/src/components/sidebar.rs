@@ -79,7 +79,9 @@ pub fn Sidebar() -> Element {
     let shopping_enabled = auth_state().feature_enabled("shopping");
     let finance_enabled = auth_state().feature_enabled("finance");
     let mail_enabled = auth_state().feature_enabled("mail");
+    let music_enabled = auth_state().feature_enabled("music");
     let section = match raw_section {
+        "music" if !music_enabled => "files",
         "tasks" if !tasks_enabled => "files",
         "shopping" if !shopping_enabled => "files",
         "finance" if !finance_enabled => "files",
@@ -127,13 +129,15 @@ pub fn Sidebar() -> Element {
                         span { "Gallery" }
                     }
                 }
-                li {
-                    Link {
-                        to: Route::Music {},
-                        class: if section == "music" { "active" } else { "" },
-                        onclick: move |_| close_drawer(),
-                        IconMusic {}
-                        span { "Music" }
+                if music_enabled {
+                    li {
+                        Link {
+                            to: Route::Music {},
+                            class: if section == "music" { "active" } else { "" },
+                            onclick: move |_| close_drawer(),
+                            IconMusic {}
+                            span { "Music" }
+                        }
                     }
                 }
                 if tasks_enabled {
@@ -708,114 +712,44 @@ fn GallerySidebarAlbums() -> Element {
     }
 }
 
-/// Flatten `folders` into DFS order for the music sidebar.
-fn flatten_music_folder_tree(folders: &[MusicFolderResponse]) -> Vec<(MusicFolderResponse, usize)> {
-    let folder_ids: std::collections::HashSet<&str> =
-        folders.iter().map(|f| f.folder_id.as_str()).collect();
-
-    fn dfs(
-        folders: &[MusicFolderResponse],
-        parent: Option<&str>,
-        folder_ids: &std::collections::HashSet<&str>,
-        depth: usize,
-        out: &mut Vec<(MusicFolderResponse, usize)>,
-    ) {
-        let mut children: Vec<&MusicFolderResponse> = folders
-            .iter()
-            .filter(|f| {
-                let effective_parent = f
-                    .parent_folder_id
-                    .as_deref()
-                    .filter(|pid| folder_ids.contains(pid));
-                effective_parent == parent
-            })
-            .collect();
-        children.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        for child in children {
-            out.push((child.clone(), depth));
-            dfs(folders, Some(&child.folder_id), folder_ids, depth + 1, out);
-        }
-    }
-
-    let mut result = Vec::new();
-    dfs(folders, None, &folder_ids, 0, &mut result);
-    result
-}
-
-/// Returns the set of folder IDs that should start collapsed given an expand depth.
-/// `depth=0` means all parent folders collapsed; `depth=1` expands only the top level, etc.
-/// `depth=u32::MAX as usize` (or any very large value) means expand everything.
-fn initial_collapsed(
-    folders: &[MusicFolderResponse],
-    expand_depth: usize,
-) -> std::collections::HashSet<String> {
-    let has_children: std::collections::HashSet<String> = folders
-        .iter()
-        .filter_map(|f| f.parent_folder_id.clone())
-        .collect();
-    let flattened = flatten_music_folder_tree(folders);
-    flattened
-        .into_iter()
-        .filter(|(f, depth)| has_children.contains(&f.folder_id) && *depth >= expand_depth)
-        .map(|(f, _)| f.folder_id)
-        .collect()
-}
-
 #[component]
 fn MusicSidebarFolders() -> Element {
     let mut folders_sig: Signal<Vec<MusicFolderResponse>> = use_signal(Vec::new);
-    let mut categorized: Signal<std::collections::HashSet<String>> =
-        use_signal(std::collections::HashSet::new);
-    // Set of folder IDs that have been manually collapsed by the user.
-    let mut collapsed: Signal<std::collections::HashSet<String>> =
-        use_signal(std::collections::HashSet::new);
+    let mut loading = use_signal(|| true);
     let route = use_route::<Route>();
-    let expand_depth = use_context::<Signal<u32>>();
     let cat_dirty = use_context::<Signal<crate::state::MusicCategoryDirtyTick>>();
 
-    // Load folders; initialize collapsed from the depth preference.
-    use_effect(move || {
-        spawn(async move {
-            if let Ok(f) = use_music::list_music_folders().await {
-                let depth = *expand_depth.peek() as usize;
-                let init = initial_collapsed(&f, depth);
-                folders_sig.set(f);
-                collapsed.set(init);
-            }
-        });
-    });
-
-    // Load categories — populate the set of folders that belong to ≥1 category
-    // so we can mark them in the tree and reroute clicks to the scoped library.
-    // `use_reactive!` makes the dependency on `cat_dirty` explicit; bare
-    // auto-tracking inside `use_effect` was unreliable here — bumps from the
-    // ManageCategoriesModal weren't always observed without a manual reload.
+    // Load the folders that belong to at least one category. The full folder
+    // tree now lives in the main Music view, so the sidebar remains compact.
     use_effect(use_reactive!(|cat_dirty| {
         let _ = cat_dirty();
         spawn(async move {
+            loading.set(true);
+            let mut folder_ids: Vec<String> = Vec::new();
             if let Ok(cats) = crate::hooks::use_music_categories::list_categories().await {
-                let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
-                for c in cats {
-                    for fid in c.folder_ids {
-                        set.insert(fid);
+                let mut seen = std::collections::HashSet::new();
+                for category in cats {
+                    for folder_id in category.folder_ids {
+                        if seen.insert(folder_id.clone()) {
+                            folder_ids.push(folder_id);
+                        }
                     }
                 }
-                categorized.set(set);
             }
+
+            if folder_ids.is_empty() {
+                folders_sig.set(Vec::new());
+            } else if let Ok(mut folders) = use_music::list_music_folders_by_ids(&folder_ids).await
+            {
+                folders.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
+                folders_sig.set(folders);
+            }
+            loading.set(false);
         });
     }));
 
-    // When the depth preference changes, reset collapsed to match the new setting.
-    // Manual toggles made during this session are discarded — that's intentional.
-    use_effect(use_reactive!(|(expand_depth)| {
-        let f = folders_sig.peek().clone();
-        if !f.is_empty() {
-            collapsed.set(initial_collapsed(&f, expand_depth() as usize));
-        }
-    }));
-
     let folders = folders_sig();
-    if folders.is_empty() {
+    if folders.is_empty() && !loading() {
         return rsx! {};
     }
 
@@ -824,111 +758,33 @@ fn MusicSidebarFolders() -> Element {
         _ => None,
     };
 
-    // When the active folder changes, auto-expand all its ancestors.
-    use_effect(use_reactive!(|(active_id)| {
-        if let Some(aid) = active_id {
-            let fs = folders_sig.peek().clone();
-            let parent_of: std::collections::HashMap<String, String> = fs
-                .iter()
-                .filter_map(|f| f.parent_folder_id.clone().map(|p| (f.folder_id.clone(), p)))
-                .collect();
-            let mut cur = aid;
-            let mut c = collapsed.write();
-            while let Some(pid) = parent_of.get(&cur).cloned() {
-                c.remove(&pid);
-                cur = pid;
+    rsx! {
+        li { class: "menu-title mt-2", span { "Categories" } }
+        if loading() {
+            li {
+                div { class: "flex items-center gap-2 text-base-content/50",
+                    span { class: "loading loading-spinner loading-xs" }
+                    span { "Loading..." }
+                }
             }
         }
-    }));
-
-    // Folders that are the parent of at least one other folder.
-    let has_children: std::collections::HashSet<String> = folders
-        .iter()
-        .filter_map(|f| f.parent_folder_id.clone())
-        .collect();
-
-    // child → parent lookup for visibility check.
-    let parent_of: std::collections::HashMap<String, String> = folders
-        .iter()
-        .filter_map(|f| f.parent_folder_id.clone().map(|p| (f.folder_id.clone(), p)))
-        .collect();
-
-    let col = collapsed();
-    let cat_set = categorized();
-    let flattened = flatten_music_folder_tree(&folders);
-
-    rsx! {
-        li { class: "menu-title mt-2", span { "Folders" } }
-        for (folder, depth) in flattened {
+        for folder in folders {
             {
-                // Skip this item if any ancestor is collapsed.
-                let mut visible = true;
-                let mut cur = folder.folder_id.clone();
-                while let Some(pid) = parent_of.get(&cur).cloned() {
-                    if col.contains(&pid) { visible = false; break; }
-                    cur = pid;
-                }
-
-                if !visible {
-                    rsx! {}
-                } else {
-                    let fid = folder.folder_id.clone();
-                    let fid_toggle = folder.folder_id.clone();
-                    let is_active = active_id.as_deref() == Some(&fid);
-                    let is_parent = has_children.contains(&fid);
-                    let is_collapsed = col.contains(&fid);
-                    let is_categorized = cat_set.contains(&fid);
-                    let indent_px = depth * 12;
-                    let target = if is_categorized {
-                        Route::MusicScopeFolder { id: folder.folder_id.clone() }
-                    } else {
-                        Route::MusicFolder { id: folder.folder_id.clone() }
-                    };
-
-                    rsx! {
-                        li {
-                            div {
-                                class: if is_active {
-                                    "flex items-center gap-0.5 rounded-md bg-base-300"
-                                } else {
-                                    "flex items-center gap-0.5 rounded-md hover:bg-base-200"
-                                },
-                                style: "padding-left: calc(0.35rem + {indent_px}px); padding-right: 0.25rem; padding-top: 0.15rem; padding-bottom: 0.15rem; min-width: 0",
-                                // Expand / collapse toggle for folders that have children.
-                                if is_parent {
-                                    button {
-                                        class: "btn btn-ghost btn-xs btn-circle flex-shrink-0 opacity-40 hover:opacity-100",
-                                        onclick: move |_| {
-                                            let mut c = collapsed.write();
-                                            if c.contains(&fid_toggle) {
-                                                c.remove(&fid_toggle);
-                                            } else {
-                                                c.insert(fid_toggle.clone());
-                                            }
-                                        },
-                                        if is_collapsed { "▶" } else { "▼" }
-                                    }
-                                } else {
-                                    // Spacer so leaf folders align with siblings.
-                                    // Width must match the btn-xs btn-circle toggle (w-6 = 24px),
-                                    // otherwise leaf icons drift 4px left of parent icons.
-                                    span { class: "w-6 flex-shrink-0" }
-                                }
-                                Link {
-                                    to: target,
-                                    class: if is_active {
-                                        "flex-1 text-sm font-medium break-words min-w-0 flex items-center gap-2"
-                                    } else if is_categorized {
-                                        "flex-1 text-sm break-words min-w-0 flex items-center gap-2 text-primary"
-                                    } else {
-                                        "flex-1 text-sm break-words min-w-0 flex items-center gap-2"
-                                    },
-                                    title: if is_categorized { "Open in scoped library" } else { "" },
-                                    onclick: move |_| close_drawer(),
-                                    IconFolder {}
-                                    span { class: "truncate", "{folder.name}" }
-                                }
-                            }
+                let fid = folder.folder_id.clone();
+                let is_active = active_id.as_deref() == Some(&fid);
+                rsx! {
+                    li {
+                        Link {
+                            to: Route::MusicScopeFolder { id: folder.folder_id.clone() },
+                            class: if is_active {
+                                "active flex items-center gap-2 min-w-0"
+                            } else {
+                                "flex items-center gap-2 min-w-0"
+                            },
+                            title: "{folder.path}",
+                            onclick: move |_| close_drawer(),
+                            IconFolder {}
+                            span { class: "truncate", "{folder.name}" }
                         }
                     }
                 }

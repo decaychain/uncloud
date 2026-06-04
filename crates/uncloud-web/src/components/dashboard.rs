@@ -67,6 +67,7 @@ pub fn DashboardPage() -> Element {
     let tasks_enabled = auth_state().feature_enabled("tasks");
     let shopping_enabled = auth_state().feature_enabled("shopping");
     let mail_enabled = auth_state().feature_enabled("mail");
+    let music_enabled = auth_state().feature_enabled("music");
 
     // Resolve enabled tiles: user's preference, or the default set.
     // Drop any ids we no longer render (e.g. "shares"/"trash" from older prefs),
@@ -88,6 +89,7 @@ pub fn DashboardPage() -> Element {
             .filter(|id| id != "tasks" || tasks_enabled)
             .filter(|id| id != "shopping" || shopping_enabled)
             .filter(|id| id != "mail" || mail_enabled)
+            .filter(|id| id != "music" || music_enabled)
             .collect()
     };
 

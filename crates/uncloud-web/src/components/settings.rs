@@ -51,7 +51,6 @@ pub fn SettingsPage(tab: String) -> Element {
                     AppearanceSection {}
                     DashboardTilesSection {}
                     OptionalFeaturesSection {}
-                    MusicSection {}
                 },
                 "activity" => rsx! {
                     h1 { class: "text-2xl font-bold", "Activity" }
@@ -316,7 +315,7 @@ fn OptionalFeaturesSection() -> Element {
 }
 
 fn optional_feature_ids() -> &'static [&'static str] {
-    &["finance", "shopping", "mail", "tasks"]
+    &["finance", "shopping", "mail", "tasks", "music"]
 }
 
 fn optional_feature_label(feature: &str) -> &'static str {
@@ -325,6 +324,7 @@ fn optional_feature_label(feature: &str) -> &'static str {
         "shopping" => "Shopping Lists",
         "mail" => "Mail",
         "tasks" => "Tasks",
+        "music" => "Music",
         _ => "Unknown",
     }
 }
@@ -335,6 +335,7 @@ fn optional_feature_description(feature: &str) -> &'static str {
         "shopping" => "Manage shopping lists with a shared item catalogue.",
         "mail" => "Use the experimental IMAP/SMTP mail client.",
         "tasks" => "Manage projects, task boards, schedules, and assignments.",
+        "music" => "Browse the music library, playlists, and in-browser playback.",
         _ => "",
     }
 }
@@ -344,6 +345,7 @@ fn tile_feature_id(tile_id: &str) -> Option<&'static str> {
         "tasks" => Some("tasks"),
         "shopping" => Some("shopping"),
         "mail" => Some("mail"),
+        "music" => Some("music"),
         _ => None,
     }
 }
@@ -366,54 +368,11 @@ fn update_feature_request(feature: &str, enabled: bool) -> UpdateFeaturesRequest
             tasks: Some(enabled),
             ..Default::default()
         },
+        "music" => UpdateFeaturesRequest {
+            music: Some(enabled),
+            ..Default::default()
+        },
         _ => UpdateFeaturesRequest::default(),
-    }
-}
-
-#[component]
-fn MusicSection() -> Element {
-    let mut expand_depth = use_context::<Signal<u32>>();
-
-    let options: &[(&str, u32)] = &[
-        ("All collapsed", 0),
-        ("1 level — top folders only (default)", 1),
-        ("2 levels", 2),
-        ("3 levels", 3),
-        ("Expand all", 999),
-    ];
-
-    rsx! {
-        div { class: "card bg-base-100 shadow",
-            div { class: "card-body gap-4",
-                h2 { class: "card-title text-lg", "Music" }
-
-                div { class: "flex items-center justify-between gap-4",
-                    div {
-                        p { class: "font-medium text-sm", "Default folder tree depth" }
-                        p { class: "text-base-content/60 text-xs mt-0.5",
-                            "How many levels of the music folder tree are expanded by default in the sidebar."
-                        }
-                    }
-                    select {
-                        class: "select select-bordered select-sm w-64 shrink-0",
-                        value: "{expand_depth()}",
-                        onchange: move |evt| {
-                            if let Ok(v) = evt.value().parse::<u32>() {
-                                expand_depth.set(v);
-                                let _ = LocalStorage::set("uncloud_music_expand_depth", &v);
-                            }
-                        },
-                        for (label, value) in options {
-                            option {
-                                value: "{value}",
-                                selected: expand_depth() == *value,
-                                "{label}"
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 

@@ -114,7 +114,7 @@ async fn users_can_opt_out_of_builtin_app_features() {
     app.register_and_login("alice").await;
 
     let me: serde_json::Value = app.server.get("/api/auth/me").await.json();
-    for feature in ["finance", "shopping", "mail", "tasks"] {
+    for feature in ["finance", "shopping", "mail", "tasks", "music"] {
         assert!(
             json_string_array_contains(&me["features_available"], feature),
             "{feature} should be server-available by default"
@@ -132,12 +132,13 @@ async fn users_can_opt_out_of_builtin_app_features() {
             "finance": false,
             "shopping": false,
             "mail": false,
-            "tasks": false
+            "tasks": false,
+            "music": false
         }))
         .await;
     disabled.assert_status_ok();
     let body: serde_json::Value = disabled.json();
-    for feature in ["finance", "shopping", "mail", "tasks"] {
+    for feature in ["finance", "shopping", "mail", "tasks", "music"] {
         assert!(json_string_array_contains(
             &body["features_available"],
             feature
@@ -164,6 +165,14 @@ async fn users_can_opt_out_of_builtin_app_features() {
         .get("/api/tasks/projects")
         .await
         .assert_status(StatusCode::FORBIDDEN);
+    app.server
+        .get("/api/music/folders")
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    app.server
+        .get("/api/playlists")
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
 
     let enabled = app
         .server
@@ -172,12 +181,13 @@ async fn users_can_opt_out_of_builtin_app_features() {
             "finance": true,
             "shopping": true,
             "mail": true,
-            "tasks": true
+            "tasks": true,
+            "music": true
         }))
         .await;
     enabled.assert_status_ok();
     let body: serde_json::Value = enabled.json();
-    for feature in ["finance", "shopping", "mail", "tasks"] {
+    for feature in ["finance", "shopping", "mail", "tasks", "music"] {
         assert!(json_string_array_contains(
             &body["features_enabled"],
             feature
@@ -186,6 +196,10 @@ async fn users_can_opt_out_of_builtin_app_features() {
 
     app.server
         .get("/api/tasks/projects")
+        .await
+        .assert_status_ok();
+    app.server
+        .get("/api/music/folders")
         .await
         .assert_status_ok();
     app.cleanup().await;
@@ -198,12 +212,13 @@ async fn server_disabled_builtin_app_features_are_not_advertised() {
         config.features.shopping = false;
         config.features.mail = false;
         config.features.tasks = false;
+        config.features.music = false;
     })
     .await;
     app.register_and_login("alice").await;
 
     let me: serde_json::Value = app.server.get("/api/auth/me").await.json();
-    for feature in ["finance", "shopping", "mail", "tasks"] {
+    for feature in ["finance", "shopping", "mail", "tasks", "music"] {
         assert!(!json_string_array_contains(
             &me["features_available"],
             feature
@@ -228,6 +243,14 @@ async fn server_disabled_builtin_app_features_are_not_advertised() {
         .assert_status(StatusCode::FORBIDDEN);
     app.server
         .get("/api/tasks/projects")
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    app.server
+        .get("/api/music/folders")
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    app.server
+        .get("/api/playlists")
         .await
         .assert_status(StatusCode::FORBIDDEN);
 

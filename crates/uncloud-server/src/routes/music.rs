@@ -28,6 +28,13 @@ pub struct ListTracksQuery {
     pub limit: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ListFoldersQuery {
+    pub parent_id: Option<String>,
+    pub root: Option<bool>,
+    pub folder_ids: Option<String>,
+}
+
 pub async fn list_music_tracks(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -113,6 +120,7 @@ pub async fn list_music_tracks(
 pub async fn list_music_folders(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    Query(query): Query<ListFoldersQuery>,
 ) -> Result<Json<Vec<MusicFolderResponse>>> {
     use futures::TryStreamExt;
 
@@ -216,6 +224,7 @@ pub async fn list_music_folders(
             path: build_folder_path(folder_id, &by_id),
             track_count: s.track_count,
             cover_file_id: s.cover_file_id.map(|id| id.to_hex()),
+            has_children: false,
         });
     }
 
@@ -242,8 +251,36 @@ pub async fn list_music_folders(
                 path: build_folder_path(folder.id, &shared_by_id),
                 track_count: s.track_count,
                 cover_file_id: s.cover_file_id.map(|id| id.to_hex()),
+                has_children: false,
             });
         }
+    }
+
+    let parent_ids: HashSet<String> = result
+        .iter()
+        .filter_map(|folder| folder.parent_folder_id.clone())
+        .collect();
+    for folder in &mut result {
+        folder.has_children = parent_ids.contains(&folder.folder_id);
+    }
+
+    if let Some(folder_ids) = query.folder_ids.as_deref() {
+        let requested: HashSet<String> = folder_ids
+            .split(',')
+            .filter(|id| !id.is_empty())
+            .map(|id| {
+                ObjectId::parse_str(id)
+                    .map(|_| id.to_string())
+                    .map_err(|_| AppError::BadRequest("Invalid folder_ids".to_string()))
+            })
+            .collect::<Result<HashSet<_>>>()?;
+        result.retain(|folder| requested.contains(&folder.folder_id));
+    } else if let Some(parent_id) = query.parent_id.as_deref() {
+        ObjectId::parse_str(parent_id)
+            .map_err(|_| AppError::BadRequest("Invalid parent_id".to_string()))?;
+        result.retain(|folder| folder.parent_folder_id.as_deref() == Some(parent_id));
+    } else if query.root.unwrap_or(false) {
+        result.retain(|folder| folder.parent_folder_id.is_none());
     }
 
     result.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));

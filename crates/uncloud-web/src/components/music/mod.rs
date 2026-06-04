@@ -2,7 +2,7 @@ mod album_grid;
 mod album_view;
 mod artist_list;
 mod artist_view;
-mod folder_view;
+mod folder_tree;
 pub mod manage_categories;
 mod playlist_list;
 mod playlist_panel;
@@ -14,14 +14,14 @@ use uncloud_common::{
     ArtistResponse, MusicAlbumResponse, MusicCategory, PlaylistSummary, ServerEvent,
 };
 
-use crate::components::icons::{IconAlertTriangle, IconSearch};
+use crate::components::icons::{IconAlertTriangle, IconFolder, IconMusic, IconSearch};
 use crate::hooks::use_music::LibraryScope;
 use crate::hooks::{use_music, use_music_categories, use_playlists};
 use crate::router::Route;
 
 pub use album_view::AlbumView as MusicAlbumView;
 pub use artist_view::ArtistView as MusicArtistView;
-pub use folder_view::FolderView as MusicFolderView;
+pub use folder_tree::FolderTreeView;
 pub use playlist_panel::PlaylistSidePanel;
 pub use playlist_view::PlaylistView as MusicPlaylistView;
 
@@ -32,6 +32,12 @@ enum MetadataNav {
     Artists,
     Artist(String),
     Album(String, String),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum MusicMainView {
+    Library,
+    Folders,
 }
 
 // ── MetadataView ────────────────────────────────────────────────────────────
@@ -312,12 +318,41 @@ fn MetadataView(scope: LibraryScope) -> Element {
 
 #[component]
 pub fn Music() -> Element {
+    let mut view = use_signal(|| MusicMainView::Library);
+    let current_view = view();
+
     rsx! {
         div { class: "p-4 space-y-4",
-            div { class: "flex items-center justify-between",
+            div { class: "flex flex-wrap items-center justify-between gap-3",
                 h1 { class: "text-2xl font-bold", "Music" }
+                div { class: "join",
+                    button {
+                        class: if current_view == MusicMainView::Library {
+                            "btn btn-sm join-item btn-primary"
+                        } else {
+                            "btn btn-sm join-item"
+                        },
+                        onclick: move |_| view.set(MusicMainView::Library),
+                        IconMusic { class: "w-4 h-4".to_string() }
+                        "Library"
+                    }
+                    button {
+                        class: if current_view == MusicMainView::Folders {
+                            "btn btn-sm join-item btn-primary"
+                        } else {
+                            "btn btn-sm join-item"
+                        },
+                        onclick: move |_| view.set(MusicMainView::Folders),
+                        IconFolder { class: "w-4 h-4".to_string() }
+                        "Folders"
+                    }
+                }
             }
-            MetadataView { scope: LibraryScope::All }
+            if current_view == MusicMainView::Folders {
+                FolderTreeView { root_folder_id: None }
+            } else {
+                MetadataView { scope: LibraryScope::All }
+            }
         }
     }
 }

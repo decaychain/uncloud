@@ -170,6 +170,8 @@ pub fn Layout() -> Element {
         | Route::MusicArtist { .. }
         | Route::MusicAlbum { .. }
         | Route::MusicFolder { .. }
+        | Route::MusicScopeFolder { .. }
+        | Route::MusicScopeCategory { .. }
         | Route::MusicPlaylist { .. } => "Uncloud - Music",
         Route::Shopping {} | Route::ShoppingList { .. } => "Uncloud - Shopping",
         Route::Finance {}
@@ -242,6 +244,13 @@ pub fn Layout() -> Element {
 
 fn route_feature_id(route: &Route) -> Option<&'static str> {
     match route {
+        Route::Music {}
+        | Route::MusicArtist { .. }
+        | Route::MusicAlbum { .. }
+        | Route::MusicFolder { .. }
+        | Route::MusicScopeFolder { .. }
+        | Route::MusicScopeCategory { .. }
+        | Route::MusicPlaylist { .. } => Some("music"),
         Route::Shopping {} | Route::ShoppingList { .. } => Some("shopping"),
         Route::Finance {}
         | Route::FinanceAccounts {}
@@ -261,6 +270,7 @@ fn feature_label(feature: &str) -> &'static str {
         "shopping" => "Shopping",
         "mail" => "Mail",
         "tasks" => "Tasks",
+        "music" => "Music",
         _ => "Feature",
     }
 }
