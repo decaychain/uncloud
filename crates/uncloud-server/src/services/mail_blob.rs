@@ -24,6 +24,13 @@ pub struct StoredMailAttachment {
     pub size_bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredDraftAttachment {
+    pub storage_id: ObjectId,
+    pub storage_path: String,
+    pub size_bytes: u64,
+}
+
 fn sanitize_storage_component(value: &str) -> String {
     value
         .chars()
@@ -32,6 +39,15 @@ fn sanitize_storage_component(value: &str) -> String {
             c => c,
         })
         .collect()
+}
+
+fn draft_attachment_prefix(username: &str, account: &MailAccount, draft_id: ObjectId) -> String {
+    let user_prefix = sanitize_storage_component(username);
+    format!(
+        "{user_prefix}/.uncloud/mail/v1/accounts/{}/drafts/{}",
+        account.id.to_hex(),
+        draft_id.to_hex(),
+    )
 }
 
 fn message_body_prefix(
@@ -51,6 +67,31 @@ fn message_body_prefix(
         folder.id.to_hex(),
         message.uid,
     )
+}
+
+pub async fn store_draft_attachment(
+    storage: &StorageService,
+    username: &str,
+    account: &MailAccount,
+    draft_id: ObjectId,
+    attachment_id: ObjectId,
+    filename: &str,
+    data: &[u8],
+) -> Result<StoredDraftAttachment> {
+    let storage_id = account
+        .mail_storage_id
+        .unwrap_or_else(|| storage.default_storage_id());
+    let backend = storage.get_backend(storage_id).await?;
+    let prefix = draft_attachment_prefix(username, account, draft_id);
+    let filename = sanitize_storage_component(filename);
+    let path = format!("{prefix}/attachments/{}-{filename}", attachment_id.to_hex());
+    backend.write(&path, data).await?;
+
+    Ok(StoredDraftAttachment {
+        storage_id,
+        storage_path: path,
+        size_bytes: data.len() as u64,
+    })
 }
 
 pub async fn read_cached_message_body(

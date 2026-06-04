@@ -41,6 +41,7 @@ Collections:
 - `mail_messages`
 - `mail_attachments`
 - `mail_drafts`
+- `mail_draft_attachments`
 
 ## API Surface
 
@@ -61,6 +62,8 @@ Authenticated routes are mounted under both `/api` and `/api/v1`:
 - `POST /mail/accounts/{id}/drafts`
 - `PUT /mail/drafts/{id}`
 - `DELETE /mail/drafts/{id}`
+- `POST /mail/drafts/{id}/attachments`
+- `DELETE /mail/drafts/{draft_id}/attachments/{attachment_id}`
 - `GET /mail/accounts/{account_id}/folders`
 - `POST /mail/accounts/{account_id}/folders/refresh`
 - `PUT /mail/accounts/{account_id}/folders/{folder_id}`
@@ -136,10 +139,14 @@ the account's SMTP settings.
   sends plain text, or `multipart/alternative` with sanitized HTML plus a
   plain-text alternative when rich body HTML is present. It uses the stored
   account credential and can attach `In-Reply-To` / `References` headers for
-  replies.
+  replies. When draft attachments are present, SMTP output is wrapped in
+  `multipart/mixed` and includes the attachment parts.
 - Local draft storage in MongoDB through `mail_drafts`, with list/create/update
   and delete endpoints. Drafts are local-only for now and are removed after a
   successful send when the send request references the draft id.
+- Local draft attachments are stored in `mail_draft_attachments`, with blobs in
+  the hidden mail storage namespace. The compose UI can upload and remove them,
+  and discard/send cleanup removes the local draft attachment blobs.
 - Sent-copy handling for basic sends: after SMTP accepts the message, Uncloud
   checks the configured Sent folder by `Message-ID`; if the provider did not
   save it, Uncloud appends the exact RFC822 payload to Sent.
@@ -221,7 +228,9 @@ the account's SMTP settings.
 13. Save an attachment into Files with
     `POST /api/mail/attachments/{attachment_id}/save` and an optional
     `parent_id`, then verify it appears in the selected folder.
-14. Open `/mail` in the web UI and verify account/folder selection, sync
+14. Create or open a local draft, attach a small file in the compose pane, send
+    it, and verify the recipient receives the attachment.
+15. Open `/mail` in the web UI and verify account/folder selection, sync
     controls, message list, and sanitized HTML/plain-text reader body.
 
 This is enough to validate the current protocol foundation before building UI.
@@ -336,8 +345,8 @@ Remaining credential work before scheduler/background sync:
   successful send are wired.
 - Rich compose sends `multipart/alternative` when HTML is present, with
   server-side sanitization before draft persistence and SMTP send.
-- Add outgoing attachments after the local draft and reply flow has been tested
-  against real accounts.
+- Outgoing draft attachments are stored locally, rendered in compose, removed on
+  discard/send cleanup, and sent as `multipart/mixed`.
 - Decide whether to upload drafts to the provider Drafts folder or keep local
   drafts as the first-version behavior.
 - Add a user/provider setting for sent-copy policy once we know how common
@@ -355,7 +364,7 @@ data before adding write actions:
 - Read-only message list.
 - Message reader with sanitized HTML and plain-text fallback.
 - Reader-pane compose surface with Tiptap rich editing, reply/reply-all/forward
-  prefilling, and local draft autosave.
+  prefilling, local draft autosave, and outgoing attachment upload/removal.
 - Consistent bottom-right toast notifications for Mail errors and notices, with
   sticky errors and auto-dismissing non-error notices.
 - After the first prototype lands, extract the Files copy/move destination

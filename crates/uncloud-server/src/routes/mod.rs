@@ -306,6 +306,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/mail/drafts/{id}",
             put(mail::update_draft).delete(mail::delete_draft),
         )
+        .route(
+            "/mail/drafts/{id}/attachments",
+            post(mail::upload_draft_attachment),
+        )
+        .route(
+            "/mail/drafts/{draft_id}/attachments/{attachment_id}",
+            delete(mail::delete_draft_attachment),
+        )
         .route("/mail/accounts/{account_id}/folders", get(mail::list_folders))
         .route("/mail/accounts/{account_id}/folders/refresh", post(mail::refresh_folders))
         .route(

@@ -240,6 +240,22 @@ pub struct MailDraft {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MailDraftAttachment {
+    #[serde(rename = "_id")]
+    pub id: ObjectId,
+    pub owner_id: ObjectId,
+    pub account_id: ObjectId,
+    pub draft_id: ObjectId,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: u64,
+    pub storage_id: ObjectId,
+    pub storage_path: String,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+}
+
 fn default_true() -> bool {
     true
 }

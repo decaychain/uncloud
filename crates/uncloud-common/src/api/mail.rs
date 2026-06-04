@@ -253,6 +253,8 @@ pub struct SendMailMessageRequest {
     pub in_reply_to: Option<String>,
     #[serde(default)]
     pub references: Vec<String>,
+    #[serde(default)]
+    pub attachment_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -270,6 +272,7 @@ pub struct MailDraftResponse {
     pub body_html: Option<String>,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
+    pub attachments: Vec<MailDraftAttachmentResponse>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -331,6 +334,16 @@ pub struct MailAttachmentResponse {
     pub content_id: Option<String>,
     pub disposition: Option<String>,
     pub size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailDraftAttachmentResponse {
+    pub id: String,
+    pub draft_id: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: u64,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

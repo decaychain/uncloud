@@ -3,14 +3,16 @@ use std::rc::Rc;
 use dioxus::prelude::*;
 use uncloud_common::{
     CreateMailAccountRequest, FolderResponse, MailAccountResponse, MailAccountSyncResponse,
-    MailAddressDto, MailAttachmentResponse, MailComposeMode, MailDraftResponse, MailFolderResponse,
-    MailFolderRole, MailFolderRoleSource, MailIdentityResponse, MailMessageDetailResponse,
-    MailMessageMutationAction, MailMessageSummaryResponse, MailSecurity, MailSentCopyStatus,
-    MailServerSettings, SendMailMessageRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
+    MailAddressDto, MailAttachmentResponse, MailComposeMode, MailDraftAttachmentResponse,
+    MailDraftResponse, MailFolderResponse, MailFolderRole, MailFolderRoleSource,
+    MailIdentityResponse, MailMessageDetailResponse, MailMessageMutationAction,
+    MailMessageSummaryResponse, MailSecurity, MailSentCopyStatus, MailServerSettings,
+    SendMailMessageRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
     UpsertMailDraftRequest,
 };
-use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
+use web_sys::HtmlInputElement;
 
 use crate::components::icons::{
     IconArchive, IconChevronRight, IconDownload, IconEye, IconFileText, IconFolder, IconFolderOpen,
@@ -27,6 +29,7 @@ const MAIL_NOTICE_TOAST_TIMEOUT_MS: u32 = 6_000;
 const MAIL_MIN_SYNC_INTERVAL_MINUTES: u64 = 1;
 const MAIL_MAX_SYNC_INTERVAL_MINUTES: u64 = 7 * 24 * 60;
 const MAIL_COMPOSE_EDITOR_ID: &str = "mail-compose-editor";
+const MAIL_COMPOSE_ATTACHMENT_INPUT_ID: &str = "mail-compose-attachment-input";
 
 struct MailEditorListener {
     cb: Closure<dyn FnMut(web_sys::Event)>,
@@ -67,6 +70,7 @@ pub fn MailPage() -> Element {
     let mut show_compose = use_signal(|| false);
     let mut sending_message = use_signal(|| false);
     let mut saving_draft = use_signal(|| false);
+    let mut uploading_draft_attachment = use_signal(|| false);
     let mut compose_autosave_token = use_signal(|| 0u64);
     let mut compose_draft_id = use_signal(String::new);
     let mut compose_mode = use_signal(|| MailComposeMode::New);
@@ -80,6 +84,7 @@ pub fn MailPage() -> Element {
     let mut compose_body_html = use_signal(String::new);
     let mut compose_in_reply_to = use_signal(String::new);
     let mut compose_references = use_signal(Vec::<String>::new);
+    let mut compose_attachments = use_signal(Vec::<MailDraftAttachmentResponse>::new);
     let mut compose_editor_key = use_signal(|| 0u64);
     let mut settings_folder = use_signal(|| None::<MailFolderResponse>);
     let mut folder_role_value = use_signal(|| "auto".to_string());
@@ -157,8 +162,8 @@ pub fn MailPage() -> Element {
             return;
         }
 
-        let content =
-            serde_json::to_string(&compose_body_html.peek().clone()).unwrap_or_else(|_| "\"\"".to_string());
+        let content = serde_json::to_string(&compose_body_html.peek().clone())
+            .unwrap_or_else(|_| "\"\"".to_string());
         let _ = js_sys::eval(&format!(
             "window.UncloudMailEditor && window.UncloudMailEditor.mount({editor_id}, {content});"
         ));
@@ -260,7 +265,8 @@ pub fn MailPage() -> Element {
             || !bcc.trim().is_empty()
             || !subject.trim().is_empty()
             || !body.trim().is_empty()
-            || !body_html.trim().is_empty();
+            || !body_html.trim().is_empty()
+            || !compose_attachments.peek().is_empty();
         if !has_content {
             return;
         }
@@ -299,6 +305,7 @@ pub fn MailPage() -> Element {
             match result {
                 Ok(saved) => {
                     compose_draft_id.set(saved.id.clone());
+                    compose_attachments.set(saved.attachments.clone());
                     drafts.set(upsert_draft(drafts(), saved));
                 }
                 Err(e) => error.set(Some(format!("Draft autosave failed: {e}"))),
@@ -586,6 +593,7 @@ pub fn MailPage() -> Element {
                             compose_body_html.set(String::new());
                             compose_in_reply_to.set(String::new());
                             compose_references.set(Vec::new());
+                            compose_attachments.set(Vec::new());
                             bump_compose_editor_key(&mut compose_editor_key);
                             show_compose.set(true);
                         },
@@ -798,6 +806,7 @@ pub fn MailPage() -> Element {
                                                                 draft_for_open.in_reply_to.clone().unwrap_or_default(),
                                                             );
                                                             compose_references.set(draft_for_open.references.clone());
+                                                            compose_attachments.set(draft_for_open.attachments.clone());
                                                             bump_compose_editor_key(&mut compose_editor_key);
                                                             show_compose.set(true);
                                                         },
@@ -1173,6 +1182,8 @@ pub fn MailPage() -> Element {
                                     let compose_title = compose_title(compose_mode());
                                     let draft_status = if saving_draft() {
                                         "Saving draft"
+                                    } else if uploading_draft_attachment() {
+                                        "Updating attachments"
                                     } else if compose_draft_id().is_empty() {
                                         ""
                                     } else {
@@ -1182,7 +1193,98 @@ pub fn MailPage() -> Element {
                                         || !compose_to().trim().is_empty()
                                         || !compose_subject().trim().is_empty()
                                         || !compose_body().trim().is_empty()
-                                        || !compose_body_html().trim().is_empty();
+                                        || !compose_body_html().trim().is_empty()
+                                        || !compose_attachments().is_empty();
+                                    let on_attachment_pick = {
+                                        let account_id = account_id.clone();
+                                        move |_: Event<FormData>| {
+                                            let account_id = account_id.clone();
+                                            let file_list = web_sys::window()
+                                                .and_then(|w| w.document())
+                                                .and_then(|d| d.get_element_by_id(MAIL_COMPOSE_ATTACHMENT_INPUT_ID))
+                                                .and_then(|e| e.dyn_into::<HtmlInputElement>().ok())
+                                                .and_then(|i| i.files());
+                                            let Some(file_list) = file_list else { return };
+                                            if file_list.length() == 0 {
+                                                return;
+                                            }
+                                            let files: Vec<web_sys::File> = (0..file_list.length())
+                                                .filter_map(|i| file_list.item(i))
+                                                .collect();
+                                            let draft_id = compose_draft_id();
+                                            let identity_id = compose_identity_id();
+                                            let mode = compose_mode();
+                                            let source_message_id = compose_source_message_id();
+                                            let to = compose_to();
+                                            let cc = compose_cc();
+                                            let bcc = compose_bcc();
+                                            let subject = compose_subject();
+                                            let body = compose_body();
+                                            let body_html = compose_body_html();
+                                            let in_reply_to = compose_in_reply_to();
+                                            let references = compose_references();
+                                            spawn(async move {
+                                                uploading_draft_attachment.set(true);
+                                                error.set(None);
+                                                notice.set(None);
+                                                let mut active_draft_id = draft_id;
+                                                saving_draft.set(true);
+                                                let req = UpsertMailDraftRequest {
+                                                    identity_id: nonempty_string(identity_id),
+                                                    mode,
+                                                    source_message_id: nonempty_string(source_message_id),
+                                                    to: parse_compose_addresses(&to),
+                                                    cc: parse_compose_addresses(&cc),
+                                                    bcc: parse_compose_addresses(&bcc),
+                                                    subject,
+                                                    body_text: body,
+                                                    body_html: nonempty_string(body_html),
+                                                    in_reply_to: nonempty_string(in_reply_to),
+                                                    references,
+                                                };
+                                                let saved_result = if active_draft_id.trim().is_empty() {
+                                                    use_mail::create_draft(&account_id, &req).await
+                                                } else {
+                                                    use_mail::update_draft(&active_draft_id, &req).await
+                                                };
+                                                match saved_result {
+                                                    Ok(saved) => {
+                                                        active_draft_id = saved.id.clone();
+                                                        compose_draft_id.set(saved.id.clone());
+                                                        compose_attachments.set(saved.attachments.clone());
+                                                        drafts.set(upsert_draft(drafts(), saved));
+                                                    }
+                                                    Err(e) => {
+                                                        error.set(Some(e));
+                                                        saving_draft.set(false);
+                                                        uploading_draft_attachment.set(false);
+                                                        reset_compose_attachment_input();
+                                                        return;
+                                                    }
+                                                }
+                                                saving_draft.set(false);
+
+                                                for file in files {
+                                                    match use_mail::upload_draft_attachment(&active_draft_id, &file).await {
+                                                        Ok(attachment) => {
+                                                            let mut current = compose_attachments();
+                                                            current.push(attachment);
+                                                            compose_attachments.set(current);
+                                                        }
+                                                        Err(e) => {
+                                                            error.set(Some(e));
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                                if let Ok(rows) = use_mail::list_drafts(&account_id).await {
+                                                    drafts.set(rows);
+                                                }
+                                                uploading_draft_attachment.set(false);
+                                                reset_compose_attachment_input();
+                                            });
+                                        }
+                                    };
                                     rsx! {
                                         div { class: "flex min-h-0 flex-1 flex-col",
                                             div { class: "border-b border-base-300 px-4 py-3",
@@ -1265,6 +1367,13 @@ pub fn MailPage() -> Element {
                                                     div {
                                                         span { class: "label-text", "Message" }
                                                         div { class: "mt-1 overflow-hidden rounded border border-base-300 bg-base-100",
+                                                            input {
+                                                                id: MAIL_COMPOSE_ATTACHMENT_INPUT_ID,
+                                                                class: "hidden",
+                                                                r#type: "file",
+                                                                multiple: true,
+                                                                onchange: on_attachment_pick,
+                                                            }
                                                             div { class: "flex flex-wrap items-center gap-1 border-b border-base-300 bg-base-200/50 px-2 py-1.5",
                                                                 button {
                                                                     class: "btn btn-ghost btn-xs h-8 min-h-8 w-8 p-0",
@@ -1322,10 +1431,74 @@ pub fn MailPage() -> Element {
                                                                     onclick: move |_| run_mail_editor_command("redo"),
                                                                     "Redo"
                                                                 }
+                                                                div { class: "mx-1 h-5 w-px bg-base-300" }
+                                                                button {
+                                                                    class: "btn btn-ghost btn-xs h-8 min-h-8 w-8 p-0",
+                                                                    title: "Attach files",
+                                                                    disabled: sending_message() || saving_draft() || uploading_draft_attachment(),
+                                                                    onclick: move |_| click_compose_attachment_input(),
+                                                                    if uploading_draft_attachment() {
+                                                                        span { class: "loading loading-spinner loading-xs" }
+                                                                    } else {
+                                                                        IconPaperclip { class: "h-4 w-4".to_string() }
+                                                                    }
+                                                                }
                                                             }
                                                             div {
                                                                 id: MAIL_COMPOSE_EDITOR_ID,
                                                                 class: "uc-mail-editor-shell bg-base-100",
+                                                            }
+                                                        }
+                                                    }
+                                                    if !compose_attachments().is_empty() {
+                                                        div { class: "rounded border border-base-300 bg-base-200/30 p-2",
+                                                            div { class: "mb-1 text-xs font-semibold uppercase text-base-content/50", "Attachments" }
+                                                            div { class: "grid gap-1",
+                                                                for attachment in compose_attachments() {
+                                                                    {
+                                                                        let attachment_id = attachment.id.clone();
+                                                                        let draft_id = attachment.draft_id.clone();
+                                                                        let filename = attachment.filename.clone();
+                                                                        let meta = mail_draft_attachment_meta(&attachment);
+                                                                        rsx! {
+                                                                            div {
+                                                                                key: "{attachment_id}",
+                                                                                class: "flex items-center gap-2 rounded bg-base-100 px-2 py-1.5 text-sm",
+                                                                                IconPaperclip { class: "h-4 w-4 shrink-0 text-base-content/50".to_string() }
+                                                                                div { class: "min-w-0 flex-1",
+                                                                                    div { class: "truncate font-medium", "{filename}" }
+                                                                                    div { class: "truncate text-xs text-base-content/50", "{meta}" }
+                                                                                }
+                                                                                button {
+                                                                                    class: "btn btn-ghost btn-xs h-7 min-h-7 w-7 p-0",
+                                                                                    title: "Remove attachment",
+                                                                                    disabled: sending_message() || uploading_draft_attachment(),
+                                                                                    onclick: move |_| {
+                                                                                        let draft_id = draft_id.clone();
+                                                                                        let attachment_id = attachment_id.clone();
+                                                                                        spawn(async move {
+                                                                                            uploading_draft_attachment.set(true);
+                                                                                            error.set(None);
+                                                                                            match use_mail::delete_draft_attachment(&draft_id, &attachment_id).await {
+                                                                                                Ok(()) => {
+                                                                                                    compose_attachments.set(
+                                                                                                        compose_attachments()
+                                                                                                            .into_iter()
+                                                                                                            .filter(|attachment| attachment.id != attachment_id)
+                                                                                                            .collect(),
+                                                                                                    );
+                                                                                                }
+                                                                                                Err(e) => error.set(Some(e)),
+                                                                                            }
+                                                                                            uploading_draft_attachment.set(false);
+                                                                                        });
+                                                                                    },
+                                                                                    IconX { class: "h-4 w-4".to_string() }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -1336,7 +1509,7 @@ pub fn MailPage() -> Element {
                                                 if can_discard {
                                                     button {
                                                         class: "btn btn-ghost text-error",
-                                                        disabled: sending_message() || saving_draft(),
+                                                        disabled: sending_message() || saving_draft() || uploading_draft_attachment(),
                                                         onclick: move |_| {
                                                             let draft_id = compose_draft_id();
                                                             spawn(async move {
@@ -1359,6 +1532,7 @@ pub fn MailPage() -> Element {
                                                                 }
                                                                 compose_draft_id.set(String::new());
                                                                 compose_body_html.set(String::new());
+                                                                compose_attachments.set(Vec::new());
                                                                 show_compose.set(false);
                                                             });
                                                         },
@@ -1367,7 +1541,7 @@ pub fn MailPage() -> Element {
                                                 }
                                                 button {
                                                     class: "btn",
-                                                    disabled: sending_message() || saving_draft(),
+                                                    disabled: sending_message() || saving_draft() || uploading_draft_attachment(),
                                                     onclick: {
                                                         let account_id = account_id.clone();
                                                         move |_| {
@@ -1408,6 +1582,7 @@ pub fn MailPage() -> Element {
                                                                 } {
                                                                     Ok(saved) => {
                                                                         compose_draft_id.set(saved.id.clone());
+                                                                        compose_attachments.set(saved.attachments.clone());
                                                                         drafts.set(upsert_draft(drafts(), saved));
                                                                         notice.set(Some("Draft saved".to_string()));
                                                                     }
@@ -1424,7 +1599,7 @@ pub fn MailPage() -> Element {
                                                 }
                                                 button {
                                                     class: "btn btn-primary gap-2",
-                                                    disabled: sending_message() || saving_draft(),
+                                                    disabled: sending_message() || saving_draft() || uploading_draft_attachment(),
                                                     onclick: {
                                                         let account_id = account_id.clone();
                                                         move |_| {
@@ -1439,6 +1614,10 @@ pub fn MailPage() -> Element {
                                                             let body_html = compose_body_html();
                                                             let in_reply_to = compose_in_reply_to();
                                                             let references = compose_references();
+                                                            let attachment_ids = compose_attachments()
+                                                                .into_iter()
+                                                                .map(|attachment| attachment.id)
+                                                                .collect();
                                                             spawn(async move {
                                                                 sending_message.set(true);
                                                                 error.set(None);
@@ -1458,6 +1637,7 @@ pub fn MailPage() -> Element {
                                                                     body_html: nonempty_string(body_html),
                                                                     in_reply_to: nonempty_string(in_reply_to),
                                                                     references,
+                                                                    attachment_ids,
                                                                 };
                                                                 match use_mail::send_message(&account_id, &req).await {
                                                                     Ok(sent) => {
@@ -1475,6 +1655,7 @@ pub fn MailPage() -> Element {
                                                                         }
                                                                         compose_draft_id.set(String::new());
                                                                         compose_body_html.set(String::new());
+                                                                        compose_attachments.set(Vec::new());
                                                                         show_compose.set(false);
                                                                     }
                                                                     Err(e) => error.set(Some(e)),
@@ -1556,6 +1737,7 @@ pub fn MailPage() -> Element {
                                                                 row.message.message_id.clone().unwrap_or_default(),
                                                             );
                                                             compose_references.set(reply_references(&row.message));
+                                                            compose_attachments.set(Vec::new());
                                                             bump_compose_editor_key(&mut compose_editor_key);
                                                             show_compose.set(true);
                                                         }
@@ -1585,6 +1767,7 @@ pub fn MailPage() -> Element {
                                                                 row.message.message_id.clone().unwrap_or_default(),
                                                             );
                                                             compose_references.set(reply_references(&row.message));
+                                                            compose_attachments.set(Vec::new());
                                                             bump_compose_editor_key(&mut compose_editor_key);
                                                             show_compose.set(true);
                                                         }
@@ -1610,6 +1793,7 @@ pub fn MailPage() -> Element {
                                                             compose_body_html.set(forward_body_html(&row));
                                                             compose_in_reply_to.set(String::new());
                                                             compose_references.set(Vec::new());
+                                                            compose_attachments.set(Vec::new());
                                                             bump_compose_editor_key(&mut compose_editor_key);
                                                             show_compose.set(true);
                                                         }
@@ -2898,6 +3082,26 @@ fn run_mail_editor_command(action: &str) {
     ));
 }
 
+fn click_compose_attachment_input() {
+    if let Some(input) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id(MAIL_COMPOSE_ATTACHMENT_INPUT_ID))
+        .and_then(|e| e.dyn_into::<HtmlInputElement>().ok())
+    {
+        input.click();
+    }
+}
+
+fn reset_compose_attachment_input() {
+    if let Some(input) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id(MAIL_COMPOSE_ATTACHMENT_INPUT_ID))
+        .and_then(|e| e.dyn_into::<HtmlInputElement>().ok())
+    {
+        input.set_value("");
+    }
+}
+
 fn bump_compose_editor_key(compose_editor_key: &mut Signal<u64>) {
     let next = compose_editor_key.peek().saturating_add(1);
     compose_editor_key.set(next);
@@ -3250,6 +3454,16 @@ fn mail_attachment_meta(attachment: &MailAttachmentResponse) -> String {
     } else {
         parts.join(" | ")
     }
+}
+
+fn mail_draft_attachment_meta(attachment: &MailDraftAttachmentResponse) -> String {
+    let mut parts = vec![uncloud_common::validation::format_bytes(
+        attachment.size_bytes as i64,
+    )];
+    if !attachment.content_type.trim().is_empty() {
+        parts.push(attachment.content_type.clone());
+    }
+    parts.join(" | ")
 }
 
 fn message_sender(message: &MailMessageSummaryResponse) -> String {

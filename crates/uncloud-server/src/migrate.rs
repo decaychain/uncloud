@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use chrono::Utc;
 use futures::TryStreamExt;
-use mongodb::Database;
 use mongodb::bson::{self, doc, oid::ObjectId};
+use mongodb::Database;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use tokio::sync::Notify;
@@ -32,7 +32,8 @@ use tokio::task::JoinHandle;
 use crate::config::Config;
 use crate::db;
 use crate::models::{
-    File, FileVersion, Folder, MailAccount, MailAttachment, MailMessage, MigrationLock, Storage,
+    File, FileVersion, Folder, MailAccount, MailAttachment, MailDraftAttachment, MailMessage,
+    MigrationLock, Storage,
 };
 use crate::services::StorageService;
 use crate::storage::StorageBackend;
@@ -60,6 +61,7 @@ struct MailBlobPath {
 enum MailBlobKind {
     Message,
     Attachment,
+    DraftAttachment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -435,6 +437,7 @@ async fn run_mail_blob_migration(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let messages = db.collection::<MailMessage>("mail_messages");
     let attachments = db.collection::<MailAttachment>("mail_attachments");
+    let draft_attachments = db.collection::<MailDraftAttachment>("mail_draft_attachments");
     let total_blobs: usize = candidates
         .iter()
         .map(|candidate| candidate.blobs.len())
@@ -470,6 +473,14 @@ async fn run_mail_blob_migration(
             }
             MailBlobKind::Attachment => {
                 attachments
+                    .update_one(
+                        doc! { "_id": candidate.id, "storage_id": from_id },
+                        doc! { "$set": { "storage_id": to_id } },
+                    )
+                    .await?
+            }
+            MailBlobKind::DraftAttachment => {
+                draft_attachments
                     .update_one(
                         doc! { "_id": candidate.id, "storage_id": from_id },
                         doc! { "$set": { "storage_id": to_id } },
@@ -527,10 +538,20 @@ async fn run_mail_blob_migration(
         )
         .await?
         .modified_count;
-    if metadata_only_messages > 0 || metadata_only_attachments > 0 {
+    let metadata_only_draft_attachments = draft_attachments
+        .update_many(
+            doc! { "storage_id": from_id },
+            doc! { "$set": { "storage_id": to_id } },
+        )
+        .await?
+        .modified_count;
+    if metadata_only_messages > 0
+        || metadata_only_attachments > 0
+        || metadata_only_draft_attachments > 0
+    {
         println!(
-            "Mail cache: re-pointed {} message row(s) and {} attachment row(s) without cached blobs.",
-            metadata_only_messages, metadata_only_attachments
+            "Mail cache: re-pointed {} message row(s), {} attachment row(s), and {} draft attachment row(s) without cached blobs.",
+            metadata_only_messages, metadata_only_attachments, metadata_only_draft_attachments
         );
     }
     Ok(())
@@ -818,6 +839,26 @@ async fn enumerate_mail_blob_candidates(
             out.push(MailBlobCandidate {
                 id: attachment.id,
                 kind: MailBlobKind::Attachment,
+                blobs,
+            });
+        }
+    }
+
+    let mut draft_attachments = db
+        .collection::<MailDraftAttachment>("mail_draft_attachments")
+        .find(doc! { "storage_id": from_id })
+        .await?;
+    while let Some(attachment) = draft_attachments.try_next().await? {
+        let mut blobs = Vec::new();
+        push_optional_blob(
+            &mut blobs,
+            Some(attachment.storage_path),
+            Some(attachment.size_bytes),
+        );
+        if !blobs.is_empty() {
+            out.push(MailBlobCandidate {
+                id: attachment.id,
+                kind: MailBlobKind::DraftAttachment,
                 blobs,
             });
         }
@@ -1191,6 +1232,14 @@ async fn add_mail_blob_keep_set(
         .await?;
     while let Some(attachment) = attachments.try_next().await? {
         insert_optional_path(keep_blobs, attachment.storage_path);
+    }
+
+    let mut draft_attachments = db
+        .collection::<MailDraftAttachment>("mail_draft_attachments")
+        .find(doc! { "storage_id": storage_id })
+        .await?;
+    while let Some(attachment) = draft_attachments.try_next().await? {
+        insert_optional_path(keep_blobs, Some(attachment.storage_path));
     }
 
     Ok(())

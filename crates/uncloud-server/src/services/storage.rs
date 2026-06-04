@@ -211,7 +211,11 @@ async fn count_mail_storage_references(db: &Database, storage_id: ObjectId) -> R
         .collection::<mongodb::bson::Document>("mail_attachments")
         .count_documents(doc! { "storage_id": storage_id })
         .await?;
-    Ok(accounts + messages + attachments)
+    let draft_attachments = db
+        .collection::<mongodb::bson::Document>("mail_draft_attachments")
+        .count_documents(doc! { "storage_id": storage_id })
+        .await?;
+    Ok(accounts + messages + attachments + draft_attachments)
 }
 
 impl From<ConfiguredStorageBackend> for StorageBackendConfig {

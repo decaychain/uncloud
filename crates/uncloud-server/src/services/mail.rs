@@ -20,11 +20,11 @@ use lettre::transport::smtp::{
     response::Response,
 };
 use lettre::{
-    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
     message::{
-        Mailbox, MultiPart,
-        header::{HeaderName, HeaderValue},
+        header::{ContentType, HeaderName, HeaderValue},
+        Attachment, Mailbox, MultiPart, SinglePart,
     },
+    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
 use mail_parser::{MessageParser, MimeHeaders, PartType};
 use mongodb::bson::oid::ObjectId;
@@ -954,17 +954,42 @@ fn build_smtp_message(message: RemoteOutgoingMessage) -> Result<Message> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
-    match body_html {
-        Some(body_html) => builder
-            .multipart(MultiPart::alternative_plain_html(
-                message.body_text,
-                body_html,
-            ))
-            .map_err(|e| AppError::BadRequest(format!("mail message could not be built: {e}"))),
-        None => builder
-            .body(message.body_text)
-            .map_err(|e| AppError::BadRequest(format!("mail message could not be built: {e}"))),
+    let attachments = message.attachments;
+    if attachments.is_empty() {
+        return match body_html {
+            Some(body_html) => builder
+                .multipart(MultiPart::alternative_plain_html(
+                    message.body_text,
+                    body_html,
+                ))
+                .map_err(|e| AppError::BadRequest(format!("mail message could not be built: {e}"))),
+            None => builder
+                .body(message.body_text)
+                .map_err(|e| AppError::BadRequest(format!("mail message could not be built: {e}"))),
+        };
     }
+
+    let mut mixed = match body_html {
+        Some(body_html) => MultiPart::mixed().multipart(MultiPart::alternative_plain_html(
+            message.body_text,
+            body_html,
+        )),
+        None => MultiPart::mixed().singlepart(SinglePart::plain(message.body_text)),
+    };
+    for attachment in attachments {
+        mixed = mixed.singlepart(Attachment::new(attachment.filename).body(
+            attachment.data,
+            outgoing_attachment_content_type(&attachment.content_type),
+        ));
+    }
+    builder
+        .multipart(mixed)
+        .map_err(|e| AppError::BadRequest(format!("mail message could not be built: {e}")))
+}
+
+fn outgoing_attachment_content_type(value: &str) -> ContentType {
+    ContentType::parse(value)
+        .unwrap_or_else(|_| ContentType::parse("application/octet-stream").unwrap())
 }
 
 fn clean_message_header_value(value: Option<&str>) -> Result<Option<String>> {
@@ -1096,6 +1121,14 @@ pub struct RemoteOutgoingMessage {
     pub body_html: Option<String>,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
+    pub attachments: Vec<RemoteOutgoingAttachment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteOutgoingAttachment {
+    pub filename: String,
+    pub content_type: String,
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1459,7 +1492,11 @@ fn body_params_has_key(params: &BodyParams<'_>, key: &str) -> bool {
 
 fn decode_bytes(bytes: &[u8]) -> Option<String> {
     let value = String::from_utf8_lossy(bytes).trim().to_string();
-    if value.is_empty() { None } else { Some(value) }
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn parse_envelope_date(bytes: &[u8]) -> Option<DateTime<Utc>> {
@@ -1610,12 +1647,12 @@ fn normalize_plain_text(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MailService, RemoteMailAddress, RemoteMessageFlag, RemoteOutgoingMessage, UidSyncDirection,
-        UidSyncPlan, bodystructure_has_attachment, build_smtp_message, display_name,
-        flag_store_query, latest_cached_refresh_plan, mail_move_unsupported_message,
-        mailbox_from_address, map_imap_command_error, map_imap_login_error, next_uid_sync_plan,
-        parent_path, parse_message_body, quoted_imap_search_string, sync_completed,
-        sync_fetch_plans, updated_uid_cursors,
+        bodystructure_has_attachment, build_smtp_message, display_name, flag_store_query,
+        latest_cached_refresh_plan, mail_move_unsupported_message, mailbox_from_address,
+        map_imap_command_error, map_imap_login_error, next_uid_sync_plan, parent_path,
+        parse_message_body, quoted_imap_search_string, sync_completed, sync_fetch_plans,
+        updated_uid_cursors, MailService, RemoteMailAddress, RemoteMessageFlag,
+        RemoteOutgoingAttachment, RemoteOutgoingMessage, UidSyncDirection, UidSyncPlan,
     };
     use crate::error::AppError;
     use async_imap::error::Error as ImapError;
@@ -1814,6 +1851,7 @@ mod tests {
             body_html: None,
             in_reply_to: None,
             references: Vec::new(),
+            attachments: Vec::new(),
         })
         .unwrap_err();
 
@@ -1843,6 +1881,7 @@ mod tests {
             body_html: None,
             in_reply_to: None,
             references: Vec::new(),
+            attachments: Vec::new(),
         })
         .unwrap();
         let formatted = String::from_utf8(message.formatted()).unwrap();
@@ -1874,6 +1913,7 @@ mod tests {
                 "<root@example.com>".to_string(),
                 "<original@example.com>".to_string(),
             ],
+            attachments: Vec::new(),
         })
         .unwrap();
         let formatted = String::from_utf8(message.formatted()).unwrap();
@@ -1902,6 +1942,7 @@ mod tests {
             body_html: Some("<p><strong>HTML body</strong></p>".to_string()),
             in_reply_to: None,
             references: Vec::new(),
+            attachments: Vec::new(),
         })
         .unwrap();
         let formatted = String::from_utf8(message.formatted()).unwrap();
@@ -1911,6 +1952,42 @@ mod tests {
         assert!(formatted.contains("Content-Type: text/html; charset=utf-8"));
         assert!(formatted.contains("Plain body"));
         assert!(formatted.contains("<strong>HTML body</strong>"));
+    }
+
+    #[test]
+    fn build_smtp_message_uses_multipart_mixed_for_attachments() {
+        let message = build_smtp_message(RemoteOutgoingMessage {
+            message_id: "<test@uncloud.local>".to_string(),
+            from: RemoteMailAddress {
+                name: Some("Sender".to_string()),
+                address: "sender@example.com".to_string(),
+            },
+            reply_to: None,
+            to: vec![RemoteMailAddress {
+                name: None,
+                address: "visible@example.com".to_string(),
+            }],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Test".to_string(),
+            body_text: "Plain body".to_string(),
+            body_html: Some("<p><strong>HTML body</strong></p>".to_string()),
+            in_reply_to: None,
+            references: Vec::new(),
+            attachments: vec![RemoteOutgoingAttachment {
+                filename: "note.txt".to_string(),
+                content_type: "text/plain".to_string(),
+                data: b"attached text".to_vec(),
+            }],
+        })
+        .unwrap();
+        let formatted = String::from_utf8(message.formatted()).unwrap();
+
+        assert!(formatted.contains("Content-Type: multipart/mixed;"));
+        assert!(formatted.contains("Content-Type: multipart/alternative;"));
+        assert!(formatted.contains("Content-Type: text/plain;"));
+        assert!(formatted.contains("Content-Disposition: attachment; filename=\"note.txt\""));
+        assert!(formatted.contains("attached text"));
     }
 
     #[test]

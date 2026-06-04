@@ -5,11 +5,11 @@ use std::{
 };
 
 use axum::{
-    Json,
     body::Body,
-    extract::{Path, Query, State},
-    http::{StatusCode, header},
+    extract::{Multipart, Path, Query, State},
+    http::{header, StatusCode},
     response::Response,
+    Json,
 };
 use bson::doc;
 use chrono::{DateTime, Utc};
@@ -22,32 +22,35 @@ use tokio_util::io::ReaderStream;
 use uncloud_common::{
     CreateMailAccountRequest, CreateMailIdentityRequest, MailAccountResponse,
     MailAccountSyncResponse, MailAddressDto, MailAttachmentResponse, MailComposeMode,
-    MailConnectionTestResponse, MailCredentialStatusResponse, MailDraftResponse,
-    MailFolderResponse, MailFolderRole, MailFolderRoleSource, MailFolderSyncResponse,
-    MailIdentityResponse, MailMessageDetailResponse, MailMessageListResponse,
-    MailMessageMutationAction, MailMessageMutationRequest, MailMessageMutationResponse,
-    MailMessageSummaryResponse, MailPasswordAuthRequest, MailSentCopyStatus, MailServerSettings,
-    MailSyncRequest, SaveMailAttachmentRequest, SaveMailAttachmentResponse, SendMailMessageRequest,
-    SendMailMessageResponse, SetMailCredentialRequest, UpdateMailAccountRequest,
-    UpdateMailFolderRequest, UpdateMailIdentityRequest, UpsertMailDraftRequest,
+    MailConnectionTestResponse, MailCredentialStatusResponse, MailDraftAttachmentResponse,
+    MailDraftResponse, MailFolderResponse, MailFolderRole, MailFolderRoleSource,
+    MailFolderSyncResponse, MailIdentityResponse, MailMessageDetailResponse,
+    MailMessageListResponse, MailMessageMutationAction, MailMessageMutationRequest,
+    MailMessageMutationResponse, MailMessageSummaryResponse, MailPasswordAuthRequest,
+    MailSentCopyStatus, MailServerSettings, MailSyncRequest, SaveMailAttachmentRequest,
+    SaveMailAttachmentResponse, SendMailMessageRequest, SendMailMessageResponse,
+    SetMailCredentialRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
+    UpdateMailIdentityRequest, UpsertMailDraftRequest,
 };
 
-use crate::AppState;
 use crate::error::{AppError, Result};
 use crate::middleware::{AuthUser, RequestMeta};
 use crate::models::{
-    File, Folder, MailAccount, MailAddress, MailAttachment, MailDraft, MailFolder, MailIdentity,
-    MailMessage, MailServerConfig, User,
+    File, Folder, MailAccount, MailAddress, MailAttachment, MailDraft, MailDraftAttachment,
+    MailFolder, MailIdentity, MailMessage, MailServerConfig, User,
 };
-use crate::routes::apps::{EVENT_FILE_CREATED, deliver_webhooks};
+use crate::routes::apps::{deliver_webhooks, EVENT_FILE_CREATED};
 use crate::routes::files::{check_name_conflict, file_to_response, resolve_storage_path};
-use crate::services::SecretCipher;
 use crate::services::mail::{
     RemoteMailAddress, RemoteMailbox, RemoteMessageBody, RemoteMessageFlag, RemoteMessageSummary,
-    RemoteOutgoingMessage, RemoteUidRange,
+    RemoteOutgoingAttachment, RemoteOutgoingMessage, RemoteUidRange,
 };
-use crate::services::mail_blob::{StoredMailBody, read_cached_message_body, store_message_body};
+use crate::services::mail_blob::{
+    read_cached_message_body, store_draft_attachment, store_message_body, StoredMailBody,
+};
 use crate::services::sharing::check_folder_access;
+use crate::services::SecretCipher;
+use crate::AppState;
 
 const ACCOUNTS: &str = "mail_accounts";
 const IDENTITIES: &str = "mail_identities";
@@ -55,6 +58,7 @@ const FOLDERS: &str = "mail_folders";
 const MESSAGES: &str = "mail_messages";
 const ATTACHMENTS: &str = "mail_attachments";
 const DRAFTS: &str = "mail_drafts";
+const DRAFT_ATTACHMENTS: &str = "mail_draft_attachments";
 const DEFAULT_SYNC_LIMIT_PER_FOLDER: u32 = 250;
 const MAX_SYNC_LIMIT_PER_FOLDER: u32 = 1_000;
 const DEFAULT_MESSAGE_LIST_LIMIT: i64 = 100;
@@ -64,6 +68,7 @@ const SENT_COPY_DETECT_DELAY: Duration = Duration::from_millis(750);
 const MIN_ACCOUNT_SYNC_INTERVAL_SECS: u64 = 60;
 const MAX_ACCOUNT_SYNC_INTERVAL_SECS: u64 = 7 * 24 * 60 * 60;
 const BACKGROUND_SYNC_TICK_SECS: u64 = 60;
+const MAX_DRAFT_ATTACHMENT_TOTAL_BYTES: u64 = 20 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub struct MailMessageListQuery {
@@ -173,7 +178,10 @@ fn identity_to_response(identity: &MailIdentity) -> MailIdentityResponse {
     }
 }
 
-fn draft_to_response(draft: &MailDraft) -> MailDraftResponse {
+fn draft_to_response(
+    draft: &MailDraft,
+    attachments: Vec<MailDraftAttachment>,
+) -> MailDraftResponse {
     MailDraftResponse {
         id: draft.id.to_hex(),
         account_id: draft.account_id.to_hex(),
@@ -188,6 +196,10 @@ fn draft_to_response(draft: &MailDraft) -> MailDraftResponse {
         body_html: draft.body_html.clone(),
         in_reply_to: draft.in_reply_to.clone(),
         references: draft.references.clone(),
+        attachments: attachments
+            .iter()
+            .map(draft_attachment_to_response)
+            .collect(),
         created_at: draft.created_at.to_rfc3339(),
         updated_at: draft.updated_at.to_rfc3339(),
     }
@@ -268,6 +280,17 @@ fn attachment_to_response(attachment: &MailAttachment) -> MailAttachmentResponse
     }
 }
 
+fn draft_attachment_to_response(attachment: &MailDraftAttachment) -> MailDraftAttachmentResponse {
+    MailDraftAttachmentResponse {
+        id: attachment.id.to_hex(),
+        draft_id: attachment.draft_id.to_hex(),
+        filename: attachment.filename.clone(),
+        content_type: attachment.content_type.clone(),
+        size_bytes: attachment.size_bytes,
+        created_at: attachment.created_at.to_rfc3339(),
+    }
+}
+
 fn message_to_response(message: &MailMessage) -> MailMessageSummaryResponse {
     MailMessageSummaryResponse {
         id: message.id.to_hex(),
@@ -336,6 +359,33 @@ async fn find_draft(
         .find_one(doc! { "_id": id, "owner_id": owner_id, "account_id": account_id })
         .await?
         .ok_or_else(|| AppError::NotFound("Mail draft".into()))
+}
+
+async fn find_draft_by_id(state: &AppState, owner_id: ObjectId, id: ObjectId) -> Result<MailDraft> {
+    state
+        .db
+        .collection::<MailDraft>(DRAFTS)
+        .find_one(doc! { "_id": id, "owner_id": owner_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Mail draft".into()))
+}
+
+async fn list_draft_attachments(
+    state: &AppState,
+    owner_id: ObjectId,
+    draft_id: ObjectId,
+) -> Result<Vec<MailDraftAttachment>> {
+    let mut cursor = state
+        .db
+        .collection::<MailDraftAttachment>(DRAFT_ATTACHMENTS)
+        .find(doc! { "owner_id": owner_id, "draft_id": draft_id })
+        .sort(doc! { "created_at": 1 })
+        .await?;
+    let mut out = Vec::new();
+    while let Some(attachment) = cursor.try_next().await? {
+        out.push(attachment);
+    }
+    Ok(out)
 }
 
 async fn list_message_attachments(
@@ -576,6 +626,41 @@ fn sanitize_optional_mail_html(value: Option<String>) -> Option<String> {
     } else {
         Some(cleaned)
     }
+}
+
+fn clean_attachment_filename(value: Option<&str>) -> Result<String> {
+    let filename = value
+        .and_then(|value| {
+            value
+                .rsplit(['/', '\\'])
+                .next()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or("attachment.bin");
+    if filename.len() > 255
+        || filename.contains('\0')
+        || filename.contains('\r')
+        || filename.contains('\n')
+    {
+        return Err(AppError::BadRequest(
+            "attachment filename must be 255 characters or fewer and cannot contain control characters".into(),
+        ));
+    }
+    Ok(filename.to_string())
+}
+
+fn clean_attachment_content_type(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 127
+                && !value.contains('\r')
+                && !value.contains('\n')
+        })
+        .unwrap_or("application/octet-stream")
+        .to_string()
 }
 
 fn recipient_count(req: &SendMailMessageRequest) -> usize {
@@ -1257,6 +1342,9 @@ async fn delete_sent_draft(
     let Some(draft_id) = draft_id else {
         return;
     };
+    if let Err(err) = delete_draft_attachments(state, owner_id, draft_id).await {
+        tracing::warn!(%draft_id, "failed to delete sent mail draft attachments: {err}");
+    }
     if let Err(err) = state
         .db
         .collection::<MailDraft>(DRAFTS)
@@ -1265,6 +1353,109 @@ async fn delete_sent_draft(
     {
         tracing::warn!(%draft_id, "failed to delete sent mail draft: {err}");
     }
+}
+
+async fn delete_draft_attachments(
+    state: &AppState,
+    owner_id: ObjectId,
+    draft_id: ObjectId,
+) -> Result<()> {
+    let attachments = list_draft_attachments(state, owner_id, draft_id).await?;
+    for attachment in &attachments {
+        match state.storage.get_backend(attachment.storage_id).await {
+            Ok(backend) => {
+                if let Err(err) = backend.delete(&attachment.storage_path).await {
+                    tracing::warn!(
+                        "failed to delete mail draft attachment blob {} at {}: {err}",
+                        attachment.id,
+                        attachment.storage_path
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "failed to open storage for mail draft attachment blob {}: {err}",
+                    attachment.id
+                );
+            }
+        }
+    }
+    state
+        .db
+        .collection::<MailDraftAttachment>(DRAFT_ATTACHMENTS)
+        .delete_many(doc! { "owner_id": owner_id, "draft_id": draft_id })
+        .await?;
+    Ok(())
+}
+
+async fn load_outgoing_attachments(
+    state: &AppState,
+    owner_id: ObjectId,
+    account_id: ObjectId,
+    draft_id: Option<ObjectId>,
+    attachment_ids: &[String],
+) -> Result<Vec<RemoteOutgoingAttachment>> {
+    if draft_id.is_none() && !attachment_ids.is_empty() {
+        return Err(AppError::BadRequest(
+            "mail attachments require a saved draft".into(),
+        ));
+    }
+    let Some(draft_id) = draft_id else {
+        return Ok(Vec::new());
+    };
+
+    let attachments = if attachment_ids.is_empty() {
+        list_draft_attachments(state, owner_id, draft_id).await?
+    } else {
+        let ids = attachment_ids
+            .iter()
+            .map(|id| parse_oid(id, "mail draft attachment id"))
+            .collect::<Result<Vec<_>>>()?;
+        let mut cursor = state
+            .db
+            .collection::<MailDraftAttachment>(DRAFT_ATTACHMENTS)
+            .find(doc! {
+                "_id": { "$in": ids },
+                "owner_id": owner_id,
+                "account_id": account_id,
+                "draft_id": draft_id,
+            })
+            .sort(doc! { "created_at": 1 })
+            .await?;
+        let mut out = Vec::new();
+        while let Some(attachment) = cursor.try_next().await? {
+            out.push(attachment);
+        }
+        if out.len() != attachment_ids.len() {
+            return Err(AppError::BadRequest(
+                "one or more mail draft attachments were not found".into(),
+            ));
+        }
+        out
+    };
+
+    let total_size: u64 = attachments
+        .iter()
+        .map(|attachment| attachment.size_bytes)
+        .sum();
+    if total_size > MAX_DRAFT_ATTACHMENT_TOTAL_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "mail attachments are limited to {} MiB total",
+            MAX_DRAFT_ATTACHMENT_TOTAL_BYTES / 1024 / 1024
+        )));
+    }
+
+    let mut out = Vec::new();
+    for attachment in attachments {
+        let backend = state.storage.get_backend(attachment.storage_id).await?;
+        let data = backend.read_all(&attachment.storage_path).await?;
+        out.push(RemoteOutgoingAttachment {
+            filename: attachment.filename,
+            content_type: attachment.content_type,
+            data,
+        });
+    }
+    Ok(out)
 }
 
 pub async fn send_account_message(
@@ -1293,6 +1484,9 @@ pub async fn send_account_message(
     let password = resolve_mail_password(&state, &account, None)?;
     let identity =
         resolve_send_identity(&state, user.id, &account, req.identity_id.as_deref()).await?;
+    let outgoing_attachments =
+        load_outgoing_attachments(&state, user.id, account.id, draft_id, &req.attachment_ids)
+            .await?;
     let message_id = message_id_for_sender(&identity.email_address);
     let accepted_recipients = recipient_count(&req);
     let remote = RemoteOutgoingMessage {
@@ -1313,6 +1507,7 @@ pub async fn send_account_message(
         body_html: sanitize_optional_mail_html(req.body_html),
         in_reply_to: clean_optional_message_header_value(req.in_reply_to, "In-Reply-To")?,
         references: clean_message_header_values(req.references, "References")?,
+        attachments: outgoing_attachments,
     };
     let sent = state
         .mail
@@ -1520,7 +1715,8 @@ pub async fn list_drafts(
         .await?;
     let mut out = Vec::new();
     while let Some(draft) = cursor.try_next().await? {
-        out.push(draft_to_response(&draft));
+        let attachments = list_draft_attachments(&state, user.id, draft.id).await?;
+        out.push(draft_to_response(&draft, attachments));
     }
     Ok(Json(out))
 }
@@ -1559,7 +1755,10 @@ pub async fn create_draft(
         .collection::<MailDraft>(DRAFTS)
         .insert_one(&draft)
         .await?;
-    Ok((StatusCode::CREATED, Json(draft_to_response(&draft))))
+    Ok((
+        StatusCode::CREATED,
+        Json(draft_to_response(&draft, Vec::new())),
+    ))
 }
 
 pub async fn update_draft(
@@ -1624,7 +1823,8 @@ pub async fn update_draft(
         .find_one(doc! { "_id": id, "owner_id": user.id })
         .await?
         .ok_or_else(|| AppError::NotFound("Mail draft".into()))?;
-    Ok(Json(draft_to_response(&updated)))
+    let attachments = list_draft_attachments(&state, user.id, updated.id).await?;
+    Ok(Json(draft_to_response(&updated, attachments)))
 }
 
 pub async fn delete_draft(
@@ -1634,6 +1834,8 @@ pub async fn delete_draft(
 ) -> Result<StatusCode> {
     require_mail(&state)?;
     let id = parse_oid(&id, "mail draft id")?;
+    let _ = find_draft_by_id(&state, user.id, id).await?;
+    delete_draft_attachments(&state, user.id, id).await?;
     let result = state
         .db
         .collection::<MailDraft>(DRAFTS)
@@ -1642,6 +1844,158 @@ pub async fn delete_draft(
     if result.deleted_count == 0 {
         return Err(AppError::NotFound("Mail draft".into()));
     }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn upload_draft_attachment(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<MailDraftAttachmentResponse>)> {
+    require_mail(&state)?;
+    let draft_id = parse_oid(&id, "mail draft id")?;
+    let draft = find_draft_by_id(&state, user.id, draft_id).await?;
+    let account = find_account(&state, user.id, draft.account_id).await?;
+
+    let mut upload: Option<(String, String, Vec<u8>)> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Multipart error: {e}")))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let filename = clean_attachment_filename(field.file_name())?;
+        let content_type = clean_attachment_content_type(field.content_type());
+        let data = field
+            .bytes()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("Multipart error: {e}")))?
+            .to_vec();
+        upload = Some((filename, content_type, data));
+        break;
+    }
+
+    let Some((filename, content_type, data)) = upload else {
+        return Err(AppError::BadRequest("attachment file is required".into()));
+    };
+    let size = data.len() as u64;
+    let existing_total: u64 = list_draft_attachments(&state, user.id, draft.id)
+        .await?
+        .iter()
+        .map(|attachment| attachment.size_bytes)
+        .sum();
+    if existing_total.saturating_add(size) > MAX_DRAFT_ATTACHMENT_TOTAL_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "mail attachments are limited to {} MiB total",
+            MAX_DRAFT_ATTACHMENT_TOTAL_BYTES / 1024 / 1024
+        )));
+    }
+
+    let now = Utc::now();
+    let attachment_id = ObjectId::new();
+    let stored = store_draft_attachment(
+        &state.storage,
+        &user.username,
+        &account,
+        draft.id,
+        attachment_id,
+        &filename,
+        &data,
+    )
+    .await?;
+    let attachment = MailDraftAttachment {
+        id: attachment_id,
+        owner_id: user.id,
+        account_id: draft.account_id,
+        draft_id: draft.id,
+        filename,
+        content_type,
+        size_bytes: stored.size_bytes,
+        storage_id: stored.storage_id,
+        storage_path: stored.storage_path,
+        created_at: now,
+    };
+
+    if let Err(err) = state
+        .db
+        .collection::<MailDraftAttachment>(DRAFT_ATTACHMENTS)
+        .insert_one(&attachment)
+        .await
+    {
+        if let Ok(backend) = state.storage.get_backend(attachment.storage_id).await {
+            let _ = backend.delete(&attachment.storage_path).await;
+        }
+        return Err(err.into());
+    }
+    state
+        .db
+        .collection::<MailDraft>(DRAFTS)
+        .update_one(
+            doc! { "_id": draft.id, "owner_id": user.id },
+            doc! { "$set": { "updated_at": bson::DateTime::from_chrono(now) } },
+        )
+        .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(draft_attachment_to_response(&attachment)),
+    ))
+}
+
+pub async fn delete_draft_attachment(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((draft_id, attachment_id)): Path<(String, String)>,
+) -> Result<StatusCode> {
+    require_mail(&state)?;
+    let draft_id = parse_oid(&draft_id, "mail draft id")?;
+    let attachment_id = parse_oid(&attachment_id, "mail draft attachment id")?;
+    let draft = find_draft_by_id(&state, user.id, draft_id).await?;
+    let attachment = state
+        .db
+        .collection::<MailDraftAttachment>(DRAFT_ATTACHMENTS)
+        .find_one(doc! {
+            "_id": attachment_id,
+            "owner_id": user.id,
+            "account_id": draft.account_id,
+            "draft_id": draft.id,
+        })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Mail draft attachment".into()))?;
+
+    match state.storage.get_backend(attachment.storage_id).await {
+        Ok(backend) => {
+            if let Err(err) = backend.delete(&attachment.storage_path).await {
+                tracing::warn!(
+                    "failed to delete mail draft attachment blob {} at {}: {err}",
+                    attachment.id,
+                    attachment.storage_path
+                );
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                "failed to open storage for mail draft attachment blob {}: {err}",
+                attachment.id
+            );
+        }
+    }
+    state
+        .db
+        .collection::<MailDraftAttachment>(DRAFT_ATTACHMENTS)
+        .delete_one(doc! { "_id": attachment.id, "owner_id": user.id })
+        .await?;
+    state
+        .db
+        .collection::<MailDraft>(DRAFTS)
+        .update_one(
+            doc! { "_id": draft.id, "owner_id": user.id },
+            doc! { "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) } },
+        )
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3243,6 +3597,7 @@ mod tests {
             body_html: None,
             in_reply_to: None,
             references: Vec::new(),
+            attachment_ids: Vec::new(),
         };
 
         assert!(validate_send_request(&req).is_err());

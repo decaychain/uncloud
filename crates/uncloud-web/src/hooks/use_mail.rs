@@ -3,14 +3,15 @@
 use uncloud_common::FileResponse;
 use uncloud_common::{
     CreateMailAccountRequest, MailAccountResponse, MailAccountSyncResponse,
-    MailConnectionTestResponse, MailCredentialStatusResponse, MailDraftResponse,
-    MailFolderResponse, MailFolderSyncResponse, MailIdentityResponse, MailMessageDetailResponse,
-    MailMessageListResponse, MailMessageMutationAction, MailMessageMutationRequest,
-    MailMessageMutationResponse, MailPasswordAuthRequest, MailSyncRequest,
-    SaveMailAttachmentRequest, SaveMailAttachmentResponse, SendMailMessageRequest,
+    MailConnectionTestResponse, MailCredentialStatusResponse, MailDraftAttachmentResponse,
+    MailDraftResponse, MailFolderResponse, MailFolderSyncResponse, MailIdentityResponse,
+    MailMessageDetailResponse, MailMessageListResponse, MailMessageMutationAction,
+    MailMessageMutationRequest, MailMessageMutationResponse, MailPasswordAuthRequest,
+    MailSyncRequest, SaveMailAttachmentRequest, SaveMailAttachmentResponse, SendMailMessageRequest,
     SendMailMessageResponse, SetMailCredentialRequest, UpdateMailAccountRequest,
     UpdateMailFolderRequest, UpsertMailDraftRequest,
 };
+use wasm_bindgen::{JsCast, JsValue};
 
 use super::api;
 
@@ -181,6 +182,44 @@ pub async fn delete_draft(draft_id: &str) -> Result<(), String> {
         .send()
         .await
         .map_err(|e| e.to_string())?;
+    if r.ok() || r.status() == 204 {
+        Ok(())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn upload_draft_attachment(
+    draft_id: &str,
+    file: &web_sys::File,
+) -> Result<MailDraftAttachmentResponse, String> {
+    let form = web_sys::FormData::new().map_err(|_| "Failed to create FormData".to_string())?;
+    let blob = file.unchecked_ref::<web_sys::Blob>();
+    form.append_with_blob_and_filename("file", blob, &file.name())
+        .map_err(|_| "Failed to append file to form".to_string())?;
+
+    let r = api::post(&format!("/mail/drafts/{draft_id}/attachments"))
+        .body(JsValue::from(form))
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() || r.status() == 201 {
+        r.json::<MailDraftAttachmentResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn delete_draft_attachment(draft_id: &str, attachment_id: &str) -> Result<(), String> {
+    let r = api::delete(&format!(
+        "/mail/drafts/{draft_id}/attachments/{attachment_id}"
+    ))
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
     if r.ok() || r.status() == 204 {
         Ok(())
     } else {

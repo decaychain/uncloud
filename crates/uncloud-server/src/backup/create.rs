@@ -26,15 +26,15 @@ use mongodb::Database;
 use rustic_core::{BackupOptions, SnapshotOptions};
 use tokio::sync::Notify;
 
-use crate::backup::CreateArgs;
 use crate::backup::config::{BackupConfig, BackupTarget};
 use crate::backup::dump;
 use crate::backup::lock;
 use crate::backup::repo;
 use crate::backup::source::{FileEntry, StaticEntry, UncloudSource};
+use crate::backup::CreateArgs;
 use crate::config::Config;
 use crate::db;
-use crate::models::{File, FileVersion, MailAttachment, MailMessage};
+use crate::models::{File, FileVersion, MailAttachment, MailDraftAttachment, MailMessage};
 use crate::services::StorageService;
 
 /// Top-level entry point. Resolves which targets to back up to and runs
@@ -534,6 +534,33 @@ async fn collect_mail_blob_entries(
                 attachment.id.to_hex()
             )),
             size,
+        });
+    }
+
+    let mut draft_attachments = db
+        .collection::<MailDraftAttachment>("mail_draft_attachments")
+        .find(doc! {})
+        .await?;
+    while let Some(attachment) = draft_attachments.try_next().await? {
+        let backend = match storage.get_backend(attachment.storage_id).await {
+            Ok(backend) => backend,
+            Err(e) => {
+                tracing::warn!(
+                    "skipping mail draft attachment {} cached blob: backend {} unavailable: {e}",
+                    attachment.id,
+                    attachment.storage_id
+                );
+                continue;
+            }
+        };
+        out.push(FileEntry {
+            backend,
+            storage_path: attachment.storage_path,
+            snapshot_path: PathBuf::from(format!(
+                "/uncloud/mail-draft-attachments/{}/blob",
+                attachment.id.to_hex()
+            )),
+            size: attachment.size_bytes,
         });
     }
     Ok(out)

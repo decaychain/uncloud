@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bson::oid::ObjectId;
-use bson::{Bson, Document, doc};
+use bson::{doc, Bson, Document};
 use futures::stream::TryStreamExt;
 use mongodb::Database;
 use rustic_core::repofile::SnapshotFile;
@@ -39,7 +39,7 @@ use crate::backup::repo;
 use crate::backup::{ConflictPolicy, RestoreArgs};
 use crate::config::Config;
 use crate::db;
-use crate::models::{MailAttachment, MailMessage, Storage};
+use crate::models::{MailAttachment, MailDraftAttachment, MailMessage, Storage};
 use crate::services::StorageService;
 use crate::storage::StorageBackend;
 
@@ -85,6 +85,7 @@ const RESTORE_COLLECTIONS: &[&str] = &[
     "mail_messages",
     "mail_attachments",
     "mail_drafts",
+    "mail_draft_attachments",
 ];
 
 pub async fn run(args: RestoreArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -357,7 +358,7 @@ async fn restore_collection(
             remap_storage_id(&mut doc, remap);
         } else if matches!(name, "mail_accounts" | "mail_messages") {
             remap_mail_storage_id(&mut doc, remap);
-        } else if name == "mail_attachments" {
+        } else if matches!(name, "mail_attachments" | "mail_draft_attachments") {
             remap_storage_id(&mut doc, remap);
         } else if name == "sftp_host_keys" {
             // Drop any host-key row whose source storage isn't represented
@@ -600,6 +601,34 @@ async fn restore_all_blobs(
                 attachment.id.to_hex()
             )),
             attachment.storage_path.as_deref(),
+        )
+        .await?;
+    }
+
+    let mut draft_attachments = db
+        .collection::<MailDraftAttachment>("mail_draft_attachments")
+        .find(doc! {})
+        .await?;
+    while let Some(attachment) = draft_attachments.try_next().await? {
+        let backend = match storage_service.get_backend(attachment.storage_id).await {
+            Ok(backend) => backend,
+            Err(e) => {
+                tracing::warn!(
+                    "skipping cached mail draft attachment {}: {e}",
+                    attachment.id
+                );
+                continue;
+            }
+        };
+        count += restore_optional_mail_blob(
+            repo,
+            snap_tree,
+            &backend,
+            PathBuf::from(format!(
+                "/uncloud/mail-draft-attachments/{}/blob",
+                attachment.id.to_hex()
+            )),
+            Some(&attachment.storage_path),
         )
         .await?;
     }

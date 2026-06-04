@@ -1,6 +1,6 @@
 use crate::config::{DatabaseConfig, SyncAuditConfig};
 use crate::error::{AppError, Result};
-use mongodb::{Client, Database, IndexModel, options::IndexOptions};
+use mongodb::{options::IndexOptions, Client, Database, IndexModel};
 
 pub async fn connect(config: &DatabaseConfig) -> Result<Database> {
     let client = Client::with_uri_str(&config.uri)
@@ -873,6 +873,22 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         .create_index(
             IndexModel::builder()
                 .keys(mongodb::bson::doc! { "owner_id": 1, "source_message_id": 1 })
+                .build(),
+        )
+        .await?;
+
+    let mail_draft_attachments = db.collection::<mongodb::bson::Document>("mail_draft_attachments");
+    mail_draft_attachments
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "draft_id": 1, "created_at": 1 })
+                .build(),
+        )
+        .await?;
+    mail_draft_attachments
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "storage_id": 1 })
                 .build(),
         )
         .await?;
