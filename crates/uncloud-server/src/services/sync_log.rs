@@ -1,15 +1,15 @@
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use mongodb::{
-    Database,
     bson::{doc, oid::ObjectId},
+    Database,
 };
 use uncloud_common::SyncEventSource;
 
 use crate::error::Result;
 use crate::models::SyncEvent;
-use crate::services::EventService;
 use crate::services::events::Event;
+use crate::services::EventService;
 
 #[derive(Clone)]
 pub struct SyncLog {
@@ -55,7 +55,12 @@ impl SyncLog {
         match coll.insert_one(&event).await {
             Ok(_) => {
                 self.events
-                    .emit(owner_id, Event::SyncEventAppended { event: (&event).into() })
+                    .emit(
+                        owner_id,
+                        Event::SyncEventAppended {
+                            event: (&event).into(),
+                        },
+                    )
                     .await;
             }
             Err(e) => {
@@ -95,10 +100,7 @@ impl SyncLog {
         }
         if let Some(ref c) = filter.client {
             let pattern = escape_regex(c);
-            query.insert(
-                "client_id",
-                doc! { "$regex": pattern, "$options": "i" },
-            );
+            query.insert("client_id", doc! { "$regex": pattern, "$options": "i" });
         }
         if let Some(ref sources) = filter.source {
             if !sources.is_empty() {

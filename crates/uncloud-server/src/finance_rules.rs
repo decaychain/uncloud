@@ -18,8 +18,14 @@ pub struct CompiledRule {
 
 #[derive(Debug)]
 enum CompiledKind {
-    Substring { needle: String, case_insensitive: bool },
-    StartsWith { needle: String, case_insensitive: bool },
+    Substring {
+        needle: String,
+        case_insensitive: bool,
+    },
+    StartsWith {
+        needle: String,
+        case_insensitive: bool,
+    },
     Wildcard(Regex),
     Regex(Regex),
 }
@@ -34,8 +40,11 @@ impl RuleEngine {
     /// matching is deterministic. Regex rules that fail to compile are
     /// skipped (errors are reported separately via `compile_errors`).
     pub fn build(rules: &[FinanceRule]) -> (Self, Vec<CompileError>) {
-        let mut indexed: Vec<(usize, &FinanceRule)> =
-            rules.iter().enumerate().filter(|(_, r)| r.enabled).collect();
+        let mut indexed: Vec<(usize, &FinanceRule)> = rules
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.enabled)
+            .collect();
         indexed.sort_by(|a, b| {
             a.1.priority
                 .cmp(&b.1.priority)
@@ -120,15 +129,18 @@ fn compile_rule(rule: &FinanceRule) -> Result<CompiledKind, String> {
             needle: pattern.to_string(),
             case_insensitive: rule.case_insensitive,
         }),
-        RulePatternKind::Wildcard => compile_wildcard(pattern, rule.case_insensitive)
-            .map(CompiledKind::Wildcard),
+        RulePatternKind::Wildcard => {
+            compile_wildcard(pattern, rule.case_insensitive).map(CompiledKind::Wildcard)
+        }
         RulePatternKind::Regex => {
             let wrapped = if rule.case_insensitive {
                 format!("(?i){pattern}")
             } else {
                 pattern.to_string()
             };
-            Regex::new(&wrapped).map(CompiledKind::Regex).map_err(|e| e.to_string())
+            Regex::new(&wrapped)
+                .map(CompiledKind::Regex)
+                .map_err(|e| e.to_string())
         }
     }
 }
@@ -237,12 +249,7 @@ mod tests {
 
     #[test]
     fn regex_with_anchor() {
-        let rules = vec![rule(
-            "salary",
-            r"^SALARY\b",
-            RulePatternKind::Regex,
-            0,
-        )];
+        let rules = vec![rule("salary", r"^SALARY\b", RulePatternKind::Regex, 0)];
         let (engine, errs) = RuleEngine::build(&rules);
         assert!(errs.is_empty());
         assert_eq!(engine.match_first("salary october"), Some(0));

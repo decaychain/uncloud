@@ -592,7 +592,7 @@ impl Default for Config {
             },
             uploads: UploadConfig {
                 max_chunk_size: 10 * 1024 * 1024, // 10MB
-                max_file_size: 0,                  // unlimited
+                max_file_size: 0,                 // unlimited
                 temp_cleanup_hours: 24,
             },
             processing: ProcessingConfig::default(),

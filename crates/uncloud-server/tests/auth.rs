@@ -28,7 +28,8 @@ async fn register_success() {
 #[tokio::test]
 async fn register_duplicate_username() {
     let app = TestApp::new().await;
-    app.register("alice", "alice@example.com", "password123!").await;
+    app.register("alice", "alice@example.com", "password123!")
+        .await;
 
     let res = app
         .server
@@ -46,7 +47,8 @@ async fn register_duplicate_username() {
 #[tokio::test]
 async fn register_duplicate_email() {
     let app = TestApp::new().await;
-    app.register("alice", "alice@example.com", "password123!").await;
+    app.register("alice", "alice@example.com", "password123!")
+        .await;
 
     let res = app
         .server
@@ -114,7 +116,8 @@ async fn register_invalid_email() {
 #[tokio::test]
 async fn login_success() {
     let app = TestApp::new().await;
-    app.register("alice", "alice@example.com", "password123!").await;
+    app.register("alice", "alice@example.com", "password123!")
+        .await;
 
     let res = app
         .server
@@ -133,7 +136,8 @@ async fn login_success() {
 #[tokio::test]
 async fn login_wrong_password() {
     let app = TestApp::new().await;
-    app.register("alice", "alice@example.com", "password123!").await;
+    app.register("alice", "alice@example.com", "password123!")
+        .await;
 
     let res = app
         .server
@@ -225,7 +229,8 @@ async fn revoke_session_invalidates_access() {
     // Use register only (not register_and_login) to ensure a single session.
     // register_and_login creates two sessions (register auto-login + explicit login),
     // and revoking sessions[0] might not match the cookie jar's active session.
-    app.register("alice", "alice@example.com", "password123!").await;
+    app.register("alice", "alice@example.com", "password123!")
+        .await;
 
     // Get the session ID — should be exactly one
     let sessions_res = app.server.get("/api/auth/sessions").await;

@@ -14,9 +14,7 @@ use crate::models::{File, Folder};
 use crate::routes::files::build_folder_path;
 use crate::AppState;
 
-const BACKUP_PATH_SEGMENTS: &[&str] = &[
-    "backup", "backups", "archive", "archives", "old", "trash",
-];
+const BACKUP_PATH_SEGMENTS: &[&str] = &["backup", "backups", "archive", "archives", "old", "trash"];
 
 pub async fn get_duplicate_report(
     State(state): State<Arc<AppState>>,
@@ -56,8 +54,7 @@ async fn compute_report(state: &AppState, owner_id: ObjectId) -> Result<Duplicat
     }
 
     let folders = load_user_folders(state, owner_id).await?;
-    let folder_by_id: HashMap<ObjectId, &Folder> =
-        folders.iter().map(|f| (f.id, f)).collect();
+    let folder_by_id: HashMap<ObjectId, &Folder> = folders.iter().map(|f| (f.id, f)).collect();
 
     // folder_id (Some) -> set of checksums it contributes to dup_sets.
     // Files at the user's root (parent_id == None) are not folder-classifiable —
@@ -109,10 +106,7 @@ async fn compute_report(state: &AppState, owner_id: ObjectId) -> Result<Duplicat
 
     let total_duplicate_files: u32 = mirror_cards.iter().map(|c| c.file_count).sum::<u32>()
         + subset_cards.iter().map(|c| c.file_count).sum::<u32>()
-        + stray_sets
-            .iter()
-            .map(|s| s.files.len() as u32)
-            .sum::<u32>();
+        + stray_sets.iter().map(|s| s.files.len() as u32).sum::<u32>();
     let total_wasted_bytes: i64 = mirror_cards.iter().map(|c| c.total_bytes).sum::<i64>()
         + subset_cards.iter().map(|c| c.total_bytes).sum::<i64>()
         + stray_sets
@@ -186,10 +180,7 @@ async fn aggregate_dup_sets(state: &AppState, owner_id: ObjectId) -> Result<Vec<
             // thumbnails). The aggregation can't easily filter by suffix on
             // owner_id key, so we filter here.
             let storage_path = f.get_str("storage_path").unwrap_or("");
-            if storage_path
-                .split('/')
-                .any(|seg| seg == ".uncloud")
-            {
+            if storage_path.split('/').any(|seg| seg == ".uncloud") {
                 continue;
             }
 
@@ -353,11 +344,8 @@ fn build_mirror_card(
     let mut total_bytes: i64 = 0;
     let mut explained_files_in_cluster: u32 = 0;
     for set in dup_sets {
-        let folders_in_set: HashSet<ObjectId> = set
-            .files
-            .iter()
-            .filter_map(|f| f.parent_id)
-            .collect();
+        let folders_in_set: HashSet<ObjectId> =
+            set.files.iter().filter_map(|f| f.parent_id).collect();
         if folders_in_set.is_empty() || !folders_in_set.is_subset(&member_set) {
             continue;
         }
@@ -427,11 +415,8 @@ fn build_subset_card(
     let mut total_bytes: i64 = 0;
 
     for set in dup_sets {
-        let folders_in_set: HashSet<ObjectId> = set
-            .files
-            .iter()
-            .filter_map(|f| f.parent_id)
-            .collect();
+        let folders_in_set: HashSet<ObjectId> =
+            set.files.iter().filter_map(|f| f.parent_id).collect();
         if folders_in_set.is_empty() || !folders_in_set.is_subset(&pair_set) {
             continue;
         }
@@ -511,11 +496,8 @@ fn build_stray_sets(
 
     let mut out = Vec::new();
     for (idx, set) in dup_sets.iter().enumerate() {
-        let folders_in_set: HashSet<ObjectId> = set
-            .files
-            .iter()
-            .filter_map(|f| f.parent_id)
-            .collect();
+        let folders_in_set: HashSet<ObjectId> =
+            set.files.iter().filter_map(|f| f.parent_id).collect();
 
         // Files at user root (parent_id None) bypass folder explanation —
         // always stray.
@@ -528,9 +510,7 @@ fn build_stray_sets(
                 .any(|m| folders_in_set.is_subset(m));
         let explained_by_subset = !has_root_files
             && !folders_in_set.is_empty()
-            && subset_pair_sets
-                .iter()
-                .any(|p| folders_in_set.is_subset(p));
+            && subset_pair_sets.iter().any(|p| folders_in_set.is_subset(p));
 
         if explained_by_mirror || explained_by_subset {
             continue;
@@ -589,10 +569,11 @@ fn pick_keeper(members: &[ObjectId], folder_by_id: &HashMap<ObjectId, &Folder>) 
                 .map(|f| build_folder_path(f.id, folder_by_id))
                 .unwrap_or_default();
             let lower = path.to_lowercase();
-            let backup_score = if BACKUP_PATH_SEGMENTS
-                .iter()
-                .any(|seg| lower.split(|c: char| c == ' ' || c == '/').any(|s| s == *seg))
-            {
+            let backup_score = if BACKUP_PATH_SEGMENTS.iter().any(|seg| {
+                lower
+                    .split(|c: char| c == ' ' || c == '/')
+                    .any(|s| s == *seg)
+            }) {
                 1usize
             } else {
                 0usize

@@ -50,7 +50,16 @@ async fn suggest_name(
 ) -> Result<String> {
     let mut candidate = bump_name(name);
     loop {
-        if !check_name_conflict(db, owner_id, parent_id, &candidate, exclude_file, exclude_folder).await? {
+        if !check_name_conflict(
+            db,
+            owner_id,
+            parent_id,
+            &candidate,
+            exclude_file,
+            exclude_folder,
+        )
+        .await?
+        {
             return Ok(candidate);
         }
         candidate = bump_name(&candidate);
@@ -156,15 +165,17 @@ pub async fn restore_from_trash(
     Path(id): Path<String>,
     body: Option<Json<RestoreRequest>>,
 ) -> Result<axum::response::Response> {
-    let item_id = ObjectId::parse_str(&id)
-        .map_err(|_| AppError::BadRequest("Invalid ID".to_string()))?;
+    let item_id =
+        ObjectId::parse_str(&id).map_err(|_| AppError::BadRequest("Invalid ID".to_string()))?;
 
     let rename_to = body.and_then(|b| b.0.name).filter(|n| !n.is_empty());
 
     // Try file first
     let files_coll = state.db.collection::<File>("files");
     if let Some(file) = files_coll
-        .find_one(doc! { "_id": item_id, "owner_id": user.id, "deleted_at": { "$ne": bson::Bson::Null } })
+        .find_one(
+            doc! { "_id": item_id, "owner_id": user.id, "deleted_at": { "$ne": bson::Bson::Null } },
+        )
         .await?
     {
         let restore_name = rename_to.as_deref().unwrap_or(&file.name);
@@ -185,16 +196,34 @@ pub async fn restore_from_trash(
         )
         .await?
         {
-            let suggested = suggest_name(&state.db, user.id, file.parent_id, restore_name, Some(file.id), None).await?;
+            let suggested = suggest_name(
+                &state.db,
+                user.id,
+                file.parent_id,
+                restore_name,
+                Some(file.id),
+                None,
+            )
+            .await?;
             return Ok((
                 StatusCode::CONFLICT,
                 Json(json!({ "error": "CONFLICT", "suggest": suggested })),
-            ).into_response());
+            )
+                .into_response());
         }
 
         // Compute new storage path if the name changed
         let new_storage_path = if rename_to.is_some() {
-            Some(resolve_storage_path(&state.db, user.id, &user.username, file.parent_id, restore_name).await?)
+            Some(
+                resolve_storage_path(
+                    &state.db,
+                    user.id,
+                    &user.username,
+                    file.parent_id,
+                    restore_name,
+                )
+                .await?,
+            )
         } else {
             None
         };
@@ -221,10 +250,7 @@ pub async fn restore_from_trash(
             update_doc.insert("storage_path", sp.as_str());
         }
         files_coll
-            .update_one(
-                doc! { "_id": item_id },
-                doc! { "$set": update_doc },
-            )
+            .update_one(doc! { "_id": item_id }, doc! { "$set": update_doc })
             .await?;
 
         // Re-enqueue processing (e.g. rebuild thumbnail)
@@ -250,7 +276,9 @@ pub async fn restore_from_trash(
     // Try folder
     let folders_coll = state.db.collection::<Folder>("folders");
     if let Some(folder) = folders_coll
-        .find_one(doc! { "_id": item_id, "owner_id": user.id, "deleted_at": { "$ne": bson::Bson::Null } })
+        .find_one(
+            doc! { "_id": item_id, "owner_id": user.id, "deleted_at": { "$ne": bson::Bson::Null } },
+        )
         .await?
     {
         let restore_name = rename_to.as_deref().unwrap_or(&folder.name);
@@ -271,11 +299,20 @@ pub async fn restore_from_trash(
         )
         .await?
         {
-            let suggested = suggest_name(&state.db, user.id, folder.parent_id, restore_name, None, Some(folder.id)).await?;
+            let suggested = suggest_name(
+                &state.db,
+                user.id,
+                folder.parent_id,
+                restore_name,
+                None,
+                Some(folder.id),
+            )
+            .await?;
             return Ok((
                 StatusCode::CONFLICT,
                 Json(json!({ "error": "CONFLICT", "suggest": suggested })),
-            ).into_response());
+            )
+                .into_response());
         }
 
         // Update folder name if renamed
@@ -299,13 +336,9 @@ pub async fn restore_from_trash(
             .find_one(doc! { "_id": item_id })
             .await?
             .unwrap_or_else(|| folder.clone());
-        let path = super::audit::resolve_folder_path(
-            &state.db,
-            user.id,
-            &user.username,
-            &restored_folder,
-        )
-        .await;
+        let path =
+            super::audit::resolve_folder_path(&state.db, user.id, &user.username, &restored_folder)
+                .await;
         state
             .sync_log
             .record(super::audit::folder_event(
@@ -436,13 +469,15 @@ pub async fn permanently_delete(
     meta: crate::middleware::RequestMeta,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    let item_id = ObjectId::parse_str(&id)
-        .map_err(|_| AppError::BadRequest("Invalid ID".to_string()))?;
+    let item_id =
+        ObjectId::parse_str(&id).map_err(|_| AppError::BadRequest("Invalid ID".to_string()))?;
 
     // Try file first
     let files_coll = state.db.collection::<File>("files");
     if let Some(file) = files_coll
-        .find_one(doc! { "_id": item_id, "owner_id": user.id, "deleted_at": { "$ne": bson::Bson::Null } })
+        .find_one(
+            doc! { "_id": item_id, "owner_id": user.id, "deleted_at": { "$ne": bson::Bson::Null } },
+        )
         .await?
     {
         // Delete blob from trash
@@ -454,22 +489,25 @@ pub async fn permanently_delete(
 
         // Delete all versions
         let versions_coll = state.db.collection::<FileVersion>("file_versions");
-        let mut ver_cursor = versions_coll
-            .find(doc! { "file_id": item_id })
-            .await?;
+        let mut ver_cursor = versions_coll.find(doc! { "file_id": item_id }).await?;
         while ver_cursor.advance().await? {
             let ver: FileVersion = ver_cursor.deserialize_current()?;
             if let Ok(backend) = state.storage.get_backend(file.storage_id).await {
                 let _ = backend.delete(&ver.storage_path).await;
             }
         }
-        versions_coll.delete_many(doc! { "file_id": item_id }).await?;
+        versions_coll
+            .delete_many(doc! { "file_id": item_id })
+            .await?;
 
         // Delete DB record
         files_coll.delete_one(doc! { "_id": item_id }).await?;
 
         // Update user's used bytes (quota released on permanent purge)
-        state.auth.update_user_bytes(user.id, -file.size_bytes).await?;
+        state
+            .auth
+            .update_user_bytes(user.id, -file.size_bytes)
+            .await?;
 
         state
             .sync_log
@@ -489,7 +527,9 @@ pub async fn permanently_delete(
     // Try folder
     let folders_coll = state.db.collection::<Folder>("folders");
     if let Some(folder) = folders_coll
-        .find_one(doc! { "_id": item_id, "owner_id": user.id, "deleted_at": { "$ne": bson::Bson::Null } })
+        .find_one(
+            doc! { "_id": item_id, "owner_id": user.id, "deleted_at": { "$ne": bson::Bson::Null } },
+        )
         .await?
     {
         // Resolve the path BEFORE the recursive purge so parent chain lookups
@@ -548,20 +588,23 @@ async fn permanently_delete_folder_recursive(
         file_ids.push(file.id);
 
         // Delete versions
-        let mut ver_cursor = versions_coll
-            .find(doc! { "file_id": file.id })
-            .await?;
+        let mut ver_cursor = versions_coll.find(doc! { "file_id": file.id }).await?;
         while ver_cursor.advance().await? {
             let ver: FileVersion = ver_cursor.deserialize_current()?;
             if let Ok(backend) = state.storage.get_backend(file.storage_id).await {
                 let _ = backend.delete(&ver.storage_path).await;
             }
         }
-        versions_coll.delete_many(doc! { "file_id": file.id }).await?;
+        versions_coll
+            .delete_many(doc! { "file_id": file.id })
+            .await?;
     }
 
     if !file_ids.is_empty() {
-        let file_bson_ids: Vec<bson::Bson> = file_ids.iter().map(|id| bson::Bson::ObjectId(*id)).collect();
+        let file_bson_ids: Vec<bson::Bson> = file_ids
+            .iter()
+            .map(|id| bson::Bson::ObjectId(*id))
+            .collect();
         files_coll
             .delete_many(doc! { "_id": { "$in": &file_bson_ids } })
             .await?;
@@ -618,14 +661,14 @@ pub async fn empty_trash(
         file_ids.push(file.id);
 
         // Delete versions
-        versions_coll.delete_many(doc! { "file_id": file.id }).await?;
+        versions_coll
+            .delete_many(doc! { "file_id": file.id })
+            .await?;
     }
 
     // Count trashed folders before deletion so the summary event is accurate.
     let trashed_folders = folders_coll
-        .count_documents(
-            doc! { "owner_id": user.id, "deleted_at": { "$ne": bson::Bson::Null } },
-        )
+        .count_documents(doc! { "owner_id": user.id, "deleted_at": { "$ne": bson::Bson::Null } })
         .await
         .unwrap_or(0);
 

@@ -37,7 +37,11 @@ const LS_AUTH_TOKEN: &str = "uncloud_auth_token";
 /// In browser mode, it is never called; `api_base()` returns `""` (relative URLs).
 pub fn seed_api_base(url: String) {
     let url = url.trim_end_matches('/').to_string();
-    let url = if url.starts_with("http") { url } else { String::new() };
+    let url = if url.starts_with("http") {
+        url
+    } else {
+        String::new()
+    };
     let _ = LocalStorage::set(LS_API_BASE, &url);
     CACHED_BASE.with(|cell| *cell.borrow_mut() = Some(url));
 }
@@ -167,70 +171,43 @@ fn apply_auth(req: RequestBuilder) -> RequestBuilder {
 }
 
 pub fn get(path: &str) -> RequestBuilder {
-    apply_auth(
-        Request::get(&api_url(path))
-            .credentials(RequestCredentials::Include),
-    )
+    apply_auth(Request::get(&api_url(path)).credentials(RequestCredentials::Include))
 }
 
 pub fn post(path: &str) -> RequestBuilder {
-    apply_auth(
-        Request::post(&api_url(path))
-            .credentials(RequestCredentials::Include),
-    )
+    apply_auth(Request::post(&api_url(path)).credentials(RequestCredentials::Include))
 }
 
 pub fn put(path: &str) -> RequestBuilder {
-    apply_auth(
-        Request::put(&api_url(path))
-            .credentials(RequestCredentials::Include),
-    )
+    apply_auth(Request::put(&api_url(path)).credentials(RequestCredentials::Include))
 }
 
 pub fn delete(path: &str) -> RequestBuilder {
-    apply_auth(
-        Request::delete(&api_url(path))
-            .credentials(RequestCredentials::Include),
-    )
+    apply_auth(Request::delete(&api_url(path)).credentials(RequestCredentials::Include))
 }
 
 pub fn patch(path: &str) -> RequestBuilder {
-    apply_auth(
-        Request::patch(&api_url(path))
-            .credentials(RequestCredentials::Include),
-    )
+    apply_auth(Request::patch(&api_url(path)).credentials(RequestCredentials::Include))
 }
 
 // v1 variants
 
 pub fn get_v1(path: &str) -> RequestBuilder {
-    apply_auth(
-        Request::get(&api_v1_url(path))
-            .credentials(RequestCredentials::Include),
-    )
+    apply_auth(Request::get(&api_v1_url(path)).credentials(RequestCredentials::Include))
 }
 
 #[allow(dead_code)]
 pub fn post_v1(path: &str) -> RequestBuilder {
-    apply_auth(
-        Request::post(&api_v1_url(path))
-            .credentials(RequestCredentials::Include),
-    )
+    apply_auth(Request::post(&api_v1_url(path)).credentials(RequestCredentials::Include))
 }
 
 pub fn put_v1(path: &str) -> RequestBuilder {
-    apply_auth(
-        Request::put(&api_v1_url(path))
-            .credentials(RequestCredentials::Include),
-    )
+    apply_auth(Request::put(&api_v1_url(path)).credentials(RequestCredentials::Include))
 }
 
 #[allow(dead_code)]
 pub fn delete_v1(path: &str) -> RequestBuilder {
-    apply_auth(
-        Request::delete(&api_v1_url(path))
-            .credentials(RequestCredentials::Include),
-    )
+    apply_auth(Request::delete(&api_v1_url(path)).credentials(RequestCredentials::Include))
 }
 
 // ---------------------------------------------------------------------------
@@ -239,39 +216,24 @@ pub fn delete_v1(path: &str) -> RequestBuilder {
 // ---------------------------------------------------------------------------
 
 pub fn get_raw(url: &str) -> RequestBuilder {
-    apply_auth(
-        Request::get(url)
-            .credentials(RequestCredentials::Include),
-    )
+    apply_auth(Request::get(url).credentials(RequestCredentials::Include))
 }
 
 pub fn post_raw(url: &str) -> RequestBuilder {
-    apply_auth(
-        Request::post(url)
-            .credentials(RequestCredentials::Include),
-    )
+    apply_auth(Request::post(url).credentials(RequestCredentials::Include))
 }
 
 #[allow(dead_code)]
 pub fn put_raw(url: &str) -> RequestBuilder {
-    apply_auth(
-        Request::put(url)
-            .credentials(RequestCredentials::Include),
-    )
+    apply_auth(Request::put(url).credentials(RequestCredentials::Include))
 }
 
 #[allow(dead_code)]
 pub fn delete_raw(url: &str) -> RequestBuilder {
-    apply_auth(
-        Request::delete(url)
-            .credentials(RequestCredentials::Include),
-    )
+    apply_auth(Request::delete(url).credentials(RequestCredentials::Include))
 }
 
 #[allow(dead_code)]
 pub fn patch_raw(url: &str) -> RequestBuilder {
-    apply_auth(
-        Request::patch(url)
-            .credentials(RequestCredentials::Include),
-    )
+    apply_auth(Request::patch(url).credentials(RequestCredentials::Include))
 }

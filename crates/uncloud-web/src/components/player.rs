@@ -1,13 +1,13 @@
-use dioxus::prelude::*;
-use wasm_bindgen::closure::Closure;
-use wasm_bindgen::{JsCast, JsValue};
-use wasm_bindgen_futures::spawn_local;
 use crate::components::icons::{
     IconMusic, IconPause, IconPlay, IconRepeat, IconRepeat1, IconShuffle, IconSkipBack,
     IconSkipForward, IconVolume2, IconX,
 };
 use crate::hooks::{api, media_session, native_audio, use_files::download_url};
 use crate::state::{PlayerState, RepeatMode};
+use dioxus::prelude::*;
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen_futures::spawn_local;
 
 const AUDIO_ELEMENT_ID: &str = "uc-audio-player";
 
@@ -53,7 +53,9 @@ fn advance_to(
     native_mode: bool,
 ) {
     let s = player.peek().clone();
-    let Some(track) = s.queue.get(idx).cloned() else { return; };
+    let Some(track) = s.queue.get(idx).cloned() else {
+        return;
+    };
     if !native_mode {
         let next_src = download_url(&track.file.id);
         if let Some(a) = get_audio_element() {
@@ -87,7 +89,10 @@ fn media_session_metadata_from(state: &PlayerState) {
         .unwrap_or_else(|| "Unknown".into());
     let album = track.audio.album.clone().unwrap_or_default();
     let artwork = if track.audio.has_cover_art {
-        Some(api::authenticated_media_url(&format!("/files/{}/thumb", track.file.id)))
+        Some(api::authenticated_media_url(&format!(
+            "/files/{}/thumb",
+            track.file.id
+        )))
     } else {
         None
     };
@@ -209,25 +214,13 @@ pub fn Player() -> Element {
             last_native_index.set(start_index as i32);
             current_secs.set(0.0);
             duration.set(0.0);
-            last_src.set(
-                state
-                    .current_track()
-                    .map(|t| download_url(&t.file.id)),
-            );
+            last_src.set(state.current_track().map(|t| download_url(&t.file.id)));
             let items: Vec<native_audio::QueueItem> = state
                 .queue
                 .iter()
                 .map(|t| {
-                    let title = t
-                        .audio
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| t.file.name.clone());
-                    let artist = t
-                        .audio
-                        .artist
-                        .clone()
-                        .unwrap_or_else(|| "Unknown".into());
+                    let title = t.audio.title.clone().unwrap_or_else(|| t.file.name.clone());
+                    let artist = t.audio.artist.clone().unwrap_or_else(|| "Unknown".into());
                     let artwork_url = if t.audio.has_cover_art {
                         Some(api::authenticated_media_url(&format!(
                             "/files/{}/thumb",
@@ -261,11 +254,7 @@ pub fn Player() -> Element {
             last_native_index.set(start_index as i32);
             current_secs.set(0.0);
             duration.set(0.0);
-            last_src.set(
-                state
-                    .current_track()
-                    .map(|t| download_url(&t.file.id)),
-            );
+            last_src.set(state.current_track().map(|t| download_url(&t.file.id)));
             spawn_local(async move {
                 let _ = native_audio::seek_to_item(start_index).await;
                 if should_play {
@@ -429,17 +418,16 @@ pub fn Player() -> Element {
     let vol = volume();
     let cur_fmt = format_time(cur);
     let dur_fmt = format_time(dur);
-    let seek_val = if dur > 0.0 { ((cur / dur) * 1000.0) as i64 } else { 0 };
+    let seek_val = if dur > 0.0 {
+        ((cur / dur) * 1000.0) as i64
+    } else {
+        0
+    };
     let vol_val = (vol * 100.0) as i64;
 
     let title = track
         .as_ref()
-        .map(|t| {
-            t.audio
-                .title
-                .clone()
-                .unwrap_or_else(|| t.file.name.clone())
-        })
+        .map(|t| t.audio.title.clone().unwrap_or_else(|| t.file.name.clone()))
         .unwrap_or_default();
     let artist = track
         .as_ref()

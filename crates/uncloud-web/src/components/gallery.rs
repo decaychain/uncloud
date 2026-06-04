@@ -1,11 +1,11 @@
-use std::collections::HashMap;
-use dioxus::prelude::*;
-use uncloud_common::{AlbumResponse, FileResponse, ServerEvent};
 use crate::components::icons::{IconAlertTriangle, IconImage};
 use crate::components::lightbox::Lightbox;
 use crate::components::scroll_sentinel::ScrollSentinel;
 use crate::hooks::{api, use_files};
 use crate::router::Route;
+use dioxus::prelude::*;
+use std::collections::HashMap;
+use uncloud_common::{AlbumResponse, FileResponse, ServerEvent};
 
 // ── Date grouping ────────────────────────────────────────────────────────────
 
@@ -44,10 +44,18 @@ fn format_date_label(iso: &str) -> String {
     }
     let year = parts[0];
     let month = match parts[1] {
-        "01" => "January", "02" => "February", "03" => "March",
-        "04" => "April", "05" => "May", "06" => "June",
-        "07" => "July", "08" => "August", "09" => "September",
-        "10" => "October", "11" => "November", "12" => "December",
+        "01" => "January",
+        "02" => "February",
+        "03" => "March",
+        "04" => "April",
+        "05" => "May",
+        "06" => "June",
+        "07" => "July",
+        "08" => "August",
+        "09" => "September",
+        "10" => "October",
+        "11" => "November",
+        "12" => "December",
         _ => parts[1],
     };
     let day = parts[2].trim_start_matches('0');
@@ -57,7 +65,12 @@ fn format_date_label(iso: &str) -> String {
 // ── GalleryThumbnail ─────────────────────────────────────────────────────────
 
 #[component]
-fn GalleryThumbnail(id: String, name: String, thumb_ver: u32, on_click: EventHandler<()>) -> Element {
+fn GalleryThumbnail(
+    id: String,
+    name: String,
+    thumb_ver: u32,
+    on_click: EventHandler<()>,
+) -> Element {
     // Track which version last 404'd so a bumped `thumb_ver` (from an SSE
     // ProcessingCompleted event) triggers a retry automatically.
     let mut ver_when_failed: Signal<Option<u32>> = use_signal(|| None);
@@ -102,7 +115,11 @@ fn TimelineView() -> Element {
     use_effect(move || {
         if let Some(event) = sse_event() {
             match event {
-                ServerEvent::ProcessingCompleted { file_id, task_type, success } => {
+                ServerEvent::ProcessingCompleted {
+                    file_id,
+                    task_type,
+                    success,
+                } => {
                     if task_type == "thumbnail" && success {
                         *thumb_vers.write().entry(file_id).or_insert(0) += 1;
                     }
@@ -339,7 +356,12 @@ fn AlbumView(album: AlbumResponse, on_back: EventHandler<()>) -> Element {
 
     let sse_event = use_context::<Signal<Option<ServerEvent>>>();
     use_effect(move || {
-        if let Some(ServerEvent::ProcessingCompleted { file_id, task_type, success }) = sse_event() {
+        if let Some(ServerEvent::ProcessingCompleted {
+            file_id,
+            task_type,
+            success,
+        }) = sse_event()
+        {
             if task_type == "thumbnail" && success {
                 *thumb_vers.write().entry(file_id).or_insert(0) += 1;
             }

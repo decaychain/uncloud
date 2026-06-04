@@ -1,10 +1,10 @@
-use std::cell::RefCell;
-use std::rc::Rc;
 use dioxus::prelude::*;
 use dioxus_core::{current_scope_id, Runtime, RuntimeGuard};
+use std::cell::RefCell;
+use std::rc::Rc;
 use uncloud_common::ServerEvent;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
 use web_sys::{EventSource, MessageEvent};
 
 use super::api;
@@ -34,7 +34,9 @@ where
     // captured signals are always current.  This update is safe: render runs
     // synchronously and SSE callbacks are only dispatched between JS tasks.
     let handler: Rc<RefCell<Box<dyn FnMut(ServerEvent)>>> = use_hook(|| {
-        Rc::new(RefCell::new(Box::new(|_: ServerEvent| {}) as Box<dyn FnMut(ServerEvent)>))
+        Rc::new(RefCell::new(
+            Box::new(|_: ServerEvent| {}) as Box<dyn FnMut(ServerEvent)>
+        ))
     });
 
     *handler.borrow_mut() = Box::new(on_event);
@@ -50,8 +52,7 @@ where
     // The connection lives for the component's lifetime via use_hook — when
     // the component is unmounted, this Rc drops, which calls SseConnection::Drop
     // and closes the EventSource so no further callbacks fire.
-    let connection: Rc<RefCell<Option<SseConnection>>> =
-        use_hook(|| Rc::new(RefCell::new(None)));
+    let connection: Rc<RefCell<Option<SseConnection>>> = use_hook(|| Rc::new(RefCell::new(None)));
 
     // Establish the connection exactly once after mount.
     use_effect({
@@ -79,8 +80,12 @@ where
             let handler = handler.clone();
             let runtime = runtime.clone();
             let on_message = Closure::wrap(Box::new(move |evt: MessageEvent| {
-                let Some(data) = evt.data().as_string() else { return };
-                let Ok(event) = serde_json::from_str::<ServerEvent>(&data) else { return };
+                let Some(data) = evt.data().as_string() else {
+                    return;
+                };
+                let Ok(event) = serde_json::from_str::<ServerEvent>(&data) else {
+                    return;
+                };
                 // Provide the runtime + scope so Signal::set / read / write
                 // inside the user's handler don't blow up.
                 let _runtime_guard = RuntimeGuard::new(runtime.clone());

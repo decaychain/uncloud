@@ -5,12 +5,18 @@ use axum::{
 };
 use chrono::Utc;
 use futures::StreamExt;
-use mongodb::{Database, bson::{self, doc, oid::ObjectId}};
+use mongodb::{
+    bson::{self, doc, oid::ObjectId},
+    Database,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
-use uncloud_common::{EffectiveStorageResponse, EffectiveStrategyResponse, GalleryInclude, InheritableSetting, MusicInclude, SyncStrategy};
+use uncloud_common::{
+    EffectiveStorageResponse, EffectiveStrategyResponse, GalleryInclude, InheritableSetting,
+    MusicInclude, SyncStrategy,
+};
 
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
@@ -124,7 +130,8 @@ async fn folder_to_response_with_shared(
     // even when the caller is a share grantee (not the owner).
     let resolve_id = folder.owner_id;
     let (effective, _source) = resolve_setting(db, resolve_id, folder, |f| f.sync_strategy).await?;
-    let (effective_gallery, _) = resolve_setting(db, resolve_id, folder, |f| f.gallery_include).await?;
+    let (effective_gallery, _) =
+        resolve_setting(db, resolve_id, folder, |f| f.gallery_include).await?;
     let (effective_music, _) = resolve_setting(db, resolve_id, folder, |f| f.music_include).await?;
 
     // For the owner, count how many users this folder is shared with.
@@ -164,7 +171,11 @@ fn resolve_from_parent<T: InheritableSetting>(
     get: fn(&Folder) -> T,
 ) -> T {
     let v = get(folder);
-    if v.is_inherit() { parent_effective } else { v }
+    if v.is_inherit() {
+        parent_effective
+    } else {
+        v
+    }
 }
 
 /// Return share counts for the given folder ids in a single aggregation query.
@@ -233,7 +244,8 @@ pub async fn list_folders(
             parent.owner_id
         };
         let (sync_eff, _) = resolve_setting(&state.db, owner, &parent, |f| f.sync_strategy).await?;
-        let (gal_eff, _) = resolve_setting(&state.db, owner, &parent, |f| f.gallery_include).await?;
+        let (gal_eff, _) =
+            resolve_setting(&state.db, owner, &parent, |f| f.gallery_include).await?;
         let (mus_eff, _) = resolve_setting(&state.db, owner, &parent, |f| f.music_include).await?;
         (owner, Some((sync_eff, gal_eff, mus_eff)))
     } else {
@@ -241,14 +253,18 @@ pub async fn list_folders(
     };
 
     let (sync_from_parent, gallery_from_parent, music_from_parent) = parent_effective
-        .unwrap_or_else(|| (
-            SyncStrategy::root_default(),
-            GalleryInclude::root_default(),
-            MusicInclude::root_default(),
-        ));
+        .unwrap_or_else(|| {
+            (
+                SyncStrategy::root_default(),
+                GalleryInclude::root_default(),
+                MusicInclude::root_default(),
+            )
+        });
 
     let filter = match parent_id {
-        Some(pid) => doc! { "owner_id": effective_owner_id, "parent_id": pid, "deleted_at": bson::Bson::Null },
+        Some(pid) => {
+            doc! { "owner_id": effective_owner_id, "parent_id": pid, "deleted_at": bson::Bson::Null }
+        }
         None => doc! { "owner_id": user.id, "parent_id": null, "deleted_at": bson::Bson::Null },
     };
 
@@ -315,7 +331,9 @@ pub async fn list_folders(
             .await?
         {
             let owner_username = get_username(&state.db, shared_folder.owner_id).await?;
-            let display_name = share.mount_name.unwrap_or_else(|| shared_folder.name.clone());
+            let display_name = share
+                .mount_name
+                .unwrap_or_else(|| shared_folder.name.clone());
             let mut resp = folder_to_response_with_shared(
                 &state.db,
                 shared_folder.owner_id,
@@ -410,16 +428,15 @@ pub async fn create_folder(
 
     collection.insert_one(&folder).await?;
 
-    state.events.emit_folder_created(effective_owner_id, &folder).await;
+    state
+        .events
+        .emit_folder_created(effective_owner_id, &folder)
+        .await;
 
     let owner_username = super::audit::username_of(&state.db, effective_owner_id).await;
-    let path = super::audit::resolve_folder_path(
-        &state.db,
-        effective_owner_id,
-        &owner_username,
-        &folder,
-    )
-    .await;
+    let path =
+        super::audit::resolve_folder_path(&state.db, effective_owner_id, &owner_username, &folder)
+            .await;
     state
         .sync_log
         .record(super::audit::folder_event(
@@ -550,14 +567,17 @@ pub async fn update_folder(
             // Return the folder response (with shared_by info)
             let shared_by = Some(get_username(&state.db, folder.owner_id).await?);
             return Ok(Json(
-                folder_to_response_with_shared(&state.db, folder.owner_id, &folder, shared_by).await?,
+                folder_to_response_with_shared(&state.db, folder.owner_id, &folder, shared_by)
+                    .await?,
             ));
         }
         // If no direct share found, the user has inherited access — they can modify
         // the actual folder contents but not move/rename the shared root itself.
         // Only allow rename/settings changes within the shared tree (not move).
         if req.parent_id.is_some() {
-            return Err(AppError::Forbidden("Cannot move folders in a shared tree".into()));
+            return Err(AppError::Forbidden(
+                "Cannot move folders in a shared tree".into(),
+            ));
         }
     }
 
@@ -587,7 +607,12 @@ pub async fn update_folder(
         None => folder.parent_id,
     };
 
-    if req.name.as_deref().map(|n| n.is_empty() || n.len() > 255).unwrap_or(false) {
+    if req
+        .name
+        .as_deref()
+        .map(|n| n.is_empty() || n.len() > 255)
+        .unwrap_or(false)
+    {
         return Err(AppError::Validation(
             "Folder name must be between 1 and 255 characters".to_string(),
         ));
@@ -653,7 +678,10 @@ pub async fn update_folder(
     let owner_username = get_username(&state.db, owner_id).await?;
 
     collection
-        .update_one(doc! { "_id": folder_id, "owner_id": owner_id }, doc! { "$set": set_doc })
+        .update_one(
+            doc! { "_id": folder_id, "owner_id": owner_id },
+            doc! { "$set": set_doc },
+        )
         .await?;
 
     // After the DB update, recursively update storage_path for all contained files
@@ -693,7 +721,9 @@ pub async fn update_folder(
             .await;
     }
 
-    Ok(Json(folder_to_response(&state.db, owner_id, &updated).await?))
+    Ok(Json(
+        folder_to_response(&state.db, owner_id, &updated).await?,
+    ))
 }
 
 /// GET /api/folders/{id}/effective-strategy
@@ -711,7 +741,8 @@ pub async fn get_effective_strategy(
         .await?
         .ok_or_else(|| AppError::NotFound("Folder not found".to_string()))?;
 
-    let (strategy, source_id) = resolve_setting(&state.db, user.id, &folder, |f| f.sync_strategy).await?;
+    let (strategy, source_id) =
+        resolve_setting(&state.db, user.id, &folder, |f| f.sync_strategy).await?;
 
     Ok(Json(EffectiveStrategyResponse {
         strategy,
@@ -736,31 +767,31 @@ pub async fn get_effective_storage(
         .ok_or_else(|| AppError::NotFound("Folder not found".to_string()))?;
 
     // Walk: this folder, then ancestors, looking for the first non-None storage_id.
-    let (resolved_storage_id, pinned_here, source_folder_id) =
-        if let Some(sid) = folder.storage_id {
-            (sid, true, None)
-        } else {
-            let mut current = folder.parent_id;
-            let mut found: Option<(ObjectId, ObjectId)> = None; // (storage_id, source_folder)
-            for _ in 0..256 {
-                let Some(pid) = current else { break };
-                let Some(parent) = collection
-                    .find_one(doc! { "_id": pid, "owner_id": folder.owner_id })
-                    .await?
-                else {
-                    break;
-                };
-                if let Some(sid) = parent.storage_id {
-                    found = Some((sid, parent.id));
-                    break;
-                }
-                current = parent.parent_id;
+    let (resolved_storage_id, pinned_here, source_folder_id) = if let Some(sid) = folder.storage_id
+    {
+        (sid, true, None)
+    } else {
+        let mut current = folder.parent_id;
+        let mut found: Option<(ObjectId, ObjectId)> = None; // (storage_id, source_folder)
+        for _ in 0..256 {
+            let Some(pid) = current else { break };
+            let Some(parent) = collection
+                .find_one(doc! { "_id": pid, "owner_id": folder.owner_id })
+                .await?
+            else {
+                break;
+            };
+            if let Some(sid) = parent.storage_id {
+                found = Some((sid, parent.id));
+                break;
             }
-            match found {
-                Some((sid, src)) => (sid, false, Some(src)),
-                None => (state.storage.default_storage_id(), false, None),
-            }
-        };
+            current = parent.parent_id;
+        }
+        match found {
+            Some((sid, src)) => (sid, false, Some(src)),
+            None => (state.storage.default_storage_id(), false, None),
+        }
+    };
 
     let storage = state.storage.get_storage(resolved_storage_id).await?;
     Ok(Json(EffectiveStorageResponse {
@@ -811,14 +842,7 @@ pub async fn sync_tree(
     let mut all_files = Vec::new();
     let mut all_folders = Vec::new();
 
-    collect_tree(
-        &state,
-        user.id,
-        parent_id,
-        &mut all_files,
-        &mut all_folders,
-    )
-    .await?;
+    collect_tree(&state, user.id, parent_id, &mut all_files, &mut all_folders).await?;
 
     Ok(Json(SyncTreeResponse {
         files: all_files,
@@ -871,7 +895,14 @@ async fn collect_tree(
     }
 
     for sf_id in subfolder_ids {
-        Box::pin(collect_tree(state, user_id, Some(sf_id), all_files, all_folders)).await?;
+        Box::pin(collect_tree(
+            state,
+            user_id,
+            Some(sf_id),
+            all_files,
+            all_folders,
+        ))
+        .await?;
     }
 
     Ok(())
@@ -898,8 +929,7 @@ async fn update_folder_file_paths(
     while cursor.advance().await? {
         let file: File = cursor.deserialize_current()?;
         let new_path =
-            resolve_storage_path(&state.db, user_id, username, Some(folder_id), &file.name)
-                .await?;
+            resolve_storage_path(&state.db, user_id, username, Some(folder_id), &file.name).await?;
 
         if new_path != file.storage_path {
             let disk_ok = match state.storage.get_backend(file.storage_id).await {
@@ -1100,9 +1130,10 @@ async fn copy_folder_contents(
         if let Ok(backend) = state.storage.get_backend(file.storage_id).await {
             let mut reader = backend.read(&file.storage_path).await?;
             let mut data = Vec::new();
-            reader.read_to_end(&mut data).await.map_err(|e| {
-                AppError::Storage(format!("Failed to read source file: {}", e))
-            })?;
+            reader
+                .read_to_end(&mut data)
+                .await
+                .map_err(|e| AppError::Storage(format!("Failed to read source file: {}", e)))?;
             backend.write(&dst_path, &data).await?;
         }
 
@@ -1139,7 +1170,10 @@ async fn copy_folder_contents(
         let new_sf = Folder::new(user_id, Some(dest_id), sf.name.clone());
         folders_coll.insert_one(&new_sf).await?;
         state.events.emit_folder_created(user_id, &new_sf).await;
-        Box::pin(copy_folder_contents(state, user_id, username, sf.id, new_sf.id)).await?;
+        Box::pin(copy_folder_contents(
+            state, user_id, username, sf.id, new_sf.id,
+        ))
+        .await?;
     }
 
     Ok(())
@@ -1249,7 +1283,9 @@ async fn soft_delete_folder_contents(
         if let Ok(backend) = state.storage.get_backend(file.storage_id).await {
             let _ = backend.move_to_trash(&file.storage_path, &tp).await;
             // Best-effort thumbnail cleanup
-            let _ = backend.delete(&format!(".thumbs/{}.jpg", file.id.to_hex())).await;
+            let _ = backend
+                .delete(&format!(".thumbs/{}.jpg", file.id.to_hex()))
+                .await;
         }
 
         // Soft-delete the file record
@@ -1291,14 +1327,24 @@ async fn soft_delete_folder_contents(
     }
 
     for subfolder_id in subfolder_ids {
-        Box::pin(soft_delete_folder_contents(state, user_id, subfolder_id, now_bson, batch_id)).await?;
+        Box::pin(soft_delete_folder_contents(
+            state,
+            user_id,
+            subfolder_id,
+            now_bson,
+            batch_id,
+        ))
+        .await?;
         folders_collection
             .update_one(
                 doc! { "_id": subfolder_id },
                 doc! { "$set": { "deleted_at": now_bson, "batch_delete_id": batch_id } },
             )
             .await?;
-        state.events.emit_folder_deleted(user_id, subfolder_id).await;
+        state
+            .events
+            .emit_folder_deleted(user_id, subfolder_id)
+            .await;
     }
 
     Ok(())

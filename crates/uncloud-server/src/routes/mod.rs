@@ -1,32 +1,32 @@
+pub mod admin_processing;
+pub mod apps;
+pub mod audit;
 pub mod auth;
+pub mod duplicates;
+pub mod events;
 pub mod files;
+pub mod finance;
+pub mod folder_shares;
 pub mod folders;
 pub mod invites;
+pub mod mail;
 pub mod music;
+pub mod oauth;
 pub mod playlists;
+pub mod s3;
+pub mod s3_credentials;
 pub mod search;
 pub mod shares;
+pub mod shopping;
 pub mod storages;
+pub mod sync_events;
+pub mod task_items;
+pub mod tasks;
+pub mod tokens;
 pub mod trash;
 pub mod users;
-pub mod events;
-pub mod versions;
-pub mod tokens;
-pub mod s3_credentials;
-pub mod s3;
-pub mod apps;
-pub mod shopping;
-pub mod folder_shares;
 pub mod vault_recents;
-pub mod tasks;
-pub mod task_items;
-pub mod admin_processing;
-pub mod sync_events;
-pub mod audit;
-pub mod duplicates;
-pub mod oauth;
-pub mod finance;
-pub mod mail;
+pub mod versions;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -53,7 +53,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/auth/invite/{token}", get(auth::validate_invite))
         .route("/public/{token}", get(shares::get_public_share))
         .route("/public/{token}/download", get(shares::download_public))
-        .route("/public/{token}/verify", post(shares::verify_share_password));
+        .route(
+            "/public/{token}/verify",
+            post(shares::verify_share_password),
+        );
 
     // Public v1-only routes (app registration, webhooks — secret-protected, no user auth)
     let public_v1_only = Router::new()
@@ -99,38 +102,92 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Files
         .route("/files", get(files::list_files))
         .route("/files/{id}", get(files::get_file))
-        .route("/files/{id}", put(files::update_file).layer(middleware::from_fn(require_files_write)))
-        .route("/files/{id}", delete(files::delete_file).layer(middleware::from_fn(require_files_delete)))
+        .route(
+            "/files/{id}",
+            put(files::update_file).layer(middleware::from_fn(require_files_write)),
+        )
+        .route(
+            "/files/{id}",
+            delete(files::delete_file).layer(middleware::from_fn(require_files_delete)),
+        )
         .route("/files/{id}/download", get(files::download_file))
-        .route("/files/{id}/copy", post(files::copy_file).layer(middleware::from_fn(require_files_write)))
+        .route(
+            "/files/{id}/copy",
+            post(files::copy_file).layer(middleware::from_fn(require_files_write)),
+        )
         .route("/files/{id}/thumb", get(files::get_thumbnail))
-        .route("/files/{id}/content", post(files::update_file_content)
-            .layer(DefaultBodyLimit::disable())
-            .layer(middleware::from_fn(require_files_write)))
+        .route(
+            "/files/{id}/content",
+            post(files::update_file_content)
+                .layer(DefaultBodyLimit::disable())
+                .layer(middleware::from_fn(require_files_write)),
+        )
         .route("/files/{id}/versions", get(versions::list_versions))
-        .route("/files/{file_id}/versions/{version_id}", get(versions::download_version))
-        .route("/files/{file_id}/versions/{version_id}/restore", post(versions::restore_version))
+        .route(
+            "/files/{file_id}/versions/{version_id}",
+            get(versions::download_version),
+        )
+        .route(
+            "/files/{file_id}/versions/{version_id}/restore",
+            post(versions::restore_version),
+        )
         // Uploads
-        .route("/uploads/init", post(files::init_upload).layer(middleware::from_fn(require_files_write)))
-        .route("/uploads/simple", post(files::simple_upload)
-            .layer(DefaultBodyLimit::disable())
-            .layer(middleware::from_fn(require_files_write)))
-        .route("/uploads/{id}/chunk", post(files::upload_chunk)
-            .layer(DefaultBodyLimit::disable())
-            .layer(middleware::from_fn(require_files_write)))
-        .route("/uploads/{id}/complete", post(files::complete_upload).layer(middleware::from_fn(require_files_write)))
-        .route("/uploads/{id}", delete(files::cancel_upload).layer(middleware::from_fn(require_files_write)))
+        .route(
+            "/uploads/init",
+            post(files::init_upload).layer(middleware::from_fn(require_files_write)),
+        )
+        .route(
+            "/uploads/simple",
+            post(files::simple_upload)
+                .layer(DefaultBodyLimit::disable())
+                .layer(middleware::from_fn(require_files_write)),
+        )
+        .route(
+            "/uploads/{id}/chunk",
+            post(files::upload_chunk)
+                .layer(DefaultBodyLimit::disable())
+                .layer(middleware::from_fn(require_files_write)),
+        )
+        .route(
+            "/uploads/{id}/complete",
+            post(files::complete_upload).layer(middleware::from_fn(require_files_write)),
+        )
+        .route(
+            "/uploads/{id}",
+            delete(files::cancel_upload).layer(middleware::from_fn(require_files_write)),
+        )
         // Folders
         .route("/folders", get(folders::list_folders))
-        .route("/folders", post(folders::create_folder).layer(middleware::from_fn(require_files_write)))
+        .route(
+            "/folders",
+            post(folders::create_folder).layer(middleware::from_fn(require_files_write)),
+        )
         .route("/storages", get(storages::list_storages_public))
         .route("/folders/{id}", get(folders::get_folder))
-        .route("/folders/{id}", put(folders::update_folder).layer(middleware::from_fn(require_files_write)))
-        .route("/folders/{id}", delete(folders::delete_folder).layer(middleware::from_fn(require_files_delete)))
-        .route("/folders/{id}/copy", post(folders::copy_folder).layer(middleware::from_fn(require_files_write)))
-        .route("/folders/{id}/breadcrumb", get(folders::get_folder_breadcrumb))
-        .route("/folders/{id}/effective-strategy", get(folders::get_effective_strategy))
-        .route("/folders/{id}/effective-storage", get(folders::get_effective_storage))
+        .route(
+            "/folders/{id}",
+            put(folders::update_folder).layer(middleware::from_fn(require_files_write)),
+        )
+        .route(
+            "/folders/{id}",
+            delete(folders::delete_folder).layer(middleware::from_fn(require_files_delete)),
+        )
+        .route(
+            "/folders/{id}/copy",
+            post(folders::copy_folder).layer(middleware::from_fn(require_files_write)),
+        )
+        .route(
+            "/folders/{id}/breadcrumb",
+            get(folders::get_folder_breadcrumb),
+        )
+        .route(
+            "/folders/{id}/effective-strategy",
+            get(folders::get_effective_strategy),
+        )
+        .route(
+            "/folders/{id}/effective-storage",
+            get(folders::get_effective_storage),
+        )
         .route("/sync/tree", get(folders::sync_tree))
         // Gallery
         .route("/gallery", get(files::list_gallery))
@@ -139,10 +196,22 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/music/tracks", get(music::list_music_tracks))
         .route("/music/folders", get(music::list_music_folders))
         .route("/music/artists", get(music::list_artists))
-        .route("/music/artists/{name}/albums", get(music::list_artist_albums))
-        .route("/music/albums/{artist}/{album}/tracks", get(music::list_album_tracks))
-        .route("/music/categories", get(music::list_categories).post(music::create_category))
-        .route("/music/categories/{id}", put(music::update_category).delete(music::delete_category))
+        .route(
+            "/music/artists/{name}/albums",
+            get(music::list_artist_albums),
+        )
+        .route(
+            "/music/albums/{artist}/{album}/tracks",
+            get(music::list_album_tracks),
+        )
+        .route(
+            "/music/categories",
+            get(music::list_categories).post(music::create_category),
+        )
+        .route(
+            "/music/categories/{id}",
+            put(music::update_category).delete(music::delete_category),
+        )
         .route("/music/search", get(music::search_music))
         // Playlists
         .route("/playlists", get(playlists::list_playlists))
@@ -152,7 +221,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/playlists/{id}", delete(playlists::delete_playlist))
         .route("/playlists/{id}/tracks", post(playlists::add_tracks))
         .route("/playlists/{id}/tracks", delete(playlists::remove_tracks))
-        .route("/playlists/{id}/tracks/reorder", put(playlists::reorder_tracks))
+        .route(
+            "/playlists/{id}/tracks/reorder",
+            put(playlists::reorder_tracks),
+        )
         // Users (non-admin)
         .route("/users/names", get(users::list_usernames))
         // Shares
@@ -161,9 +233,18 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/shares/{id}", delete(shares::delete_share))
         // Trash
         .route("/trash", get(trash::list_trash))
-        .route("/trash", delete(trash::empty_trash).layer(middleware::from_fn(require_files_delete)))
-        .route("/trash/{id}/restore", post(trash::restore_from_trash).layer(middleware::from_fn(require_files_write)))
-        .route("/trash/{id}", delete(trash::permanently_delete).layer(middleware::from_fn(require_files_delete)))
+        .route(
+            "/trash",
+            delete(trash::empty_trash).layer(middleware::from_fn(require_files_delete)),
+        )
+        .route(
+            "/trash/{id}/restore",
+            post(trash::restore_from_trash).layer(middleware::from_fn(require_files_write)),
+        )
+        .route(
+            "/trash/{id}",
+            delete(trash::permanently_delete).layer(middleware::from_fn(require_files_delete)),
+        )
         // Search
         .route("/search/status", get(search::search_status))
         .route("/search", get(search::search_files))
@@ -171,53 +252,165 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Events (SSE)
         .route("/events", get(events::events_stream))
         // Shopping
-        .route("/shopping/items", get(shopping::list_items).post(shopping::create_item))
-        .route("/shopping/items/{id}", put(shopping::update_item).delete(shopping::delete_item))
-        .route("/shopping/lists", get(shopping::list_lists).post(shopping::create_list))
-        .route("/shopping/lists/{id}", put(shopping::update_list).delete(shopping::delete_list))
-        .route("/shopping/lists/{id}/items", get(shopping::get_list_items).post(shopping::add_list_item))
-        .route("/shopping/lists/{id}/items/{item_id}", axum::routing::patch(shopping::patch_list_item).delete(shopping::remove_list_item))
-        .route("/shopping/lists/{id}/items/{item_id}/position", put(shopping::update_item_position))
-        .route("/shopping/lists/{id}/remove-purchased", post(shopping::remove_purchased))
+        .route(
+            "/shopping/items",
+            get(shopping::list_items).post(shopping::create_item),
+        )
+        .route(
+            "/shopping/items/{id}",
+            put(shopping::update_item).delete(shopping::delete_item),
+        )
+        .route(
+            "/shopping/lists",
+            get(shopping::list_lists).post(shopping::create_list),
+        )
+        .route(
+            "/shopping/lists/{id}",
+            put(shopping::update_list).delete(shopping::delete_list),
+        )
+        .route(
+            "/shopping/lists/{id}/items",
+            get(shopping::get_list_items).post(shopping::add_list_item),
+        )
+        .route(
+            "/shopping/lists/{id}/items/{item_id}",
+            axum::routing::patch(shopping::patch_list_item).delete(shopping::remove_list_item),
+        )
+        .route(
+            "/shopping/lists/{id}/items/{item_id}/position",
+            put(shopping::update_item_position),
+        )
+        .route(
+            "/shopping/lists/{id}/remove-purchased",
+            post(shopping::remove_purchased),
+        )
         .route("/shopping/lists/{id}/share", post(shopping::share_list))
-        .route("/shopping/lists/{id}/share/{user_id}", delete(shopping::unshare_list))
+        .route(
+            "/shopping/lists/{id}/share/{user_id}",
+            delete(shopping::unshare_list),
+        )
         // Vault recents
-        .route("/vault-recents", get(vault_recents::list_recent_vaults).post(vault_recents::add_recent_vault))
-        .route("/vault-recents/{file_id}", delete(vault_recents::remove_recent_vault))
+        .route(
+            "/vault-recents",
+            get(vault_recents::list_recent_vaults).post(vault_recents::add_recent_vault),
+        )
+        .route(
+            "/vault-recents/{file_id}",
+            delete(vault_recents::remove_recent_vault),
+        )
         // Shopping categories
-        .route("/shopping/categories", get(shopping::list_categories).post(shopping::create_category))
-        .route("/shopping/categories/{id}", put(shopping::update_category).delete(shopping::delete_category))
-        .route("/shopping/categories/{id}/position", put(shopping::update_category_position))
+        .route(
+            "/shopping/categories",
+            get(shopping::list_categories).post(shopping::create_category),
+        )
+        .route(
+            "/shopping/categories/{id}",
+            put(shopping::update_category).delete(shopping::delete_category),
+        )
+        .route(
+            "/shopping/categories/{id}/position",
+            put(shopping::update_category_position),
+        )
         // Shopping shops
-        .route("/shopping/shops", get(shopping::list_shops).post(shopping::create_shop))
-        .route("/shopping/shops/{id}", put(shopping::update_shop).delete(shopping::delete_shop))
+        .route(
+            "/shopping/shops",
+            get(shopping::list_shops).post(shopping::create_shop),
+        )
+        .route(
+            "/shopping/shops/{id}",
+            put(shopping::update_shop).delete(shopping::delete_shop),
+        )
         // Folder shares
         .route("/folder-shares", post(folder_shares::create_share))
-        .route("/folder-shares/by-me", get(folder_shares::list_shares_by_me))
-        .route("/folder-shares/with-me", get(folder_shares::list_shares_with_me))
-        .route("/folder-shares/folder/{id}", get(folder_shares::list_folder_shares))
-        .route("/folder-shares/{id}", put(folder_shares::update_share).delete(folder_shares::delete_share))
+        .route(
+            "/folder-shares/by-me",
+            get(folder_shares::list_shares_by_me),
+        )
+        .route(
+            "/folder-shares/with-me",
+            get(folder_shares::list_shares_with_me),
+        )
+        .route(
+            "/folder-shares/folder/{id}",
+            get(folder_shares::list_folder_shares),
+        )
+        .route(
+            "/folder-shares/{id}",
+            put(folder_shares::update_share).delete(folder_shares::delete_share),
+        )
         // Tasks
-        .route("/tasks/projects", get(tasks::list_projects).post(tasks::create_project))
-        .route("/tasks/projects/{id}", get(tasks::get_project).put(tasks::update_project).delete(tasks::delete_project))
-        .route("/tasks/projects/{id}/members", post(tasks::add_project_member))
-        .route("/tasks/projects/{id}/members/{user_id}", put(tasks::update_project_member).delete(tasks::remove_project_member))
-        .route("/tasks/projects/{id}/sections", get(tasks::list_sections).post(tasks::create_section))
-        .route("/tasks/projects/{id}/sections/reorder", put(tasks::reorder_sections))
-        .route("/tasks/projects/{id}/labels", get(tasks::list_labels).post(tasks::create_label))
-        .route("/tasks/projects/{id}/tasks", get(task_items::list_tasks).post(task_items::create_task))
-        .route("/tasks/projects/{id}/tasks/reorder", put(task_items::reorder_tasks))
-        .route("/tasks/sections/{id}", put(tasks::update_section).delete(tasks::delete_section))
-        .route("/tasks/labels/{id}", put(tasks::update_label).delete(tasks::delete_label))
-        .route("/tasks/{id}", get(task_items::get_task).put(task_items::update_task).delete(task_items::delete_task))
+        .route(
+            "/tasks/projects",
+            get(tasks::list_projects).post(tasks::create_project),
+        )
+        .route(
+            "/tasks/projects/{id}",
+            get(tasks::get_project)
+                .put(tasks::update_project)
+                .delete(tasks::delete_project),
+        )
+        .route(
+            "/tasks/projects/{id}/members",
+            post(tasks::add_project_member),
+        )
+        .route(
+            "/tasks/projects/{id}/members/{user_id}",
+            put(tasks::update_project_member).delete(tasks::remove_project_member),
+        )
+        .route(
+            "/tasks/projects/{id}/sections",
+            get(tasks::list_sections).post(tasks::create_section),
+        )
+        .route(
+            "/tasks/projects/{id}/sections/reorder",
+            put(tasks::reorder_sections),
+        )
+        .route(
+            "/tasks/projects/{id}/labels",
+            get(tasks::list_labels).post(tasks::create_label),
+        )
+        .route(
+            "/tasks/projects/{id}/tasks",
+            get(task_items::list_tasks).post(task_items::create_task),
+        )
+        .route(
+            "/tasks/projects/{id}/tasks/reorder",
+            put(task_items::reorder_tasks),
+        )
+        .route(
+            "/tasks/sections/{id}",
+            put(tasks::update_section).delete(tasks::delete_section),
+        )
+        .route(
+            "/tasks/labels/{id}",
+            put(tasks::update_label).delete(tasks::delete_label),
+        )
+        .route(
+            "/tasks/{id}",
+            get(task_items::get_task)
+                .put(task_items::update_task)
+                .delete(task_items::delete_task),
+        )
         .route("/tasks/{id}/status", put(task_items::update_task_status))
-        .route("/tasks/{id}/completion-history", delete(task_items::clear_completion_history))
+        .route(
+            "/tasks/{id}/completion-history",
+            delete(task_items::clear_completion_history),
+        )
         .route("/tasks/{id}/subtasks", post(task_items::create_subtask))
         .route("/tasks/{id}/promote", post(task_items::promote_subtask))
         .route("/tasks/{id}/attachments", post(task_items::attach_files))
-        .route("/tasks/{id}/attachments/{file_id}", delete(task_items::detach_file))
-        .route("/tasks/{id}/comments", get(task_items::list_comments).post(task_items::create_comment))
-        .route("/tasks/comments/{id}", put(task_items::update_comment).delete(task_items::delete_comment))
+        .route(
+            "/tasks/{id}/attachments/{file_id}",
+            delete(task_items::detach_file),
+        )
+        .route(
+            "/tasks/{id}/comments",
+            get(task_items::list_comments).post(task_items::create_comment),
+        )
+        .route(
+            "/tasks/comments/{id}",
+            put(task_items::update_comment).delete(task_items::delete_comment),
+        )
         .route("/tasks/schedule", get(task_items::get_schedule))
         .route("/tasks/assigned-to-me", get(task_items::get_assigned_to_me))
         // Sync audit log
@@ -225,17 +418,38 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Duplicate detection
         .route("/duplicates", get(duplicates::get_duplicate_report))
         // Finance tracker
-        .route("/finance/accounts", get(finance::list_accounts).post(finance::create_account))
-        .route("/finance/accounts/{id}", put(finance::update_account).delete(finance::delete_account))
-        .route("/finance/accounts/{id}/balance", get(finance::get_account_balance))
-        .route("/finance/categories", get(finance::list_categories).post(finance::create_category))
-        .route("/finance/categories/{id}", put(finance::update_category).delete(finance::delete_category))
-        .route("/finance/transactions", get(finance::list_transactions).post(finance::create_transaction))
+        .route(
+            "/finance/accounts",
+            get(finance::list_accounts).post(finance::create_account),
+        )
+        .route(
+            "/finance/accounts/{id}",
+            put(finance::update_account).delete(finance::delete_account),
+        )
+        .route(
+            "/finance/accounts/{id}/balance",
+            get(finance::get_account_balance),
+        )
+        .route(
+            "/finance/categories",
+            get(finance::list_categories).post(finance::create_category),
+        )
+        .route(
+            "/finance/categories/{id}",
+            put(finance::update_category).delete(finance::delete_category),
+        )
+        .route(
+            "/finance/transactions",
+            get(finance::list_transactions).post(finance::create_transaction),
+        )
         .route(
             "/finance/transactions/category-summary",
             get(finance::transaction_category_summary),
         )
-        .route("/finance/transactions/{id}", put(finance::update_transaction).delete(finance::delete_transaction))
+        .route(
+            "/finance/transactions/{id}",
+            put(finance::update_transaction).delete(finance::delete_transaction),
+        )
         .route(
             "/finance/import-schemas",
             get(finance::list_import_schemas).post(finance::create_import_schema),
@@ -270,10 +484,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/finance/snapshots/{id}/recompute",
             post(finance::recompute_snapshot),
         )
-        .route(
-            "/finance/snapshots/{id}",
-            delete(finance::delete_snapshot),
-        )
+        .route("/finance/snapshots/{id}", delete(finance::delete_snapshot))
         .route(
             "/finance/rules",
             get(finance::list_rules).post(finance::create_rule),
@@ -286,16 +497,28 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/finance/rules/apply", post(finance::apply_rules))
         .route("/finance/rules/test", post(finance::test_rule))
         // Mail client foundation
-        .route("/mail/accounts", get(mail::list_accounts).post(mail::create_account))
-        .route("/mail/accounts/{id}", put(mail::update_account).delete(mail::delete_account))
+        .route(
+            "/mail/accounts",
+            get(mail::list_accounts).post(mail::create_account),
+        )
+        .route(
+            "/mail/accounts/{id}",
+            put(mail::update_account).delete(mail::delete_account),
+        )
         .route(
             "/mail/accounts/{id}/credential",
             get(mail::get_account_credential)
                 .put(mail::set_account_credential)
                 .delete(mail::clear_account_credential),
         )
-        .route("/mail/accounts/{id}/test-imap", post(mail::test_account_imap))
-        .route("/mail/accounts/{id}/test-smtp", post(mail::test_account_smtp))
+        .route(
+            "/mail/accounts/{id}/test-imap",
+            post(mail::test_account_imap),
+        )
+        .route(
+            "/mail/accounts/{id}/test-smtp",
+            post(mail::test_account_smtp),
+        )
         .route(
             "/mail/accounts/{id}/diagnostics",
             post(mail::diagnose_account_provider),
@@ -318,8 +541,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/mail/drafts/{draft_id}/attachments/{attachment_id}",
             delete(mail::delete_draft_attachment),
         )
-        .route("/mail/accounts/{account_id}/folders", get(mail::list_folders))
-        .route("/mail/accounts/{account_id}/folders/refresh", post(mail::refresh_folders))
+        .route(
+            "/mail/accounts/{account_id}/folders",
+            get(mail::list_folders),
+        )
+        .route(
+            "/mail/accounts/{account_id}/folders/refresh",
+            post(mail::refresh_folders),
+        )
         .route(
             "/mail/accounts/{account_id}/folders/{folder_id}",
             put(mail::update_folder),
@@ -333,15 +562,30 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             get(mail::list_messages),
         )
         .route("/mail/messages/{message_id}", get(mail::get_message))
-        .route("/mail/messages/{message_id}/mutate", post(mail::mutate_message))
-        .route("/mail/attachments/{attachment_id}/open", get(mail::open_attachment))
-        .route("/mail/attachments/{attachment_id}/download", get(mail::download_attachment))
+        .route(
+            "/mail/messages/{message_id}/mutate",
+            post(mail::mutate_message),
+        )
+        .route(
+            "/mail/attachments/{attachment_id}/open",
+            get(mail::open_attachment),
+        )
+        .route(
+            "/mail/attachments/{attachment_id}/download",
+            get(mail::download_attachment),
+        )
         .route(
             "/mail/attachments/{attachment_id}/save",
             post(mail::save_attachment_to_files).layer(middleware::from_fn(require_files_write)),
         )
-        .route("/mail/identities", get(mail::list_identities).post(mail::create_identity))
-        .route("/mail/identities/{id}", put(mail::update_identity).delete(mail::delete_identity));
+        .route(
+            "/mail/identities",
+            get(mail::list_identities).post(mail::create_identity),
+        )
+        .route(
+            "/mail/identities/{id}",
+            put(mail::update_identity).delete(mail::delete_identity),
+        );
 
     // v1-only routes (API tokens, S3 credentials, apps)
     let v1_only = Router::new()
@@ -350,14 +594,20 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/auth/tokens/{id}", delete(tokens::delete_token))
         .route("/s3/credentials", post(s3_credentials::create_credential))
         .route("/s3/credentials", get(s3_credentials::list_credentials))
-        .route("/s3/credentials/{id}", delete(s3_credentials::delete_credential))
+        .route(
+            "/s3/credentials/{id}",
+            delete(s3_credentials::delete_credential),
+        )
         .route("/apps", get(apps::list_apps))
         .route("/auth/me/features", put(auth::update_my_features))
         .route("/auth/me/preferences", put(auth::update_my_preferences))
         // OAuth consent + connected-apps management (authenticated)
         .route("/oauth/authorize", post(oauth::authorize_submit))
         .route("/oauth/connected-apps", get(oauth::list_connected_apps))
-        .route("/oauth/connected-apps/{client_id}", delete(oauth::revoke_connected_app));
+        .route(
+            "/oauth/connected-apps/{client_id}",
+            delete(oauth::revoke_connected_app),
+        );
 
     let auth_routes = Router::new()
         .nest("/api", auth_api.clone())
@@ -374,10 +624,19 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/admin/storages", post(storages::create_storage))
         .route("/admin/storages/{id}", put(storages::update_storage))
         .route("/admin/storages/{id}", delete(storages::delete_storage))
-        .route("/admin/storages/{id}/rescan", post(storages::rescan_storage))
-        .route("/admin/rescan-jobs/active", get(storages::get_active_rescan_job))
+        .route(
+            "/admin/storages/{id}/rescan",
+            post(storages::rescan_storage),
+        )
+        .route(
+            "/admin/rescan-jobs/active",
+            get(storages::get_active_rescan_job),
+        )
         .route("/admin/rescan-jobs/{id}", get(storages::get_rescan_job))
-        .route("/admin/rescan-jobs/{id}/cancel", post(storages::cancel_rescan_job))
+        .route(
+            "/admin/rescan-jobs/{id}/cancel",
+            post(storages::cancel_rescan_job),
+        )
         .route("/admin/users", get(users::list_users))
         .route("/admin/users", post(users::create_user))
         .route("/admin/users/{id}", put(users::update_user))
@@ -386,7 +645,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/admin/users/{id}/disable", post(users::disable_user))
         .route("/admin/users/{id}/enable", post(users::enable_user))
         .route("/admin/users/{id}/reset-totp", post(users::reset_user_totp))
-        .route("/admin/users/{id}/reset-password", post(users::reset_user_password))
+        .route(
+            "/admin/users/{id}/reset-password",
+            post(users::reset_user_password),
+        )
         .route("/admin/users/{id}/role", post(users::change_user_role))
         // Invites
         .route("/admin/invites", get(invites::list_invites))
@@ -413,8 +675,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     let s3_routes = Router::new()
         .route("/s3", any(s3::s3_handler))
         .route("/s3/", any(s3::s3_handler))
-        .route("/s3/{*rest}", any(s3::s3_handler)
-            .layer(DefaultBodyLimit::disable()))
+        .route(
+            "/s3/{*rest}",
+            any(s3::s3_handler).layer(DefaultBodyLimit::disable()),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             sigv4_middleware,

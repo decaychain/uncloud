@@ -26,8 +26,12 @@ async fn upload_creates_file() {
 async fn upload_requires_auth() {
     let app = TestApp::new().await;
     use axum_test::multipart::{MultipartForm, Part};
-    let form = MultipartForm::new()
-        .add_part("file", Part::bytes(b"data".to_vec()).file_name("f.txt").mime_type("text/plain"));
+    let form = MultipartForm::new().add_part(
+        "file",
+        Part::bytes(b"data".to_vec())
+            .file_name("f.txt")
+            .mime_type("text/plain"),
+    );
     let res = app.server.post("/api/uploads/simple").multipart(form).await;
     res.assert_status(StatusCode::UNAUTHORIZED);
 }
@@ -114,7 +118,9 @@ async fn delete_requires_auth() {
 async fn user_isolation() {
     let app_alice = TestApp::new().await;
     app_alice.register_and_login("alice").await;
-    let file = app_alice.upload("secret.txt", b"private", "text/plain").await;
+    let file = app_alice
+        .upload("secret.txt", b"private", "text/plain")
+        .await;
     let file_id = file["id"].as_str().expect("file id").to_string();
 
     // Bob registers and logs in on a fresh TestApp pointed at the same DB
@@ -196,7 +202,9 @@ async fn move_file_conflict_retry_with_new_name() {
         .json();
     let docs_list = docs_files.as_array().expect("docs files");
     assert!(
-        docs_list.iter().any(|f| f["id"] == file_a_id && f["name"] == "photo (1).jpg"),
+        docs_list
+            .iter()
+            .any(|f| f["id"] == file_a_id && f["name"] == "photo (1).jpg"),
         "moved file should appear in docs with new name"
     );
 
@@ -306,8 +314,7 @@ async fn file_response_metadata_populated_after_direct_db_update() {
 
     let file = app.upload("song.mp3", b"fake audio", "audio/mpeg").await;
     let file_id_str = file["id"].as_str().expect("file id");
-    let file_oid =
-        mongodb::bson::oid::ObjectId::parse_str(file_id_str).expect("valid ObjectId");
+    let file_oid = mongodb::bson::oid::ObjectId::parse_str(file_id_str).expect("valid ObjectId");
 
     // Directly set metadata.audio on the MongoDB document
     let collection = app.db.collection::<mongodb::bson::Document>("files");
@@ -370,8 +377,7 @@ async fn copy_file_does_not_preserve_metadata() {
 
     let file = app.upload("track.mp3", b"audio data", "audio/mpeg").await;
     let file_id_str = file["id"].as_str().expect("file id");
-    let file_oid =
-        mongodb::bson::oid::ObjectId::parse_str(file_id_str).expect("valid ObjectId");
+    let file_oid = mongodb::bson::oid::ObjectId::parse_str(file_id_str).expect("valid ObjectId");
 
     // Set metadata.audio on the original file via direct DB update
     let collection = app.db.collection::<mongodb::bson::Document>("files");
@@ -436,11 +442,7 @@ async fn simple_upload_rejects_duplicate_name() {
             .file_name("doc.pdf")
             .mime_type("application/pdf"),
     );
-    let res = app
-        .server
-        .post("/api/uploads/simple")
-        .multipart(form)
-        .await;
+    let res = app.server.post("/api/uploads/simple").multipart(form).await;
     res.assert_status(StatusCode::CONFLICT);
 }
 

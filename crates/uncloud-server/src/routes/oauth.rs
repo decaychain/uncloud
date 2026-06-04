@@ -105,7 +105,9 @@ pub struct AuthorizationServerMetadata {
     scopes_supported: Vec<&'static str>,
 }
 
-pub async fn authorization_server_metadata(headers: HeaderMap) -> Json<AuthorizationServerMetadata> {
+pub async fn authorization_server_metadata(
+    headers: HeaderMap,
+) -> Json<AuthorizationServerMetadata> {
     let issuer = issuer_url(&headers);
     Json(AuthorizationServerMetadata {
         authorization_endpoint: format!("{}/oauth/authorize", issuer),
@@ -301,9 +303,7 @@ pub async fn authorize_submit(
         ));
     }
     if body.code_challenge.len() < 43 || body.code_challenge.len() > 128 {
-        return Err(AppError::BadRequest(
-            "invalid code_challenge length".into(),
-        ));
+        return Err(AppError::BadRequest("invalid code_challenge length".into()));
     }
 
     let scopes = validate_scope_string(&body.scope).map_err(AppError::BadRequest)?;
@@ -331,7 +331,10 @@ pub async fn authorize_submit(
     if body.decision == "deny" {
         let url = build_redirect(
             &body.redirect_uri,
-            &[("error", "access_denied"), ("state", body.state.as_deref().unwrap_or(""))],
+            &[
+                ("error", "access_denied"),
+                ("state", body.state.as_deref().unwrap_or("")),
+            ],
         );
         return Ok(Json(AuthorizeSubmitResponse { redirect_to: url }));
     }
@@ -362,7 +365,10 @@ pub async fn authorize_submit(
 
     let url = build_redirect(
         &body.redirect_uri,
-        &[("code", &code), ("state", body.state.as_deref().unwrap_or(""))],
+        &[
+            ("code", &code),
+            ("state", body.state.as_deref().unwrap_or("")),
+        ],
     );
     Ok(Json(AuthorizeSubmitResponse { redirect_to: url }))
 }
@@ -450,11 +456,16 @@ async fn exchange_code(
     state: &AppState,
     req: TokenRequest,
 ) -> std::result::Result<TokenResponse, Response> {
-    let code = req.code.as_deref().ok_or_else(|| {
-        oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "missing code")
-    })?;
+    let code = req
+        .code
+        .as_deref()
+        .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "missing code"))?;
     let client_id = req.client_id.as_deref().ok_or_else(|| {
-        oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "missing client_id")
+        oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "missing client_id",
+        )
     })?;
     let redirect_uri = req.redirect_uri.as_deref().ok_or_else(|| {
         oauth_error(
@@ -485,9 +496,7 @@ async fn exchange_code(
                 "code lookup failed",
             )
         })?
-        .ok_or_else(|| {
-            oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "unknown code")
-        })?;
+        .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "unknown code"))?;
 
     if row.consumed {
         return Err(oauth_error(

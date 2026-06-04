@@ -6,8 +6,8 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::json;
 use tracing::instrument;
 use uncloud_common::{
-    CreateFolderRequest, EffectiveStrategyResponse, FileResponse, FolderResponse,
-    SyncTreeResponse, UpdateFolderRequest, UserResponse,
+    CreateFolderRequest, EffectiveStrategyResponse, FileResponse, FolderResponse, SyncTreeResponse,
+    UpdateFolderRequest, UserResponse,
 };
 
 mod error;
@@ -106,11 +106,7 @@ impl Client {
     }
 
     pub async fn logout(&self) -> Result<()> {
-        let resp = self
-            .http
-            .post(self.url("/api/auth/logout"))
-            .send()
-            .await?;
+        let resp = self.http.post(self.url("/api/auth/logout")).send().await?;
         if resp.status().is_success() {
             Ok(())
         } else {
@@ -136,7 +132,8 @@ impl Client {
 
     /// Download a file by ID to `dest` on the local filesystem.
     pub async fn download_file(&self, id: &str, dest: &Path) -> Result<()> {
-        self.download_api_path(&format!("/files/{id}/download"), dest).await
+        self.download_api_path(&format!("/files/{id}/download"), dest)
+            .await
     }
 
     /// Download an authenticated API path to `dest` on the local filesystem.
@@ -144,45 +141,37 @@ impl Client {
         use futures::StreamExt;
         use tokio::io::AsyncWriteExt;
 
-        let resp = self
-            .http
-            .get(self.api_path_url(path))
-            .send()
-            .await?;
+        let resp = self.http.get(self.api_path_url(path)).send().await?;
 
         if !resp.status().is_success() {
             return Err(ClientError::api(resp).await);
         }
 
-        let mut file = tokio::fs::File::create(dest).await.map_err(|e| {
-            ClientError::Io(format!("cannot create {}: {}", dest.display(), e))
-        })?;
+        let mut file = tokio::fs::File::create(dest)
+            .await
+            .map_err(|e| ClientError::Io(format!("cannot create {}: {}", dest.display(), e)))?;
 
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let bytes = chunk?;
-            file.write_all(&bytes).await.map_err(|e| {
-                ClientError::Io(format!("write error: {}", e))
-            })?;
+            file.write_all(&bytes)
+                .await
+                .map_err(|e| ClientError::Io(format!("write error: {}", e)))?;
         }
         Ok(())
     }
 
     /// Upload a local file to the server.
-    pub async fn upload_file(
-        &self,
-        path: &Path,
-        parent_id: Option<&str>,
-    ) -> Result<FileResponse> {
+    pub async fn upload_file(&self, path: &Path, parent_id: Option<&str>) -> Result<FileResponse> {
         let file_name = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("file")
             .to_owned();
 
-        let bytes = tokio::fs::read(path).await.map_err(|e| {
-            ClientError::Io(format!("cannot read {}: {}", path.display(), e))
-        })?;
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|e| ClientError::Io(format!("cannot read {}: {}", path.display(), e)))?;
 
         let part = reqwest::multipart::Part::bytes(bytes).file_name(file_name);
         let mut form = reqwest::multipart::Form::new().part("file", part);
@@ -201,9 +190,9 @@ impl Client {
 
     /// Replace the content of an existing file, archiving the previous version server-side.
     pub async fn update_file_content(&self, file_id: &str, path: &Path) -> Result<FileResponse> {
-        let bytes = tokio::fs::read(path).await.map_err(|e| {
-            ClientError::Io(format!("cannot read {}: {}", path.display(), e))
-        })?;
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|e| ClientError::Io(format!("cannot read {}: {}", path.display(), e)))?;
         let file_name = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -337,20 +326,14 @@ impl Client {
     ) -> Result<EffectiveStrategyResponse> {
         let resp = self
             .http
-            .get(self.url(&format!(
-                "/api/folders/{}/effective-strategy",
-                folder_id
-            )))
+            .get(self.url(&format!("/api/folders/{}/effective-strategy", folder_id)))
             .send()
             .await?;
         self.parse(resp).await
     }
 
     /// Fetch the breadcrumb (root → leaf) for a folder.
-    pub async fn get_folder_breadcrumb(
-        &self,
-        folder_id: &str,
-    ) -> Result<Vec<FolderResponse>> {
+    pub async fn get_folder_breadcrumb(&self, folder_id: &str) -> Result<Vec<FolderResponse>> {
         let resp = self
             .http
             .get(self.url(&format!("/api/folders/{}/breadcrumb", folder_id)))

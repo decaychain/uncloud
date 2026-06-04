@@ -99,7 +99,9 @@ fn parse_money(input: &str) -> Result<i64, String> {
         Some((m, c)) => (m, c),
         None => (body, "00"),
     };
-    let major: i64 = major_str.parse().map_err(|_| "Invalid amount".to_string())?;
+    let major: i64 = major_str
+        .parse()
+        .map_err(|_| "Invalid amount".to_string())?;
     let cents_padded = if cents_str.len() == 1 {
         format!("{}0", cents_str)
     } else if cents_str.len() >= 2 {
@@ -107,13 +109,21 @@ fn parse_money(input: &str) -> Result<i64, String> {
     } else {
         "00".to_string()
     };
-    let cents: i64 = cents_padded.parse().map_err(|_| "Invalid amount".to_string())?;
+    let cents: i64 = cents_padded
+        .parse()
+        .map_err(|_| "Invalid amount".to_string())?;
     Ok(sign * (major * 100 + cents))
 }
 
 fn today_iso() -> String {
-    js_sys::Date::new_0().to_iso_string().as_string().unwrap_or_default()
-        .split('T').next().unwrap_or("").to_string()
+    js_sys::Date::new_0()
+        .to_iso_string()
+        .as_string()
+        .unwrap_or_default()
+        .split('T')
+        .next()
+        .unwrap_or("")
+        .to_string()
 }
 
 fn ymd(y: i32, m_zero_based: u32, d: u32) -> String {
@@ -126,7 +136,11 @@ fn last_day_of_month(year: i32, m_zero_based: u32) -> u32 {
         3 | 5 | 8 | 10 => 30,
         1 => {
             let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-            if leap { 29 } else { 28 }
+            if leap {
+                29
+            } else {
+                28
+            }
         }
         _ => 30,
     }
@@ -204,7 +218,10 @@ fn AccountsTab() -> Element {
             if a.archived_at.is_some() {
                 continue;
             }
-            let bal = balances().get(&a.id).copied().unwrap_or(a.opening_balance_minor);
+            let bal = balances()
+                .get(&a.id)
+                .copied()
+                .unwrap_or(a.opening_balance_minor);
             *t.entry(a.currency.clone()).or_insert(0) += bal;
         }
         t
@@ -343,17 +360,34 @@ fn AccountFormModal(
     let editing = initial.is_some();
     let mut name = use_signal(|| initial.as_ref().map(|a| a.name.clone()).unwrap_or_default());
     let mut account_type = use_signal(|| {
-        initial.as_ref().map(|a| a.account_type.clone()).unwrap_or_else(|| "checking".to_string())
+        initial
+            .as_ref()
+            .map(|a| a.account_type.clone())
+            .unwrap_or_else(|| "checking".to_string())
     });
     let mut currency = use_signal(|| {
-        initial.as_ref().map(|a| a.currency.clone()).unwrap_or_else(|| "EUR".to_string())
+        initial
+            .as_ref()
+            .map(|a| a.currency.clone())
+            .unwrap_or_else(|| "EUR".to_string())
     });
     let mut opening = use_signal(|| {
-        initial.as_ref().map(|a| format_amount_input(a.opening_balance_minor)).unwrap_or_else(|| "0.00".to_string())
+        initial
+            .as_ref()
+            .map(|a| format_amount_input(a.opening_balance_minor))
+            .unwrap_or_else(|| "0.00".to_string())
     });
-    let mut archived = use_signal(|| initial.as_ref().map(|a| a.archived_at.is_some()).unwrap_or(false));
+    let mut archived = use_signal(|| {
+        initial
+            .as_ref()
+            .map(|a| a.archived_at.is_some())
+            .unwrap_or(false)
+    });
     let mut iban = use_signal(|| {
-        initial.as_ref().and_then(|a| a.iban.clone()).unwrap_or_default()
+        initial
+            .as_ref()
+            .and_then(|a| a.iban.clone())
+            .unwrap_or_default()
     });
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut saving = use_signal(|| false);
@@ -518,7 +552,9 @@ fn category_has_children(categories: &[FinanceCategoryResponse], category_id: &s
         .any(|c| c.parent_id.as_deref() == Some(category_id))
 }
 
-fn category_effective_roots(categories: &[FinanceCategoryResponse]) -> Vec<FinanceCategoryResponse> {
+fn category_effective_roots(
+    categories: &[FinanceCategoryResponse],
+) -> Vec<FinanceCategoryResponse> {
     categories
         .iter()
         .filter(|c| {
@@ -703,7 +739,10 @@ fn CategoriesTab() -> Element {
         spawn(async move {
             loading.set(true);
             match use_finance::list_categories().await {
-                Ok(list) => { categories.set(list); error.set(None); }
+                Ok(list) => {
+                    categories.set(list);
+                    error.set(None);
+                }
                 Err(e) => error.set(Some(e)),
             }
             loading.set(false);
@@ -1063,17 +1102,26 @@ fn TransactionsTab() -> Element {
                 categories.set(c);
             }
             let acc_filter = filter_account();
-            let acc_opt = if acc_filter.is_empty() { None } else { Some(acc_filter.as_str()) };
+            let acc_opt = if acc_filter.is_empty() {
+                None
+            } else {
+                Some(acc_filter.as_str())
+            };
             let cat_filter = category_filter();
-            let cat_opt = cat_filter
-                .as_deref()
-                .filter(|c| *c != UNCATEGORIZED_FILTER);
-            let uncat_filter = only_uncat()
-                || cat_filter.as_deref() == Some(UNCATEGORIZED_FILTER);
+            let cat_opt = cat_filter.as_deref().filter(|c| *c != UNCATEGORIZED_FILTER);
+            let uncat_filter = only_uncat() || cat_filter.as_deref() == Some(UNCATEGORIZED_FILTER);
             let from_val = date_from();
-            let from_opt = if from_val.is_empty() { None } else { Some(from_val.as_str()) };
+            let from_opt = if from_val.is_empty() {
+                None
+            } else {
+                Some(from_val.as_str())
+            };
             let to_val = date_to();
-            let to_opt = if to_val.is_empty() { None } else { Some(to_val.as_str()) };
+            let to_opt = if to_val.is_empty() {
+                None
+            } else {
+                Some(to_val.as_str())
+            };
             match use_finance::list_transactions(
                 acc_opt,
                 cat_opt,
@@ -1083,7 +1131,9 @@ fn TransactionsTab() -> Element {
                 include_recon(),
                 page_size,
                 0,
-            ).await {
+            )
+            .await
+            {
                 Ok(resp) => {
                     transactions.set(resp.items);
                     total.set(resp.total);
@@ -1128,12 +1178,26 @@ fn TransactionsTab() -> Element {
             let acc = filter_account.peek().clone();
             let only_un = *only_uncat.peek();
             let inc_rec = *include_recon.peek();
-            let acc_opt = if acc.is_empty() { None } else { Some(acc.as_str()) };
-            let from_opt = if from_val.is_empty() { None } else { Some(from_val.as_str()) };
-            let to_opt = if to_val.is_empty() { None } else { Some(to_val.as_str()) };
+            let acc_opt = if acc.is_empty() {
+                None
+            } else {
+                Some(acc.as_str())
+            };
+            let from_opt = if from_val.is_empty() {
+                None
+            } else {
+                Some(from_val.as_str())
+            };
+            let to_opt = if to_val.is_empty() {
+                None
+            } else {
+                Some(to_val.as_str())
+            };
             match use_finance::transaction_category_summary(
                 acc_opt, only_un, from_opt, to_opt, inc_rec,
-            ).await {
+            )
+            .await
+            {
                 Ok(s) => summary.set(Some(s)),
                 Err(_) => summary.set(None),
             }
@@ -1145,7 +1209,9 @@ fn TransactionsTab() -> Element {
     // and moves mutations into the spawned future so the closure stays
     // Fn (and thus Copy, since it only captures Signals + u32).
     let trigger_load_more = move || {
-        if *loading_more.peek() { return; }
+        if *loading_more.peek() {
+            return;
+        }
         let skip_val = transactions.peek().len() as u32;
         let acc = filter_account.peek().clone();
         let cat = category_filter.peek().clone();
@@ -1155,13 +1221,23 @@ fn TransactionsTab() -> Element {
         let inc_recon = *include_recon.peek();
         spawn(async move {
             loading_more.set(true);
-            let acc_opt = if acc.is_empty() { None } else { Some(acc.as_str()) };
-            let cat_opt = cat
-                .as_deref()
-                .filter(|c| *c != UNCATEGORIZED_FILTER);
+            let acc_opt = if acc.is_empty() {
+                None
+            } else {
+                Some(acc.as_str())
+            };
+            let cat_opt = cat.as_deref().filter(|c| *c != UNCATEGORIZED_FILTER);
             let uncat_filter = only_un || cat.as_deref() == Some(UNCATEGORIZED_FILTER);
-            let from_opt = if from_val.is_empty() { None } else { Some(from_val.as_str()) };
-            let to_opt = if to_val.is_empty() { None } else { Some(to_val.as_str()) };
+            let from_opt = if from_val.is_empty() {
+                None
+            } else {
+                Some(from_val.as_str())
+            };
+            let to_opt = if to_val.is_empty() {
+                None
+            } else {
+                Some(to_val.as_str())
+            };
             match use_finance::list_transactions(
                 acc_opt,
                 cat_opt,
@@ -1171,7 +1247,9 @@ fn TransactionsTab() -> Element {
                 inc_recon,
                 page_size,
                 skip_val,
-            ).await {
+            )
+            .await
+            {
                 Ok(resp) => {
                     transactions.write().extend(resp.items);
                     total.set(resp.total);
@@ -1188,8 +1266,7 @@ fn TransactionsTab() -> Element {
         if id == UNCATEGORIZED_FILTER {
             "Uncategorized".to_string()
         } else {
-            category_label(&categories(), &id)
-                .unwrap_or_else(|| "Selected category".into())
+            category_label(&categories(), &id).unwrap_or_else(|| "Selected category".into())
         }
     });
 
@@ -1200,7 +1277,8 @@ fn TransactionsTab() -> Element {
             .find(|a| a.id == t.account_id)
             .map(|a| a.name.clone())
             .unwrap_or_else(|| "?".into());
-        let cat = t.category_id
+        let cat = t
+            .category_id
             .as_deref()
             .map(|id| category_label(&categories(), id).unwrap_or_else(|| "?".into()));
         rsx! {
@@ -1236,7 +1314,8 @@ fn TransactionsTab() -> Element {
 
     let render_split_row = move |t: &TransactionResponse| -> Element {
         let date_short = t.date.split('T').next().unwrap_or(&t.date).to_string();
-        let cat = t.category_id
+        let cat = t
+            .category_id
             .as_deref()
             .map(|id| category_label(&categories(), id).unwrap_or_else(|| "?".into()));
         rsx! {
@@ -1276,7 +1355,8 @@ fn TransactionsTab() -> Element {
             .find(|a| a.id == t.account_id)
             .map(|a| a.name.clone())
             .unwrap_or_else(|| "?".into());
-        let cat = t.category_id
+        let cat = t
+            .category_id
             .as_deref()
             .map(|id| category_label(&categories(), id).unwrap_or_else(|| "?".into()));
         let amount_class = if t.amount_minor < 0 {
@@ -1675,7 +1755,10 @@ fn SummaryStrip(
     let mut expanded = expanded;
 
     let visible_accounts: Vec<&AccountResponse> = if account_filter.is_empty() {
-        accounts.iter().filter(|a| a.archived_at.is_none()).collect()
+        accounts
+            .iter()
+            .filter(|a| a.archived_at.is_none())
+            .collect()
     } else {
         accounts.iter().filter(|a| a.id == account_filter).collect()
     };
@@ -1697,17 +1780,18 @@ fn SummaryStrip(
             for parent in category_effective_roots(&categories) {
                 let parent_key = Some(parent.id.clone());
                 let parent_direct = totals.get(&parent_key).copied().unwrap_or(0);
-                let mut children: Vec<CategoryBreakdownChild> = category_children(&categories, &parent.id)
-                    .into_iter()
-                    .filter_map(|child| {
-                        let key = Some(child.id.clone());
-                        totals.get(&key).map(|total| CategoryBreakdownChild {
-                            category_id: child.id,
-                            name: child.name,
-                            total: *total,
+                let mut children: Vec<CategoryBreakdownChild> =
+                    category_children(&categories, &parent.id)
+                        .into_iter()
+                        .filter_map(|child| {
+                            let key = Some(child.id.clone());
+                            totals.get(&key).map(|total| CategoryBreakdownChild {
+                                category_id: child.id,
+                                name: child.name,
+                                total: *total,
+                            })
                         })
-                    })
-                    .collect();
+                        .collect();
                 children.sort_by_key(|child| -child.total.abs());
                 let child_total = children
                     .iter()
@@ -1752,7 +1836,8 @@ fn SummaryStrip(
     let breakdown_max_abs = breakdown
         .iter()
         .flat_map(|row| {
-            std::iter::once(row.total.abs()).chain(row.children.iter().map(|child| child.total.abs()))
+            std::iter::once(row.total.abs())
+                .chain(row.children.iter().map(|child| child.total.abs()))
         })
         .max()
         .unwrap_or(1)
@@ -1971,21 +2056,42 @@ fn TransactionFormModal(
     let mut new_cat_name = use_signal(String::new);
     let mut new_cat_busy = use_signal(|| false);
     let mut date = use_signal(|| {
-        initial.as_ref()
+        initial
+            .as_ref()
             .map(|t| t.date.split('T').next().unwrap_or(&t.date).to_string())
             .unwrap_or_else(today_iso)
     });
     let mut account_id = use_signal(|| {
-        initial.as_ref().map(|t| t.account_id.clone())
+        initial
+            .as_ref()
+            .map(|t| t.account_id.clone())
             .or_else(|| accounts.first().map(|a| a.id.clone()))
             .unwrap_or_default()
     });
     let mut amount = use_signal(|| {
-        initial.as_ref().map(|t| format_amount_input(t.amount_minor)).unwrap_or_else(|| "0.00".into())
+        initial
+            .as_ref()
+            .map(|t| format_amount_input(t.amount_minor))
+            .unwrap_or_else(|| "0.00".into())
     });
-    let mut description = use_signal(|| initial.as_ref().map(|t| t.description.clone()).unwrap_or_default());
-    let mut category_id = use_signal(|| initial.as_ref().and_then(|t| t.category_id.clone()).unwrap_or_default());
-    let mut notes = use_signal(|| initial.as_ref().and_then(|t| t.notes.clone()).unwrap_or_default());
+    let mut description = use_signal(|| {
+        initial
+            .as_ref()
+            .map(|t| t.description.clone())
+            .unwrap_or_default()
+    });
+    let mut category_id = use_signal(|| {
+        initial
+            .as_ref()
+            .and_then(|t| t.category_id.clone())
+            .unwrap_or_default()
+    });
+    let mut notes = use_signal(|| {
+        initial
+            .as_ref()
+            .and_then(|t| t.notes.clone())
+            .unwrap_or_default()
+    });
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut saving = use_signal(|| false);
     let initial_id = initial.as_ref().map(|t| t.id.clone());
@@ -2365,7 +2471,10 @@ fn SchemasTab() -> Element {
         spawn(async move {
             loading.set(true);
             match use_finance::list_import_schemas().await {
-                Ok(list) => { schemas.set(list); error.set(None); }
+                Ok(list) => {
+                    schemas.set(list);
+                    error.set(None);
+                }
                 Err(e) => error.set(Some(e)),
             }
             loading.set(false);
@@ -2490,54 +2599,108 @@ fn SchemaFormModal(
 
     let mut name = use_signal(|| initial.as_ref().map(|s| s.name.clone()).unwrap_or_default());
     let mut delimiter = use_signal(|| {
-        initial.as_ref().map(|s| s.delimiter.clone()).unwrap_or_else(|| ",".into())
+        initial
+            .as_ref()
+            .map(|s| s.delimiter.clone())
+            .unwrap_or_else(|| ",".into())
     });
     let mut encoding = use_signal(|| {
-        initial.as_ref().map(|s| s.encoding.clone()).unwrap_or_else(|| "utf-8".into())
+        initial
+            .as_ref()
+            .map(|s| s.encoding.clone())
+            .unwrap_or_else(|| "utf-8".into())
     });
     let mut decimal_separator = use_signal(|| {
-        initial.as_ref().map(|s| s.decimal_separator.clone()).unwrap_or_else(|| "dot".into())
+        initial
+            .as_ref()
+            .map(|s| s.decimal_separator.clone())
+            .unwrap_or_else(|| "dot".into())
     });
     let mut skip_header_rows = use_signal(|| {
-        initial.as_ref().map(|s| s.skip_header_rows).unwrap_or(0).to_string()
+        initial
+            .as_ref()
+            .map(|s| s.skip_header_rows)
+            .unwrap_or(0)
+            .to_string()
     });
-    let mut has_headers = use_signal(|| {
-        initial.as_ref().map(|s| s.has_headers).unwrap_or(true)
-    });
+    let mut has_headers = use_signal(|| initial.as_ref().map(|s| s.has_headers).unwrap_or(true));
     let mut date_column = use_signal(|| {
-        initial.as_ref().map(|s| s.date_column).unwrap_or(0).to_string()
+        initial
+            .as_ref()
+            .map(|s| s.date_column)
+            .unwrap_or(0)
+            .to_string()
     });
     let mut date_format = use_signal(|| {
-        initial.as_ref().map(|s| s.date_format.clone()).unwrap_or_else(|| "YYYY-MM-DD".into())
+        initial
+            .as_ref()
+            .map(|s| s.date_format.clone())
+            .unwrap_or_else(|| "YYYY-MM-DD".into())
     });
     let mut amount_column = use_signal(|| {
-        initial.as_ref().map(|s| s.amount_column).unwrap_or(0).to_string()
+        initial
+            .as_ref()
+            .map(|s| s.amount_column)
+            .unwrap_or(0)
+            .to_string()
     });
     let mut amount_sign_convention = use_signal(|| {
-        initial.as_ref().map(|s| s.amount_sign_convention.clone()).unwrap_or_else(|| "positive_credit".into())
+        initial
+            .as_ref()
+            .map(|s| s.amount_sign_convention.clone())
+            .unwrap_or_else(|| "positive_credit".into())
     });
     let mut description_columns = use_signal(|| {
-        initial.as_ref()
-            .map(|s| s.description_columns.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(","))
+        initial
+            .as_ref()
+            .map(|s| {
+                s.description_columns
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
             .unwrap_or_default()
     });
     let mut currency_source = use_signal(|| {
-        initial.as_ref().map(|s| s.currency_source.clone()).unwrap_or_else(|| "fixed".into())
+        initial
+            .as_ref()
+            .map(|s| s.currency_source.clone())
+            .unwrap_or_else(|| "fixed".into())
     });
     let mut currency_column = use_signal(|| {
-        initial.as_ref().and_then(|s| s.currency_column).map(|c| c.to_string()).unwrap_or_default()
+        initial
+            .as_ref()
+            .and_then(|s| s.currency_column)
+            .map(|c| c.to_string())
+            .unwrap_or_default()
     });
     let mut fixed_currency = use_signal(|| {
-        initial.as_ref().and_then(|s| s.fixed_currency.clone()).unwrap_or_else(|| "EUR".into())
+        initial
+            .as_ref()
+            .and_then(|s| s.fixed_currency.clone())
+            .unwrap_or_else(|| "EUR".into())
     });
     let mut bank_ref_column = use_signal(|| {
-        initial.as_ref().and_then(|s| s.bank_ref_column).map(|c| c.to_string()).unwrap_or_default()
+        initial
+            .as_ref()
+            .and_then(|s| s.bank_ref_column)
+            .map(|c| c.to_string())
+            .unwrap_or_default()
     });
     let mut iban_column = use_signal(|| {
-        initial.as_ref().and_then(|s| s.iban_column).map(|c| c.to_string()).unwrap_or_default()
+        initial
+            .as_ref()
+            .and_then(|s| s.iban_column)
+            .map(|c| c.to_string())
+            .unwrap_or_default()
     });
     let mut raw_category_column = use_signal(|| {
-        initial.as_ref().and_then(|s| s.raw_category_column).map(|c| c.to_string()).unwrap_or_default()
+        initial
+            .as_ref()
+            .and_then(|s| s.raw_category_column)
+            .map(|c| c.to_string())
+            .unwrap_or_default()
     });
 
     let mut submitting = use_signal(|| false);
@@ -2548,17 +2711,26 @@ fn SchemaFormModal(
             return;
         }
         let parse_u32 = |s: &str| -> Result<u32, String> {
-            s.trim().parse::<u32>().map_err(|_| format!("`{s}` must be a non-negative integer"))
+            s.trim()
+                .parse::<u32>()
+                .map_err(|_| format!("`{s}` must be a non-negative integer"))
         };
         let parse_opt_u32 = |s: &str| -> Result<Option<u32>, String> {
             let trimmed = s.trim();
-            if trimmed.is_empty() { Ok(None) } else { parse_u32(trimmed).map(Some) }
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                parse_u32(trimmed).map(Some)
+            }
         };
         let parse_desc = |s: &str| -> Result<Vec<u32>, String> {
             s.split(',')
                 .map(str::trim)
                 .filter(|p| !p.is_empty())
-                .map(|p| p.parse::<u32>().map_err(|_| format!("`{p}` is not a column index")))
+                .map(|p| {
+                    p.parse::<u32>()
+                        .map_err(|_| format!("`{p}` is not a column index"))
+                })
                 .collect()
         };
 
@@ -3003,10 +3175,15 @@ fn ReconcileModal(
     let acc_id_preview = acc_id.clone();
     let do_preview = move |_| {
         let id = acc_id_preview.clone();
-        if busy() { return; }
+        if busy() {
+            return;
+        }
         let actual_minor = match parse_money(&actual()) {
             Ok(v) => v,
-            Err(e) => { error.set(Some(e)); return; }
+            Err(e) => {
+                error.set(Some(e));
+                return;
+            }
         };
         let req = ReconcileRequest {
             on_date: on_date(),
@@ -3027,23 +3204,35 @@ fn ReconcileModal(
     let acc_id_apply = acc_id.clone();
     let do_apply = move |_| {
         let id = acc_id_apply.clone();
-        if busy() { return; }
+        if busy() {
+            return;
+        }
         let actual_minor = match parse_money(&actual()) {
             Ok(v) => v,
-            Err(e) => { error.set(Some(e)); return; }
+            Err(e) => {
+                error.set(Some(e));
+                return;
+            }
         };
         let note_str = note().trim().to_string();
         let req = ReconcileRequest {
             on_date: on_date(),
             actual_balance_minor: actual_minor,
-            note: if note_str.is_empty() { None } else { Some(note_str) },
+            note: if note_str.is_empty() {
+                None
+            } else {
+                Some(note_str)
+            },
         };
         busy.set(true);
         error.set(None);
         spawn(async move {
             match use_finance::reconcile_apply(&id, &req).await {
                 Ok(_) => on_done.call(()),
-                Err(e) => { error.set(Some(e)); busy.set(false); }
+                Err(e) => {
+                    error.set(Some(e));
+                    busy.set(false);
+                }
             }
         });
     };
@@ -3216,7 +3405,10 @@ fn RulesTab() -> Element {
         spawn(async move {
             loading.set(true);
             match use_finance::list_rules().await {
-                Ok(list) => { rules.set(list); error.set(None); }
+                Ok(list) => {
+                    rules.set(list);
+                    error.set(None);
+                }
                 Err(e) => error.set(Some(e)),
             }
             if let Ok(cats) = use_finance::list_categories().await {
@@ -3227,7 +3419,9 @@ fn RulesTab() -> Element {
     });
 
     let run_apply = move |_| {
-        if applying() { return; }
+        if applying() {
+            return;
+        }
         applying.set(true);
         apply_summary.set(None);
         error.set(None);
@@ -3245,7 +3439,9 @@ fn RulesTab() -> Element {
         let to = *drop_rule_idx.peek();
         drag_rule_idx.set(None);
         drop_rule_idx.set(None);
-        let (Some(from), Some(to)) = (from, to) else { return; };
+        let (Some(from), Some(to)) = (from, to) else {
+            return;
+        };
         if from == to || reordering() {
             return;
         }
@@ -3452,23 +3648,31 @@ fn RuleFormModal(
     let initial_priority = initial.as_ref().map(|r| r.priority).unwrap_or(0);
 
     let mut name = use_signal(|| {
-        initial.as_ref().map(|r| r.name.clone())
+        initial
+            .as_ref()
+            .map(|r| r.name.clone())
             .or_else(|| prefill.as_ref().map(|p| p.name.clone()))
             .unwrap_or_default()
     });
     let mut pattern = use_signal(|| {
-        initial.as_ref().map(|r| r.pattern.clone())
+        initial
+            .as_ref()
+            .map(|r| r.pattern.clone())
             .or_else(|| prefill.as_ref().map(|p| p.pattern.clone()))
             .unwrap_or_default()
     });
     let mut pattern_kind = use_signal(|| {
-        initial.as_ref().map(|r| r.pattern_kind.clone()).unwrap_or_else(|| "substring".into())
+        initial
+            .as_ref()
+            .map(|r| r.pattern_kind.clone())
+            .unwrap_or_else(|| "substring".into())
     });
-    let mut case_insensitive = use_signal(|| {
-        initial.as_ref().map(|r| r.case_insensitive).unwrap_or(true)
-    });
+    let mut case_insensitive =
+        use_signal(|| initial.as_ref().map(|r| r.case_insensitive).unwrap_or(true));
     let mut category_id = use_signal(|| {
-        initial.as_ref().map(|r| r.category_id.clone())
+        initial
+            .as_ref()
+            .map(|r| r.category_id.clone())
             .or_else(|| prefill.as_ref().and_then(|p| p.category_id.clone()))
             .or_else(|| categories.iter().next().map(|(k, _)| k.clone()))
             .unwrap_or_default()
@@ -3520,10 +3724,15 @@ fn RuleFormModal(
 
     let editing_id_a = editing_id.clone();
     let submit = move |_| {
-        if submitting() || applying() { return; }
+        if submitting() || applying() {
+            return;
+        }
         let req = match build_req() {
             Ok(r) => r,
-            Err(e) => { error.set(Some(e)); return; }
+            Err(e) => {
+                error.set(Some(e));
+                return;
+            }
         };
         submitting.set(true);
         error.set(None);
@@ -3535,17 +3744,25 @@ fn RuleFormModal(
             };
             match result {
                 Ok(_) => on_saved.call(()),
-                Err(e) => { error.set(Some(e)); submitting.set(false); }
+                Err(e) => {
+                    error.set(Some(e));
+                    submitting.set(false);
+                }
             }
         });
     };
 
     let editing_id_b = editing_id.clone();
     let submit_and_apply = move |_| {
-        if submitting() || applying() { return; }
+        if submitting() || applying() {
+            return;
+        }
         let req = match build_req() {
             Ok(r) => r,
-            Err(e) => { error.set(Some(e)); return; }
+            Err(e) => {
+                error.set(Some(e));
+                return;
+            }
         };
         submitting.set(true);
         error.set(None);
@@ -3566,7 +3783,10 @@ fn RuleFormModal(
                     }
                     applying.set(false);
                 }
-                Err(e) => { error.set(Some(e)); submitting.set(false); }
+                Err(e) => {
+                    error.set(Some(e));
+                    submitting.set(false);
+                }
             }
         });
     };

@@ -238,7 +238,8 @@ impl StorageBackend for LocalStorage {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        let mut stack: Vec<(PathBuf, String)> = vec![(root, prefix.trim_start_matches('/').to_string())];
+        let mut stack: Vec<(PathBuf, String)> =
+            vec![(root, prefix.trim_start_matches('/').to_string())];
 
         while let Some((dir, rel)) = stack.pop() {
             let mut entries = match fs::read_dir(&dir).await {
@@ -291,9 +292,7 @@ mod tests {
     use tokio::io::AsyncReadExt;
 
     /// Helper: create a LocalStorage backed by a tempdir and write a test file.
-    async fn setup_with_file(
-        content: &[u8],
-    ) -> (LocalStorage, tempfile::TempDir) {
+    async fn setup_with_file(content: &[u8]) -> (LocalStorage, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("failed to create tempdir");
         let storage = LocalStorage::new(tmp.path()).await.unwrap();
         storage.write("test.bin", content).await.unwrap();

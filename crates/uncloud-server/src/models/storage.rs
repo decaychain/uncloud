@@ -14,7 +14,9 @@ pub enum StorageBackendType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum StorageBackendConfig {
-    Local { path: String },
+    Local {
+        path: String,
+    },
     S3 {
         endpoint: String,
         bucket: String,

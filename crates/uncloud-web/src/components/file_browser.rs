@@ -1,7 +1,3 @@
-use std::collections::{HashMap, HashSet};
-use dioxus::prelude::*;
-use gloo_storage::{LocalStorage, Storage};
-use uncloud_common::{EffectiveStrategyResponse, FileResponse, FolderResponse, GalleryInclude, MusicInclude, ServerEvent, SyncStrategy};
 use crate::components::file_item::FileItem;
 use crate::components::file_open_viewer::FileOpenViewer;
 use crate::components::file_properties::FilePropertiesDrawer;
@@ -10,11 +6,18 @@ use crate::components::icons::{
     IconFolderPlus, IconGrid, IconList, IconTrash, IconUpload, IconX,
 };
 use crate::components::upload::{UploadZone, FILE_INPUT_ID};
-use web_sys::wasm_bindgen::JsCast;
 use crate::hooks::use_file_opener::{use_file_opener, FileOpenTarget};
 use crate::hooks::use_files;
 use crate::router::Route;
 use crate::state::{HighlightTarget, ViewMode};
+use dioxus::prelude::*;
+use gloo_storage::{LocalStorage, Storage};
+use std::collections::{HashMap, HashSet};
+use uncloud_common::{
+    EffectiveStrategyResponse, FileResponse, FolderResponse, GalleryInclude, MusicInclude,
+    ServerEvent, SyncStrategy,
+};
+use web_sys::wasm_bindgen::JsCast;
 
 // ── Selection state ───────────────────────────────────────────────────────────
 
@@ -74,7 +77,9 @@ impl Selection {
     }
 
     fn has_shared_folder(&self, folders: &[FolderResponse]) -> bool {
-        folders.iter().any(|f| self.folders.contains(&f.id) && f.shared_by.is_some())
+        folders
+            .iter()
+            .any(|f| self.folders.contains(&f.id) && f.shared_by.is_some())
     }
 }
 
@@ -104,7 +109,9 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
     // Single-item delete confirmation: Some((id, is_folder, name))
     let mut delete_target: Signal<Option<(String, bool, String)>> = use_signal(|| None);
     // Folder settings modal target: Some((folder_id, folder_name, gallery_include, music_include))
-    let mut folder_settings_target: Signal<Option<(String, String, SyncStrategy, GalleryInclude, MusicInclude)>> = use_signal(|| None);
+    let mut folder_settings_target: Signal<
+        Option<(String, String, SyncStrategy, GalleryInclude, MusicInclude)>,
+    > = use_signal(|| None);
     // Folder share dialog target: Some((folder_id, folder_name))
     let mut share_folder_target: Signal<Option<(String, String)>> = use_signal(|| None);
     // Share link dialog target: Some((resource_id, resource_type, resource_name))
@@ -129,16 +136,24 @@ pub fn FileBrowser(parent_id: Option<String>) -> Element {
     use_effect(move || {
         if let Some(event) = sse_event() {
             match event {
-                ServerEvent::ProcessingCompleted { file_id, task_type, success } => {
+                ServerEvent::ProcessingCompleted {
+                    file_id,
+                    task_type,
+                    success,
+                } => {
                     if task_type == "thumbnail" && success {
                         *thumb_vers.write().entry(file_id).or_insert(0) += 1;
                     }
                 }
-                ServerEvent::FileCreated { .. } | ServerEvent::FileUpdated { .. }
-                | ServerEvent::FileDeleted { .. } | ServerEvent::FolderCreated { .. }
-                | ServerEvent::FolderUpdated { .. } | ServerEvent::FolderDeleted { .. }
+                ServerEvent::FileCreated { .. }
+                | ServerEvent::FileUpdated { .. }
+                | ServerEvent::FileDeleted { .. }
+                | ServerEvent::FolderCreated { .. }
+                | ServerEvent::FolderUpdated { .. }
+                | ServerEvent::FolderDeleted { .. }
                 | ServerEvent::FileRestored { .. }
-                | ServerEvent::FolderShared { .. } | ServerEvent::FolderShareRevoked { .. } => {
+                | ServerEvent::FolderShared { .. }
+                | ServerEvent::FolderShareRevoked { .. } => {
                     let epoch = *refresh_epoch.peek() + 1;
                     refresh_epoch.set(epoch);
                     spawn(async move {
@@ -878,7 +893,11 @@ fn NewFolderModal(
         }
         let parent = parent_id.clone();
         let chosen = storage_choice();
-        let storage = if chosen.is_empty() { None } else { Some(chosen) };
+        let storage = if chosen.is_empty() {
+            None
+        } else {
+            Some(chosen)
+        };
         creating.set(true);
         error.set(None);
         spawn(async move {
@@ -1174,7 +1193,8 @@ fn MoveDialog(
     on_success: EventHandler<()>,
 ) -> Element {
     // IDs of folders being moved — excluded from picker (can't move into self).
-    let moved_folder_ids: HashSet<String> = items.iter()
+    let moved_folder_ids: HashSet<String> = items
+        .iter()
         .filter(|(_, is_f, _)| *is_f)
         .map(|(id, _, _)| id.clone())
         .collect();
@@ -1412,7 +1432,8 @@ fn FolderSettingsDrawer(
     let mut music_selected: Signal<MusicInclude> = use_signal(|| music_include);
     let is_tauri = crate::hooks::tauri::is_tauri();
     let mut effective_info: Signal<Option<EffectiveStrategyResponse>> = use_signal(|| None);
-    let mut storage_info: Signal<Option<uncloud_common::EffectiveStorageResponse>> = use_signal(|| None);
+    let mut storage_info: Signal<Option<uncloud_common::EffectiveStorageResponse>> =
+        use_signal(|| None);
     let mut loading = use_signal(|| true);
     let mut saving_server = use_signal(|| false);
     let mut saving_local = use_signal(|| false);

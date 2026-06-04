@@ -1,6 +1,6 @@
-use axum::response::{IntoResponse, Response};
-use axum::http::{header, StatusCode};
 use axum::extract::Path;
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
 use rust_embed::Embed;
 
 #[derive(Embed)]
@@ -35,8 +35,10 @@ fn serve_embedded(path: &str) -> Response {
         None => match Assets::get("index.html") {
             Some(file) => (
                 StatusCode::OK,
-                [(header::CONTENT_TYPE, "text/html".to_string()),
-                 (header::CACHE_CONTROL, "no-cache".to_string())],
+                [
+                    (header::CONTENT_TYPE, "text/html".to_string()),
+                    (header::CACHE_CONTROL, "no-cache".to_string()),
+                ],
                 file.data,
             )
                 .into_response(),

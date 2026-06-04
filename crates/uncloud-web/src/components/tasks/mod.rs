@@ -1,10 +1,10 @@
 pub mod assigned_view;
-pub mod board_view;
 pub mod board_card;
+pub mod board_view;
 pub mod list_view;
 pub mod project_settings;
-pub mod task_detail;
 pub mod schedule_view;
+pub mod task_detail;
 
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
@@ -264,7 +264,10 @@ pub fn TasksProjectPage(project_id: String) -> Element {
     // events; refetching the small label list on any task change is cheap
     // and keeps the UI consistent across tabs and devices.
     use_events(move |evt| {
-        if let ServerEvent::TaskChanged { project_id: ev_pid, .. } = evt {
+        if let ServerEvent::TaskChanged {
+            project_id: ev_pid, ..
+        } = evt
+        {
             if ev_pid == *pid_sig.peek() {
                 let pid = ev_pid;
                 spawn(async move {

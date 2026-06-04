@@ -16,9 +16,7 @@
 use chrono::Utc;
 use mongodb::bson::oid::ObjectId;
 
-use crate::models::{
-    AmountSignConvention, CurrencySource, DecimalSeparator, ImportSchema,
-};
+use crate::models::{AmountSignConvention, CurrencySource, DecimalSeparator, ImportSchema};
 
 pub const BUILTIN_ID: &str = "sparkasse_camt_v8";
 pub const SCHEMA_NAME: &str = "Sparkasse CAMT V8";
@@ -58,7 +56,7 @@ pub fn seed_for(owner_id: ObjectId) -> ImportSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::finance_import::{parse_csv, parse_amount_minor};
+    use crate::finance_import::{parse_amount_minor, parse_csv};
     use crate::models::DecimalSeparator;
 
     fn fixture_csv() -> &'static [u8] {
@@ -90,18 +88,27 @@ DE12345;06.03.26;06.03.26;GUTSCHRIFT;Salary March;;;;;;;Acme GmbH;DE98765;ACMEDE
 
     #[test]
     fn german_amount_positive() {
-        assert_eq!(parse_amount_minor("1.234,56", DecimalSeparator::Comma), Some(123456));
+        assert_eq!(
+            parse_amount_minor("1.234,56", DecimalSeparator::Comma),
+            Some(123456)
+        );
         assert_eq!(parse_amount_minor("0,00", DecimalSeparator::Comma), Some(0));
     }
 
     #[test]
     fn german_amount_negative() {
-        assert_eq!(parse_amount_minor("-1.234,56", DecimalSeparator::Comma), Some(-123456));
+        assert_eq!(
+            parse_amount_minor("-1.234,56", DecimalSeparator::Comma),
+            Some(-123456)
+        );
     }
 
     #[test]
     fn us_amount_positive() {
-        assert_eq!(parse_amount_minor("1,234.56", DecimalSeparator::Dot), Some(123456));
+        assert_eq!(
+            parse_amount_minor("1,234.56", DecimalSeparator::Dot),
+            Some(123456)
+        );
         assert_eq!(parse_amount_minor("0.00", DecimalSeparator::Dot), Some(0));
     }
 }

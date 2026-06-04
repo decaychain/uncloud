@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 
+use crate::components::icons::{
+    IconChevronRight, IconFingerprint, IconFolder, IconLock, IconLockOpen, IconX,
+};
+use crate::hooks::{api, biometric, use_files};
+use crate::state::{AuthState, VaultSession, VaultState};
 use chrono::Duration;
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use keepass::db::{Database, Entry, Group};
 use keepass::DatabaseKey;
 use uncloud_common::{FileResponse, FolderResponse};
-use crate::components::icons::{IconChevronRight, IconFingerprint, IconFolder, IconLock, IconLockOpen, IconX};
-use crate::hooks::{api, biometric, use_files};
-use crate::state::{AuthState, VaultSession, VaultState};
 
 /// Idle TTL for the unlocked vault. Past this, the next mount of
 /// PasswordsPage (or a 30 s ticker while the page is open) clears the
@@ -72,7 +74,12 @@ fn collect_groups(group: &Group, depth: usize) -> Vec<GroupView> {
 }
 
 fn count_entries_recursive(group: &Group) -> usize {
-    group.entries.len() + group.groups.iter().map(|g| count_entries_recursive(g)).sum::<usize>()
+    group.entries.len()
+        + group
+            .groups
+            .iter()
+            .map(|g| count_entries_recursive(g))
+            .sum::<usize>()
 }
 
 fn find_entry<'a>(group: &'a Group, uuid: uuid::Uuid) -> Option<&'a Entry> {
@@ -85,12 +92,16 @@ fn find_entry_mut<'a>(group: &'a mut Group, uuid: uuid::Uuid) -> Option<&'a mut 
 
 fn find_group_entries(group: &Group, group_uuid: uuid::Uuid) -> Vec<EntryView> {
     if group.uuid == group_uuid {
-        return group.entries.iter().map(|e| EntryView {
-            uuid: e.uuid,
-            title: e.get_title().unwrap_or("Untitled").to_string(),
-            username: e.get_username().unwrap_or("").to_string(),
-            url: e.get_url().unwrap_or("").to_string(),
-        }).collect();
+        return group
+            .entries
+            .iter()
+            .map(|e| EntryView {
+                uuid: e.uuid,
+                title: e.get_title().unwrap_or("Untitled").to_string(),
+                username: e.get_username().unwrap_or("").to_string(),
+                url: e.get_url().unwrap_or("").to_string(),
+            })
+            .collect();
     }
     for child in &group.groups {
         let r = find_group_entries(child, group_uuid);
@@ -155,7 +166,11 @@ async fn fetch_recent_vaults() -> Result<Vec<uncloud_common::RecentVaultEntry>, 
         .map_err(|e| e.to_string())
 }
 
-async fn add_recent_vault_api(file_id: &str, file_name: &str, folder_path: Option<&str>) -> Result<(), String> {
+async fn add_recent_vault_api(
+    file_id: &str,
+    file_name: &str,
+    folder_path: Option<&str>,
+) -> Result<(), String> {
     let req = uncloud_common::AddRecentVaultRequest {
         file_id: file_id.to_string(),
         file_name: file_name.to_string(),
@@ -204,7 +219,9 @@ async fn download_file_bytes(file_id: &str) -> Result<Vec<u8>, String> {
         return Err(format!("HTTP {}", resp.status()));
     }
 
-    let array_buffer = resp.binary().await
+    let array_buffer = resp
+        .binary()
+        .await
         .map_err(|e| format!("Read error: {:?}", e))?;
 
     Ok(array_buffer)
@@ -219,8 +236,7 @@ async fn save_vault_bytes(file_id: &str, data: Vec<u8>, file_name: &str) -> Resu
     let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&blob_parts, &opts)
         .map_err(|_| "Failed to create Blob".to_string())?;
 
-    let form = web_sys::FormData::new()
-        .map_err(|_| "Failed to create FormData".to_string())?;
+    let form = web_sys::FormData::new().map_err(|_| "Failed to create FormData".to_string())?;
     form.append_with_blob_and_filename("file", &blob, file_name)
         .map_err(|_| "Failed to append to FormData".to_string())?;
 
@@ -240,7 +256,11 @@ async fn save_vault_bytes(file_id: &str, data: Vec<u8>, file_name: &str) -> Resu
     }
 }
 
-async fn create_new_vault_file(name: &str, data: Vec<u8>, parent_id: Option<&str>) -> Result<String, String> {
+async fn create_new_vault_file(
+    name: &str,
+    data: Vec<u8>,
+    parent_id: Option<&str>,
+) -> Result<String, String> {
     let blob_parts = js_sys::Array::new();
     let uint8 = js_sys::Uint8Array::from(data.as_slice());
     blob_parts.push(&uint8);
@@ -249,8 +269,7 @@ async fn create_new_vault_file(name: &str, data: Vec<u8>, parent_id: Option<&str
     let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&blob_parts, &opts)
         .map_err(|_| "Failed to create Blob".to_string())?;
 
-    let form = web_sys::FormData::new()
-        .map_err(|_| "Failed to create FormData".to_string())?;
+    let form = web_sys::FormData::new().map_err(|_| "Failed to create FormData".to_string())?;
     form.append_with_blob_and_filename("file", &blob, name)
         .map_err(|_| "Failed to append to FormData".to_string())?;
     if let Some(pid) = parent_id {
@@ -271,20 +290,37 @@ async fn create_new_vault_file(name: &str, data: Vec<u8>, parent_id: Option<&str
         return Err(format!("Upload failed (HTTP {}): {}", resp.status(), body));
     }
 
-    let text = resp.text().await.map_err(|e| format!("Read error: {}", e))?;
-    let file: uncloud_common::FileResponse = serde_json::from_str(&text)
-        .map_err(|_| "Failed to parse upload response".to_string())?;
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("Read error: {}", e))?;
+    let file: uncloud_common::FileResponse =
+        serde_json::from_str(&text).map_err(|_| "Failed to parse upload response".to_string())?;
     Ok(file.id)
 }
 
 // ── Password generator ─────────────────────────────────────────────────────
 
-fn generate_password(length: usize, uppercase: bool, lowercase: bool, digits: bool, symbols: bool) -> String {
+fn generate_password(
+    length: usize,
+    uppercase: bool,
+    lowercase: bool,
+    digits: bool,
+    symbols: bool,
+) -> String {
     let mut chars = String::new();
-    if uppercase { chars.push_str("ABCDEFGHIJKLMNOPQRSTUVWXYZ"); }
-    if lowercase { chars.push_str("abcdefghijklmnopqrstuvwxyz"); }
-    if digits { chars.push_str("0123456789"); }
-    if symbols { chars.push_str("!@#$%^&*()-_=+[]{}|;:,.<>?/~`"); }
+    if uppercase {
+        chars.push_str("ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+    }
+    if lowercase {
+        chars.push_str("abcdefghijklmnopqrstuvwxyz");
+    }
+    if digits {
+        chars.push_str("0123456789");
+    }
+    if symbols {
+        chars.push_str("!@#$%^&*()-_=+[]{}|;:,.<>?/~`");
+    }
     if chars.is_empty() {
         chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".to_string();
     }
@@ -318,14 +354,15 @@ pub fn PasswordsPage() -> Element {
     // Synchronously expire stale sessions before any child sees them.
     // This handles "navigate to /passwords after >5 min away" — the
     // initial reads below pick up the cleared session, not the stale one.
-    if session.peek().is_stale(Duration::seconds(VAULT_IDLE_TTL_SECS)) {
+    if session
+        .peek()
+        .is_stale(Duration::seconds(VAULT_IDLE_TTL_SECS))
+    {
         session.write().clear();
     }
 
-    let mut vault: Signal<Option<VaultState>> =
-        use_signal(|| session.peek().state.clone());
-    let mut master_password: Signal<String> =
-        use_signal(|| session.peek().master_password.clone());
+    let mut vault: Signal<Option<VaultState>> = use_signal(|| session.peek().state.clone());
+    let mut master_password: Signal<String> = use_signal(|| session.peek().master_password.clone());
     let mut recent_vaults: Signal<Vec<uncloud_common::RecentVaultEntry>> = use_signal(Vec::new);
     let mut loading: Signal<bool> = use_signal(|| true);
 
@@ -346,7 +383,10 @@ pub fn PasswordsPage() -> Element {
     use_future(move || async move {
         loop {
             TimeoutFuture::new(30_000).await;
-            if session.peek().is_stale(Duration::seconds(VAULT_IDLE_TTL_SECS)) {
+            if session
+                .peek()
+                .is_stale(Duration::seconds(VAULT_IDLE_TTL_SECS))
+            {
                 session.write().clear();
                 vault.set(None);
                 master_password.set(String::new());
@@ -567,10 +607,7 @@ pub fn PasswordsPage() -> Element {
 // ── Vault file picker (browse folders for .kdbx files) ─────────────────────
 
 #[component]
-fn VaultFilePicker(
-    on_select: EventHandler<KdbxFile>,
-    on_close: EventHandler<()>,
-) -> Element {
+fn VaultFilePicker(on_select: EventHandler<KdbxFile>, on_close: EventHandler<()>) -> Element {
     let mut current_parent: Signal<Option<String>> = use_signal(|| None);
     let mut folders: Signal<Vec<FolderResponse>> = use_signal(Vec::new);
     let mut kdbx_files: Signal<Vec<FileResponse>> = use_signal(Vec::new);
@@ -586,7 +623,8 @@ fn VaultFilePicker(
                 folders.set(flds);
             }
             if let Ok(files) = use_files::list_files(parent.as_deref()).await {
-                let kdbx: Vec<FileResponse> = files.into_iter()
+                let kdbx: Vec<FileResponse> = files
+                    .into_iter()
                     .filter(|f| f.name.ends_with(".kdbx"))
                     .collect();
                 kdbx_files.set(kdbx);
@@ -726,7 +764,9 @@ fn NewVaultModal(
 
     // Load folders for the picker
     use_effect(move || {
-        if !show_folder_picker() { return; }
+        if !show_folder_picker() {
+            return;
+        }
         let parent = picker_parent();
         spawn(async move {
             picker_loading.set(true);
@@ -747,7 +787,10 @@ fn NewVaultModal(
 
     let folder_label = if selected_folder().is_some() {
         // Show last breadcrumb name as hint
-        picker_breadcrumb().last().map(|f| f.name.clone()).unwrap_or("(selected folder)".to_string())
+        picker_breadcrumb()
+            .last()
+            .map(|f| f.name.clone())
+            .unwrap_or("(selected folder)".to_string())
     } else {
         "Root (Files)".to_string()
     };
@@ -1277,10 +1320,7 @@ fn BiometricEnrolPrompt(
 // ── Vault browser (main UI after unlock) ───────────────────────────────────
 
 #[component]
-fn VaultBrowser(
-    vault: Signal<Option<VaultState>>,
-    master_password: String,
-) -> Element {
+fn VaultBrowser(vault: Signal<Option<VaultState>>, master_password: String) -> Element {
     let mut session = use_context::<Signal<VaultSession>>();
     let mut selected_group: Signal<Option<uuid::Uuid>> = use_signal(|| None);
     let mut selected_entry: Signal<Option<uuid::Uuid>> = use_signal(|| None);
@@ -1300,11 +1340,14 @@ fn VaultBrowser(
     // Filter entries by search or selected group
     let filtered_entries: Vec<EntryView> = if !search_query().is_empty() {
         let q = search_query().to_lowercase();
-        all_entries.into_iter().filter(|e| {
-            e.title.to_lowercase().contains(&q)
-                || e.username.to_lowercase().contains(&q)
-                || e.url.to_lowercase().contains(&q)
-        }).collect()
+        all_entries
+            .into_iter()
+            .filter(|e| {
+                e.title.to_lowercase().contains(&q)
+                    || e.username.to_lowercase().contains(&q)
+                    || e.url.to_lowercase().contains(&q)
+            })
+            .collect()
     } else if let Some(gid) = selected_group() {
         find_group_entries(&vs.db.root, gid)
     } else {
@@ -1619,11 +1662,7 @@ fn delete_entry_from_group(group: &mut Group, uuid: uuid::Uuid) -> bool {
 // ── Entry detail (read-only view) ──────────────────────────────────────────
 
 #[component]
-fn EntryDetail(
-    entry: Entry,
-    on_edit: EventHandler<()>,
-    on_delete: EventHandler<()>,
-) -> Element {
+fn EntryDetail(entry: Entry, on_edit: EventHandler<()>, on_delete: EventHandler<()>) -> Element {
     let mut show_password = use_signal(|| false);
     let copied: Signal<Option<String>> = use_signal(|| None);
 
@@ -2078,21 +2117,34 @@ fn EntryEditor(
     let entry = find_entry(&vs.db.root, entry_uuid);
 
     let mut title = use_signal(|| entry.and_then(|e| e.get_title()).unwrap_or("").to_string());
-    let mut username = use_signal(|| entry.and_then(|e| e.get_username()).unwrap_or("").to_string());
-    let mut password = use_signal(|| entry.and_then(|e| e.get_password()).unwrap_or("").to_string());
+    let mut username = use_signal(|| {
+        entry
+            .and_then(|e| e.get_username())
+            .unwrap_or("")
+            .to_string()
+    });
+    let mut password = use_signal(|| {
+        entry
+            .and_then(|e| e.get_password())
+            .unwrap_or("")
+            .to_string()
+    });
     let mut url = use_signal(|| entry.and_then(|e| e.get_url()).unwrap_or("").to_string());
     let mut notes = use_signal(|| entry.and_then(|e| e.get("Notes")).unwrap_or("").to_string());
 
     // Custom fields: (key, value, is_protected)
     let mut custom_fields: Signal<Vec<(String, String, bool)>> = use_signal(|| {
         let standard = ["Title", "UserName", "Password", "URL", "Notes"];
-        entry.map(|e| {
-            e.fields.iter()
-                .filter(|(k, _)| !standard.contains(&k.as_str()))
-                .filter(|(_, v)| !v.is_empty())
-                .map(|(k, v)| (k.clone(), v.as_str().to_string(), v.is_protected()))
-                .collect::<Vec<_>>()
-        }).unwrap_or_default()
+        entry
+            .map(|e| {
+                e.fields
+                    .iter()
+                    .filter(|(k, _)| !standard.contains(&k.as_str()))
+                    .filter(|(_, v)| !v.is_empty())
+                    .map(|(k, v)| (k.clone(), v.as_str().to_string(), v.is_protected()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
     });
 
     // Password generator

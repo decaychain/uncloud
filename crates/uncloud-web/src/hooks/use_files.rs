@@ -1,7 +1,8 @@
 use uncloud_common::{
-    AlbumResponse, CopyFileRequest, CopyFolderRequest, CreateFolderRequest, EffectiveStorageResponse, EffectiveStrategyResponse,
-    FileResponse, FileVersionResponse, FolderResponse, GalleryInclude, GalleryResponse, MusicInclude,
-    SyncStrategy, TrashItemResponse, UpdateFileRequest, UpdateFolderRequest,
+    AlbumResponse, CopyFileRequest, CopyFolderRequest, CreateFolderRequest,
+    EffectiveStorageResponse, EffectiveStrategyResponse, FileResponse, FileVersionResponse,
+    FolderResponse, GalleryInclude, GalleryResponse, MusicInclude, SyncStrategy, TrashItemResponse,
+    UpdateFileRequest, UpdateFolderRequest,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -37,10 +38,7 @@ pub async fn list_files(parent_id: Option<&str>) -> Result<Vec<FileResponse>, St
         None => api::api_url("/files"),
     };
 
-    let response = api::get_raw(&url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let response = api::get_raw(&url).send().await.map_err(|e| e.to_string())?;
 
     if response.ok() {
         response
@@ -58,10 +56,7 @@ pub async fn list_folders(parent_id: Option<&str>) -> Result<Vec<FolderResponse>
         None => api::api_url("/folders"),
     };
 
-    let response = api::get_raw(&url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let response = api::get_raw(&url).send().await.map_err(|e| e.to_string())?;
 
     if response.ok() {
         response
@@ -144,18 +139,31 @@ pub async fn delete_folder(id: &str) -> Result<(), String> {
 }
 
 pub async fn rename_file(id: &str, name: &str) -> Result<FileResponse, String> {
-    let req = UpdateFileRequest { name: Some(name.to_string()), parent_id: None };
+    let req = UpdateFileRequest {
+        name: Some(name.to_string()),
+        parent_id: None,
+    };
     update_file_req(id, &req).await
 }
 
 pub async fn rename_folder(id: &str, name: &str) -> Result<FolderResponse, String> {
-    let req = UpdateFolderRequest { name: Some(name.to_string()), parent_id: None, sync_strategy: None, gallery_include: None, music_include: None };
+    let req = UpdateFolderRequest {
+        name: Some(name.to_string()),
+        parent_id: None,
+        sync_strategy: None,
+        gallery_include: None,
+        music_include: None,
+    };
     update_folder_req(id, &req).await
 }
 
 /// Move a file. `parent_id = None` -> root; `parent_id = Some(id)` -> folder.
 /// `name` renames the file at the destination (used for conflict resolution).
-pub async fn move_file(id: &str, parent_id: Option<&str>, name: Option<&str>) -> Result<FileResponse, String> {
+pub async fn move_file(
+    id: &str,
+    parent_id: Option<&str>,
+    name: Option<&str>,
+) -> Result<FileResponse, String> {
     let req = UpdateFileRequest {
         name: name.map(|s| s.to_string()),
         parent_id: Some(parent_id.unwrap_or("").to_string()),
@@ -165,7 +173,11 @@ pub async fn move_file(id: &str, parent_id: Option<&str>, name: Option<&str>) ->
 
 /// Move a folder. `parent_id = None` -> root; `parent_id = Some(id)` -> folder.
 /// `name` renames the folder at the destination (used for conflict resolution).
-pub async fn move_folder(id: &str, parent_id: Option<&str>, name: Option<&str>) -> Result<FolderResponse, String> {
+pub async fn move_folder(
+    id: &str,
+    parent_id: Option<&str>,
+    name: Option<&str>,
+) -> Result<FolderResponse, String> {
     let req = UpdateFolderRequest {
         name: name.map(|s| s.to_string()),
         parent_id: Some(parent_id.unwrap_or("").to_string()),
@@ -193,11 +205,17 @@ pub async fn copy_folder(
         .await
         .map_err(|e| e.to_string())?;
     if response.ok() {
-        response.json::<FolderResponse>().await.map_err(|e| e.to_string())
+        response
+            .json::<FolderResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else if response.status() == 409 {
         Err("CONFLICT".to_string())
     } else {
-        Err(format!("Failed to copy folder (HTTP {})", response.status()))
+        Err(format!(
+            "Failed to copy folder (HTTP {})",
+            response.status()
+        ))
     }
 }
 
@@ -218,7 +236,10 @@ pub async fn copy_file(
         .await
         .map_err(|e| e.to_string())?;
     if response.ok() {
-        response.json::<FileResponse>().await.map_err(|e| e.to_string())
+        response
+            .json::<FileResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else if response.status() == 409 {
         Err("CONFLICT".to_string())
     } else {
@@ -234,11 +255,17 @@ async fn update_file_req(id: &str, req: &UpdateFileRequest) -> Result<FileRespon
         .await
         .map_err(|e| e.to_string())?;
     if response.ok() {
-        response.json::<FileResponse>().await.map_err(|e| e.to_string())
+        response
+            .json::<FileResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else if response.status() == 409 {
         Err("CONFLICT".to_string())
     } else {
-        Err(format!("Failed to update file (HTTP {})", response.status()))
+        Err(format!(
+            "Failed to update file (HTTP {})",
+            response.status()
+        ))
     }
 }
 
@@ -250,11 +277,17 @@ async fn update_folder_req(id: &str, req: &UpdateFolderRequest) -> Result<Folder
         .await
         .map_err(|e| e.to_string())?;
     if response.ok() {
-        response.json::<FolderResponse>().await.map_err(|e| e.to_string())
+        response
+            .json::<FolderResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else if response.status() == 409 {
         Err("CONFLICT".to_string())
     } else {
-        Err(format!("Failed to update folder (HTTP {})", response.status()))
+        Err(format!(
+            "Failed to update folder (HTTP {})",
+            response.status()
+        ))
     }
 }
 
@@ -288,18 +321,45 @@ pub async fn get_effective_storage(id: &str) -> Result<EffectiveStorageResponse,
     }
 }
 
-pub async fn update_folder_strategy(id: &str, strategy: SyncStrategy) -> Result<FolderResponse, String> {
-    let req = UpdateFolderRequest { name: None, parent_id: None, sync_strategy: Some(strategy), gallery_include: None, music_include: None };
+pub async fn update_folder_strategy(
+    id: &str,
+    strategy: SyncStrategy,
+) -> Result<FolderResponse, String> {
+    let req = UpdateFolderRequest {
+        name: None,
+        parent_id: None,
+        sync_strategy: Some(strategy),
+        gallery_include: None,
+        music_include: None,
+    };
     update_folder_req(id, &req).await
 }
 
-pub async fn update_folder_gallery_include(id: &str, gallery: GalleryInclude) -> Result<FolderResponse, String> {
-    let req = UpdateFolderRequest { name: None, parent_id: None, sync_strategy: None, gallery_include: Some(gallery), music_include: None };
+pub async fn update_folder_gallery_include(
+    id: &str,
+    gallery: GalleryInclude,
+) -> Result<FolderResponse, String> {
+    let req = UpdateFolderRequest {
+        name: None,
+        parent_id: None,
+        sync_strategy: None,
+        gallery_include: Some(gallery),
+        music_include: None,
+    };
     update_folder_req(id, &req).await
 }
 
-pub async fn update_folder_music_include(id: &str, music: MusicInclude) -> Result<FolderResponse, String> {
-    let req = UpdateFolderRequest { name: None, parent_id: None, sync_strategy: None, gallery_include: None, music_include: Some(music) };
+pub async fn update_folder_music_include(
+    id: &str,
+    music: MusicInclude,
+) -> Result<FolderResponse, String> {
+    let req = UpdateFolderRequest {
+        name: None,
+        parent_id: None,
+        sync_strategy: None,
+        gallery_include: None,
+        music_include: Some(music),
+    };
     update_folder_req(id, &req).await
 }
 
@@ -328,13 +388,13 @@ pub async fn list_gallery(
         url = format!("{}?{}", url, params.join("&"));
     }
 
-    let response = api::get_raw(&url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let response = api::get_raw(&url).send().await.map_err(|e| e.to_string())?;
 
     if response.ok() {
-        response.json::<GalleryResponse>().await.map_err(|e| e.to_string())
+        response
+            .json::<GalleryResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err("Failed to load gallery".to_string())
     }
@@ -347,7 +407,10 @@ pub async fn list_gallery_albums() -> Result<Vec<AlbumResponse>, String> {
         .map_err(|e| e.to_string())?;
 
     if response.ok() {
-        response.json::<Vec<AlbumResponse>>().await.map_err(|e| e.to_string())
+        response
+            .json::<Vec<AlbumResponse>>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err("Failed to load albums".to_string())
     }
@@ -357,9 +420,11 @@ pub fn download_url(id: &str) -> String {
     api::authenticated_media_url(&format!("/files/{}/download", id))
 }
 
-pub async fn upload_file(file: &web_sys::File, parent_id: Option<&str>) -> Result<FileResponse, String> {
-    let form = web_sys::FormData::new()
-        .map_err(|_| "Failed to create FormData".to_string())?;
+pub async fn upload_file(
+    file: &web_sys::File,
+    parent_id: Option<&str>,
+) -> Result<FileResponse, String> {
+    let form = web_sys::FormData::new().map_err(|_| "Failed to create FormData".to_string())?;
 
     let blob = file.unchecked_ref::<web_sys::Blob>();
     form.append_with_blob_and_filename("file", blob, &file.name())
@@ -378,7 +443,10 @@ pub async fn upload_file(file: &web_sys::File, parent_id: Option<&str>) -> Resul
         .map_err(|e| e.to_string())?;
 
     if response.ok() {
-        response.json::<FileResponse>().await.map_err(|e| e.to_string())
+        response
+            .json::<FileResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err(format!("Upload failed (HTTP {})", response.status()))
     }
@@ -389,13 +457,13 @@ pub async fn upload_file(file: &web_sys::File, parent_id: Option<&str>) -> Resul
 // --------------------------------------------------------------------------
 
 pub async fn list_trash() -> Result<Vec<TrashItemResponse>, String> {
-    let response = api::get("/trash")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let response = api::get("/trash").send().await.map_err(|e| e.to_string())?;
 
     if response.ok() {
-        response.json::<Vec<TrashItemResponse>>().await.map_err(|e| e.to_string())
+        response
+            .json::<Vec<TrashItemResponse>>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err("Failed to load trash".to_string())
     }
@@ -412,10 +480,7 @@ pub async fn restore_from_trash(id: &str, name: Option<&str>) -> Result<(), Stri
             .await
             .map_err(|e| e.to_string())?
     } else {
-        api::post(&path)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
+        api::post(&path).send().await.map_err(|e| e.to_string())?
     };
 
     if response.ok() {
@@ -470,17 +535,23 @@ pub async fn list_versions(file_id: &str) -> Result<Vec<FileVersionResponse>, St
         .map_err(|e| e.to_string())?;
 
     if response.ok() {
-        response.json::<Vec<FileVersionResponse>>().await.map_err(|e| e.to_string())
+        response
+            .json::<Vec<FileVersionResponse>>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err("Failed to load versions".to_string())
     }
 }
 
 pub async fn restore_version(file_id: &str, version_id: &str) -> Result<(), String> {
-    let response = api::post(&format!("/files/{}/versions/{}/restore", file_id, version_id))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let response = api::post(&format!(
+        "/files/{}/versions/{}/restore",
+        file_id, version_id
+    ))
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
 
     if response.ok() {
         Ok(())

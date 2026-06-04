@@ -14,8 +14,8 @@ use common::TestApp;
 async fn search_music_buckets_match_against_metadata() {
     let app = TestApp::new().await;
     let me: Value = app.register_and_login("alice").await;
-    let owner_id = ObjectId::parse_str(me["id"].as_str().expect("user id"))
-        .expect("user id is ObjectId");
+    let owner_id =
+        ObjectId::parse_str(me["id"].as_str().expect("user id")).expect("user id is ObjectId");
 
     let folders = app.db.collection::<Folder>("folders");
     let files = app.db.collection::<File>("files");
@@ -23,7 +23,10 @@ async fn search_music_buckets_match_against_metadata() {
 
     let mut music = Folder::new(owner_id, None, "Music".into());
     music.music_include = uncloud_common::MusicInclude::Include;
-    folders.insert_one(&music).await.expect("insert music folder");
+    folders
+        .insert_one(&music)
+        .await
+        .expect("insert music folder");
 
     let other = Folder::new(owner_id, None, "Documents".into());
     folders.insert_one(&other).await.expect("insert other");
@@ -54,11 +57,41 @@ async fn search_music_buckets_match_against_metadata() {
     // file in `Documents` that must not leak into any bucket regardless of
     // how well it matches.
     let rows = [
-        audio(music.id, "back-in-the-ussr.mp3", "The Beatles", "The White Album", "Back in the USSR"),
-        audio(music.id, "dear-prudence.mp3",     "The Beatles", "The White Album", "Dear Prudence"),
-        audio(music.id, "come-together.mp3",     "The Beatles", "Abbey Road",      "Come Together"),
-        audio(music.id, "changes.mp3",            "David Bowie", "Hunky Dory",      "Changes"),
-        audio(other.id, "beatles-memo.mp3",       "The Beatles", "Should Not Show", "Hidden"),
+        audio(
+            music.id,
+            "back-in-the-ussr.mp3",
+            "The Beatles",
+            "The White Album",
+            "Back in the USSR",
+        ),
+        audio(
+            music.id,
+            "dear-prudence.mp3",
+            "The Beatles",
+            "The White Album",
+            "Dear Prudence",
+        ),
+        audio(
+            music.id,
+            "come-together.mp3",
+            "The Beatles",
+            "Abbey Road",
+            "Come Together",
+        ),
+        audio(
+            music.id,
+            "changes.mp3",
+            "David Bowie",
+            "Hunky Dory",
+            "Changes",
+        ),
+        audio(
+            other.id,
+            "beatles-memo.mp3",
+            "The Beatles",
+            "Should Not Show",
+            "Hidden",
+        ),
     ];
     for f in &rows {
         files.insert_one(f).await.expect("insert file");
@@ -72,13 +105,21 @@ async fn search_music_buckets_match_against_metadata() {
     let body: Value = res.json();
 
     let artist_names: Vec<&str> = body["artists"]
-        .as_array().unwrap().iter().map(|a| a["name"].as_str().unwrap()).collect();
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["name"].as_str().unwrap())
+        .collect();
     assert_eq!(artist_names, vec!["The Beatles"]);
     assert_eq!(body["artists"][0]["album_count"], 2);
     assert_eq!(body["artists"][0]["track_count"], 3);
 
     let album_names: Vec<&str> = body["albums"]
-        .as_array().unwrap().iter().map(|a| a["name"].as_str().unwrap()).collect();
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["name"].as_str().unwrap())
+        .collect();
     // Both Beatles albums matched (sorted by year asc, then name; both have
     // no year so falls back to name ascending case-insensitively).
     assert_eq!(album_names, vec!["Abbey Road", "The White Album"]);

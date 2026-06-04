@@ -1,7 +1,6 @@
 use dioxus::prelude::*;
 use uncloud_common::{
-    ServerEvent, TaskLabelResponse, TaskPriority, TaskResponse, TaskStatus,
-    UpdateTaskStatusRequest,
+    ServerEvent, TaskLabelResponse, TaskPriority, TaskResponse, TaskStatus, UpdateTaskStatusRequest,
 };
 
 use crate::hooks::use_events::use_events;
@@ -81,13 +80,11 @@ pub fn AssignedView() -> Element {
 
     // Sort: overdue/dated tasks first by due_date asc, then undated by priority.
     let mut ordered: Vec<TaskResponse> = tasks.read().clone();
-    ordered.sort_by(|a, b| {
-        match (&a.due_date, &b.due_date) {
-            (Some(x), Some(y)) => x.cmp(y),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => priority_rank(&a.priority).cmp(&priority_rank(&b.priority)),
-        }
+    ordered.sort_by(|a, b| match (&a.due_date, &b.due_date) {
+        (Some(x), Some(y)) => x.cmp(y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => priority_rank(&a.priority).cmp(&priority_rank(&b.priority)),
     });
 
     rsx! {

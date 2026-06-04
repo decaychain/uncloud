@@ -32,13 +32,11 @@ async fn require(scope: &'static str, request: Request, next: Next) -> Response 
     let challenge = format!("Bearer scope=\"{}\"", scope);
     (
         StatusCode::FORBIDDEN,
-        [
-            (
-                axum::http::header::WWW_AUTHENTICATE,
-                HeaderValue::from_str(&challenge)
-                    .unwrap_or_else(|_| HeaderValue::from_static("Bearer")),
-            ),
-        ],
+        [(
+            axum::http::header::WWW_AUTHENTICATE,
+            HeaderValue::from_str(&challenge)
+                .unwrap_or_else(|_| HeaderValue::from_static("Bearer")),
+        )],
         format!("Scope `{}` required", scope),
     )
         .into_response()

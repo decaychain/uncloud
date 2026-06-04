@@ -11,15 +11,15 @@
 //!   - `UploadOnly` strategy never pushes a delete.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use axum::{
-    Json, Router,
     extract::{Path as AxPath, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get},
+    Json, Router,
 };
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -95,10 +95,7 @@ async fn sync_tree(State(s): State<FakeServer>) -> impl IntoResponse {
     Json(serde_json::json!({ "files": files, "folders": folders }))
 }
 
-async fn download(
-    AxPath(id): AxPath<String>,
-    State(s): State<FakeServer>,
-) -> impl IntoResponse {
+async fn download(AxPath(id): AxPath<String>, State(s): State<FakeServer>) -> impl IntoResponse {
     match s.files.get(&id) {
         Some(f) => (StatusCode::OK, f.bytes.clone()).into_response(),
         None => (StatusCode::NOT_FOUND, "").into_response(),
@@ -284,7 +281,10 @@ async fn watcher_cancel_hook_clears_pending() {
         .cancel_pending_delete_for_path(&path_str)
         .await
         .unwrap();
-    assert_eq!(cleared, 1, "exactly one journal row should have been cleared");
+    assert_eq!(
+        cleared, 1,
+        "exactly one journal row should have been cleared"
+    );
 
     // Now run a sync — pending was cancelled, file is back, no delete.
     let r = engine.incremental_sync().await.unwrap();

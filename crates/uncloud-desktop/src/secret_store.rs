@@ -50,11 +50,7 @@ pub fn store_password(
 
 /// Load the password for `(server_url, username)`. Tries keyring first,
 /// then the encrypted file fallback.
-pub fn load_password(
-    fallback_dir: &Path,
-    server_url: &str,
-    username: &str,
-) -> Option<String> {
+pub fn load_password(fallback_dir: &Path, server_url: &str, username: &str) -> Option<String> {
     let account = account_key(server_url, username);
     match keyring_get(&account) {
         Ok(Some(pw)) => Some(pw),
@@ -186,8 +182,7 @@ fn write_fallback_file(dir: &Path, account: &str, password: &str) -> Result<(), 
     std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {dir:?}: {e}"))?;
 
     let key = resolve_fallback_key(dir)?;
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| format!("invalid key length: {e}"))?;
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| format!("invalid key length: {e}"))?;
     let mut nonce_bytes = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
@@ -202,21 +197,21 @@ fn write_fallback_file(dir: &Path, account: &str, password: &str) -> Result<(), 
     blob.extend_from_slice(&ciphertext);
     let encoded = B64.encode(&blob);
 
-    std::fs::write(fallback_path(dir, account), encoded)
-        .map_err(|e| format!("write: {e}"))
+    std::fs::write(fallback_path(dir, account), encoded).map_err(|e| format!("write: {e}"))
 }
 
 fn read_fallback_file(dir: &Path, account: &str) -> Result<String, String> {
     let path = fallback_path(dir, account);
     let encoded = std::fs::read_to_string(&path).map_err(|e| format!("read {path:?}: {e}"))?;
-    let blob = B64.decode(encoded.trim()).map_err(|e| format!("base64: {e}"))?;
+    let blob = B64
+        .decode(encoded.trim())
+        .map_err(|e| format!("base64: {e}"))?;
     if blob.len() < 12 + 16 {
         return Err("ciphertext too short".to_string());
     }
     let (nonce_bytes, ciphertext) = blob.split_at(12);
     let key = resolve_fallback_key(dir)?;
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| format!("invalid key length: {e}"))?;
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| format!("invalid key length: {e}"))?;
     let plaintext = cipher
         .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
         .map_err(|e| format!("decrypt (wrong key or tampered file): {e}"))?;

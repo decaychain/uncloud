@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use dioxus::prelude::*;
 use crate::components::icons::IconSettings;
+use dioxus::prelude::*;
 use uncloud_common::{
     AddShoppingListItemRequest, CategoryResponse, CreateShopRequest, PatchShoppingListItemRequest,
     ShopResponse, ShoppingItemResponse, ShoppingListItemResponse, ShoppingListResponse,
@@ -18,8 +18,7 @@ pub fn ShoppingPage() -> Element {
     let mut lists: Signal<Vec<ShoppingListSummary>> = use_signal(Vec::new);
     let mut categories: Signal<Vec<CategoryResponse>> = use_signal(Vec::new);
     let mut shops: Signal<Vec<ShopResponse>> = use_signal(Vec::new);
-    let mut all_list_data: Signal<HashMap<String, ShoppingListResponse>> =
-        use_signal(HashMap::new);
+    let mut all_list_data: Signal<HashMap<String, ShoppingListResponse>> = use_signal(HashMap::new);
     let mut loading = use_signal(|| true);
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut refresh = use_signal(|| 0u32);
@@ -105,13 +104,10 @@ pub fn ShoppingPage() -> Element {
     let all_items: Vec<(String, String, ShoppingListItemResponse)> = all_data
         .iter()
         .flat_map(|(list_id, list_resp)| {
-            list_resp.items.iter().map(move |item| {
-                (
-                    list_id.clone(),
-                    list_resp.name.clone(),
-                    item.clone(),
-                )
-            })
+            list_resp
+                .items
+                .iter()
+                .map(move |item| (list_id.clone(), list_resp.name.clone(), item.clone()))
         })
         .collect();
 
@@ -1220,12 +1216,9 @@ fn ItemInlet(
     on_updated: EventHandler<()>,
 ) -> Element {
     let mut item_name: Signal<String> = use_signal(|| item.name.clone());
-    let mut selected_categories: Signal<Vec<String>> =
-        use_signal(|| item.categories.clone());
-    let mut selected_shop_ids: Signal<Vec<String>> =
-        use_signal(|| item.shop_ids.clone());
-    let mut quantity: Signal<String> =
-        use_signal(|| item.quantity.clone().unwrap_or_default());
+    let mut selected_categories: Signal<Vec<String>> = use_signal(|| item.categories.clone());
+    let mut selected_shop_ids: Signal<Vec<String>> = use_signal(|| item.shop_ids.clone());
+    let mut quantity: Signal<String> = use_signal(|| item.quantity.clone().unwrap_or_default());
     let mut saving = use_signal(|| false);
 
     let catalogue_item_id = item.item_id.clone();

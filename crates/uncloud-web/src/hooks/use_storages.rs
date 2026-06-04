@@ -82,9 +82,6 @@ pub async fn start_rescan(storage_id: &str) -> Result<RescanJob, String> {
     response.json().await.map_err(|e| e.to_string())
 }
 
-
-
-
 /// Admin-only: GET /api/admin/rescan-jobs/active — current running job, if any.
 /// Used on mount to restore the live-progress panel after navigation/reload.
 pub async fn get_active_rescan_job() -> Result<Option<RescanJob>, String> {
@@ -93,7 +90,10 @@ pub async fn get_active_rescan_job() -> Result<Option<RescanJob>, String> {
         .await
         .map_err(|e| e.to_string())?;
     if response.status() != 200 {
-        return Err(format!("Failed to fetch active rescan job ({})", response.status()));
+        return Err(format!(
+            "Failed to fetch active rescan job ({})",
+            response.status()
+        ));
     }
     response.json().await.map_err(|e| e.to_string())
 }

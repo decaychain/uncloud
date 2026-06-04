@@ -1,10 +1,13 @@
+use crate::components::icons::{
+    IconAlertTriangle, IconGripVertical, IconMoreVertical, IconMusic, IconPause, IconPencil,
+    IconPin, IconPinOff, IconPlay, IconTrash, IconX,
+};
+use crate::hooks::{use_drag_cleanup::use_drag_cleanup, use_player, use_playlists};
+use crate::router::Route;
+use crate::state::{PinnedPlaylistState, PlayerState, PlaylistDirtyTick};
 use dioxus::prelude::*;
 use uncloud_common::TrackResponse;
 use wasm_bindgen::JsCast;
-use crate::components::icons::{IconAlertTriangle, IconGripVertical, IconMoreVertical, IconMusic, IconPause, IconPencil, IconPin, IconPinOff, IconPlay, IconTrash, IconX};
-use crate::hooks::{use_drag_cleanup::use_drag_cleanup, use_playlists, use_player};
-use crate::router::Route;
-use crate::state::{PinnedPlaylistState, PlayerState, PlaylistDirtyTick};
 
 /// Milliseconds the user must hold a touch on a row before it enters drag
 /// mode. Matches Android's typical long-press threshold.
@@ -132,7 +135,10 @@ pub fn PlaylistView(playlist_id: String) -> Element {
 
     let track_list = tracks();
     let total_tracks = track_list.len();
-    let total_duration: f64 = track_list.iter().filter_map(|t| t.audio.duration_secs).sum();
+    let total_duration: f64 = track_list
+        .iter()
+        .filter_map(|t| t.audio.duration_secs)
+        .sum();
     let total_dur_str = if total_duration > 0.0 {
         let total_mins = (total_duration / 60.0).round() as u64;
         if total_mins >= 60 {
@@ -570,7 +576,11 @@ fn RenamePlaylistModal(
         e.prevent_default();
         let new_name = name().trim().to_string();
         let new_desc_raw = desc().trim().to_string();
-        let new_desc = if new_desc_raw.is_empty() { None } else { Some(new_desc_raw) };
+        let new_desc = if new_desc_raw.is_empty() {
+            None
+        } else {
+            Some(new_desc_raw)
+        };
 
         if new_name.is_empty() {
             error.set(Some("Name cannot be empty".to_string()));
@@ -582,8 +592,16 @@ fn RenamePlaylistModal(
         }
 
         let id = playlist_id.clone();
-        let name_to_send = if new_name == cn { None } else { Some(new_name.clone()) };
-        let desc_to_send = if new_desc == cd { None } else { new_desc.clone() };
+        let name_to_send = if new_name == cn {
+            None
+        } else {
+            Some(new_name.clone())
+        };
+        let desc_to_send = if new_desc == cd {
+            None
+        } else {
+            new_desc.clone()
+        };
         saving.set(true);
         error.set(None);
 
@@ -599,11 +617,9 @@ fn RenamePlaylistModal(
             } else {
                 desc_to_send
             };
-            let res = use_playlists::update_playlist(
-                &id,
-                name_to_send.as_deref(),
-                desc_param.as_deref(),
-            ).await;
+            let res =
+                use_playlists::update_playlist(&id, name_to_send.as_deref(), desc_param.as_deref())
+                    .await;
             match res {
                 Ok(_) => on_renamed.call((new_name.clone(), new_desc.clone())),
                 Err(e) if e == "CONFLICT" => {

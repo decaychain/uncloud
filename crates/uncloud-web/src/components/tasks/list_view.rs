@@ -167,10 +167,7 @@ const STATUS_CYCLE: &[TaskStatus] = &[
 ];
 
 fn next_status(current: &TaskStatus) -> TaskStatus {
-    let idx = STATUS_CYCLE
-        .iter()
-        .position(|s| s == current)
-        .unwrap_or(0);
+    let idx = STATUS_CYCLE.iter().position(|s| s == current).unwrap_or(0);
     STATUS_CYCLE[(idx + 1) % STATUS_CYCLE.len()].clone()
 }
 
@@ -239,10 +236,7 @@ const UNSECTIONED_ID: &str = "__unsectioned__";
 // ── Main component ──
 
 #[component]
-pub fn ListView(
-    project_id: String,
-    available_labels: Signal<Vec<TaskLabelResponse>>,
-) -> Element {
+pub fn ListView(project_id: String, available_labels: Signal<Vec<TaskLabelResponse>>) -> Element {
     let mut sections: Signal<Vec<TaskSectionResponse>> = use_signal(Vec::new);
     let mut tasks: Signal<Vec<TaskResponse>> = use_signal(Vec::new);
     let mut loading = use_signal(|| true);
@@ -314,7 +308,11 @@ pub fn ListView(
     // Live updates: refetch on TaskChanged for the current project. Bumps
     // detail_refresh too when the open task is the one that changed.
     use_events(move |evt| {
-        if let ServerEvent::TaskChanged { project_id: ev_pid, task_id } = evt {
+        if let ServerEvent::TaskChanged {
+            project_id: ev_pid,
+            task_id,
+        } = evt
+        {
             if ev_pid == *pid_sig.peek() {
                 let pid = ev_pid.clone();
                 spawn(async move {
@@ -1215,7 +1213,11 @@ fn render_task_row(
     // `data-task-id` only on the top-level wrapper — subtasks aren't
     // draggable so the hit-test should snap to the parent row's bbox even
     // when the pointer is over an expanded subtask.
-    let data_task_id = if depth == 0 { Some(task_id.clone()) } else { None };
+    let data_task_id = if depth == 0 {
+        Some(task_id.clone())
+    } else {
+        None
+    };
 
     rsx! {
         div {

@@ -1,8 +1,8 @@
-use std::sync::Arc;
-use axum::http::Method;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+use axum::http::Method;
 use axum::routing::get;
 use clap::{Parser, Subcommand};
+use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -12,20 +12,22 @@ use mongodb::bson::{self, doc};
 use uncloud_server::models::{File, FileVersion, Folder, UserRole, UserStatus};
 
 use uncloud_server::{
-    AppState,
     config::Config,
-    db,
-    models,
-    processing,
-    routes,
-    services::{AuthService, EventService, MailService, RescanService, SearchService, StorageService},
+    db, models, processing, routes,
+    services::{
+        AuthService, EventService, MailService, RescanService, SearchService, StorageService,
+    },
     supervisor::Supervisor,
+    AppState,
 };
 
 // ── CLI definition ──────────────────────────────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "uncloud-server", about = "Uncloud — self-hosted personal cloud")]
+#[command(
+    name = "uncloud-server",
+    about = "Uncloud — self-hosted personal cloud"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -401,7 +403,6 @@ async fn bootstrap_admin(
     Ok(())
 }
 
-
 // ── dedupe-files ────────────────────────────────────────────────────────────
 
 async fn dedupe_files(dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
@@ -481,7 +482,8 @@ async fn dedupe_files(dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
 
         // Count file_versions belonging to the losers — we'll re-point
         // them at the survivor.
-        let losers_filter = doc! { "file_id": { "$in": losers.iter().copied().collect::<Vec<_>>() } };
+        let losers_filter =
+            doc! { "file_id": { "$in": losers.iter().copied().collect::<Vec<_>>() } };
         let version_count = versions.count_documents(losers_filter.clone()).await?;
 
         let parent_label = g
@@ -495,7 +497,11 @@ async fn dedupe_files(dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
             parent_label,
             g.count,
             survivor_id,
-            losers.iter().map(|id| id.to_hex()).collect::<Vec<_>>().join(","),
+            losers
+                .iter()
+                .map(|id| id.to_hex())
+                .collect::<Vec<_>>()
+                .join(","),
             version_count,
         );
 
@@ -504,19 +510,14 @@ async fn dedupe_files(dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
             // version chain stays intact.
             if version_count > 0 {
                 versions
-                    .update_many(
-                        losers_filter,
-                        doc! { "$set": { "file_id": survivor_id } },
-                    )
+                    .update_many(losers_filter, doc! { "$set": { "file_id": survivor_id } })
                     .await?;
             }
             // Hard-delete the loser File documents. Their on-disk bytes
             // live at the same `storage_path` as the survivor so the
             // file is unaffected.
             files
-                .delete_many(
-                    doc! { "_id": { "$in": losers.iter().copied().collect::<Vec<_>>() } },
-                )
+                .delete_many(doc! { "_id": { "$in": losers.iter().copied().collect::<Vec<_>>() } })
                 .await?;
         }
 
@@ -593,7 +594,8 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let auth = AuthService::new(&db, config.auth.clone());
     let storage = StorageService::new(&db, &config.storage).await?;
     let events = EventService::new();
-    let sync_log = uncloud_server::services::SyncLog::new(&db, events.clone(), config.sync_audit.enabled);
+    let sync_log =
+        uncloud_server::services::SyncLog::new(&db, events.clone(), config.sync_audit.enabled);
     let processing = processing::ProcessingService::new(
         config.processing.max_concurrency,
         config.processing.max_attempts,

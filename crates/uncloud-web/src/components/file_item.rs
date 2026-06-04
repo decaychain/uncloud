@@ -1,4 +1,3 @@
-use dioxus::prelude::*;
 use crate::components::icons::{
     file_type_icon, IconClipboard, IconDownload, IconEye, IconFolderOpen, IconHistory, IconInfo,
     IconLink, IconMoreVertical, IconPencil, IconTrash, IconUsers,
@@ -6,14 +5,23 @@ use crate::components::icons::{
 use crate::hooks::api;
 use crate::router::Route;
 use crate::state::ViewMode;
+use dioxus::prelude::*;
 
 /// Clamp menu coordinates so the menu stays inside the viewport.
 /// Uses conservative fixed dimensions: 180 × 260 px.
 fn clamp_menu_pos(x: f64, y: f64) -> (f64, f64) {
     let (vw, vh) = web_sys::window()
         .map(|w| {
-            let vw = w.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(1024.0);
-            let vh = w.inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(768.0);
+            let vw = w
+                .inner_width()
+                .ok()
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1024.0);
+            let vh = w
+                .inner_height()
+                .ok()
+                .and_then(|v| v.as_f64())
+                .unwrap_or(768.0);
             (vw, vh)
         })
         .unwrap_or((1024.0, 768.0));
@@ -47,16 +55,11 @@ pub fn FileItem(
     on_edit_request: EventHandler<()>,
     on_version_history_request: EventHandler<()>,
     on_folder_settings_request: EventHandler<()>,
-    #[props(default)]
-    on_properties_request: EventHandler<()>,
-    #[props(default)]
-    on_share_folder_request: EventHandler<()>,
-    #[props(default)]
-    on_share_link_request: EventHandler<()>,
-    #[props(default)]
-    shared_by: Option<String>,
-    #[props(default)]
-    shared_with_count: u32,
+    #[props(default)] on_properties_request: EventHandler<()>,
+    #[props(default)] on_share_folder_request: EventHandler<()>,
+    #[props(default)] on_share_link_request: EventHandler<()>,
+    #[props(default)] shared_by: Option<String>,
+    #[props(default)] shared_with_count: u32,
 ) -> Element {
     let nav = use_navigator();
     // None = hidden; Some((x, y)) = visible at clamped viewport coordinates.
@@ -334,9 +337,11 @@ fn FileContextMenu(
     on_share_folder: EventHandler<()>,
     on_share_link: EventHandler<()>,
 ) -> Element {
-    let is_editable_text = !is_folder && mime_type.as_deref()
-        .map(|m| m.starts_with("text/") || m == "application/json" || m == "application/xml")
-        .unwrap_or(false);
+    let is_editable_text = !is_folder
+        && mime_type
+            .as_deref()
+            .map(|m| m.starts_with("text/") || m == "application/json" || m == "application/xml")
+            .unwrap_or(false);
     let on_download = {
         let id = id.clone();
         let name = name.clone();

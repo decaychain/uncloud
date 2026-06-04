@@ -21,8 +21,8 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{AppError, Result};
 use crate::finance_import::{self, sparkasse_camt_v8, ParseError, ParsedRow};
-use crate::middleware::AuthUser;
 use crate::finance_rules::{self, RuleEngine};
+use crate::middleware::AuthUser;
 use crate::models::{
     AmountSignConvention, BalanceSnapshot, CategorySource, CurrencySource, DecimalSeparator,
     FinanceAccount, FinanceCategory, FinanceRule, FinanceTransaction, ImportRun,
@@ -37,9 +37,8 @@ use uncloud_common::{
     FinanceRuleRequest, FinanceRuleResponse, ImportCsvResponse, ImportRowError, ImportRunResponse,
     ImportRunSourceDto, ImportRunSummaryDto, ImportSchemaRequest, ImportSchemaResponse,
     ListTransactionsQuery, ReconcilePreviewResponse, ReconcileRequest, ReorderRulesRequest,
-    TestRuleMatch, TestRuleRequest, TestRuleResponse, TransactionListResponse,
-    TransactionResponse, UpdateAccountRequest, UpdateFinanceCategoryRequest,
-    UpdateTransactionRequest,
+    TestRuleMatch, TestRuleRequest, TestRuleResponse, TransactionListResponse, TransactionResponse,
+    UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
 };
 
 const ACCOUNTS: &str = "finance_accounts";
@@ -81,9 +80,7 @@ fn parse_date(input: &str) -> Result<DateTime<Utc>> {
 
 fn validate_currency(c: &str) -> Result<String> {
     let trimmed = c.trim();
-    if trimmed.len() != ALLOWED_CURRENCY_LEN
-        || !trimmed.chars().all(|c| c.is_ascii_alphabetic())
-    {
+    if trimmed.len() != ALLOWED_CURRENCY_LEN || !trimmed.chars().all(|c| c.is_ascii_alphabetic()) {
         return Err(AppError::BadRequest(format!(
             "currency must be a 3-letter ISO 4217 code, got `{}`",
             c
@@ -213,9 +210,7 @@ pub async fn create_account(
         .await
         .map_err(|e| {
             if is_duplicate_key_error(&e) {
-                AppError::BadRequest(
-                    "Another account already uses this IBAN".into(),
-                )
+                AppError::BadRequest("Another account already uses this IBAN".into())
             } else {
                 AppError::from(e)
             }
@@ -250,8 +245,12 @@ pub async fn update_account(
     let mut unset = doc! {};
     if let Some(iban_opt) = req.iban {
         match iban_opt.as_deref().and_then(normalize_iban) {
-            Some(norm) => { set.insert("iban", norm); }
-            None => { unset.insert("iban", ""); }
+            Some(norm) => {
+                set.insert("iban", norm);
+            }
+            None => {
+                unset.insert("iban", "");
+            }
         }
     }
     match req.archived {
@@ -392,7 +391,10 @@ pub async fn create_category(
         owner_id: user.id,
         parent_id,
         name,
-        colour: req.colour.map(|c| c.trim().to_string()).filter(|c| !c.is_empty()),
+        colour: req
+            .colour
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty()),
         created_at: Utc::now(),
     };
     state
@@ -431,7 +433,9 @@ pub async fn update_category(
         } else {
             let oid = parse_oid(&p, "parent_id")?;
             if oid == id {
-                return Err(AppError::BadRequest("Category cannot be its own parent".into()));
+                return Err(AppError::BadRequest(
+                    "Category cannot be its own parent".into(),
+                ));
             }
             let parent = coll
                 .find_one(doc! { "_id": oid, "owner_id": user.id })
@@ -646,12 +650,12 @@ pub async fn transaction_category_summary(
             Some(Bson::ObjectId(oid)) => Some(oid.to_hex()),
             _ => None,
         };
-        let income = d.get_i64("income").unwrap_or_else(|_| {
-            d.get_i32("income").map(|n| n as i64).unwrap_or(0)
-        });
-        let expense = d.get_i64("expense").unwrap_or_else(|_| {
-            d.get_i32("expense").map(|n| n as i64).unwrap_or(0)
-        });
+        let income = d
+            .get_i64("income")
+            .unwrap_or_else(|_| d.get_i32("income").map(|n| n as i64).unwrap_or(0));
+        let expense = d
+            .get_i64("expense")
+            .unwrap_or_else(|_| d.get_i32("expense").map(|n| n as i64).unwrap_or(0));
         income_total += income;
         expense_total += expense;
         items.push(CategorySummaryItem {
@@ -720,7 +724,11 @@ pub async fn create_transaction(
         raw_bank_category: None,
         notes: req.notes.and_then(|n| {
             let t = n.trim().to_string();
-            if t.is_empty() { None } else { Some(t) }
+            if t.is_empty() {
+                None
+            } else {
+                Some(t)
+            }
         }),
         tags: vec![],
         legs: vec![leg],
@@ -809,8 +817,11 @@ pub async fn update_transaction(
         }
     }
 
-    coll.update_one(doc! { "_id": id, "owner_id": user.id }, doc! { "$set": set })
-        .await?;
+    coll.update_one(
+        doc! { "_id": id, "owner_id": user.id },
+        doc! { "$set": set },
+    )
+    .await?;
     let updated = coll
         .find_one(doc! { "_id": id, "owner_id": user.id })
         .await?
@@ -932,10 +943,7 @@ fn validate_schema_request(req: &ImportSchemaRequest) -> Result<()> {
     }
 }
 
-fn apply_schema_request(
-    schema: &mut ImportSchema,
-    req: ImportSchemaRequest,
-) -> Result<()> {
+fn apply_schema_request(schema: &mut ImportSchema, req: ImportSchemaRequest) -> Result<()> {
     schema.name = req.name.trim().to_string();
     schema.delimiter = req.delimiter;
     schema.encoding = req.encoding;
@@ -949,9 +957,7 @@ fn apply_schema_request(
     schema.description_columns = req.description_columns;
     schema.currency_source = parse_currency_source(&req.currency_source)?;
     schema.currency_column = req.currency_column;
-    schema.fixed_currency = req
-        .fixed_currency
-        .map(|c| c.trim().to_ascii_uppercase());
+    schema.fixed_currency = req.fixed_currency.map(|c| c.trim().to_ascii_uppercase());
     schema.bank_ref_column = req.bank_ref_column;
     schema.iban_column = req.iban_column;
     schema.raw_category_column = req.raw_category_column;
@@ -1178,10 +1184,9 @@ pub async fn import_csv(
         }
     }
 
-    let schema_id_str = schema_id_str
-        .ok_or_else(|| AppError::BadRequest("Missing schema_id field".into()))?;
-    let csv_bytes = csv_bytes
-        .ok_or_else(|| AppError::BadRequest("Missing csv field".into()))?;
+    let schema_id_str =
+        schema_id_str.ok_or_else(|| AppError::BadRequest("Missing schema_id field".into()))?;
+    let csv_bytes = csv_bytes.ok_or_else(|| AppError::BadRequest("Missing csv field".into()))?;
 
     let schema_oid = parse_oid(&schema_id_str, "schema_id")?;
     let schema = find_schema(&state, user.id, schema_oid).await?;
@@ -1572,10 +1577,7 @@ async fn sum_transactions_through(
     Ok(sum)
 }
 
-async fn ensure_reconciliation_category(
-    state: &AppState,
-    owner_id: ObjectId,
-) -> Result<ObjectId> {
+async fn ensure_reconciliation_category(state: &AppState, owner_id: ObjectId) -> Result<ObjectId> {
     let cats = state.db.collection::<FinanceCategory>(CATEGORIES);
     if let Some(existing) = cats
         .find_one(doc! { "owner_id": owner_id, "name": RECONCILIATION_CATEGORY })
@@ -1642,7 +1644,12 @@ pub async fn reconcile_apply(
     let computed = account.opening_balance_minor + txn_sum;
     let delta = req.actual_balance_minor - computed;
 
-    let note = req.note.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    let note = req
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     let category_id = ensure_reconciliation_category(&state, user.id).await?;
 
     let now = Utc::now();
@@ -1701,7 +1708,10 @@ pub async fn reconcile_apply(
         .insert_one(&snapshot)
         .await?;
 
-    Ok((StatusCode::CREATED, Json(snapshot_to_response(&snapshot, 0))))
+    Ok((
+        StatusCode::CREATED,
+        Json(snapshot_to_response(&snapshot, 0)),
+    ))
 }
 
 fn snapshot_to_response(s: &BalanceSnapshot, drift_minor: i64) -> BalanceSnapshotResponse {
@@ -1949,7 +1959,11 @@ pub async fn create_rule(
         created_at: now,
         updated_at: now,
     };
-    state.db.collection::<FinanceRule>(RULES).insert_one(&rule).await?;
+    state
+        .db
+        .collection::<FinanceRule>(RULES)
+        .insert_one(&rule)
+        .await?;
     Ok((StatusCode::CREATED, Json(rule_to_response(&rule))))
 }
 
@@ -2023,7 +2037,9 @@ pub async fn reorder_rules(
         .count_documents(doc! { "owner_id": user.id, "_id": { "$in": ids.clone() } })
         .await?;
     if count != ids.len() as u64 {
-        return Err(AppError::BadRequest("Rule list contains unknown rules".into()));
+        return Err(AppError::BadRequest(
+            "Rule list contains unknown rules".into(),
+        ));
     }
 
     let now = bson::DateTime::from_chrono(Utc::now());
@@ -2098,10 +2114,7 @@ pub async fn apply_rules(
                         set.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
                     }
                     let result = txns
-                        .update_one(
-                            doc! { "_id": t.id },
-                            doc! { "$set": set },
-                        )
+                        .update_one(doc! { "_id": t.id }, doc! { "$set": set })
                         .await?;
                     if category_changed {
                         updated += result.modified_count as u32;
@@ -2122,10 +2135,7 @@ pub async fn apply_rules(
                         set.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
                     }
                     let result = txns
-                        .update_one(
-                            doc! { "_id": t.id },
-                            doc! { "$set": set },
-                        )
+                        .update_one(doc! { "_id": t.id }, doc! { "$set": set })
                         .await?;
                     if category_changed {
                         updated += result.modified_count as u32;

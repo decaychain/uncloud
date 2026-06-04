@@ -12,15 +12,10 @@ use crate::models::{FolderShare, SharePermissionModel, User};
 use crate::services::sharing;
 use crate::AppState;
 
-use uncloud_common::{
-    CreateFolderShareRequest, FolderShareResponse, UpdateFolderShareRequest,
-};
+use uncloud_common::{CreateFolderShareRequest, FolderShareResponse, UpdateFolderShareRequest};
 
 /// Build a response by joining folder and user data.
-async fn build_response(
-    state: &AppState,
-    share: &FolderShare,
-) -> Result<FolderShareResponse> {
+async fn build_response(state: &AppState, share: &FolderShare) -> Result<FolderShareResponse> {
     let folders = state.db.collection::<crate::models::Folder>("folders");
     let users = state.db.collection::<User>("users");
 
@@ -308,8 +303,7 @@ pub async fn update_share(
         let perm_model: SharePermissionModel = permission.into();
         update.insert(
             "permission",
-            mongodb::bson::to_bson(&perm_model)
-                .map_err(|e| AppError::Internal(e.to_string()))?,
+            mongodb::bson::to_bson(&perm_model).map_err(|e| AppError::Internal(e.to_string()))?,
         );
     }
 
@@ -366,7 +360,10 @@ pub async fn update_share(
         return Err(AppError::BadRequest("No fields to update".to_string()));
     }
 
-    update.insert("updated_at", mongodb::bson::DateTime::from_chrono(chrono::Utc::now()));
+    update.insert(
+        "updated_at",
+        mongodb::bson::DateTime::from_chrono(chrono::Utc::now()),
+    );
 
     shares_coll
         .update_one(doc! { "_id": share_id }, doc! { "$set": update })
@@ -408,9 +405,7 @@ pub async fn delete_share(
         return Err(AppError::Forbidden("Access denied".into()));
     }
 
-    shares_coll
-        .delete_one(doc! { "_id": share_id })
-        .await?;
+    shares_coll.delete_one(doc! { "_id": share_id }).await?;
 
     // Notify the other party: if the owner/admin is revoking, notify the grantee;
     // if the grantee is leaving, notify the owner.

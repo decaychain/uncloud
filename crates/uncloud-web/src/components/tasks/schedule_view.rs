@@ -23,11 +23,26 @@ struct ScheduleGroup {
 }
 
 const GROUPS: &[ScheduleGroup] = &[
-    ScheduleGroup { label: "Overdue", badge_class: "badge badge-error badge-sm" },
-    ScheduleGroup { label: "Today", badge_class: "badge badge-warning badge-sm" },
-    ScheduleGroup { label: "Tomorrow", badge_class: "badge badge-info badge-sm" },
-    ScheduleGroup { label: "Next 7 Days", badge_class: "badge badge-sm" },
-    ScheduleGroup { label: "Later", badge_class: "badge badge-ghost badge-sm" },
+    ScheduleGroup {
+        label: "Overdue",
+        badge_class: "badge badge-error badge-sm",
+    },
+    ScheduleGroup {
+        label: "Today",
+        badge_class: "badge badge-warning badge-sm",
+    },
+    ScheduleGroup {
+        label: "Tomorrow",
+        badge_class: "badge badge-info badge-sm",
+    },
+    ScheduleGroup {
+        label: "Next 7 Days",
+        badge_class: "badge badge-sm",
+    },
+    ScheduleGroup {
+        label: "Later",
+        badge_class: "badge badge-ghost badge-sm",
+    },
 ];
 
 #[component]

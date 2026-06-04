@@ -90,7 +90,10 @@ fn extract_param(redirect: &str, key: &str) -> Option<String> {
 #[tokio::test]
 async fn discovery_authorization_server_metadata() {
     let app = TestApp::new().await;
-    let resp = app.server.get("/.well-known/oauth-authorization-server").await;
+    let resp = app
+        .server
+        .get("/.well-known/oauth-authorization-server")
+        .await;
     resp.assert_status_ok();
     let body: Value = resp.json();
     assert!(body["issuer"].as_str().unwrap().starts_with("http"));
@@ -119,7 +122,10 @@ async fn discovery_authorization_server_metadata() {
 #[tokio::test]
 async fn discovery_protected_resource_metadata() {
     let app = TestApp::new().await;
-    let resp = app.server.get("/.well-known/oauth-protected-resource").await;
+    let resp = app
+        .server
+        .get("/.well-known/oauth-protected-resource")
+        .await;
     resp.assert_status_ok();
     let body: Value = resp.json();
     assert!(body["resource"].as_str().unwrap().starts_with("http"));
@@ -239,7 +245,10 @@ async fn token_exchange_rejects_bad_verifier() {
             ("code", &code),
             ("client_id", &client_id),
             ("redirect_uri", TEST_REDIRECT),
-            ("code_verifier", "definitely-not-the-real-verifier-but-long-enough-to-pass"),
+            (
+                "code_verifier",
+                "definitely-not-the-real-verifier-but-long-enough-to-pass",
+            ),
         ])
         .await;
     resp.assert_status(StatusCode::BAD_REQUEST);

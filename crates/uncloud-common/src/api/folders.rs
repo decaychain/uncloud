@@ -62,13 +62,21 @@ pub trait InheritableSetting: Copy + PartialEq + Default {
 }
 
 impl InheritableSetting for SyncStrategy {
-    fn is_inherit(&self) -> bool { *self == Self::Inherit }
-    fn root_default() -> Self { Self::TwoWay }
+    fn is_inherit(&self) -> bool {
+        *self == Self::Inherit
+    }
+    fn root_default() -> Self {
+        Self::TwoWay
+    }
 }
 
 impl InheritableSetting for GalleryInclude {
-    fn is_inherit(&self) -> bool { *self == Self::Inherit }
-    fn root_default() -> Self { Self::Exclude }
+    fn is_inherit(&self) -> bool {
+        *self == Self::Inherit
+    }
+    fn root_default() -> Self {
+        Self::Exclude
+    }
     fn as_include_flag(&self) -> Option<bool> {
         match self {
             Self::Include => Some(true),
@@ -79,8 +87,12 @@ impl InheritableSetting for GalleryInclude {
 }
 
 impl InheritableSetting for MusicInclude {
-    fn is_inherit(&self) -> bool { *self == Self::Inherit }
-    fn root_default() -> Self { Self::Exclude }
+    fn is_inherit(&self) -> bool {
+        *self == Self::Inherit
+    }
+    fn root_default() -> Self {
+        Self::Exclude
+    }
     fn as_include_flag(&self) -> Option<bool> {
         match self {
             Self::Include => Some(true),

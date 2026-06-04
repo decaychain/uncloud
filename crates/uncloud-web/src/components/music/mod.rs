@@ -1,13 +1,13 @@
-mod track_list;
-mod artist_list;
 mod album_grid;
-mod artist_view;
 mod album_view;
+mod artist_list;
+mod artist_view;
 mod folder_view;
+pub mod manage_categories;
 mod playlist_list;
 mod playlist_panel;
 pub mod playlist_view;
-pub mod manage_categories;
+mod track_list;
 
 use dioxus::prelude::*;
 use uncloud_common::{
@@ -15,8 +15,8 @@ use uncloud_common::{
 };
 
 use crate::components::icons::{IconAlertTriangle, IconSearch};
-use crate::hooks::{use_music, use_music_categories, use_playlists};
 use crate::hooks::use_music::LibraryScope;
+use crate::hooks::{use_music, use_music_categories, use_playlists};
 use crate::router::Route;
 
 pub use album_view::AlbumView as MusicAlbumView;
@@ -392,10 +392,10 @@ fn SearchResults(
     on_artist_select: EventHandler<String>,
     on_album_select: EventHandler<MusicAlbumResponse>,
 ) -> Element {
-    use track_list::TrackList;
-    use album_grid::AlbumGrid;
     use crate::hooks::use_player;
     use crate::state::PlayerState;
+    use album_grid::AlbumGrid;
+    use track_list::TrackList;
 
     let player = use_context::<Signal<PlayerState>>();
 

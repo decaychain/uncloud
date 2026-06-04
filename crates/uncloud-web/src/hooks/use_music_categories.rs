@@ -1,6 +1,4 @@
-use uncloud_common::{
-    CreateMusicCategoryRequest, MusicCategory, UpdateMusicCategoryRequest,
-};
+use uncloud_common::{CreateMusicCategoryRequest, MusicCategory, UpdateMusicCategoryRequest};
 
 use super::api;
 
@@ -20,10 +18,7 @@ pub async fn list_categories() -> Result<Vec<MusicCategory>, String> {
     }
 }
 
-pub async fn create_category(
-    name: &str,
-    folder_ids: Vec<String>,
-) -> Result<MusicCategory, String> {
+pub async fn create_category(name: &str, folder_ids: Vec<String>) -> Result<MusicCategory, String> {
     let body = CreateMusicCategoryRequest {
         name: name.to_string(),
         folder_ids,
@@ -74,4 +69,3 @@ pub async fn update_category(
         Err("Failed to update category".to_string())
     }
 }
-

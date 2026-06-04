@@ -43,7 +43,9 @@ async fn preview_computes_delta_against_history() {
 
     let preview: Value = app
         .server
-        .post(&format!("/api/finance/accounts/{account_id}/reconcile/preview"))
+        .post(&format!(
+            "/api/finance/accounts/{account_id}/reconcile/preview"
+        ))
         .json(&serde_json::json!({
             "on_date": "2026-05-02",
             "actual_balance_minor": 150_00,
@@ -66,7 +68,9 @@ async fn apply_creates_snapshot_and_adjustment() {
 
     let resp: Value = app
         .server
-        .post(&format!("/api/finance/accounts/{account_id}/reconcile/apply"))
+        .post(&format!(
+            "/api/finance/accounts/{account_id}/reconcile/apply"
+        ))
         .json(&serde_json::json!({
             "on_date": "2026-05-01",
             "actual_balance_minor": 105_00,
@@ -95,7 +99,11 @@ async fn apply_creates_snapshot_and_adjustment() {
         .await
         .json();
     let default_items = default_txns["items"].as_array().unwrap();
-    assert_eq!(default_items.len(), 1, "only the real deposit shows by default");
+    assert_eq!(
+        default_items.len(),
+        1,
+        "only the real deposit shows by default"
+    );
 
     // Opting in surfaces the adjustment alongside the deposit.
     let all_txns: Value = app
@@ -109,10 +117,18 @@ async fn apply_creates_snapshot_and_adjustment() {
     assert_eq!(items.len(), 2, "deposit + adjustment");
     let adj = items
         .iter()
-        .find(|t| t["description"].as_str().unwrap().starts_with("Reconciliation"))
+        .find(|t| {
+            t["description"]
+                .as_str()
+                .unwrap()
+                .starts_with("Reconciliation")
+        })
         .expect("adjustment transaction not found");
     assert_eq!(adj["amount_minor"], 5_00);
-    assert!(adj["source_snapshot_id"].as_str().is_some(), "snapshot link present");
+    assert!(
+        adj["source_snapshot_id"].as_str().is_some(),
+        "snapshot link present"
+    );
 
     // Snapshot list shows the snapshot with zero drift.
     let snaps: Value = app
@@ -137,7 +153,9 @@ async fn drift_detected_after_late_import_then_recompute_clears_it() {
 
     let snapshot: Value = app
         .server
-        .post(&format!("/api/finance/accounts/{account_id}/reconcile/apply"))
+        .post(&format!(
+            "/api/finance/accounts/{account_id}/reconcile/apply"
+        ))
         .json(&serde_json::json!({
             "on_date": "2026-05-01",
             "actual_balance_minor": 105_00,
@@ -154,7 +172,10 @@ async fn drift_detected_after_late_import_then_recompute_clears_it() {
         .get(&format!("/api/finance/accounts/{account_id}/snapshots"))
         .await
         .json();
-    assert_eq!(snaps[0]["drift_minor"], -7_00, "actual stays; computed grew, so drift is negative");
+    assert_eq!(
+        snaps[0]["drift_minor"], -7_00,
+        "actual stays; computed grew, so drift is negative"
+    );
 
     let recomputed: Value = app
         .server
@@ -183,7 +204,9 @@ async fn delete_snapshot_removes_its_adjustment() {
 
     let snap: Value = app
         .server
-        .post(&format!("/api/finance/accounts/{account_id}/reconcile/apply"))
+        .post(&format!(
+            "/api/finance/accounts/{account_id}/reconcile/apply"
+        ))
         .json(&serde_json::json!({
             "on_date": "2026-05-01",
             "actual_balance_minor": 110_00,

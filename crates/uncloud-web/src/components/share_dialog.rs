@@ -1,5 +1,5 @@
-use dioxus::prelude::*;
 use crate::components::icons::{IconCheck, IconX};
+use dioxus::prelude::*;
 
 #[component]
 pub fn ShareDialog(
@@ -18,7 +18,11 @@ pub fn ShareDialog(
     let on_create = move |_| {
         let resource_id = resource_id.clone();
         let resource_type = resource_type.clone();
-        let password_val = if use_password() { Some(password()) } else { None };
+        let password_val = if use_password() {
+            Some(password())
+        } else {
+            None
+        };
         let expires = expires_hours();
         let max_dl = max_downloads();
 

@@ -1,24 +1,26 @@
+pub mod backup;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod finance_import;
+pub mod finance_rules;
 pub mod frontend;
 pub mod mcp;
 pub mod middleware;
+pub mod migrate;
 pub mod models;
 pub mod processing;
-pub mod finance_import;
-pub mod finance_rules;
 pub mod routes;
 pub mod services;
 pub mod storage;
 pub mod supervisor;
-pub mod migrate;
-pub mod backup;
 
 use mongodb::Database;
 
 use config::Config;
-use services::{AuthService, EventService, MailService, RescanService, SearchService, StorageService, SyncLog};
+use services::{
+    AuthService, EventService, MailService, RescanService, SearchService, StorageService, SyncLog,
+};
 
 pub struct AppState {
     pub config: Config,

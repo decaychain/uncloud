@@ -22,7 +22,9 @@ use crate::AppState;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum CreateStorageConfig {
-    Local { path: String },
+    Local {
+        path: String,
+    },
     S3 {
         endpoint: String,
         bucket: String,
@@ -210,7 +212,10 @@ pub async fn rescan_storage(
         job.finished_at = Some(Utc::now());
         let final_snapshot = job.clone();
         drop(job);
-        worker_state.events.emit_rescan_finished(&final_snapshot).await;
+        worker_state
+            .events
+            .emit_rescan_finished(&final_snapshot)
+            .await;
         worker_state.rescan.release(storage_id).await;
     });
 
@@ -222,8 +227,8 @@ pub async fn get_rescan_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<RescanJob>> {
-    let job_id = ObjectId::parse_str(&id)
-        .map_err(|_| AppError::BadRequest("Invalid job ID".to_string()))?;
+    let job_id =
+        ObjectId::parse_str(&id).map_err(|_| AppError::BadRequest("Invalid job ID".to_string()))?;
     match state.rescan.get(job_id).await {
         Some(handle) => Ok(Json(handle.job.read().await.clone())),
         None => Err(AppError::NotFound("Rescan job".to_string())),
@@ -245,8 +250,8 @@ pub async fn cancel_rescan_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    let job_id = ObjectId::parse_str(&id)
-        .map_err(|_| AppError::BadRequest("Invalid job ID".to_string()))?;
+    let job_id =
+        ObjectId::parse_str(&id).map_err(|_| AppError::BadRequest("Invalid job ID".to_string()))?;
     if state.rescan.cancel(job_id).await {
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -281,7 +286,10 @@ async fn run_rescan_worker(
             return Ok(());
         }
         let user_prefix = sanitize_path_component(&user.username);
-        let mut entries = backend.scan(&user_prefix).await.map_err(|e| e.to_string())?;
+        let mut entries = backend
+            .scan(&user_prefix)
+            .await
+            .map_err(|e| e.to_string())?;
         // Sort shallow-first so parent folders get created before their children.
         entries.sort_by_key(|e| e.path.matches('/').count());
         total = total.saturating_add(entries.len() as u64);

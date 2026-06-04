@@ -18,8 +18,12 @@ pub fn ScrollSentinel(on_visible: EventHandler<()>) -> Element {
 
     let id_effect = id.clone();
     use_effect(move || {
-        let Some(doc) = web_sys::window().and_then(|w| w.document()) else { return; };
-        let Some(sentinel) = doc.get_element_by_id(&id_effect) else { return; };
+        let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+            return;
+        };
+        let Some(sentinel) = doc.get_element_by_id(&id_effect) else {
+            return;
+        };
 
         let callback = Closure::wrap(Box::new(
             move |entries: js_sys::Array, _: web_sys::IntersectionObserver| {

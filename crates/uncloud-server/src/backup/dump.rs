@@ -18,7 +18,7 @@ use std::path::Path;
 use bson::{Bson, Document};
 use futures::stream::TryStreamExt;
 use mongodb::Database;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 

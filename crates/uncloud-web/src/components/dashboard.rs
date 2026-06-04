@@ -89,8 +89,7 @@ pub fn DashboardPage() -> Element {
         } else {
             configured
         };
-        let known: std::collections::HashSet<&str> =
-            all_tile_ids().iter().copied().collect();
+        let known: std::collections::HashSet<&str> = all_tile_ids().iter().copied().collect();
         base.into_iter()
             .filter(|id| known.contains(id.as_str()))
             .filter(|id| id != "shopping" || shopping_enabled)
@@ -187,7 +186,11 @@ fn use_tile_count(tile_id: &str) -> Signal<TileCount> {
 
     // Synchronous summaries (no network) — resolve from auth state.
     if tid == "files" {
-        let used = auth_state().user.as_ref().map(|u| u.used_bytes).unwrap_or(0);
+        let used = auth_state()
+            .user
+            .as_ref()
+            .map(|u| u.used_bytes)
+            .unwrap_or(0);
         let text = format!("{} used", uncloud_common::validation::format_bytes(used));
         return use_signal(move || TileCount::Text(text.clone()));
     }

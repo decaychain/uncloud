@@ -6,7 +6,9 @@ use uncloud_common::{
 use super::api;
 
 fn encode(s: &str) -> String {
-    js_sys::encode_uri_component(s).as_string().unwrap_or_else(|| s.to_string())
+    js_sys::encode_uri_component(s)
+        .as_string()
+        .unwrap_or_else(|| s.to_string())
 }
 
 /// Optional restriction applied to library queries (artists / albums / tracks).
@@ -47,10 +49,7 @@ pub async fn list_music_tracks(
         url = format!("{}?{}", url, params.join("&"));
     }
 
-    let response = api::get_raw(&url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let response = api::get_raw(&url).send().await.map_err(|e| e.to_string())?;
 
     if response.ok() {
         response
@@ -80,10 +79,7 @@ pub async fn list_music_folders() -> Result<Vec<MusicFolderResponse>, String> {
 
 pub async fn list_artists_scoped(scope: &LibraryScope) -> Result<Vec<ArtistResponse>, String> {
     let url = format!("/music/artists{}", scope.query_string());
-    let response = api::get(&url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let response = api::get(&url).send().await.map_err(|e| e.to_string())?;
 
     if response.ok() {
         response
@@ -104,10 +100,7 @@ pub async fn list_artist_albums_scoped(
         encode(artist),
         scope.query_string()
     );
-    let response = api::get(&url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let response = api::get(&url).send().await.map_err(|e| e.to_string())?;
 
     if response.ok() {
         response
@@ -130,10 +123,7 @@ pub async fn list_album_tracks_scoped(
         encode(album),
         scope.query_string()
     );
-    let response = api::get(&url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let response = api::get(&url).send().await.map_err(|e| e.to_string())?;
 
     if response.ok() {
         response
@@ -160,10 +150,7 @@ pub async fn search_music(
         params.push(format!("limit={}", l));
     }
     let url = format!("/music/search?{}", params.join("&"));
-    let response = api::get(&url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let response = api::get(&url).send().await.map_err(|e| e.to_string())?;
     if response.ok() {
         response
             .json::<MusicSearchResponse>()

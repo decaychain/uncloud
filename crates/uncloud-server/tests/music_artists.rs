@@ -14,8 +14,8 @@ use common::TestApp;
 async fn list_artists_aggregates_via_mongo() {
     let app = TestApp::new().await;
     let me: Value = app.register_and_login("alice").await;
-    let owner_id = ObjectId::parse_str(me["id"].as_str().expect("user id"))
-        .expect("user id is ObjectId");
+    let owner_id =
+        ObjectId::parse_str(me["id"].as_str().expect("user id")).expect("user id is ObjectId");
 
     let folders = app.db.collection::<Folder>("folders");
     let files = app.db.collection::<File>("files");
@@ -79,7 +79,10 @@ async fn list_artists_aggregates_via_mongo() {
     let artists: Vec<Value> = res.json();
 
     // Sorted case-insensitively → "David Bowie", "The Beatles", "Unknown Artist".
-    let names: Vec<&str> = artists.iter().map(|a| a["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = artists
+        .iter()
+        .map(|a| a["name"].as_str().unwrap())
+        .collect();
     assert_eq!(
         names,
         vec!["David Bowie", "The Beatles", "Unknown Artist"],
@@ -87,14 +90,20 @@ async fn list_artists_aggregates_via_mongo() {
     );
 
     let beatles = artists.iter().find(|a| a["name"] == "The Beatles").unwrap();
-    assert_eq!(beatles["album_count"], 2, "Beatles: White Album + Abbey Road");
+    assert_eq!(
+        beatles["album_count"], 2,
+        "Beatles: White Album + Abbey Road"
+    );
     assert_eq!(beatles["track_count"], 3);
 
     let bowie = artists.iter().find(|a| a["name"] == "David Bowie").unwrap();
     assert_eq!(bowie["album_count"], 1);
     assert_eq!(bowie["track_count"], 1);
 
-    let unknown = artists.iter().find(|a| a["name"] == "Unknown Artist").unwrap();
+    let unknown = artists
+        .iter()
+        .find(|a| a["name"] == "Unknown Artist")
+        .unwrap();
     assert_eq!(unknown["album_count"], 1, "single 'Unknown Album' bucket");
     assert_eq!(unknown["track_count"], 1);
 

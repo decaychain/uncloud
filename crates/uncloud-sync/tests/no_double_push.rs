@@ -15,15 +15,15 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use axum::{
-    Json, Router,
     extract::{Path as AxPath, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
+    Json, Router,
 };
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -140,10 +140,7 @@ async fn sync_tree(State(s): State<FakeServer>) -> impl IntoResponse {
     Json(serde_json::json!({ "files": files, "folders": folders }))
 }
 
-async fn download(
-    AxPath(id): AxPath<String>,
-    State(s): State<FakeServer>,
-) -> impl IntoResponse {
+async fn download(AxPath(id): AxPath<String>, State(s): State<FakeServer>) -> impl IntoResponse {
     use std::sync::atomic::Ordering;
 
     s.download_hits.fetch_add(1, Ordering::SeqCst);
@@ -181,7 +178,11 @@ async fn upload_simple(State(s): State<FakeServer>) -> impl IntoResponse {
     // whole point. 409 mimics the duplicate-key behaviour the real server
     // would produce for these calls.
     s.upload_hits.fetch_add(1, Ordering::SeqCst);
-    (StatusCode::CONFLICT, "spurious upload — file already exists").into_response()
+    (
+        StatusCode::CONFLICT,
+        "spurious upload — file already exists",
+    )
+        .into_response()
 }
 
 async fn content_replace(
@@ -300,7 +301,12 @@ async fn fresh_sync_does_not_push_back_downloaded_files() {
         "must not upload anything; report.uploaded={:?}",
         report.uploaded
     );
-    assert_eq!(report.errors.len(), 0, "no errors expected: {:?}", report.errors);
+    assert_eq!(
+        report.errors.len(),
+        0,
+        "no errors expected: {:?}",
+        report.errors
+    );
     assert_eq!(
         upload_hits.load(Ordering::SeqCst),
         0,
@@ -494,8 +500,9 @@ async fn stale_journal_with_wiped_local_does_not_push_back() {
 
     assert!(!r2.errors.is_empty(), "sync should have aborted: {:?}", r2);
     assert!(
-        r2.errors.iter().any(|e| e.reason.contains("uncloud-root.json")
-            || e.reason.contains("Sync root")),
+        r2.errors
+            .iter()
+            .any(|e| e.reason.contains("uncloud-root.json") || e.reason.contains("Sync root")),
         "expected sentinel error, got {:?}",
         r2.errors
     );
@@ -557,16 +564,8 @@ async fn cold_start_with_stale_journal_record_does_not_push_back() {
         .unwrap();
     sqlx::migrate!("./migrations").run(&pool).await.unwrap();
 
-    let stale_path_for_current = rig
-        .root
-        .join("hello.txt")
-        .to_string_lossy()
-        .into_owned();
-    let stale_world_path = rig
-        .root
-        .join("world.txt")
-        .to_string_lossy()
-        .into_owned();
+    let stale_path_for_current = rig.root.join("hello.txt").to_string_lossy().into_owned();
+    let stale_world_path = rig.root.join("world.txt").to_string_lossy().into_owned();
 
     // (1) same server_id as current-1, mismatched local_path + old mtime.
     insert_state_row(
@@ -786,11 +785,7 @@ async fn duplicate_name_server_files_dont_loop_back_as_uploads() {
         .await
         .unwrap();
     sqlx::migrate!("./migrations").run(&pool).await.unwrap();
-    let local_path = rig
-        .root
-        .join("report.pdf")
-        .to_string_lossy()
-        .into_owned();
+    let local_path = rig.root.join("report.pdf").to_string_lossy().into_owned();
     for server_id in &["dup-old", "dup-mid", "dup-new"] {
         insert_state_row(
             &pool,
@@ -890,8 +885,7 @@ async fn concurrent_syncs_serialize_via_engine_lock() {
     // The lock guarantees first-come-first-served regardless of which
     // future polls first; the test only cares that *one* of them does the
     // download work and the other sees a clean journal afterward.
-    let (r_a, r_b) =
-        tokio::join!(engine.incremental_sync(), engine.incremental_sync());
+    let (r_a, r_b) = tokio::join!(engine.incremental_sync(), engine.incremental_sync());
     let r_a = r_a.unwrap();
     let r_b = r_b.unwrap();
 
@@ -906,7 +900,11 @@ async fn concurrent_syncs_serialize_via_engine_lock() {
     let r_b = loser;
 
     // Sync A is the one that actually downloads.
-    assert_eq!(r_a.downloaded.len(), 3, "sync A should download all 3 files");
+    assert_eq!(
+        r_a.downloaded.len(),
+        3,
+        "sync A should download all 3 files"
+    );
     assert_eq!(r_a.uploaded.len(), 0, "sync A must not upload");
 
     // Sync B runs after A, sees the journal populated, and skips

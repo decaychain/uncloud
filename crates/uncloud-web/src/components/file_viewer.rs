@@ -1,10 +1,10 @@
+use crate::components::icons::IconX;
+use crate::hooks::api::{self, api_url};
+use dioxus::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
-use dioxus::prelude::*;
 use uncloud_common::FileResponse;
 use wasm_bindgen::JsCast;
-use crate::hooks::api::{self, api_url};
-use crate::components::icons::IconX;
 
 fn is_markdown(file: &FileResponse) -> bool {
     file.mime_type == "text/markdown"
@@ -14,7 +14,7 @@ fn is_markdown(file: &FileResponse) -> bool {
 }
 
 fn render_markdown(source: &str) -> String {
-    use pulldown_cmark::{Parser, Options, html};
+    use pulldown_cmark::{html, Options, Parser};
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
@@ -28,7 +28,11 @@ fn render_markdown(source: &str) -> String {
 // ── TextViewer ──────────────────────────────────────────────────────────────
 
 #[component]
-pub fn TextViewer(file: FileResponse, #[props(default = false)] start_editing: bool, on_close: EventHandler<()>) -> Element {
+pub fn TextViewer(
+    file: FileResponse,
+    #[props(default = false)] start_editing: bool,
+    on_close: EventHandler<()>,
+) -> Element {
     let mut content: Signal<Option<Result<String, String>>> = use_signal(|| None);
     let mut editing = use_signal(move || start_editing);
     let mut draft = use_signal(String::new);
@@ -90,17 +94,15 @@ pub fn TextViewer(file: FileResponse, #[props(default = false)] start_editing: b
             }));
 
             let handler_clone = handler.clone();
-            let closure = wasm_bindgen::closure::Closure::wrap(Box::new(
-                move |evt: web_sys::KeyboardEvent| {
+            let closure =
+                wasm_bindgen::closure::Closure::wrap(Box::new(move |evt: web_sys::KeyboardEvent| {
                     handler_clone.borrow_mut()(evt.key());
-                },
-            ) as Box<dyn FnMut(web_sys::KeyboardEvent)>);
+                })
+                    as Box<dyn FnMut(web_sys::KeyboardEvent)>);
 
             if let Some(window) = web_sys::window() {
-                let _ = window.add_event_listener_with_callback(
-                    "keydown",
-                    closure.as_ref().unchecked_ref(),
-                );
+                let _ = window
+                    .add_event_listener_with_callback("keydown", closure.as_ref().unchecked_ref());
             }
             closure.forget();
         });

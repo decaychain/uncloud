@@ -1,9 +1,9 @@
-use dioxus::prelude::*;
-use uncloud_common::TrashItemResponse;
 use crate::components::icons::{file_type_icon, IconTrash};
 use crate::hooks::use_files;
 use crate::router::Route;
 use crate::state::HighlightTarget;
+use dioxus::prelude::*;
+use uncloud_common::TrashItemResponse;
 
 #[component]
 pub fn Trash() -> Element {

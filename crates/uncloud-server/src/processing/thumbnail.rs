@@ -11,12 +11,7 @@ use crate::AppState;
 
 use super::FileProcessor;
 
-const IMAGE_MIME_TYPES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-];
+const IMAGE_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
 
 pub struct ThumbnailProcessor {
     pub size: u32,
@@ -62,7 +57,8 @@ fn parse_exif(data: &[u8]) -> ExifInfo {
                     // EXIF format: "YYYY:MM:DD HH:MM:SS" (local time, no zone).
                     // Store as UTC — accurate ordering is more important than
                     // absolute wall-clock correctness for gallery grouping.
-                    if let Ok(naive) = NaiveDateTime::parse_from_str(s.trim(), "%Y:%m:%d %H:%M:%S") {
+                    if let Ok(naive) = NaiveDateTime::parse_from_str(s.trim(), "%Y:%m:%d %H:%M:%S")
+                    {
                         info.captured_at = Some(Utc.from_utc_datetime(&naive));
                     }
                 }

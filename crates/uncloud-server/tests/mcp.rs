@@ -525,10 +525,9 @@ async fn assert_listing_contains(app: &TestApp, path: &str, name: &str) {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let parsed: Value = serde_json::from_str(
-        body["result"]["content"][0]["text"].as_str().unwrap(),
-    )
-    .expect("inner json");
+    let parsed: Value =
+        serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap())
+            .expect("inner json");
     let names: Vec<String> = parsed["folders"]
         .as_array()
         .unwrap_or(&vec![])
@@ -553,10 +552,9 @@ async fn assert_listing_missing(app: &TestApp, path: &str, name: &str) {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let parsed: Value = serde_json::from_str(
-        body["result"]["content"][0]["text"].as_str().unwrap(),
-    )
-    .expect("inner json");
+    let parsed: Value =
+        serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap())
+            .expect("inner json");
     let names: Vec<String> = parsed["folders"]
         .as_array()
         .unwrap_or(&vec![])
@@ -646,10 +644,9 @@ async fn write_file_creates_new_file() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let parsed: Value = serde_json::from_str(
-        body["result"]["content"][0]["text"].as_str().unwrap(),
-    )
-    .expect("inner json");
+    let parsed: Value =
+        serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap())
+            .expect("inner json");
     assert_eq!(parsed["overwrote"], false);
     assert_eq!(parsed["path"], "/draft.md");
     assert_eq!(parsed["size_bytes"], 5);
@@ -661,10 +658,9 @@ async fn write_file_creates_new_file() {
         json!({ "name": "read_file", "arguments": { "path": "/draft.md" } }),
     )
     .await;
-    let read_parsed: Value = serde_json::from_str(
-        read_body["result"]["content"][0]["text"].as_str().unwrap(),
-    )
-    .expect("inner json");
+    let read_parsed: Value =
+        serde_json::from_str(read_body["result"]["content"][0]["text"].as_str().unwrap())
+            .expect("inner json");
     assert_eq!(read_parsed["content"], "hello");
 
     app.cleanup().await;
@@ -726,10 +722,9 @@ async fn write_file_overwrite_replaces_content() {
     )
     .await;
     assert_eq!(body["result"]["isError"], false);
-    let parsed: Value = serde_json::from_str(
-        body["result"]["content"][0]["text"].as_str().unwrap(),
-    )
-    .expect("inner json");
+    let parsed: Value =
+        serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap())
+            .expect("inner json");
     assert_eq!(parsed["overwrote"], true);
 
     let (_, read_body, _) = rpc(
@@ -738,10 +733,9 @@ async fn write_file_overwrite_replaces_content() {
         json!({ "name": "read_file", "arguments": { "path": "/note.txt" } }),
     )
     .await;
-    let read_parsed: Value = serde_json::from_str(
-        read_body["result"]["content"][0]["text"].as_str().unwrap(),
-    )
-    .expect("inner json");
+    let read_parsed: Value =
+        serde_json::from_str(read_body["result"]["content"][0]["text"].as_str().unwrap())
+            .expect("inner json");
     assert_eq!(read_parsed["content"], "second");
 
     app.cleanup().await;
@@ -992,7 +986,11 @@ async fn rest_session_cookie_bypasses_scope_check() {
         .post("/api/folders")
         .json(&json!({ "name": "still-works" }))
         .await;
-    assert!(resp.status_code().is_success(), "got {}", resp.status_code());
+    assert!(
+        resp.status_code().is_success(),
+        "got {}",
+        resp.status_code()
+    );
 
     app.cleanup().await;
 }

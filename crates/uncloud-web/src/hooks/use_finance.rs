@@ -16,9 +16,14 @@ use super::api::api_url;
 // ── Accounts ────────────────────────────────────────────────────────────
 
 pub async fn list_accounts() -> Result<Vec<AccountResponse>, String> {
-    let r = api::get("/finance/accounts").send().await.map_err(|e| e.to_string())?;
+    let r = api::get("/finance/accounts")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     if r.ok() {
-        r.json::<Vec<AccountResponse>>().await.map_err(|e| e.to_string())
+        r.json::<Vec<AccountResponse>>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err("Failed to load accounts".to_string())
     }
@@ -38,7 +43,10 @@ pub async fn create_account(req: &CreateAccountRequest) -> Result<AccountRespons
     }
 }
 
-pub async fn update_account(id: &str, req: &UpdateAccountRequest) -> Result<AccountResponse, String> {
+pub async fn update_account(
+    id: &str,
+    req: &UpdateAccountRequest,
+) -> Result<AccountResponse, String> {
     let r = api::put(&format!("/finance/accounts/{}", id))
         .json(req)
         .map_err(|e| e.to_string())?
@@ -70,7 +78,9 @@ pub async fn account_balance(id: &str) -> Result<AccountBalanceResponse, String>
         .await
         .map_err(|e| e.to_string())?;
     if r.ok() {
-        r.json::<AccountBalanceResponse>().await.map_err(|e| e.to_string())
+        r.json::<AccountBalanceResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err("Failed to load balance".to_string())
     }
@@ -79,15 +89,22 @@ pub async fn account_balance(id: &str) -> Result<AccountBalanceResponse, String>
 // ── Categories ──────────────────────────────────────────────────────────
 
 pub async fn list_categories() -> Result<Vec<FinanceCategoryResponse>, String> {
-    let r = api::get("/finance/categories").send().await.map_err(|e| e.to_string())?;
+    let r = api::get("/finance/categories")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     if r.ok() {
-        r.json::<Vec<FinanceCategoryResponse>>().await.map_err(|e| e.to_string())
+        r.json::<Vec<FinanceCategoryResponse>>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err("Failed to load categories".to_string())
     }
 }
 
-pub async fn create_category(req: &CreateFinanceCategoryRequest) -> Result<FinanceCategoryResponse, String> {
+pub async fn create_category(
+    req: &CreateFinanceCategoryRequest,
+) -> Result<FinanceCategoryResponse, String> {
     let r = api::post("/finance/categories")
         .json(req)
         .map_err(|e| e.to_string())?
@@ -95,13 +112,18 @@ pub async fn create_category(req: &CreateFinanceCategoryRequest) -> Result<Finan
         .await
         .map_err(|e| e.to_string())?;
     if r.ok() || r.status() == 201 {
-        r.json::<FinanceCategoryResponse>().await.map_err(|e| e.to_string())
+        r.json::<FinanceCategoryResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err(extract_error(r).await)
     }
 }
 
-pub async fn update_category(id: &str, req: &UpdateFinanceCategoryRequest) -> Result<FinanceCategoryResponse, String> {
+pub async fn update_category(
+    id: &str,
+    req: &UpdateFinanceCategoryRequest,
+) -> Result<FinanceCategoryResponse, String> {
     let r = api::put(&format!("/finance/categories/{}", id))
         .json(req)
         .map_err(|e| e.to_string())?
@@ -109,7 +131,9 @@ pub async fn update_category(id: &str, req: &UpdateFinanceCategoryRequest) -> Re
         .await
         .map_err(|e| e.to_string())?;
     if r.ok() {
-        r.json::<FinanceCategoryResponse>().await.map_err(|e| e.to_string())
+        r.json::<FinanceCategoryResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err(extract_error(r).await)
     }
@@ -160,7 +184,9 @@ pub async fn list_transactions(
     }
     let r = api::get(&url).send().await.map_err(|e| e.to_string())?;
     if r.ok() {
-        r.json::<TransactionListResponse>().await.map_err(|e| e.to_string())
+        r.json::<TransactionListResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err("Failed to load transactions".to_string())
     }
@@ -191,13 +217,17 @@ pub async fn transaction_category_summary(
     }
     let r = api::get(&url).send().await.map_err(|e| e.to_string())?;
     if r.ok() {
-        r.json::<CategorySummaryResponse>().await.map_err(|e| e.to_string())
+        r.json::<CategorySummaryResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err(extract_error(r).await)
     }
 }
 
-pub async fn create_transaction(req: &CreateTransactionRequest) -> Result<TransactionResponse, String> {
+pub async fn create_transaction(
+    req: &CreateTransactionRequest,
+) -> Result<TransactionResponse, String> {
     let r = api::post("/finance/transactions")
         .json(req)
         .map_err(|e| e.to_string())?
@@ -205,13 +235,18 @@ pub async fn create_transaction(req: &CreateTransactionRequest) -> Result<Transa
         .await
         .map_err(|e| e.to_string())?;
     if r.ok() || r.status() == 201 {
-        r.json::<TransactionResponse>().await.map_err(|e| e.to_string())
+        r.json::<TransactionResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err(extract_error(r).await)
     }
 }
 
-pub async fn update_transaction(id: &str, req: &UpdateTransactionRequest) -> Result<TransactionResponse, String> {
+pub async fn update_transaction(
+    id: &str,
+    req: &UpdateTransactionRequest,
+) -> Result<TransactionResponse, String> {
     let r = api::put(&format!("/finance/transactions/{}", id))
         .json(req)
         .map_err(|e| e.to_string())?
@@ -219,7 +254,9 @@ pub async fn update_transaction(id: &str, req: &UpdateTransactionRequest) -> Res
         .await
         .map_err(|e| e.to_string())?;
     if r.ok() {
-        r.json::<TransactionResponse>().await.map_err(|e| e.to_string())
+        r.json::<TransactionResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err(extract_error(r).await)
     }
@@ -466,13 +503,22 @@ pub async fn delete_snapshot(id: &str) -> Result<(), String> {
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    if r.ok() { Ok(()) } else { Err(extract_error(r).await) }
+    if r.ok() {
+        Ok(())
+    } else {
+        Err(extract_error(r).await)
+    }
 }
 
 pub async fn list_rules() -> Result<Vec<FinanceRuleResponse>, String> {
-    let r = api::get("/finance/rules").send().await.map_err(|e| e.to_string())?;
+    let r = api::get("/finance/rules")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     if r.ok() {
-        r.json::<Vec<FinanceRuleResponse>>().await.map_err(|e| e.to_string())
+        r.json::<Vec<FinanceRuleResponse>>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err(extract_error(r).await)
     }
@@ -480,21 +526,34 @@ pub async fn list_rules() -> Result<Vec<FinanceRuleResponse>, String> {
 
 pub async fn create_rule(req: &FinanceRuleRequest) -> Result<FinanceRuleResponse, String> {
     let r = api::post("/finance/rules")
-        .json(req).map_err(|e| e.to_string())?
-        .send().await.map_err(|e| e.to_string())?;
+        .json(req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     if r.ok() {
-        r.json::<FinanceRuleResponse>().await.map_err(|e| e.to_string())
+        r.json::<FinanceRuleResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err(extract_error(r).await)
     }
 }
 
-pub async fn update_rule(id: &str, req: &FinanceRuleRequest) -> Result<FinanceRuleResponse, String> {
+pub async fn update_rule(
+    id: &str,
+    req: &FinanceRuleRequest,
+) -> Result<FinanceRuleResponse, String> {
     let r = api::put(&format!("/finance/rules/{id}"))
-        .json(req).map_err(|e| e.to_string())?
-        .send().await.map_err(|e| e.to_string())?;
+        .json(req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     if r.ok() {
-        r.json::<FinanceRuleResponse>().await.map_err(|e| e.to_string())
+        r.json::<FinanceRuleResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err(extract_error(r).await)
     }
@@ -502,8 +561,14 @@ pub async fn update_rule(id: &str, req: &FinanceRuleRequest) -> Result<FinanceRu
 
 pub async fn delete_rule(id: &str) -> Result<(), String> {
     let r = api::delete(&format!("/finance/rules/{id}"))
-        .send().await.map_err(|e| e.to_string())?;
-    if r.ok() { Ok(()) } else { Err(extract_error(r).await) }
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        Ok(())
+    } else {
+        Err(extract_error(r).await)
+    }
 }
 
 pub async fn reorder_rules(rule_ids: &[String]) -> Result<(), String> {
@@ -524,9 +589,14 @@ pub async fn reorder_rules(rule_ids: &[String]) -> Result<(), String> {
 }
 
 pub async fn apply_rules() -> Result<ApplyRulesResponse, String> {
-    let r = api::post("/finance/rules/apply").send().await.map_err(|e| e.to_string())?;
+    let r = api::post("/finance/rules/apply")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     if r.ok() {
-        r.json::<ApplyRulesResponse>().await.map_err(|e| e.to_string())
+        r.json::<ApplyRulesResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err(extract_error(r).await)
     }
@@ -534,10 +604,15 @@ pub async fn apply_rules() -> Result<ApplyRulesResponse, String> {
 
 pub async fn test_rule(req: &TestRuleRequest) -> Result<TestRuleResponse, String> {
     let r = api::post("/finance/rules/test")
-        .json(req).map_err(|e| e.to_string())?
-        .send().await.map_err(|e| e.to_string())?;
+        .json(req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     if r.ok() {
-        r.json::<TestRuleResponse>().await.map_err(|e| e.to_string())
+        r.json::<TestRuleResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err(extract_error(r).await)
     }

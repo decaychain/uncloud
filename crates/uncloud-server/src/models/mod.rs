@@ -1,56 +1,56 @@
-pub mod user;
-pub mod session;
-pub mod file;
-pub mod folder;
-pub mod storage;
-pub mod share;
-pub mod playlist;
-pub mod music_category;
 pub mod api_token;
-pub mod oauth_client;
-pub mod oauth_authorization_code;
-pub mod s3_credential;
 pub mod app;
-pub mod webhook;
-pub mod shopping;
-pub mod invite;
-pub mod totp_challenge;
-pub mod folder_share;
-pub mod user_preferences;
-pub mod task;
-pub mod sync_event;
-pub mod sftp_host_key;
-pub mod migration_lock;
 pub mod backup_lock;
+pub mod file;
 pub mod finance;
+pub mod folder;
+pub mod folder_share;
+pub mod invite;
 pub mod mail;
+pub mod migration_lock;
+pub mod music_category;
+pub mod oauth_authorization_code;
+pub mod oauth_client;
+pub mod playlist;
+pub mod s3_credential;
+pub mod session;
+pub mod sftp_host_key;
+pub mod share;
+pub mod shopping;
+pub mod storage;
+pub mod sync_event;
+pub mod task;
+pub mod totp_challenge;
+pub mod user;
+pub mod user_preferences;
+pub mod webhook;
 
-pub use folder_share::*;
-pub use user::*;
-pub use session::*;
-pub use file::*;
-pub use folder::*;
-pub use storage::*;
-pub use share::*;
-pub use playlist::*;
-pub use music_category::*;
 pub use api_token::*;
-pub use oauth_client::*;
-pub use oauth_authorization_code::*;
-pub use s3_credential::*;
 pub use app::*;
-pub use webhook::*;
-pub use shopping::*;
-pub use invite::*;
-pub use totp_challenge::*;
-pub use user_preferences::*;
-pub use task::*;
-pub use sync_event::*;
-pub use sftp_host_key::*;
-pub use migration_lock::*;
 pub use backup_lock::*;
+pub use file::*;
 pub use finance::*;
+pub use folder::*;
+pub use folder_share::*;
+pub use invite::*;
 pub use mail::*;
+pub use migration_lock::*;
+pub use music_category::*;
+pub use oauth_authorization_code::*;
+pub use oauth_client::*;
+pub use playlist::*;
+pub use s3_credential::*;
+pub use session::*;
+pub use sftp_host_key::*;
+pub use share::*;
+pub use shopping::*;
+pub use storage::*;
+pub use sync_event::*;
+pub use task::*;
+pub use totp_challenge::*;
+pub use user::*;
+pub use user_preferences::*;
+pub use webhook::*;
 
 /// Serde module for `Option<chrono::DateTime<Utc>>` ↔ BSON Date (nullable).
 /// Usage: `#[serde(with = "crate::models::opt_dt")]`
@@ -92,8 +92,10 @@ pub(crate) mod dt_vec {
     where
         S: Serializer,
     {
-        let bson_dts: Vec<bson::DateTime> =
-            val.iter().map(|dt| bson::DateTime::from_chrono(*dt)).collect();
+        let bson_dts: Vec<bson::DateTime> = val
+            .iter()
+            .map(|dt| bson::DateTime::from_chrono(*dt))
+            .collect();
         bson_dts.serialize(s)
     }
 

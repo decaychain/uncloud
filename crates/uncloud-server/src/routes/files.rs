@@ -5,7 +5,10 @@ use axum::{
     response::Response,
     Json,
 };
-use mongodb::{bson::{doc, oid::ObjectId}, Database};
+use mongodb::{
+    bson::{doc, oid::ObjectId},
+    Database,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -13,13 +16,17 @@ use tokio::io::AsyncReadExt;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-use std::collections::{HashMap, HashSet};
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
-use crate::models::{File, FileVersion, Folder, FolderShare, ProcessingStatus, TaskType, UploadChunk, User};
-use crate::routes::apps::{deliver_webhooks, EVENT_FILE_CREATED, EVENT_FILE_UPDATED, EVENT_FILE_DELETED};
+use crate::models::{
+    File, FileVersion, Folder, FolderShare, ProcessingStatus, TaskType, UploadChunk, User,
+};
+use crate::routes::apps::{
+    deliver_webhooks, EVENT_FILE_CREATED, EVENT_FILE_DELETED, EVENT_FILE_UPDATED,
+};
 use crate::services::sharing::{check_file_access, check_folder_access};
 use crate::AppState;
+use std::collections::{HashMap, HashSet};
 use uncloud_common::{FileResponse, InheritableSetting};
 
 /// Strip characters that are unsafe in filesystem path components.
@@ -92,7 +99,11 @@ pub(crate) async fn resolve_storage_path(
     segments.reverse();
     segments.push(sanitize_path_component(filename));
 
-    Ok(format!("{}/{}", sanitize_path_component(username), segments.join("/")))
+    Ok(format!(
+        "{}/{}",
+        sanitize_path_component(username),
+        segments.join("/")
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -212,8 +223,12 @@ pub async fn list_files(
     };
 
     let filter = match parent_id {
-        Some(pid) => doc! { "owner_id": effective_owner_id, "parent_id": pid, "deleted_at": mongodb::bson::Bson::Null },
-        None => doc! { "owner_id": user.id, "parent_id": null, "deleted_at": mongodb::bson::Bson::Null },
+        Some(pid) => {
+            doc! { "owner_id": effective_owner_id, "parent_id": pid, "deleted_at": mongodb::bson::Bson::Null }
+        }
+        None => {
+            doc! { "owner_id": user.id, "parent_id": null, "deleted_at": mongodb::bson::Bson::Null }
+        }
     };
 
     let collection = state.db.collection::<File>("files");
@@ -331,7 +346,9 @@ pub async fn download_file(
             .ok_or(AppError::RangeNotSatisfiable(file.size_bytes))?;
 
         let length = end - start + 1;
-        let reader = backend.read_range(&file.storage_path, start, length).await?;
+        let reader = backend
+            .read_range(&file.storage_path, start, length)
+            .await?;
         let stream = ReaderStream::new(reader);
         let body = Body::from_stream(stream);
 
@@ -340,7 +357,10 @@ pub async fn download_file(
             .header(header::CONTENT_TYPE, &file.mime_type)
             .header(header::CONTENT_DISPOSITION, &content_disposition)
             .header(header::CONTENT_LENGTH, length)
-            .header(header::CONTENT_RANGE, format!("bytes {}-{}/{}", start, end, total))
+            .header(
+                header::CONTENT_RANGE,
+                format!("bytes {}-{}/{}", start, end, total),
+            )
             .header(header::ACCEPT_RANGES, "bytes")
             .body(body)
             .unwrap())
@@ -413,8 +433,15 @@ pub async fn update_file(
 
     if name_changed || parent_changed {
         // Conflict check
-        if check_name_conflict(&state.db, owner_id, new_parent_id, new_name, Some(file_id), None)
-            .await?
+        if check_name_conflict(
+            &state.db,
+            owner_id,
+            new_parent_id,
+            new_name,
+            Some(file_id),
+            None,
+        )
+        .await?
         {
             return Err(AppError::Conflict(
                 "A file with this name already exists at this location".to_string(),
@@ -452,7 +479,10 @@ pub async fn update_file(
     }
 
     collection
-        .update_one(doc! { "_id": file_id, "owner_id": owner_id }, doc! { "$set": set_doc })
+        .update_one(
+            doc! { "_id": file_id, "owner_id": owner_id },
+            doc! { "$set": set_doc },
+        )
         .await?;
 
     let updated = collection
@@ -488,12 +518,17 @@ pub async fn update_file(
         let username = owner_username.clone();
         let name = updated.name.clone();
         tokio::spawn(async move {
-            deliver_webhooks(&state_clone, EVENT_FILE_UPDATED, serde_json::json!({
-                "file_id": file_id,
-                "owner_id": owner_id_str,
-                "username": username,
-                "name": name,
-            })).await;
+            deliver_webhooks(
+                &state_clone,
+                EVENT_FILE_UPDATED,
+                serde_json::json!({
+                    "file_id": file_id,
+                    "owner_id": owner_id_str,
+                    "username": username,
+                    "name": name,
+                }),
+            )
+            .await;
         });
     }
 
@@ -502,7 +537,13 @@ pub async fn update_file(
         let content_text = updated
             .metadata
             .get("content_text")
-            .and_then(|b| if let mongodb::bson::Bson::String(s) = b { Some(s.clone()) } else { None })
+            .and_then(|b| {
+                if let mongodb::bson::Bson::String(s) = b {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
             .unwrap_or_default();
         let search_doc = crate::services::search::SearchDocument {
             id: updated.id.to_hex(),
@@ -555,7 +596,9 @@ pub async fn delete_file(
     backend.move_to_trash(&file.storage_path, &tp).await?;
 
     // Best-effort thumbnail cleanup (may not exist yet).
-    let _ = backend.delete(&format!(".thumbs/{}.jpg", file.id.to_hex())).await;
+    let _ = backend
+        .delete(&format!(".thumbs/{}.jpg", file.id.to_hex()))
+        .await;
 
     // Soft-delete: set deleted_at and trash_path instead of removing the record.
     // Quota is NOT updated on soft delete — only on permanent purge.
@@ -607,11 +650,16 @@ pub async fn delete_file(
         let owner_id_str = file_owner_id.to_hex();
         let name = file.name.clone();
         tokio::spawn(async move {
-            deliver_webhooks(&state_clone, EVENT_FILE_DELETED, serde_json::json!({
-                "file_id": file_id_str,
-                "owner_id": owner_id_str,
-                "name": name,
-            })).await;
+            deliver_webhooks(
+                &state_clone,
+                EVENT_FILE_DELETED,
+                serde_json::json!({
+                    "file_id": file_id_str,
+                    "owner_id": owner_id_str,
+                    "name": name,
+                }),
+            )
+            .await;
         });
     }
 
@@ -701,7 +749,9 @@ pub async fn update_file_content(
 
     // 2. Archive the current blob.
     let ver_path = version_path(&file.storage_path);
-    backend.archive_version(&file.storage_path, &ver_path).await?;
+    backend
+        .archive_version(&file.storage_path, &ver_path)
+        .await?;
 
     // 3. Insert a FileVersion record for the old content.
     let file_version = FileVersion::new(
@@ -765,7 +815,9 @@ pub async fn update_file_content(
     };
 
     // Also remove any stale thumbnail blob so the new one is generated fresh.
-    let _ = backend.delete(&format!(".thumbs/{}.jpg", file_id.to_hex())).await;
+    let _ = backend
+        .delete(&format!(".thumbs/{}.jpg", file_id.to_hex()))
+        .await;
 
     state.events.emit_file_created(user.id, &updated).await;
 
@@ -788,12 +840,17 @@ pub async fn update_file_content(
         let username = user.username.clone();
         let name = updated.name.clone();
         tokio::spawn(async move {
-            deliver_webhooks(&state_clone, EVENT_FILE_UPDATED, serde_json::json!({
-                "file_id": file_id,
-                "owner_id": owner_id,
-                "username": username,
-                "name": name,
-            })).await;
+            deliver_webhooks(
+                &state_clone,
+                EVENT_FILE_UPDATED,
+                serde_json::json!({
+                    "file_id": file_id,
+                    "owner_id": owner_id,
+                    "username": username,
+                    "name": name,
+                }),
+            )
+            .await;
         });
     }
     state.processing.enqueue(&updated, state.clone()).await;
@@ -882,7 +939,10 @@ pub async fn simple_upload(
     // Check quota against the effective owner
     {
         let users_coll = state.db.collection::<User>("users");
-        if let Some(owner) = users_coll.find_one(doc! { "_id": effective_owner_id }).await? {
+        if let Some(owner) = users_coll
+            .find_one(doc! { "_id": effective_owner_id })
+            .await?
+        {
             if !owner.has_quota_space(size) {
                 return Err(AppError::Forbidden("Quota exceeded".into()));
             }
@@ -894,7 +954,16 @@ pub async fn simple_upload(
     // authoritative guard, but checking here lets us return a clean 409
     // and skip the storage write — no torn files on disk for a request
     // that was never going to land in the DB anyway.
-    if check_name_conflict(&state.db, effective_owner_id, parent_id, &filename, None, None).await? {
+    if check_name_conflict(
+        &state.db,
+        effective_owner_id,
+        parent_id,
+        &filename,
+        None,
+        None,
+    )
+    .await?
+    {
         return Err(AppError::Conflict(
             "A file with this name already exists at this location".to_string(),
         ));
@@ -911,7 +980,8 @@ pub async fn simple_upload(
         &effective_username,
         parent_id,
         &filename,
-    ).await?;
+    )
+    .await?;
 
     // Calculate checksum
     let mut hasher = Sha256::new();
@@ -942,9 +1012,15 @@ pub async fn simple_upload(
     collection.insert_one(&file).await?;
 
     // Update effective owner's used bytes
-    state.auth.update_user_bytes(effective_owner_id, size).await?;
+    state
+        .auth
+        .update_user_bytes(effective_owner_id, size)
+        .await?;
 
-    state.events.emit_file_created(effective_owner_id, &file).await;
+    state
+        .events
+        .emit_file_created(effective_owner_id, &file)
+        .await;
 
     state
         .sync_log
@@ -965,12 +1041,17 @@ pub async fn simple_upload(
         let username = effective_username.clone();
         let name = file.name.clone();
         tokio::spawn(async move {
-            deliver_webhooks(&state_clone, EVENT_FILE_CREATED, serde_json::json!({
-                "file_id": file_id,
-                "owner_id": owner_id_str,
-                "username": username,
-                "name": name,
-            })).await;
+            deliver_webhooks(
+                &state_clone,
+                EVENT_FILE_CREATED,
+                serde_json::json!({
+                    "file_id": file_id,
+                    "owner_id": owner_id_str,
+                    "username": username,
+                    "name": name,
+                }),
+            )
+            .await;
         });
     }
     state.processing.enqueue(&file, state.clone()).await;
@@ -1018,14 +1099,19 @@ pub async fn init_upload(
     // Check quota against the effective owner
     {
         let users_coll = state.db.collection::<User>("users");
-        if let Some(owner) = users_coll.find_one(doc! { "_id": effective_owner_id }).await? {
+        if let Some(owner) = users_coll
+            .find_one(doc! { "_id": effective_owner_id })
+            .await?
+        {
             if !owner.has_quota_space(req.size) {
                 return Err(AppError::Forbidden("Quota exceeded".into()));
             }
         }
     }
 
-    let chunk_size = req.chunk_size.unwrap_or(state.config.uploads.max_chunk_size as i64);
+    let chunk_size = req
+        .chunk_size
+        .unwrap_or(state.config.uploads.max_chunk_size as i64);
 
     let storage_id = state.storage.resolve_storage_for_parent(parent_id).await?;
     let storage = state.storage.get_storage(storage_id).await?;
@@ -1172,7 +1258,8 @@ pub async fn complete_upload(
         &effective_username,
         upload.parent_id,
         &upload.filename,
-    ).await?;
+    )
+    .await?;
 
     // Finalize temp file
     backend
@@ -1185,9 +1272,10 @@ pub async fn complete_upload(
     let mut reader = tokio::io::BufReader::new(reader);
     let mut buf = [0u8; 8192];
     loop {
-        let n = reader.read(&mut buf).await.map_err(|e| {
-            AppError::Storage(format!("Failed to read for checksum: {}", e))
-        })?;
+        let n = reader
+            .read(&mut buf)
+            .await
+            .map_err(|e| AppError::Storage(format!("Failed to read for checksum: {}", e)))?;
         if n == 0 {
             break;
         }
@@ -1226,7 +1314,10 @@ pub async fn complete_upload(
         .delete_one(doc! { "upload_id": &upload_id })
         .await?;
 
-    state.events.emit_file_created(effective_owner_id, &file).await;
+    state
+        .events
+        .emit_file_created(effective_owner_id, &file)
+        .await;
 
     state
         .sync_log
@@ -1247,12 +1338,17 @@ pub async fn complete_upload(
         let username = effective_username.clone();
         let name = file.name.clone();
         tokio::spawn(async move {
-            deliver_webhooks(&state_clone, EVENT_FILE_CREATED, serde_json::json!({
-                "file_id": file_id,
-                "owner_id": owner_id_str,
-                "username": username,
-                "name": name,
-            })).await;
+            deliver_webhooks(
+                &state_clone,
+                EVENT_FILE_CREATED,
+                serde_json::json!({
+                    "file_id": file_id,
+                    "owner_id": owner_id_str,
+                    "username": username,
+                    "name": name,
+                }),
+            )
+            .await;
         });
     }
     state.processing.enqueue(&file, state.clone()).await;
@@ -1295,7 +1391,8 @@ pub async fn copy_file(
         None => file.parent_id,
     };
 
-    let dest_name = req.name
+    let dest_name = req
+        .name
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| format!("Copy of {}", file.name));
 
@@ -1319,9 +1416,10 @@ pub async fn copy_file(
     let backend = state.storage.get_backend(file.storage_id).await?;
     let mut reader = backend.read(&file.storage_path).await?;
     let mut data = Vec::new();
-    reader.read_to_end(&mut data).await.map_err(|e| {
-        AppError::Storage(format!("Failed to read source file: {}", e))
-    })?;
+    reader
+        .read_to_end(&mut data)
+        .await
+        .map_err(|e| AppError::Storage(format!("Failed to read source file: {}", e)))?;
     backend.write(&dst_path, &data).await?;
 
     let new_file = File::new(
@@ -1336,7 +1434,10 @@ pub async fn copy_file(
     );
 
     collection.insert_one(&new_file).await?;
-    state.auth.update_user_bytes(user.id, file.size_bytes).await?;
+    state
+        .auth
+        .update_user_bytes(user.id, file.size_bytes)
+        .await?;
     state.processing.enqueue(&new_file, state.clone()).await;
     state.events.emit_file_created(user.id, &new_file).await;
 
@@ -1359,12 +1460,17 @@ pub async fn copy_file(
         let username = user.username.clone();
         let name = new_file.name.clone();
         tokio::spawn(async move {
-            deliver_webhooks(&state_clone, EVENT_FILE_CREATED, serde_json::json!({
-                "file_id": file_id,
-                "owner_id": owner_id,
-                "username": username,
-                "name": name,
-            })).await;
+            deliver_webhooks(
+                &state_clone,
+                EVENT_FILE_CREATED,
+                serde_json::json!({
+                    "file_id": file_id,
+                    "owner_id": owner_id,
+                    "username": username,
+                    "name": name,
+                }),
+            )
+            .await;
         });
     }
 
@@ -1543,13 +1649,16 @@ pub async fn list_gallery(
     } else {
         // Timeline mode — all included folders (owned + shared)
         let folders_coll = state.db.collection::<Folder>("folders");
-        let mut folder_cursor = folders_coll.find(doc! { "owner_id": user.id, "deleted_at": mongodb::bson::Bson::Null }).await?;
+        let mut folder_cursor = folders_coll
+            .find(doc! { "owner_id": user.id, "deleted_at": mongodb::bson::Bson::Null })
+            .await?;
         let mut all_folders = Vec::new();
         while folder_cursor.advance().await? {
             all_folders.push(folder_cursor.deserialize_current()?);
         }
 
-        let included = resolve_included_folder_ids_by(&all_folders, |f| f.gallery_include.as_include_flag());
+        let included =
+            resolve_included_folder_ids_by(&all_folders, |f| f.gallery_include.as_include_flag());
 
         let mut parent_ids: Vec<mongodb::bson::Bson> = included
             .into_iter()
@@ -1563,7 +1672,10 @@ pub async fn list_gallery(
         parent_ids.extend(shared);
 
         if parent_ids.is_empty() {
-            return Ok(Json(GalleryResponse { files: Vec::new(), next_cursor: None }));
+            return Ok(Json(GalleryResponse {
+                files: Vec::new(),
+                next_cursor: None,
+            }));
         }
 
         doc! {
@@ -1592,10 +1704,7 @@ pub async fn list_gallery(
     pipeline.push(doc! { "$limit": limit + 1 });
 
     let files_coll = state.db.collection::<File>("files");
-    let mut cursor = files_coll
-        .aggregate(pipeline)
-        .with_type::<File>()
-        .await?;
+    let mut cursor = files_coll.aggregate(pipeline).with_type::<File>().await?;
 
     let mut raw: Vec<File> = Vec::new();
     while cursor.advance().await? {
@@ -1608,11 +1717,8 @@ pub async fn list_gallery(
     }
 
     let next_cursor = if has_more {
-        raw.last().map(|f| {
-            f.captured_at
-                .unwrap_or(f.created_at)
-                .to_rfc3339()
-        })
+        raw.last()
+            .map(|f| f.captured_at.unwrap_or(f.created_at).to_rfc3339())
     } else {
         None
     };
@@ -1641,13 +1747,16 @@ pub async fn list_gallery_albums(
     let files_coll = state.db.collection::<File>("files");
 
     // --- Owned folders ---
-    let mut folder_cursor = folders_coll.find(doc! { "owner_id": user.id, "deleted_at": mongodb::bson::Bson::Null }).await?;
+    let mut folder_cursor = folders_coll
+        .find(doc! { "owner_id": user.id, "deleted_at": mongodb::bson::Bson::Null })
+        .await?;
     let mut all_folders: Vec<Folder> = Vec::new();
     while folder_cursor.advance().await? {
         all_folders.push(folder_cursor.deserialize_current()?);
     }
 
-    let included = resolve_included_folder_ids_by(&all_folders, |f| f.gallery_include.as_include_flag());
+    let included =
+        resolve_included_folder_ids_by(&all_folders, |f| f.gallery_include.as_include_flag());
     let by_id: HashMap<ObjectId, &Folder> = all_folders.iter().map(|f| (f.id, f)).collect();
 
     // Collect all included IDs (owned + shared) for parent_folder_id resolution
@@ -1743,7 +1852,8 @@ pub async fn list_gallery_albums(
     all_included_ids.extend(&shared_folder_ids);
 
     for (_, owner_folders) in &owner_folders_cache {
-        let shared_by_id: HashMap<ObjectId, &Folder> = owner_folders.iter().map(|f| (f.id, f)).collect();
+        let shared_by_id: HashMap<ObjectId, &Folder> =
+            owner_folders.iter().map(|f| (f.id, f)).collect();
         for folder in owner_folders {
             if !shared_folder_ids.contains(&folder.id) {
                 continue;

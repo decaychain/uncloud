@@ -126,7 +126,9 @@ pub async fn restore_version(
 
     // Archive the current content as a new version
     let ver_path = crate::routes::files::version_path(&file.storage_path);
-    backend.archive_version(&file.storage_path, &ver_path).await?;
+    backend
+        .archive_version(&file.storage_path, &ver_path)
+        .await?;
 
     let next_version = versions_coll
         .count_documents(doc! { "file_id": file_id })
@@ -143,7 +145,9 @@ pub async fn restore_version(
     versions_coll.insert_one(&new_version_record).await?;
 
     // Copy the old version blob over the current path
-    backend.restore_from_trash(&version.storage_path, &file.storage_path).await?;
+    backend
+        .restore_from_trash(&version.storage_path, &file.storage_path)
+        .await?;
 
     // Update file metadata
     let now = chrono::Utc::now();
@@ -167,7 +171,9 @@ pub async fn restore_version(
     // Re-enqueue processing for the restored content
     if let Some(restored) = files_coll.find_one(doc! { "_id": file_id }).await? {
         // Remove stale thumbnail
-        let _ = backend.delete(&format!(".thumbs/{}.jpg", file_id.to_hex())).await;
+        let _ = backend
+            .delete(&format!(".thumbs/{}.jpg", file_id.to_hex()))
+            .await;
         state.processing.enqueue(&restored, state.clone()).await;
     }
 

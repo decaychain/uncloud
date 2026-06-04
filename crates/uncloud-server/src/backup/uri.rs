@@ -29,7 +29,10 @@ pub struct ExpandedUri {
 pub fn expand(input: &str) -> ExpandedUri {
     let Some((scheme, rest)) = input.split_once(':') else {
         // No scheme — local path.
-        return ExpandedUri { uri: input.to_string(), options: BTreeMap::new() };
+        return ExpandedUri {
+            uri: input.to_string(),
+            options: BTreeMap::new(),
+        };
     };
     match scheme.to_ascii_lowercase().as_str() {
         // Native rustic_backend schemes pass through.
@@ -79,10 +82,7 @@ fn expand_s3(rest: &str) -> ExpandedUri {
         Some((h, p)) => (h, p),
         None => (location, ""),
     };
-    options.insert(
-        "endpoint".to_string(),
-        format!("{endpoint}{host_port}"),
-    );
+    options.insert("endpoint".to_string(), format!("{endpoint}{host_port}"));
     let (bucket, root) = split_bucket_root(path);
     if !bucket.is_empty() {
         options.insert("bucket".to_string(), bucket.to_string());
@@ -209,7 +209,10 @@ mod tests {
     #[test]
     fn s3_with_endpoint_bucket_and_prefix() {
         let r = expand("s3:https://s3.amazonaws.com/my-bucket/sub/dir");
-        assert_eq!(r.options.get("endpoint").unwrap(), "https://s3.amazonaws.com");
+        assert_eq!(
+            r.options.get("endpoint").unwrap(),
+            "https://s3.amazonaws.com"
+        );
         assert_eq!(r.options.get("bucket").unwrap(), "my-bucket");
         assert_eq!(r.options.get("root").unwrap(), "/sub/dir");
     }
@@ -258,10 +261,19 @@ mod tests {
 
     #[test]
     fn passthrough_unknown_schemes() {
-        for input in ["local:/tmp/repo", "/tmp/repo", "rest:http://x", "opendal:s3", "rclone:remote:path"] {
+        for input in [
+            "local:/tmp/repo",
+            "/tmp/repo",
+            "rest:http://x",
+            "opendal:s3",
+            "rclone:remote:path",
+        ] {
             let r = expand(input);
             assert_eq!(r.uri, input);
-            assert!(r.options.is_empty(), "expected no synthesised options for {input}");
+            assert!(
+                r.options.is_empty(),
+                "expected no synthesised options for {input}"
+            );
         }
     }
 }

@@ -181,19 +181,33 @@ fn dispatch_download_event(
     saved_path: Option<&str>,
     error: Option<&str>,
 ) {
-    let Some(window) = web_sys::window() else { return };
+    let Some(window) = web_sys::window() else {
+        return;
+    };
     let detail = Object::new();
-    let _ = Reflect::set(&detail, &JsValue::from_str("status"), &JsValue::from_str(status));
+    let _ = Reflect::set(
+        &detail,
+        &JsValue::from_str("status"),
+        &JsValue::from_str(status),
+    );
     let _ = Reflect::set(
         &detail,
         &JsValue::from_str("filename"),
         &JsValue::from_str(filename),
     );
     if let Some(path) = saved_path {
-        let _ = Reflect::set(&detail, &JsValue::from_str("path"), &JsValue::from_str(path));
+        let _ = Reflect::set(
+            &detail,
+            &JsValue::from_str("path"),
+            &JsValue::from_str(path),
+        );
     }
     if let Some(error) = error {
-        let _ = Reflect::set(&detail, &JsValue::from_str("error"), &JsValue::from_str(error));
+        let _ = Reflect::set(
+            &detail,
+            &JsValue::from_str("error"),
+            &JsValue::from_str(error),
+        );
     }
     let init = web_sys::CustomEventInit::new();
     init.set_detail(&detail);
@@ -302,9 +316,13 @@ fn parse_sync_log_row(v: &JsValue) -> Option<SyncLogRow> {
             .and_then(|jv| jv.as_string())
     };
     let get_opt_str = |k: &str| -> Option<String> {
-        Reflect::get(v, &JsValue::from_str(k))
-            .ok()
-            .and_then(|jv| if jv.is_null() || jv.is_undefined() { None } else { jv.as_string() })
+        Reflect::get(v, &JsValue::from_str(k)).ok().and_then(|jv| {
+            if jv.is_null() || jv.is_undefined() {
+                None
+            } else {
+                jv.as_string()
+            }
+        })
     };
     Some(SyncLogRow {
         id: Reflect::get(v, &JsValue::from_str("id"))
@@ -324,10 +342,9 @@ fn parse_sync_log_row(v: &JsValue) -> Option<SyncLogRow> {
 
 async fn invoke_raw(cmd: &str, args: &JsValue) -> Result<JsValue, String> {
     let window = web_sys::window().ok_or("no window")?;
-    let tauri = Reflect::get(&window, &JsValue::from_str("__TAURI__"))
-        .map_err(|e| format!("{e:?}"))?;
-    let core = Reflect::get(&tauri, &JsValue::from_str("core"))
-        .map_err(|e| format!("{e:?}"))?;
+    let tauri =
+        Reflect::get(&window, &JsValue::from_str("__TAURI__")).map_err(|e| format!("{e:?}"))?;
+    let core = Reflect::get(&tauri, &JsValue::from_str("core")).map_err(|e| format!("{e:?}"))?;
     let invoke_fn: Function = Reflect::get(&core, &JsValue::from_str("invoke"))
         .map_err(|e| format!("{e:?}"))?
         .dyn_into()
@@ -380,7 +397,13 @@ pub async fn get_auth_status() -> Option<AuthStatus> {
     }
     let token = Reflect::get(&result, &JsValue::from_str("token"))
         .ok()
-        .and_then(|v| if v.is_null() || v.is_undefined() { None } else { v.as_string() });
+        .and_then(|v| {
+            if v.is_null() || v.is_undefined() {
+                None
+            } else {
+                v.as_string()
+            }
+        });
     let pending = Reflect::get(&result, &JsValue::from_str("pending"))
         .ok()
         .and_then(|v| v.as_bool())
@@ -395,21 +418,49 @@ pub async fn get_config() -> Option<DesktopConfig> {
         return None;
     }
     let server_url = Reflect::get(&result, &JsValue::from_str("server_url"))
-        .ok()?.as_string()?;
+        .ok()?
+        .as_string()?;
     let username = Reflect::get(&result, &JsValue::from_str("username"))
-        .ok()?.as_string()?;
+        .ok()?
+        .as_string()?;
     let root_path = Reflect::get(&result, &JsValue::from_str("root_path"))
-        .ok()?.as_string()?;
-    Some(DesktopConfig { server_url, username, root_path })
+        .ok()?
+        .as_string()?;
+    Some(DesktopConfig {
+        server_url,
+        username,
+        root_path,
+    })
 }
 
 /// Set up the sync engine via Tauri. Uses camelCase keys as Tauri 2 expects.
-pub async fn login(server: &str, username: &str, password: &str, root_path: &str) -> Result<(), String> {
+pub async fn login(
+    server: &str,
+    username: &str,
+    password: &str,
+    root_path: &str,
+) -> Result<(), String> {
     let args = Object::new();
-    let _ = Reflect::set(&args, &JsValue::from_str("server"), &JsValue::from_str(server));
-    let _ = Reflect::set(&args, &JsValue::from_str("username"), &JsValue::from_str(username));
-    let _ = Reflect::set(&args, &JsValue::from_str("password"), &JsValue::from_str(password));
-    let _ = Reflect::set(&args, &JsValue::from_str("rootPath"), &JsValue::from_str(root_path));
+    let _ = Reflect::set(
+        &args,
+        &JsValue::from_str("server"),
+        &JsValue::from_str(server),
+    );
+    let _ = Reflect::set(
+        &args,
+        &JsValue::from_str("username"),
+        &JsValue::from_str(username),
+    );
+    let _ = Reflect::set(
+        &args,
+        &JsValue::from_str("password"),
+        &JsValue::from_str(password),
+    );
+    let _ = Reflect::set(
+        &args,
+        &JsValue::from_str("rootPath"),
+        &JsValue::from_str(root_path),
+    );
     invoke_raw("login", &args).await.map(|_| ())
 }
 
@@ -437,7 +488,11 @@ pub async fn get_autostart() -> Result<bool, String> {
 
 pub async fn set_autostart(enabled: bool) -> Result<(), String> {
     let args = Object::new();
-    let _ = Reflect::set(&args, &JsValue::from_str("enabled"), &JsValue::from_bool(enabled));
+    let _ = Reflect::set(
+        &args,
+        &JsValue::from_str("enabled"),
+        &JsValue::from_bool(enabled),
+    );
     invoke_raw("set_autostart", &args).await.map(|_| ())
 }
 
@@ -445,7 +500,11 @@ pub async fn set_autostart(enabled: bool) -> Result<(), String> {
 /// once on mount; subsequent updates arrive via `sync-log-appended` events.
 pub async fn get_local_sync_log(limit: i64) -> Result<Vec<SyncLogRow>, String> {
     let args = Object::new();
-    let _ = Reflect::set(&args, &JsValue::from_str("limit"), &JsValue::from_f64(limit as f64));
+    let _ = Reflect::set(
+        &args,
+        &JsValue::from_str("limit"),
+        &JsValue::from_f64(limit as f64),
+    );
     let result = invoke_raw("get_local_sync_log", &args).await?;
     let arr = Array::from(&result);
     let mut out = Vec::with_capacity(arr.length() as usize);
@@ -494,8 +553,7 @@ where
     // unwrap `payload` before handing off to the caller so Rust code stays
     // simple.
     let closure = Closure::wrap(Box::new(move |e: JsValue| {
-        let payload = Reflect::get(&e, &JsValue::from_str("payload"))
-            .unwrap_or(JsValue::NULL);
+        let payload = Reflect::get(&e, &JsValue::from_str("payload")).unwrap_or(JsValue::NULL);
         handler(payload);
     }) as Box<dyn FnMut(JsValue)>);
 
@@ -575,8 +633,14 @@ pub struct FolderEffectiveConfig {
 /// Fetch the resolved per-folder sync config from the desktop journal + server.
 pub async fn get_folder_effective_config(folder_id: &str) -> Option<FolderEffectiveConfig> {
     let args = Object::new();
-    let _ = Reflect::set(&args, &JsValue::from_str("folderId"), &JsValue::from_str(folder_id));
-    let result = invoke_raw("get_folder_effective_config", &args).await.ok()?;
+    let _ = Reflect::set(
+        &args,
+        &JsValue::from_str("folderId"),
+        &JsValue::from_str(folder_id),
+    );
+    let result = invoke_raw("get_folder_effective_config", &args)
+        .await
+        .ok()?;
     if result.is_null() || result.is_undefined() {
         return None;
     }
@@ -607,14 +671,20 @@ pub fn display_local_path(raw: &str) -> String {
     // Android SAF tree URI:
     //   content://com.android.externalstorage.documents/tree/primary%3ADownload%2FFoo
     // Extract the last path segment after "/tree/" and URL-decode it.
-    let Some(idx) = raw.find("/tree/") else { return raw.to_string() };
+    let Some(idx) = raw.find("/tree/") else {
+        return raw.to_string();
+    };
     let encoded = &raw[idx + 6..];
     // Strip anything after the next '/' — some URIs append a document part.
     let encoded = encoded.split('/').next().unwrap_or(encoded);
     let decoded = percent_decode(encoded);
     // "primary:Download/Foo" → "Internal storage/Download/Foo"
     if let Some((volume, rel)) = decoded.split_once(':') {
-        let prefix = if volume == "primary" { "Internal storage" } else { volume };
+        let prefix = if volume == "primary" {
+            "Internal storage"
+        } else {
+            volume
+        };
         if rel.is_empty() {
             prefix.to_string()
         } else {
@@ -648,24 +718,52 @@ fn percent_decode(s: &str) -> String {
 
 /// Write (or clear) the per-device strategy override for a folder.
 /// Pass `None` to clear the override (use server default).
-pub async fn set_folder_local_strategy(folder_id: &str, strategy: Option<&str>) -> Result<(), String> {
+pub async fn set_folder_local_strategy(
+    folder_id: &str,
+    strategy: Option<&str>,
+) -> Result<(), String> {
     let args = Object::new();
-    let _ = Reflect::set(&args, &JsValue::from_str("folderId"), &JsValue::from_str(folder_id));
+    let _ = Reflect::set(
+        &args,
+        &JsValue::from_str("folderId"),
+        &JsValue::from_str(folder_id),
+    );
     match strategy {
-        Some(s) => { let _ = Reflect::set(&args, &JsValue::from_str("strategy"), &JsValue::from_str(s)); }
-        None => { let _ = Reflect::set(&args, &JsValue::from_str("strategy"), &JsValue::NULL); }
+        Some(s) => {
+            let _ = Reflect::set(&args, &JsValue::from_str("strategy"), &JsValue::from_str(s));
+        }
+        None => {
+            let _ = Reflect::set(&args, &JsValue::from_str("strategy"), &JsValue::NULL);
+        }
     }
-    invoke_raw("set_folder_local_strategy", &args).await.map(|_| ())
+    invoke_raw("set_folder_local_strategy", &args)
+        .await
+        .map(|_| ())
 }
 
 /// Write (or clear) the per-device local path override for a folder.
 /// Pass `None` to clear the override (inherit from ancestor or client root).
-pub async fn set_folder_local_path(folder_id: &str, local_path: Option<&str>) -> Result<(), String> {
+pub async fn set_folder_local_path(
+    folder_id: &str,
+    local_path: Option<&str>,
+) -> Result<(), String> {
     let args = Object::new();
-    let _ = Reflect::set(&args, &JsValue::from_str("folderId"), &JsValue::from_str(folder_id));
+    let _ = Reflect::set(
+        &args,
+        &JsValue::from_str("folderId"),
+        &JsValue::from_str(folder_id),
+    );
     match local_path {
-        Some(p) => { let _ = Reflect::set(&args, &JsValue::from_str("localPath"), &JsValue::from_str(p)); }
-        None => { let _ = Reflect::set(&args, &JsValue::from_str("localPath"), &JsValue::NULL); }
+        Some(p) => {
+            let _ = Reflect::set(
+                &args,
+                &JsValue::from_str("localPath"),
+                &JsValue::from_str(p),
+            );
+        }
+        None => {
+            let _ = Reflect::set(&args, &JsValue::from_str("localPath"), &JsValue::NULL);
+        }
     }
     invoke_raw("set_folder_local_path", &args).await.map(|_| ())
 }

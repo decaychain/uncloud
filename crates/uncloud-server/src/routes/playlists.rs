@@ -39,22 +39,19 @@ fn playlist_to_summary(
     files_by_id: &HashMap<ObjectId, File>,
 ) -> PlaylistSummary {
     // Find first track with cover art
-    let cover_file_id = playlist
-        .tracks
-        .iter()
-        .find_map(|t| {
-            let f = files_by_id.get(&t.file_id)?;
-            let audio: AudioMeta = file_to_response(f)
-                .metadata
-                .get("audio")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
-            if audio.has_cover_art {
-                Some(f.id.to_hex())
-            } else {
-                None
-            }
-        });
+    let cover_file_id = playlist.tracks.iter().find_map(|t| {
+        let f = files_by_id.get(&t.file_id)?;
+        let audio: AudioMeta = file_to_response(f)
+            .metadata
+            .get("audio")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        if audio.has_cover_art {
+            Some(f.id.to_hex())
+        } else {
+            None
+        }
+    });
 
     PlaylistSummary {
         id: playlist.id.to_hex(),
@@ -127,7 +124,9 @@ pub async fn create_playlist(
 ) -> Result<(StatusCode, Json<PlaylistSummary>)> {
     let name = body.name.trim().to_string();
     if name.is_empty() {
-        return Err(AppError::BadRequest("Playlist name cannot be empty".to_string()));
+        return Err(AppError::BadRequest(
+            "Playlist name cannot be empty".to_string(),
+        ));
     }
 
     let coll = state.db.collection::<Playlist>("playlists");
@@ -231,7 +230,9 @@ pub async fn update_playlist(
     if let Some(ref name) = body.name {
         let name = name.trim();
         if name.is_empty() {
-            return Err(AppError::BadRequest("Playlist name cannot be empty".to_string()));
+            return Err(AppError::BadRequest(
+                "Playlist name cannot be empty".to_string(),
+            ));
         }
         // Check uniqueness if name is changing
         if name != playlist.name {

@@ -20,10 +20,22 @@ struct Column {
 }
 
 const COLUMNS: &[Column] = &[
-    Column { status: TaskStatus::Todo, label: "Backlog" },
-    Column { status: TaskStatus::InProgress, label: "In Progress" },
-    Column { status: TaskStatus::Blocked, label: "Blocked" },
-    Column { status: TaskStatus::Done, label: "Done" },
+    Column {
+        status: TaskStatus::Todo,
+        label: "Backlog",
+    },
+    Column {
+        status: TaskStatus::InProgress,
+        label: "In Progress",
+    },
+    Column {
+        status: TaskStatus::Blocked,
+        label: "Blocked",
+    },
+    Column {
+        status: TaskStatus::Done,
+        label: "Done",
+    },
 ];
 
 fn status_to_attr(status: &TaskStatus) -> &'static str {
@@ -108,10 +120,7 @@ fn card_drop_at(
 }
 
 #[component]
-pub fn BoardView(
-    project_id: String,
-    available_labels: Signal<Vec<TaskLabelResponse>>,
-) -> Element {
+pub fn BoardView(project_id: String, available_labels: Signal<Vec<TaskLabelResponse>>) -> Element {
     let mut project: Signal<Option<TaskProjectResponse>> = use_signal(|| None);
     let mut tasks: Signal<Vec<TaskResponse>> = use_signal(Vec::new);
     let mut loading = use_signal(|| true);
@@ -159,7 +168,11 @@ pub fn BoardView(
     // changes from other devices). Bumps detail_refresh too when the open
     // task is the one that changed, so the slide-over re-fetches.
     use_events(move |evt| {
-        if let ServerEvent::TaskChanged { project_id: ev_pid, task_id } = evt {
+        if let ServerEvent::TaskChanged {
+            project_id: ev_pid,
+            task_id,
+        } = evt
+        {
             if ev_pid == *pid_sig.peek() {
                 let pid = ev_pid.clone();
                 spawn(async move {

@@ -158,16 +158,27 @@ impl Journal {
         server_id: &str,
         item_type: &str,
     ) -> sqlx::Result<Option<SyncStateRow>> {
-        let row: Option<(String, String, String, String, Option<i64>, Option<String>, String, Option<i64>, String, String, Option<String>)> =
-            sqlx::query_as(
-                "SELECT server_id, item_type, server_path, local_path, size_bytes, checksum, \
+        let row: Option<(
+            String,
+            String,
+            String,
+            String,
+            Option<i64>,
+            Option<String>,
+            String,
+            Option<i64>,
+            String,
+            String,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT server_id, item_type, server_path, local_path, size_bytes, checksum, \
                  server_updated_at, local_mtime, last_synced_at, sync_status, delete_pending_since \
                  FROM sync_state WHERE server_id = ? AND item_type = ?",
-            )
-            .bind(server_id)
-            .bind(item_type)
-            .fetch_optional(&self.pool)
-            .await?;
+        )
+        .bind(server_id)
+        .bind(item_type)
+        .fetch_optional(&self.pool)
+        .await?;
 
         Ok(row.map(|r| SyncStateRow {
             server_id: r.0,
@@ -185,14 +196,25 @@ impl Journal {
     }
 
     pub async fn all(&self) -> sqlx::Result<Vec<SyncStateRow>> {
-        let rows: Vec<(String, String, String, String, Option<i64>, Option<String>, String, Option<i64>, String, String, Option<String>)> =
-            sqlx::query_as(
-                "SELECT server_id, item_type, server_path, local_path, size_bytes, checksum, \
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            String,
+            Option<i64>,
+            Option<String>,
+            String,
+            Option<i64>,
+            String,
+            String,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT server_id, item_type, server_path, local_path, size_bytes, checksum, \
                  server_updated_at, local_mtime, last_synced_at, sync_status, delete_pending_since \
                  FROM sync_state",
-            )
-            .fetch_all(&self.pool)
-            .await?;
+        )
+        .fetch_all(&self.pool)
+        .await?;
 
         Ok(rows
             .into_iter()
@@ -233,21 +255,17 @@ impl Journal {
     /// base or starts with `base + separator`. Both `/` and `\` are
     /// treated as separators so the same logic works on Unix and Windows.
     /// Returns the number of rows pruned.
-    pub async fn prune_rows_outside_bases(
-        &self,
-        bases: &[&str],
-    ) -> sqlx::Result<u64> {
+    pub async fn prune_rows_outside_bases(&self, bases: &[&str]) -> sqlx::Result<u64> {
         if bases.is_empty() {
             // No bases to pin against — pruning would wipe everything,
             // which is never the right call. Caller should have ensured
             // at least one base before reaching here.
             return Ok(0);
         }
-        let rows: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT server_id, item_type, local_path FROM sync_state",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String, String, String)> =
+            sqlx::query_as("SELECT server_id, item_type, local_path FROM sync_state")
+                .fetch_all(&self.pool)
+                .await?;
         let mut pruned: u64 = 0;
         for (server_id, item_type, local_path) in rows {
             let inside_any = bases.iter().any(|base| {
@@ -260,13 +278,11 @@ impl Journal {
                 false
             });
             if !inside_any {
-                sqlx::query(
-                    "DELETE FROM sync_state WHERE server_id = ? AND item_type = ?",
-                )
-                .bind(&server_id)
-                .bind(&item_type)
-                .execute(&self.pool)
-                .await?;
+                sqlx::query("DELETE FROM sync_state WHERE server_id = ? AND item_type = ?")
+                    .bind(&server_id)
+                    .bind(&item_type)
+                    .execute(&self.pool)
+                    .await?;
                 pruned += 1;
             }
         }
@@ -274,11 +290,10 @@ impl Journal {
     }
 
     pub async fn get_config(&self, key: &str) -> sqlx::Result<Option<String>> {
-        let row: Option<(String,)> =
-            sqlx::query_as("SELECT value FROM sync_config WHERE key = ?")
-                .bind(key)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row: Option<(String,)> = sqlx::query_as("SELECT value FROM sync_config WHERE key = ?")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row.map(|r| r.0))
     }
 
@@ -375,10 +390,7 @@ impl Journal {
     // ── sync_bases ────────────────────────────────────────────────────────
 
     /// Look up a base row by its absolute local path.
-    pub async fn get_base_by_path(
-        &self,
-        local_path: &str,
-    ) -> sqlx::Result<Option<SyncBaseRow>> {
+    pub async fn get_base_by_path(&self, local_path: &str) -> sqlx::Result<Option<SyncBaseRow>> {
         let row: Option<(String, String, String, String)> = sqlx::query_as(
             "SELECT base_id, local_path, instance_id, created_at \
              FROM sync_bases WHERE local_path = ?",
@@ -448,11 +460,7 @@ impl Journal {
     /// Clear the pending-delete flag, e.g. when the file reappears, the
     /// server-side mtime advances past it, the watcher fires for the path,
     /// or the effective strategy changes to one that doesn't push deletes.
-    pub async fn clear_delete_pending(
-        &self,
-        server_id: &str,
-        item_type: &str,
-    ) -> sqlx::Result<()> {
+    pub async fn clear_delete_pending(&self, server_id: &str, item_type: &str) -> sqlx::Result<()> {
         sqlx::query(
             "UPDATE sync_state SET delete_pending_since = NULL \
              WHERE server_id = ? AND item_type = ?",
@@ -468,10 +476,7 @@ impl Journal {
     /// delete on the row pointing at it. The watcher is *only* allowed to
     /// cancel — never to commit — because we don't trust it as authoritative.
     /// Returns the number of rows cleared (0 or 1 in practice).
-    pub async fn cancel_pending_delete_by_local_path(
-        &self,
-        local_path: &str,
-    ) -> sqlx::Result<u64> {
+    pub async fn cancel_pending_delete_by_local_path(&self, local_path: &str) -> sqlx::Result<u64> {
         let res = sqlx::query(
             "UPDATE sync_state SET delete_pending_since = NULL \
              WHERE local_path = ? AND delete_pending_since IS NOT NULL",
@@ -527,11 +532,7 @@ impl Journal {
     /// Delete rows older than `cutoff_iso` (ISO-8601 string comparison works
     /// because timestamps are always in UTC `…Z` form). Also caps the table
     /// at `max_rows` by deleting the oldest excess rows.
-    pub async fn prune_sync_log(
-        &self,
-        cutoff_iso: &str,
-        max_rows: i64,
-    ) -> sqlx::Result<u64> {
+    pub async fn prune_sync_log(&self, cutoff_iso: &str, max_rows: i64) -> sqlx::Result<u64> {
         let mut total = 0u64;
         let time_deleted = sqlx::query("DELETE FROM sync_log WHERE timestamp < ?")
             .bind(cutoff_iso)
@@ -674,8 +675,12 @@ mod tests {
         j.set_folder_local_path("f-1", Some("/saf/photos"))
             .await
             .unwrap();
-        j.set_folder_local_path("f-2", Some("/saf/music")).await.unwrap();
-        j.set_folder_local_strategy("f-3", Some("two_way")).await.unwrap();
+        j.set_folder_local_path("f-2", Some("/saf/music"))
+            .await
+            .unwrap();
+        j.set_folder_local_strategy("f-3", Some("two_way"))
+            .await
+            .unwrap();
         let mut paths = j.all_local_path_overrides().await.unwrap();
         paths.sort();
         assert_eq!(paths, vec!["/saf/music".to_string(), "/saf/photos".into()]);

@@ -64,11 +64,7 @@ fn parse_os(val: &str) -> Option<SyncClientOs> {
 
 /// Middleware: reads X-Uncloud-* headers, falls back to auth-type based defaults,
 /// and stashes the result as a request extension.
-pub async fn request_meta_middleware(
-    jar: CookieJar,
-    mut request: Request,
-    next: Next,
-) -> Response {
+pub async fn request_meta_middleware(jar: CookieJar, mut request: Request, next: Next) -> Response {
     let headers = request.headers();
     let explicit_source = headers
         .get("x-uncloud-source")

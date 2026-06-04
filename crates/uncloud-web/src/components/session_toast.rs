@@ -10,8 +10,8 @@
 use std::rc::Rc;
 
 use dioxus::prelude::*;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
 
 use crate::components::icons::IconX;
 use crate::hooks::api;

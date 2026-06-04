@@ -27,7 +27,10 @@ pub enum LocalFsError {
 
 impl LocalFsError {
     pub fn io(path: impl Into<String>, source: std::io::Error) -> Self {
-        Self::Io { path: path.into(), source }
+        Self::Io {
+            path: path.into(),
+            source,
+        }
     }
     pub fn other(msg: impl Into<String>) -> Self {
         Self::Other(msg.into())
@@ -102,11 +105,15 @@ pub trait LocalFs: Send + Sync {
 pub struct NativeFs;
 
 impl NativeFs {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Default for NativeFs {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Filenames any [`LocalFs`] walker must never yield. These are never
@@ -148,7 +155,10 @@ impl LocalFs for NativeFs {
                     .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
-                out.push(WalkEntry { rel_path: rel, mtime });
+                out.push(WalkEntry {
+                    rel_path: rel,
+                    mtime,
+                });
             }
             Ok(out)
         })
@@ -235,12 +245,10 @@ impl LocalFs for NativeFs {
 
     async fn is_file(&self, path: &str) -> Result<bool, LocalFsError> {
         let path_owned = path.to_owned();
-        tokio::task::spawn_blocking(move || {
-            match std::fs::metadata(&path_owned) {
-                Ok(m) => Ok(m.is_file()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-                Err(e) => Err(LocalFsError::io(path_owned, e)),
-            }
+        tokio::task::spawn_blocking(move || match std::fs::metadata(&path_owned) {
+            Ok(m) => Ok(m.is_file()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(LocalFsError::io(path_owned, e)),
         })
         .await
         .map_err(|e| LocalFsError::other(format!("is_file task panicked: {e}")))?
@@ -248,12 +256,10 @@ impl LocalFs for NativeFs {
 
     async fn is_dir(&self, path: &str) -> Result<bool, LocalFsError> {
         let path_owned = path.to_owned();
-        tokio::task::spawn_blocking(move || {
-            match std::fs::metadata(&path_owned) {
-                Ok(m) => Ok(m.is_dir()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-                Err(e) => Err(LocalFsError::io(path_owned, e)),
-            }
+        tokio::task::spawn_blocking(move || match std::fs::metadata(&path_owned) {
+            Ok(m) => Ok(m.is_dir()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(LocalFsError::io(path_owned, e)),
         })
         .await
         .map_err(|e| LocalFsError::other(format!("is_dir task panicked: {e}")))?

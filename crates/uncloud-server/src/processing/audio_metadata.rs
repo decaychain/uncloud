@@ -5,9 +5,9 @@ use async_trait::async_trait;
 use bson::doc;
 use tracing::warn;
 
+use super::FileProcessor;
 use crate::models::{File, TaskType};
 use crate::AppState;
-use super::FileProcessor;
 use uncloud_common::AudioMeta;
 
 const AUDIO_MIME_TYPES: &[&str] = &[
@@ -73,7 +73,9 @@ impl FileProcessor for AudioMetadataProcessor {
                     None
                 };
 
-                let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag());
+                let tag = tagged_file
+                    .primary_tag()
+                    .or_else(|| tagged_file.first_tag());
 
                 let mut meta = AudioMeta {
                     duration_secs,
@@ -88,15 +90,10 @@ impl FileProcessor for AudioMetadataProcessor {
                     meta.title = tag
                         .get_string(&ItemKey::TrackTitle)
                         .map(str::to_string)
-                        .or_else(|| {
-                            file_name
-                                .rsplit_once('.')
-                                .map(|(stem, _)| stem.to_string())
-                        });
+                        .or_else(|| file_name.rsplit_once('.').map(|(stem, _)| stem.to_string()));
                     meta.artist = tag.get_string(&ItemKey::TrackArtist).map(str::to_string);
                     meta.album = tag.get_string(&ItemKey::AlbumTitle).map(str::to_string);
-                    meta.album_artist =
-                        tag.get_string(&ItemKey::AlbumArtist).map(str::to_string);
+                    meta.album_artist = tag.get_string(&ItemKey::AlbumArtist).map(str::to_string);
                     meta.genre = tag.get_string(&ItemKey::Genre).map(str::to_string);
                     meta.track_number = tag.track();
                     meta.disc_number = tag.disk();
@@ -115,10 +112,7 @@ impl FileProcessor for AudioMetadataProcessor {
                         if let Ok(img) = image::load_from_memory(pic_data) {
                             let thumb = img.thumbnail(thumbnail_size, thumbnail_size);
                             let mut buf = Cursor::new(Vec::new());
-                            if thumb
-                                .write_to(&mut buf, image::ImageFormat::Jpeg)
-                                .is_ok()
-                            {
+                            if thumb.write_to(&mut buf, image::ImageFormat::Jpeg).is_ok() {
                                 cover_jpeg = Some(buf.into_inner());
                                 meta.has_cover_art = true;
                             }
@@ -126,9 +120,7 @@ impl FileProcessor for AudioMetadataProcessor {
                     }
                 } else {
                     // No tags — fall back to filename as title
-                    meta.title = file_name
-                        .rsplit_once('.')
-                        .map(|(stem, _)| stem.to_string());
+                    meta.title = file_name.rsplit_once('.').map(|(stem, _)| stem.to_string());
                 }
 
                 Ok((meta, cover_jpeg))

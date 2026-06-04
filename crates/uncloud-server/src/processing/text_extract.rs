@@ -132,8 +132,7 @@ async fn extract_pdf_text(file: &File, state: &AppState) -> Result<String, Strin
     // controlled panics but not native faults from unsafe code. Run the
     // extraction in a fresh subprocess so any crash — clean panic, abort, or
     // SIGSEGV — only kills the helper, never the server.
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("current_exe: {}", e))?;
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {}", e))?;
     let mut child = tokio::process::Command::new(&exe)
         .arg("extract-pdf")
         .stdin(Stdio::piped())
@@ -153,11 +152,7 @@ async fn extract_pdf_text(file: &File, state: &AppState) -> Result<String, Strin
 
     // 60s wall-clock cap. Some PDFs put pdf_extract into a tight parsing
     // loop; without a timeout that would tie up a processing slot.
-    let outcome = tokio::time::timeout(
-        Duration::from_secs(60),
-        child.wait_with_output(),
-    )
-    .await;
+    let outcome = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output()).await;
     let _ = writer.await;
 
     match outcome {

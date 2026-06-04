@@ -62,7 +62,10 @@ pub enum SentinelError {
     /// they pointed sync at a different folder that happens to share the
     /// path. None of those are safe to ignore.
     #[error("Sync root '{path}' has no `{filename}` sentinel — refusing to sync.")]
-    Missing { path: String, filename: &'static str },
+    Missing {
+        path: String,
+        filename: &'static str,
+    },
 
     /// We found a sentinel but its `base_id` is for a different base. Most
     /// likely the user replaced the contents of the sync folder with a
@@ -71,7 +74,11 @@ pub enum SentinelError {
         "Sync root '{path}' is tagged as base '{found}' but the journal \
          expects '{expected}' — refusing to sync."
     )]
-    Mismatch { path: String, expected: String, found: String },
+    Mismatch {
+        path: String,
+        expected: String,
+        found: String,
+    },
 
     /// The sentinel file was unreadable or didn't deserialize.
     #[error("Sync root '{path}' has a corrupt sentinel: {reason}")]
@@ -103,9 +110,7 @@ pub async fn verify_or_mint(
 
     match (on_disk, in_journal) {
         // Both sides agree on the same base — happy path.
-        (Some(s), Some(row)) if s.base_id == row.base_id => {
-            Ok((SentinelStatus::Verified, row))
-        }
+        (Some(s), Some(row)) if s.base_id == row.base_id => Ok((SentinelStatus::Verified, row)),
         // Sentinel exists, journal disagrees — different base mounted at
         // this path. Don't auto-fix.
         (Some(s), Some(row)) => Err(SentinelError::Mismatch {
@@ -192,8 +197,7 @@ async fn write_sentinel(
     path: &str,
     sentinel: &Sentinel,
 ) -> Result<(), SentinelError> {
-    let bytes = serde_json::to_vec_pretty(sentinel)
-        .expect("Sentinel serialization is infallible");
+    let bytes = serde_json::to_vec_pretty(sentinel).expect("Sentinel serialization is infallible");
     fs.write(path, &bytes).await?;
     Ok(())
 }
@@ -238,10 +242,7 @@ mod tests {
         assert_eq!(base.local_path, path);
 
         // Sentinel file exists on disk and matches the base row.
-        let sentinel_bytes = fs
-            .read(&fs.join(&path, SENTINEL_FILENAME))
-            .await
-            .unwrap();
+        let sentinel_bytes = fs.read(&fs.join(&path, SENTINEL_FILENAME)).await.unwrap();
         let s: Sentinel = serde_json::from_slice(&sentinel_bytes).unwrap();
         assert_eq!(s.base_id, base.base_id);
         assert_eq!(s.instance_id, "instance-1");

@@ -150,11 +150,7 @@ pub fn DuplicatesPage() -> Element {
 fn recompute_totals(r: &mut DuplicateReport) {
     let mirror_files: u32 = r.mirror_clusters.iter().map(|c| c.file_count).sum();
     let subset_files: u32 = r.subsets.iter().map(|s| s.file_count).sum();
-    let stray_files: u32 = r
-        .stray_sets
-        .iter()
-        .map(|s| s.files.len() as u32)
-        .sum();
+    let stray_files: u32 = r.stray_sets.iter().map(|s| s.files.len() as u32).sum();
     let mirror_bytes: i64 = r.mirror_clusters.iter().map(|c| c.total_bytes).sum();
     let subset_bytes: i64 = r.subsets.iter().map(|s| s.total_bytes).sum();
     let stray_bytes: i64 = r

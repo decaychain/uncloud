@@ -152,8 +152,8 @@ fn canonical_uri(raw_path: &str) -> String {
     }
 
     // URI-decode the raw path first
-    let decoded = urlencoding::decode(raw_path)
-        .unwrap_or_else(|_| std::borrow::Cow::Borrowed(raw_path));
+    let decoded =
+        urlencoding::decode(raw_path).unwrap_or_else(|_| std::borrow::Cow::Borrowed(raw_path));
 
     // Re-encode each segment individually, preserving the '/' separators
     let segments: Vec<String> = decoded
@@ -195,11 +195,7 @@ fn canonical_headers(
         .map(|(k, v)| format!("{}:{}\n", k, v))
         .collect::<String>();
 
-    let signed = header_map
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(";");
+    let signed = header_map.keys().cloned().collect::<Vec<_>>().join(";");
 
     (canonical, signed)
 }
@@ -331,7 +327,12 @@ pub async fn sigv4_middleware(
     );
     let computed_signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
 
-    if computed_signature.as_bytes().ct_eq(parsed.signature.as_bytes()).unwrap_u8() == 0 {
+    if computed_signature
+        .as_bytes()
+        .ct_eq(parsed.signature.as_bytes())
+        .unwrap_u8()
+        == 0
+    {
         return s3_error_response(
             StatusCode::FORBIDDEN,
             "SignatureDoesNotMatch",

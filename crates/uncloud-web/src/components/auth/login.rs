@@ -1,7 +1,7 @@
+use crate::hooks::{tauri, use_auth, use_search};
+use crate::state::AuthState;
 use dioxus::prelude::*;
 use uncloud_common::RegistrationMode;
-use crate::state::AuthState;
-use crate::hooks::{tauri, use_auth, use_search};
 
 /// Set up the desktop's native sync engine when the webview-side login
 /// succeeds outside of first-time setup. Without this, the webview is
@@ -20,9 +20,7 @@ async fn bridge_native_login(username: &str, password: &str) {
         return;
     };
     if let Err(e) = tauri::login(&cfg.server_url, username, password, &cfg.root_path).await {
-        web_sys::console::warn_1(
-            &format!("Native sync engine handoff failed: {e}").into(),
-        );
+        web_sys::console::warn_1(&format!("Native sync engine handoff failed: {e}").into());
     }
 }
 

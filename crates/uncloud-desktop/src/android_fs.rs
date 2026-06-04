@@ -56,7 +56,9 @@ impl AndroidSafFs {
 
     async fn resolve_file(&self, root: &str, rel: &str) -> Result<FileUri, LocalFsError> {
         if rel.is_empty() {
-            return Err(LocalFsError::other("resolve_file called with empty rel path"));
+            return Err(LocalFsError::other(
+                "resolve_file called with empty rel path",
+            ));
         }
         self.app
             .android_fs_async()
@@ -111,7 +113,10 @@ impl LocalFs for AndroidSafFs {
                             .duration_since(UNIX_EPOCH)
                             .map(|d| d.as_secs() as i64)
                             .unwrap_or(0);
-                        out.push(WalkEntry { rel_path: new_rel, mtime });
+                        out.push(WalkEntry {
+                            rel_path: new_rel,
+                            mtime,
+                        });
                     }
                     Entry::Dir { uri, .. } => {
                         stack.push((uri, new_rel));

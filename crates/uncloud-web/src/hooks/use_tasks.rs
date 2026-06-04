@@ -1,13 +1,10 @@
 use uncloud_common::{
-    TaskProjectResponse, TaskSectionResponse, TaskResponse, TaskCommentResponse,
-    TaskLabelResponse, TaskScheduleResponse,
-    CreateTaskProjectRequest, UpdateTaskProjectRequest,
-    AddProjectMemberRequest, UpdateProjectMemberRequest,
-    CreateTaskSectionRequest, UpdateTaskSectionRequest, ReorderSectionsRequest,
-    CreateTaskRequest, UpdateTaskRequest, UpdateTaskStatusRequest, ReorderTasksRequest,
-    CreateTaskCommentRequest, UpdateTaskCommentRequest,
-    CreateTaskLabelRequest, UpdateTaskLabelRequest,
-    AttachFilesRequest,
+    AddProjectMemberRequest, AttachFilesRequest, CreateTaskCommentRequest, CreateTaskLabelRequest,
+    CreateTaskProjectRequest, CreateTaskRequest, CreateTaskSectionRequest, ReorderSectionsRequest,
+    ReorderTasksRequest, TaskCommentResponse, TaskLabelResponse, TaskProjectResponse, TaskResponse,
+    TaskScheduleResponse, TaskSectionResponse, UpdateProjectMemberRequest,
+    UpdateTaskCommentRequest, UpdateTaskLabelRequest, UpdateTaskProjectRequest, UpdateTaskRequest,
+    UpdateTaskSectionRequest, UpdateTaskStatusRequest,
 };
 
 use super::api;
@@ -104,10 +101,7 @@ pub async fn delete_project(id: &str) -> Result<(), String> {
     }
 }
 
-pub async fn add_member(
-    project_id: &str,
-    req: &AddProjectMemberRequest,
-) -> Result<(), String> {
+pub async fn add_member(project_id: &str, req: &AddProjectMemberRequest) -> Result<(), String> {
     let response = api::post(&format!("/tasks/projects/{}/members", project_id))
         .json(req)
         .map_err(|e| e.to_string())?
@@ -241,15 +235,12 @@ pub async fn reorder_sections(project_id: &str, section_ids: &[&str]) -> Result<
     let body = ReorderSectionsRequest {
         section_ids: section_ids.iter().map(|s| s.to_string()).collect(),
     };
-    let response = api::put(&format!(
-        "/tasks/projects/{}/sections/reorder",
-        project_id
-    ))
-    .json(&body)
-    .map_err(|e| e.to_string())?
-    .send()
-    .await
-    .map_err(|e| e.to_string())?;
+    let response = api::put(&format!("/tasks/projects/{}/sections/reorder", project_id))
+        .json(&body)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
 
     if response.ok() || response.status() == 204 {
         Ok(())
@@ -295,10 +286,7 @@ async fn list_tasks_inner(
         path.push_str(&params.join("&"));
     }
 
-    let response = api::get(&path)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let response = api::get(&path).send().await.map_err(|e| e.to_string())?;
 
     if response.ok() {
         response
@@ -318,10 +306,7 @@ pub async fn list_subtasks(
         "/tasks/projects/{}/tasks?parent_task_id={}",
         project_id, parent_task_id
     );
-    let response = api::get(&path)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let response = api::get(&path).send().await.map_err(|e| e.to_string())?;
 
     if response.ok() {
         response
@@ -402,7 +387,6 @@ pub async fn delete_task(id: &str) -> Result<(), String> {
         Err("Failed to delete task".to_string())
     }
 }
-
 
 pub async fn clear_completion_history(id: &str) -> Result<(), String> {
     let response = api::delete(&format!("/tasks/{}/completion-history", id))

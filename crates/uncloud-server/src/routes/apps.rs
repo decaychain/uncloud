@@ -65,7 +65,8 @@ pub struct RegisterWebhookRequest {
 // ---------------------------------------------------------------------------
 
 fn validate_base_url(url: &str) -> Result<()> {
-    let parsed = url.parse::<reqwest::Url>()
+    let parsed = url
+        .parse::<reqwest::Url>()
         .map_err(|_| AppError::BadRequest("base_url must be a valid URL".to_string()))?;
     let host = parsed.host_str().unwrap_or("");
     if host != "localhost" && host != "127.0.0.1" && host != "::1" {
@@ -209,9 +210,7 @@ pub async fn delete_app(
 
     // Also clean up webhooks for this app
     let webhooks_coll = state.db.collection::<Webhook>("webhooks");
-    let _ = webhooks_coll
-        .delete_many(doc! { "app_name": &name })
-        .await;
+    let _ = webhooks_coll.delete_many(doc! { "app_name": &name }).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -302,7 +301,14 @@ pub async fn proxy_handler(
         Some(pos) => {
             let n = &without_prefix[..pos];
             let p = &without_prefix[pos..]; // includes leading '/'
-            (n.to_string(), if p == "/" { "/".to_string() } else { p.to_string() })
+            (
+                n.to_string(),
+                if p == "/" {
+                    "/".to_string()
+                } else {
+                    p.to_string()
+                },
+            )
         }
         None => (without_prefix.to_string(), "/".to_string()),
     };
@@ -432,12 +438,7 @@ pub async fn deliver_webhooks(state: &AppState, event_name: &str, payload: serde
                         );
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "Webhook {} failed (attempt {}): {}",
-                            url,
-                            attempt + 1,
-                            e
-                        );
+                        tracing::warn!("Webhook {} failed (attempt {}): {}", url, attempt + 1, e);
                     }
                 }
                 if attempt < 2 {

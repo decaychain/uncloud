@@ -69,24 +69,22 @@ async fn resolve_resource_name(
     resource_id: ObjectId,
 ) -> String {
     match resource_type {
-        ShareResourceType::File => {
-            db.collection::<File>("files")
-                .find_one(doc! { "_id": resource_id })
-                .await
-                .ok()
-                .flatten()
-                .map(|f| f.name)
-                .unwrap_or_else(|| "(deleted)".to_string())
-        }
-        ShareResourceType::Folder => {
-            db.collection::<Folder>("folders")
-                .find_one(doc! { "_id": resource_id })
-                .await
-                .ok()
-                .flatten()
-                .map(|f| f.name)
-                .unwrap_or_else(|| "(deleted)".to_string())
-        }
+        ShareResourceType::File => db
+            .collection::<File>("files")
+            .find_one(doc! { "_id": resource_id })
+            .await
+            .ok()
+            .flatten()
+            .map(|f| f.name)
+            .unwrap_or_else(|| "(deleted)".to_string()),
+        ShareResourceType::Folder => db
+            .collection::<Folder>("folders")
+            .find_one(doc! { "_id": resource_id })
+            .await
+            .ok()
+            .flatten()
+            .map(|f| f.name)
+            .unwrap_or_else(|| "(deleted)".to_string()),
     }
 }
 
@@ -157,7 +155,10 @@ pub async fn create_share(
     collection.insert_one(&share).await?;
 
     let name = resolve_resource_name(&state.db, req.resource_type, resource_id).await;
-    Ok((StatusCode::CREATED, Json(ShareResponse::from_share(&share, name))))
+    Ok((
+        StatusCode::CREATED,
+        Json(ShareResponse::from_share(&share, name)),
+    ))
 }
 
 pub async fn list_shares(

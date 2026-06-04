@@ -1,7 +1,7 @@
+use crate::hooks::use_auth;
+use crate::state::AuthState;
 use dioxus::prelude::*;
 use uncloud_common::{RegistrationMode, UserStatus};
-use crate::state::AuthState;
-use crate::hooks::use_auth;
 
 #[component]
 pub fn Register(#[props(default)] invite_token: Option<String>) -> Element {

@@ -120,13 +120,16 @@ pub async fn list_music_folders(
     let files_coll = state.db.collection::<File>("files");
 
     // --- Owned folders ---
-    let mut folder_cursor = folders_coll.find(doc! { "owner_id": user.id, "deleted_at": bson::Bson::Null }).await?;
+    let mut folder_cursor = folders_coll
+        .find(doc! { "owner_id": user.id, "deleted_at": bson::Bson::Null })
+        .await?;
     let mut all_folders: Vec<Folder> = Vec::new();
     while folder_cursor.advance().await? {
         all_folders.push(folder_cursor.deserialize_current()?);
     }
 
-    let included = resolve_included_folder_ids_by(&all_folders, |f| f.music_include.as_include_flag());
+    let included =
+        resolve_included_folder_ids_by(&all_folders, |f| f.music_include.as_include_flag());
 
     let by_id: HashMap<ObjectId, &Folder> = all_folders.iter().map(|f| (f.id, f)).collect();
     let included_ids: HashSet<ObjectId> = included.iter().filter_map(|x| *x).collect();
@@ -218,7 +221,8 @@ pub async fn list_music_folders(
 
     // Build folder responses for shared folders
     for (_, owner_folders) in &owner_folders_cache {
-        let shared_by_id: HashMap<ObjectId, &Folder> = owner_folders.iter().map(|f| (f.id, f)).collect();
+        let shared_by_id: HashMap<ObjectId, &Folder> =
+            owner_folders.iter().map(|f| (f.id, f)).collect();
         for folder in owner_folders {
             if !shared_folder_ids.contains(&folder.id) {
                 continue;
@@ -295,7 +299,13 @@ async fn batch_audio_folder_stats(
                 .or_else(|_| doc.get_i64("count"))
                 .unwrap_or(0);
             let cover = doc.get_object_id("cover").ok();
-            out.insert(id, FolderAudioStats { track_count: count, cover_file_id: cover });
+            out.insert(
+                id,
+                FolderAudioStats {
+                    track_count: count,
+                    cover_file_id: cover,
+                },
+            );
         }
     }
 
@@ -368,13 +378,16 @@ async fn music_included_parent_ids(
     user_id: ObjectId,
 ) -> Result<Vec<mongodb::bson::Bson>> {
     let folders_coll = state.db.collection::<Folder>("folders");
-    let mut folder_cursor = folders_coll.find(doc! { "owner_id": user_id, "deleted_at": bson::Bson::Null }).await?;
+    let mut folder_cursor = folders_coll
+        .find(doc! { "owner_id": user_id, "deleted_at": bson::Bson::Null })
+        .await?;
     let mut all_folders: Vec<Folder> = Vec::new();
     while folder_cursor.advance().await? {
         all_folders.push(folder_cursor.deserialize_current()?);
     }
 
-    let included = resolve_included_folder_ids_by(&all_folders, |f| f.music_include.as_include_flag());
+    let included =
+        resolve_included_folder_ids_by(&all_folders, |f| f.music_include.as_include_flag());
 
     let mut result: Vec<mongodb::bson::Bson> = included
         .into_iter()
@@ -516,9 +529,13 @@ pub async fn list_artists(
 
     let mut parent_ids = music_included_parent_ids(&state, user.id).await?;
 
-    if let Some(roots) =
-        resolve_scope_roots(&state, user.id, scope.folder_id.as_deref(), scope.category_id.as_deref())
-            .await?
+    if let Some(roots) = resolve_scope_roots(
+        &state,
+        user.id,
+        scope.folder_id.as_deref(),
+        scope.category_id.as_deref(),
+    )
+    .await?
     {
         parent_ids = restrict_to_subtrees(&state, user.id, parent_ids, &roots).await?;
     }
@@ -588,7 +605,11 @@ pub async fn list_artists(
             .map(|n| n as i64)
             .or_else(|_| doc.get_i64("track_count"))
             .unwrap_or(0);
-        result.push(ArtistResponse { name, album_count, track_count });
+        result.push(ArtistResponse {
+            name,
+            album_count,
+            track_count,
+        });
     }
 
     result.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -604,9 +625,13 @@ pub async fn list_artist_albums(
 ) -> Result<Json<Vec<MusicAlbumResponse>>> {
     let mut parent_ids = music_included_parent_ids(&state, user.id).await?;
 
-    if let Some(roots) =
-        resolve_scope_roots(&state, user.id, scope.folder_id.as_deref(), scope.category_id.as_deref())
-            .await?
+    if let Some(roots) = resolve_scope_roots(
+        &state,
+        user.id,
+        scope.folder_id.as_deref(),
+        scope.category_id.as_deref(),
+    )
+    .await?
     {
         parent_ids = restrict_to_subtrees(&state, user.id, parent_ids, &roots).await?;
     }
@@ -722,9 +747,13 @@ pub async fn list_album_tracks(
 ) -> Result<Json<Vec<TrackResponse>>> {
     let mut parent_ids = music_included_parent_ids(&state, user.id).await?;
 
-    if let Some(roots) =
-        resolve_scope_roots(&state, user.id, scope.folder_id.as_deref(), scope.category_id.as_deref())
-            .await?
+    if let Some(roots) = resolve_scope_roots(
+        &state,
+        user.id,
+        scope.folder_id.as_deref(),
+        scope.category_id.as_deref(),
+    )
+    .await?
     {
         parent_ids = restrict_to_subtrees(&state, user.id, parent_ids, &roots).await?;
     }
@@ -865,7 +894,9 @@ pub async fn create_category(
 ) -> Result<(StatusCode, Json<MusicCategoryDto>)> {
     let name = body.name.trim().to_string();
     if name.is_empty() {
-        return Err(AppError::BadRequest("Category name cannot be empty".to_string()));
+        return Err(AppError::BadRequest(
+            "Category name cannot be empty".to_string(),
+        ));
     }
     let folder_ids = parse_folder_ids(&body.folder_ids)?;
 
@@ -907,7 +938,9 @@ pub async fn update_category(
     if let Some(ref name) = body.name {
         let name = name.trim();
         if name.is_empty() {
-            return Err(AppError::BadRequest("Category name cannot be empty".to_string()));
+            return Err(AppError::BadRequest(
+                "Category name cannot be empty".to_string(),
+            ));
         }
         if name != cat.name {
             let dup = coll
@@ -929,8 +962,7 @@ pub async fn update_category(
 
     if let Some(folder_ids) = body.folder_ids {
         let parsed = parse_folder_ids(&folder_ids)?;
-        let bson_ids: Vec<bson::Bson> =
-            parsed.iter().copied().map(bson::Bson::ObjectId).collect();
+        let bson_ids: Vec<bson::Bson> = parsed.iter().copied().map(bson::Bson::ObjectId).collect();
         update_doc.insert("folder_ids", bson_ids);
     }
 
@@ -1129,7 +1161,11 @@ pub async fn search_music(
             let name = d.get_str("_id").ok()?.to_owned();
             let album_count = get_int(&d, "album_count");
             let track_count = get_int(&d, "track_count");
-            Some(ArtistResponse { name, album_count, track_count })
+            Some(ArtistResponse {
+                name,
+                album_count,
+                track_count,
+            })
         })
         .collect();
     artists.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -1144,9 +1180,21 @@ pub async fn search_music(
             let artist = id.get_str("artist").ok()?.to_owned();
             let name = id.get_str("album").ok()?.to_owned();
             let track_count = get_int(&d, "track_count");
-            let year = d.get_i32("year").ok().or_else(|| d.get_i64("year").ok().map(|n| n as i32));
-            let cover_file_id = d.get_object_id("cover_file_id").ok().map(|oid| oid.to_hex());
-            Some(MusicAlbumResponse { name, artist, year, track_count, cover_file_id })
+            let year = d
+                .get_i32("year")
+                .ok()
+                .or_else(|| d.get_i64("year").ok().map(|n| n as i32));
+            let cover_file_id = d
+                .get_object_id("cover_file_id")
+                .ok()
+                .map(|oid| oid.to_hex());
+            Some(MusicAlbumResponse {
+                name,
+                artist,
+                year,
+                track_count,
+                cover_file_id,
+            })
         })
         .collect();
     albums.sort_by(|a, b| {
@@ -1182,7 +1230,10 @@ pub async fn search_music(
                         .get("audio")
                         .and_then(|v| serde_json::from_value(v.clone()).ok())
                         .unwrap_or_default();
-                    tracks.push(TrackResponse { file: file_resp, audio });
+                    tracks.push(TrackResponse {
+                        file: file_resp,
+                        audio,
+                    });
                 }
             }
         }

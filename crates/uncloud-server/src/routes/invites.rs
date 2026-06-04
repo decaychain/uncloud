@@ -33,7 +33,12 @@ pub async fn create_invite(
 ) -> Result<(StatusCode, Json<uncloud_common::InviteResponse>)> {
     let invite = state
         .auth
-        .create_invite(user.id, req.comment, req.role.map(to_model_role), req.expires_in_hours)
+        .create_invite(
+            user.id,
+            req.comment,
+            req.role.map(to_model_role),
+            req.expires_in_hours,
+        )
         .await?;
 
     Ok((
@@ -58,10 +63,7 @@ pub async fn list_invites(
     let invites = state.auth.list_invites().await?;
 
     // Resolve used_by user IDs to usernames/emails
-    let used_ids: Vec<ObjectId> = invites
-        .iter()
-        .filter_map(|inv| inv.used_by)
-        .collect();
+    let used_ids: Vec<ObjectId> = invites.iter().filter_map(|inv| inv.used_by).collect();
 
     let users_coll = state.db.collection::<User>("users");
     let mut user_map = std::collections::HashMap::new();
@@ -70,9 +72,7 @@ pub async fn list_invites(
             .iter()
             .map(|id| mongodb::bson::Bson::ObjectId(*id))
             .collect();
-        let mut cursor = users_coll
-            .find(doc! { "_id": { "$in": ids_bson } })
-            .await?;
+        let mut cursor = users_coll.find(doc! { "_id": { "$in": ids_bson } }).await?;
         while cursor.advance().await? {
             let user: User = cursor.deserialize_current()?;
             user_map.insert(user.id, (user.username, user.email));

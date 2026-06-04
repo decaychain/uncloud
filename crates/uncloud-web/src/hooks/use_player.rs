@@ -1,6 +1,6 @@
+use crate::state::PlayerState;
 use dioxus::prelude::{ReadableExt, Signal, WritableExt};
 use uncloud_common::TrackResponse;
-use crate::state::PlayerState;
 
 /// Replace the play queue and start playing at `start_index`. Preserves the
 /// user's shuffle and repeat preferences. If shuffle is on, the incoming

@@ -9,10 +9,7 @@ struct SearchStatus {
 }
 
 pub async fn fetch_search_enabled() -> bool {
-    let Ok(response) = api::get("/search/status")
-        .send()
-        .await
-    else {
+    let Ok(response) = api::get("/search/status").send().await else {
         return false;
     };
     if !response.ok() {
@@ -40,10 +37,7 @@ pub async fn trigger_reindex() -> Result<(), String> {
 pub async fn search_files(query: &str, limit: usize) -> Result<Vec<SearchHit>, String> {
     let encoded = js_sys::encode_uri_component(query);
     let url = format!("{}/search?q={}&limit={}", api::api_url(""), encoded, limit);
-    let response = api::get_raw(&url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let response = api::get_raw(&url).send().await.map_err(|e| e.to_string())?;
     if response.ok() {
         response
             .json::<Vec<SearchHit>>()

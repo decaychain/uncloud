@@ -43,7 +43,10 @@ fn mongo_port() -> u16 {
                     .start()
                     .await
                     .expect("start mongo");
-                let port = container.get_host_port_ipv4(27017).await.expect("mongo port");
+                let port = container
+                    .get_host_port_ipv4(27017)
+                    .await
+                    .expect("mongo port");
                 Box::leak(Box::new(container));
                 port
             })
@@ -55,7 +58,9 @@ fn mongo_port() -> u16 {
 
 async fn mongo_db(name: &str) -> mongodb::Database {
     let uri = format!("mongodb://127.0.0.1:{}", mongo_port());
-    let client = mongodb::Client::with_uri_str(&uri).await.expect("mongo connect");
+    let client = mongodb::Client::with_uri_str(&uri)
+        .await
+        .expect("mongo connect");
     client.database(name)
 }
 
@@ -96,9 +101,14 @@ fn make_password_config(port: u16) -> StorageBackendConfig {
 async fn write_read_delete_roundtrip_password_auth() {
     let (_sftp, port) = start_sftp_password().await;
     let db = mongo_db("uncloud_sftp_test_1").await;
-    let storage = SftpStorage::new(&make_password_config(port), Default::default(), db, ObjectId::new())
-        .await
-        .expect("connect");
+    let storage = SftpStorage::new(
+        &make_password_config(port),
+        Default::default(),
+        db,
+        ObjectId::new(),
+    )
+    .await
+    .expect("connect");
 
     let data = b"hello, sftp world";
     storage.write("blobs/abc.bin", data).await.unwrap();
@@ -120,9 +130,14 @@ async fn write_read_delete_roundtrip_password_auth() {
 async fn read_range_works() {
     let (_sftp, port) = start_sftp_password().await;
     let db = mongo_db("uncloud_sftp_test_2").await;
-    let storage = SftpStorage::new(&make_password_config(port), Default::default(), db, ObjectId::new())
-        .await
-        .unwrap();
+    let storage = SftpStorage::new(
+        &make_password_config(port),
+        Default::default(),
+        db,
+        ObjectId::new(),
+    )
+    .await
+    .unwrap();
 
     storage.write("range.txt", b"Hello, World!").await.unwrap();
     let mut reader = storage.read_range("range.txt", 7, 5).await.unwrap();
@@ -136,15 +151,23 @@ async fn read_range_works() {
 async fn temp_upload_finalizes() {
     let (_sftp, port) = start_sftp_password().await;
     let db = mongo_db("uncloud_sftp_test_3").await;
-    let storage = SftpStorage::new(&make_password_config(port), Default::default(), db, ObjectId::new())
-        .await
-        .unwrap();
+    let storage = SftpStorage::new(
+        &make_password_config(port),
+        Default::default(),
+        db,
+        ObjectId::new(),
+    )
+    .await
+    .unwrap();
 
     let temp = storage.create_temp().await.unwrap();
     storage.append_temp(&temp, b"chunk-1;").await.unwrap();
     storage.append_temp(&temp, b"chunk-2;").await.unwrap();
     storage.append_temp(&temp, b"chunk-3").await.unwrap();
-    storage.finalize_temp(&temp, "uploads/final.bin").await.unwrap();
+    storage
+        .finalize_temp(&temp, "uploads/final.bin")
+        .await
+        .unwrap();
 
     let mut reader = storage.read("uploads/final.bin").await.unwrap();
     let mut buf = Vec::new();
@@ -157,9 +180,14 @@ async fn temp_upload_finalizes() {
 async fn rename_and_archive() {
     let (_sftp, port) = start_sftp_password().await;
     let db = mongo_db("uncloud_sftp_test_4").await;
-    let storage = SftpStorage::new(&make_password_config(port), Default::default(), db, ObjectId::new())
-        .await
-        .unwrap();
+    let storage = SftpStorage::new(
+        &make_password_config(port),
+        Default::default(),
+        db,
+        ObjectId::new(),
+    )
+    .await
+    .unwrap();
 
     storage.write("a.txt", b"alpha").await.unwrap();
     storage.rename("a.txt", "moved/b.txt").await.unwrap();
@@ -179,9 +207,14 @@ async fn rename_and_archive() {
 async fn scan_lists_all_keys() {
     let (_sftp, port) = start_sftp_password().await;
     let db = mongo_db("uncloud_sftp_test_5").await;
-    let storage = SftpStorage::new(&make_password_config(port), Default::default(), db, ObjectId::new())
-        .await
-        .unwrap();
+    let storage = SftpStorage::new(
+        &make_password_config(port),
+        Default::default(),
+        db,
+        ObjectId::new(),
+    )
+    .await
+    .unwrap();
 
     storage.write("dir1/a.txt", b"a").await.unwrap();
     storage.write("dir1/b.txt", b"bb").await.unwrap();
@@ -245,7 +278,10 @@ async fn private_key_auth_works() {
         .await
         .expect("key auth connect");
 
-    storage.write("keyauth.txt", b"signed in via key").await.unwrap();
+    storage
+        .write("keyauth.txt", b"signed in via key")
+        .await
+        .unwrap();
     let mut reader = storage.read("keyauth.txt").await.unwrap();
     let mut buf = Vec::new();
     reader.read_to_end(&mut buf).await.unwrap();
@@ -265,7 +301,9 @@ async fn tofu_pins_host_key_and_subsequent_connect_validates() {
     }
 
     // First connect: writes the row.
-    let _first = SftpStorage::new(&cfg, Default::default(), db.clone(), storage_id).await.unwrap();
+    let _first = SftpStorage::new(&cfg, Default::default(), db.clone(), storage_id)
+        .await
+        .unwrap();
     let pins = db
         .collection::<mongodb::bson::Document>("sftp_host_keys")
         .count_documents(mongodb::bson::doc! { "storage_id": storage_id })
@@ -274,5 +312,7 @@ async fn tofu_pins_host_key_and_subsequent_connect_validates() {
     assert_eq!(pins, 1, "first connect should pin one row");
 
     // Second connect: row already exists, must succeed against the same key.
-    let _second = SftpStorage::new(&cfg, Default::default(), db, storage_id).await.unwrap();
+    let _second = SftpStorage::new(&cfg, Default::default(), db, storage_id)
+        .await
+        .unwrap();
 }

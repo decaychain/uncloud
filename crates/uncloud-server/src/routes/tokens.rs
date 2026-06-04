@@ -71,9 +71,7 @@ pub async fn list_tokens(
     user: AuthUser,
 ) -> Result<Json<Vec<TokenResponse>>> {
     let collection = state.db.collection::<ApiToken>("api_tokens");
-    let mut cursor = collection
-        .find(doc! { "user_id": user.id })
-        .await?;
+    let mut cursor = collection.find(doc! { "user_id": user.id }).await?;
 
     let mut tokens = Vec::new();
     while cursor.advance().await? {

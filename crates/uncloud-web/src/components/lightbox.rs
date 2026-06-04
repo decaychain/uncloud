@@ -1,10 +1,10 @@
-use std::cell::RefCell;
-use std::rc::Rc;
-use dioxus::prelude::*;
-use uncloud_common::FileResponse;
-use wasm_bindgen::JsCast;
 use crate::components::icons::{IconChevronRight, IconX};
 use crate::hooks::api;
+use dioxus::prelude::*;
+use std::cell::RefCell;
+use std::rc::Rc;
+use uncloud_common::FileResponse;
+use wasm_bindgen::JsCast;
 
 #[component]
 pub fn Lightbox(
@@ -20,37 +20,33 @@ pub fn Lightbox(
         let on_close_kb = on_close.clone();
         use_effect(move || {
             let max_idx = total.saturating_sub(1);
-            let handler = Rc::new(RefCell::new(move |key: String| {
-                match key.as_str() {
-                    "Escape" => on_close_kb.call(()),
-                    "ArrowLeft" => {
-                        let cur = index();
-                        if cur > 0 {
-                            index.set(cur - 1);
-                        }
+            let handler = Rc::new(RefCell::new(move |key: String| match key.as_str() {
+                "Escape" => on_close_kb.call(()),
+                "ArrowLeft" => {
+                    let cur = index();
+                    if cur > 0 {
+                        index.set(cur - 1);
                     }
-                    "ArrowRight" => {
-                        let cur = index();
-                        if cur < max_idx {
-                            index.set(cur + 1);
-                        }
-                    }
-                    _ => {}
                 }
+                "ArrowRight" => {
+                    let cur = index();
+                    if cur < max_idx {
+                        index.set(cur + 1);
+                    }
+                }
+                _ => {}
             }));
 
             let handler_clone = handler.clone();
-            let closure = wasm_bindgen::closure::Closure::wrap(Box::new(
-                move |evt: web_sys::KeyboardEvent| {
+            let closure =
+                wasm_bindgen::closure::Closure::wrap(Box::new(move |evt: web_sys::KeyboardEvent| {
                     handler_clone.borrow_mut()(evt.key());
-                },
-            ) as Box<dyn FnMut(web_sys::KeyboardEvent)>);
+                })
+                    as Box<dyn FnMut(web_sys::KeyboardEvent)>);
 
             if let Some(window) = web_sys::window() {
-                let _ = window.add_event_listener_with_callback(
-                    "keydown",
-                    closure.as_ref().unchecked_ref(),
-                );
+                let _ = window
+                    .add_event_listener_with_callback("keydown", closure.as_ref().unchecked_ref());
             }
             closure.forget();
         });

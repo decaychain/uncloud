@@ -8,10 +8,10 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use uncloud_common::{SyncEventListResponse, SyncEventResponse, SyncEventSource};
 
-use crate::AppState;
 use crate::error::Result;
 use crate::middleware::AuthUser;
 use crate::services::sync_log::SyncEventFilter;
+use crate::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
@@ -33,7 +33,11 @@ pub async fn list_sync_events(
     user: AuthUser,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<SyncEventListResponse>> {
-    let sources = q.source.as_deref().map(parse_sources).filter(|v: &Vec<SyncEventSource>| !v.is_empty());
+    let sources = q
+        .source
+        .as_deref()
+        .map(parse_sources)
+        .filter(|v: &Vec<SyncEventSource>| !v.is_empty());
 
     let filter = SyncEventFilter {
         q: q.q,

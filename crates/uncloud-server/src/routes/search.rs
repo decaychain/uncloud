@@ -20,7 +20,9 @@ pub async fn search_status(
     State(state): State<Arc<AppState>>,
     _user: AuthUser,
 ) -> Json<SearchStatus> {
-    Json(SearchStatus { enabled: state.search.is_enabled() })
+    Json(SearchStatus {
+        enabled: state.search.is_enabled(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -32,10 +34,7 @@ pub struct SearchParams {
 /// Admin-only: strip stale search_index tasks and re-queue all files.
 /// Needed when search was previously disabled and files were incorrectly
 /// marked as Done without actually being indexed.
-pub async fn reindex(
-    State(state): State<Arc<AppState>>,
-    _user: AuthUser,
-) -> StatusCode {
+pub async fn reindex(State(state): State<Arc<AppState>>, _user: AuthUser) -> StatusCode {
     if !state.search.is_enabled() {
         return StatusCode::SERVICE_UNAVAILABLE;
     }

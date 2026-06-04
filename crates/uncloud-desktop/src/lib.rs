@@ -1,32 +1,31 @@
-use std::path::PathBuf;
 #[cfg(desktop)]
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use tauri::async_runtime;
 #[cfg(desktop)]
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
-use tauri::async_runtime;
-#[cfg(desktop)]
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+#[cfg(mobile)]
+use tauri_plugin_android_fs::AndroidFsExt;
 #[cfg(desktop)]
 use tauri_plugin_autostart::ManagerExt;
 #[cfg(desktop)]
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+#[cfg(desktop)]
 use tauri_plugin_updater::UpdaterExt;
-#[cfg(mobile)]
-use tauri_plugin_android_fs::AndroidFsExt;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
 use uncloud_client::{Client, ClientIdentity};
 use uncloud_sync::{
-    BaseSource, SyncEngine, SyncEngineHooks, SyncLogRow, SyncReport,
-    SyncState as EngineState,
+    BaseSource, SyncEngine, SyncEngineHooks, SyncLogRow, SyncReport, SyncState as EngineState,
 };
 
 #[cfg(mobile)]
@@ -192,7 +191,9 @@ fn app_namespace() -> &'static str {
 }
 
 fn config_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_config_dir().ok()
+    app.path()
+        .app_config_dir()
+        .ok()
         .or_else(|| dirs::config_dir())
         .map(|d| d.join(app_namespace()).join("desktop.json"))
 }
@@ -200,7 +201,9 @@ fn config_path(app: &AppHandle) -> Option<PathBuf> {
 /// Path to the sync journal database — stored in the user data dir, not inside
 /// the sync root, so it is never picked up by the sync engine itself.
 fn sync_db_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_data_dir().ok()
+    app.path()
+        .app_data_dir()
+        .ok()
         .or_else(|| dirs::data_local_dir())
         .map(|d| d.join(app_namespace()).join("sync.db"))
 }
@@ -208,7 +211,9 @@ fn sync_db_path(app: &AppHandle) -> Option<PathBuf> {
 /// Directory the encrypted-file credential fallback lives in. Sits next to
 /// `sync.db` in the data dir.
 fn secrets_dir(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_data_dir().ok()
+    app.path()
+        .app_data_dir()
+        .ok()
         .or_else(|| dirs::data_local_dir())
         .map(|d| d.join(app_namespace()).join("secrets"))
 }
@@ -275,52 +280,51 @@ fn wire_engine_hooks(
     phase: Arc<Mutex<SyncPhase>>,
     stats: Arc<Mutex<SyncStats>>,
 ) {
-    let on_log_appended: uncloud_sync::LogAppendedHook =
-        Arc::new(move |row: &SyncLogRow| {
-            // Always emit the raw row for the activity log.
-            if let Err(e) = app.emit("sync-log-appended", row.clone()) {
-                error!("emit sync-log-appended: {}", e);
-            }
+    let on_log_appended: uncloud_sync::LogAppendedHook = Arc::new(move |row: &SyncLogRow| {
+        // Always emit the raw row for the activity log.
+        if let Err(e) = app.emit("sync-log-appended", row.clone()) {
+            error!("emit sync-log-appended: {}", e);
+        }
 
-            // Bump the counter that matches this op. Tokio mutexes can't
-            // be locked from a sync `Fn`, so spawn a short task per row;
-            // the `app` / `phase` / `stats` clones are cheap (Arcs).
-            let row = row.clone();
-            let app = app.clone();
-            let phase = phase.clone();
-            let stats = stats.clone();
-            async_runtime::spawn(async move {
-                let updated = {
-                    let mut s = stats.lock().await;
-                    let bumped = match row.operation.as_str() {
-                        "Uploaded" | "Updated on server" => {
-                            s.session_uploaded = s.session_uploaded.saturating_add(1);
-                            s.last_run_uploaded = s.last_run_uploaded.saturating_add(1);
-                            true
-                        }
-                        "Downloaded" | "Updated from server" => {
-                            s.session_downloaded = s.session_downloaded.saturating_add(1);
-                            s.last_run_downloaded = s.last_run_downloaded.saturating_add(1);
-                            true
-                        }
-                        "Deleted" => {
-                            s.session_deleted = s.session_deleted.saturating_add(1);
-                            s.last_run_deleted = s.last_run_deleted.saturating_add(1);
-                            true
-                        }
-                        // SyncStart / SyncEnd are bracketing markers, no
-                        // counter to bump.
-                        _ => false,
-                    };
-                    if !bumped {
-                        return;
+        // Bump the counter that matches this op. Tokio mutexes can't
+        // be locked from a sync `Fn`, so spawn a short task per row;
+        // the `app` / `phase` / `stats` clones are cheap (Arcs).
+        let row = row.clone();
+        let app = app.clone();
+        let phase = phase.clone();
+        let stats = stats.clone();
+        async_runtime::spawn(async move {
+            let updated = {
+                let mut s = stats.lock().await;
+                let bumped = match row.operation.as_str() {
+                    "Uploaded" | "Updated on server" => {
+                        s.session_uploaded = s.session_uploaded.saturating_add(1);
+                        s.last_run_uploaded = s.last_run_uploaded.saturating_add(1);
+                        true
                     }
-                    s.clone()
+                    "Downloaded" | "Updated from server" => {
+                        s.session_downloaded = s.session_downloaded.saturating_add(1);
+                        s.last_run_downloaded = s.last_run_downloaded.saturating_add(1);
+                        true
+                    }
+                    "Deleted" => {
+                        s.session_deleted = s.session_deleted.saturating_add(1);
+                        s.last_run_deleted = s.last_run_deleted.saturating_add(1);
+                        true
+                    }
+                    // SyncStart / SyncEnd are bracketing markers, no
+                    // counter to bump.
+                    _ => false,
                 };
-                let phase_snap = phase.lock().await.clone();
-                emit_stats(&app, phase_snap, updated);
-            });
+                if !bumped {
+                    return;
+                }
+                s.clone()
+            };
+            let phase_snap = phase.lock().await.clone();
+            emit_stats(&app, phase_snap, updated);
         });
+    });
     engine.set_hooks(SyncEngineHooks {
         on_log_appended: Some(on_log_appended),
     });
@@ -331,11 +335,7 @@ fn wire_engine_hooks(
 /// handles. Called on every engine-creation path so a logout → login
 /// cycle that targets a different folder reattaches cleanly.
 #[cfg(desktop)]
-fn restart_file_watcher(
-    app: &AppHandle,
-    state: &DesktopState,
-    root_path: &str,
-) {
+fn restart_file_watcher(app: &AppHandle, state: &DesktopState, root_path: &str) {
     if root_path.is_empty() {
         // Mobile path-without-root never reaches here (cfg(desktop)),
         // but be defensive: nothing to watch.
@@ -367,10 +367,7 @@ fn restart_file_watcher(
 /// when the engine it captured is dropped — at which point its
 /// `watch::Receiver` returns `Err` from `changed()` and we break.
 #[cfg(desktop)]
-fn spawn_activity_listener(
-    engine: Arc<SyncEngine>,
-    tray: Arc<std::sync::Mutex<Option<TrayIcon>>>,
-) {
+fn spawn_activity_listener(engine: Arc<SyncEngine>, tray: Arc<std::sync::Mutex<Option<TrayIcon>>>) {
     let mut rx = engine.state();
     async_runtime::spawn(async move {
         let mut last = *rx.borrow();
@@ -500,7 +497,9 @@ async fn build_engine(
 /// fresh data dir produces a clean first-run experience.
 #[cfg(desktop)]
 fn autostart_sentinel_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_config_dir().ok()
+    app.path()
+        .app_config_dir()
+        .ok()
         .or_else(|| dirs::config_dir())
         .map(|d| d.join(app_namespace()).join("autostart_decided"))
 }
@@ -611,7 +610,12 @@ async fn ensure_engine(
             msg
         })?;
     let engine = Arc::new(engine);
-    wire_engine_hooks(&engine, app.clone(), state.phase.clone(), state.stats.clone());
+    wire_engine_hooks(
+        &engine,
+        app.clone(),
+        state.phase.clone(),
+        state.stats.clone(),
+    );
     #[cfg(desktop)]
     spawn_activity_listener(engine.clone(), state.tray.clone());
     *state.client.write().await = Some(client);
@@ -695,10 +699,7 @@ async fn run_sync_once(
     let result = match first_attempt {
         Ok(r) => Ok(r),
         Err((msg, true)) => match try_reauth_with_stored_password(&app, &engine).await {
-            Ok(()) => engine
-                .incremental_sync()
-                .await
-                .map_err(|e| e.to_string()),
+            Ok(()) => engine.incremental_sync().await.map_err(|e| e.to_string()),
             Err(reauth_err) => Err(format!("{msg} (re-auth failed: {reauth_err})")),
         },
         Err((msg, false)) => Err(msg),
@@ -866,7 +867,12 @@ async fn login(
         .map_err(|e| e.to_string())?;
 
     let engine = Arc::new(engine);
-    wire_engine_hooks(&engine, app.clone(), state.phase.clone(), state.stats.clone());
+    wire_engine_hooks(
+        &engine,
+        app.clone(),
+        state.phase.clone(),
+        state.stats.clone(),
+    );
     #[cfg(desktop)]
     spawn_activity_listener(engine.clone(), state.tray.clone());
     *state.client.write().await = Some(client);
@@ -881,7 +887,14 @@ async fn login(
 
     let secrets = secrets_dir(&app).ok_or("Cannot determine data directory")?;
     secret_store::store_password(&secrets, &server, &username, &password)?;
-    save_config(&app, &PersistedConfig { server_url: server, username, root_path: root_path.clone() });
+    save_config(
+        &app,
+        &PersistedConfig {
+            server_url: server,
+            username,
+            root_path: root_path.clone(),
+        },
+    );
     info!("Logged in and sync engine initialised");
 
     #[cfg(desktop)]
@@ -934,8 +947,12 @@ async fn disconnect(app: AppHandle, state: State<'_, DesktopState>) -> Result<()
 
     *state.engine.write().await = None;
     *state.client.write().await = None;
-    if let Ok(mut t) = state.auth_token.lock() { *t = None; }
-    if let Ok(mut p) = state.auth_pending.lock() { *p = false; }
+    if let Ok(mut t) = state.auth_token.lock() {
+        *t = None;
+    }
+    if let Ok(mut p) = state.auth_pending.lock() {
+        *p = false;
+    }
     *state.phase.lock().await = SyncPhase::NotConfigured;
     *state.stats.lock().await = SyncStats::default();
     #[cfg(desktop)]
@@ -972,7 +989,10 @@ async fn sync_now(app: AppHandle, state: State<'_, DesktopState>) -> Result<Sync
         report.errors.len(),
     );
     for err in &report.errors {
-        eprintln!("[uncloud-desktop] sync error: {} — {}", err.path, err.reason);
+        eprintln!(
+            "[uncloud-desktop] sync error: {} — {}",
+            err.path, err.reason
+        );
     }
     Ok(SyncReportDto::from(report))
 }
@@ -988,10 +1008,7 @@ async fn get_local_sync_log(
 ) -> Result<Vec<SyncLogRow>, String> {
     let engine = ensure_engine(&app, &state).await?;
     let cap = limit.unwrap_or(200).clamp(1, 1000);
-    engine
-        .recent_sync_log(cap)
-        .await
-        .map_err(|e| e.to_string())
+    engine.recent_sync_log(cap).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1325,8 +1342,7 @@ fn start_poll_loop(
     poll_interval_secs: u64,
 ) {
     async_runtime::spawn(async move {
-        let mut interval =
-            tokio::time::interval(Duration::from_secs(poll_interval_secs));
+        let mut interval = tokio::time::interval(Duration::from_secs(poll_interval_secs));
         // Don't burst-fire missed ticks after a long OS suspend — just resume
         // cadence from "now".
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1334,8 +1350,14 @@ fn start_poll_loop(
             interval.tick().await;
             let maybe_engine = engine.read().await.as_ref().map(Arc::clone);
             if let Some(eng) = maybe_engine {
-                if let Err(msg) =
-                    run_sync_once(app.clone(), eng, phase.clone(), stats.clone(), run_lock.clone()).await
+                if let Err(msg) = run_sync_once(
+                    app.clone(),
+                    eng,
+                    phase.clone(),
+                    stats.clone(),
+                    run_lock.clone(),
+                )
+                .await
                 {
                     error!("Sync error: {}", msg);
                 }
@@ -1372,15 +1394,11 @@ fn open_browser(app: &tauri::AppHandle) {
         return;
     }
     // The Dioxus app fetches the server URL via invoke("get_config") in main().
-    let _ = tauri::WebviewWindowBuilder::new(
-        app,
-        "browser",
-        tauri::WebviewUrl::App("".into()),
-    )
-    .title("Uncloud")
-    .inner_size(1280.0, 800.0)
-    .resizable(true)
-    .build();
+    let _ = tauri::WebviewWindowBuilder::new(app, "browser", tauri::WebviewUrl::App("".into()))
+        .title("Uncloud")
+        .inner_size(1280.0, 800.0)
+        .resizable(true)
+        .build();
 }
 
 // ── App entry point ───────────────────────────────────────────────────────────
@@ -1476,7 +1494,9 @@ pub fn run() {
                 // Flip pending BEFORE spawning so the webview can't race
                 // and observe `pending=false` while the future is still
                 // queued for execution.
-                if let Ok(mut p) = pending_arc.lock() { *p = true; }
+                if let Ok(mut p) = pending_arc.lock() {
+                    *p = true;
+                }
                 async_runtime::spawn(async move {
                     // Single point that always runs at exit — drops the
                     // `pending` flag so the webview stops falling back to
@@ -1485,7 +1505,9 @@ pub fn run() {
                     // the in-memory `auth_token` cleared so `get_auth_token`
                     // returns None and the webview wipes its stored token.
                     let finish = |succeeded: bool| {
-                        if let Ok(mut p) = pending_arc.lock() { *p = false; }
+                        if let Ok(mut p) = pending_arc.lock() {
+                            *p = false;
+                        }
                         #[cfg(desktop)]
                         if !succeeded {
                             apply_tray_state(&tray_arc, EngineState::NotConnected);
@@ -1497,23 +1519,33 @@ pub fn run() {
                         finish(false);
                         return;
                     };
-                    let Some(password) = secret_store::load_password(&secrets, &cfg.server_url, &cfg.username) else {
+                    let Some(password) =
+                        secret_store::load_password(&secrets, &cfg.server_url, &cfg.username)
+                    else {
                         eprintln!("[uncloud-desktop] Auto-login skipped: no stored credentials");
                         finish(false);
                         return;
                     };
                     let client = Arc::new(make_client(&cfg.server_url));
-                    let login_result = client.login(&cfg.username, &password).await.map_err(|e| e.to_string());
+                    let login_result = client
+                        .login(&cfg.username, &password)
+                        .await
+                        .map_err(|e| e.to_string());
                     match login_result {
                         Ok(user_resp) => {
                             if let Ok(mut t) = token_arc.lock() {
                                 *t = user_resp.session_token.clone();
                             }
                             let db = match sync_db_path(&app_handle) {
-                                Some(p) => { let _ = p.parent().map(std::fs::create_dir_all); p }
+                                Some(p) => {
+                                    let _ = p.parent().map(std::fs::create_dir_all);
+                                    p
+                                }
                                 None => {
                                     error!("Auto-login: cannot determine data directory");
-                                    if let Ok(mut t) = token_arc.lock() { *t = None; }
+                                    if let Ok(mut t) = token_arc.lock() {
+                                        *t = None;
+                                    }
                                     finish(false);
                                     return;
                                 }
@@ -1523,11 +1555,19 @@ pub fn run() {
                             } else {
                                 Some(cfg.root_path.clone())
                             };
-                            let engine_result = build_engine(&app_handle, &db, client.clone(), effective_root).await.map_err(|e| e.to_string());
+                            let engine_result =
+                                build_engine(&app_handle, &db, client.clone(), effective_root)
+                                    .await
+                                    .map_err(|e| e.to_string());
                             match engine_result {
                                 Ok(engine) => {
                                     let engine = Arc::new(engine);
-                                    wire_engine_hooks(&engine, app_handle.clone(), phase_arc.clone(), stats_arc.clone());
+                                    wire_engine_hooks(
+                                        &engine,
+                                        app_handle.clone(),
+                                        phase_arc.clone(),
+                                        stats_arc.clone(),
+                                    );
                                     #[cfg(desktop)]
                                     spawn_activity_listener(engine.clone(), tray_arc.clone());
                                     *client_arc.write().await = Some(client);
@@ -1560,9 +1600,13 @@ pub fn run() {
                                     );
                                 }
                                 Err(e) => {
-                                    eprintln!("[uncloud-desktop] Auto-login engine init failed: {e}");
+                                    eprintln!(
+                                        "[uncloud-desktop] Auto-login engine init failed: {e}"
+                                    );
                                     error!("Auto-login: engine init failed: {}", e);
-                                    if let Ok(mut t) = token_arc.lock() { *t = None; }
+                                    if let Ok(mut t) = token_arc.lock() {
+                                        *t = None;
+                                    }
                                     finish(false);
                                 }
                             }

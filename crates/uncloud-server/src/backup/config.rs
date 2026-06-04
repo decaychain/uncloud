@@ -220,7 +220,10 @@ targets:
         let t = &cfg.targets[0];
         assert_eq!(t.name, "local");
         assert_eq!(t.repo, "/tmp/uncloud-backup");
-        assert_eq!(t.password.password_file.as_ref().unwrap().to_str(), Some("/tmp/key"));
+        assert_eq!(
+            t.password.password_file.as_ref().unwrap().to_str(),
+            Some("/tmp/key")
+        );
     }
 
     #[test]
@@ -247,8 +250,14 @@ targets:
         assert_eq!(cfg.targets.len(), 2);
         assert!(cfg.options.include_versions);
         let minio = cfg.target("minio").unwrap();
-        assert_eq!(minio.password.password_env.as_deref(), Some("UNCLOUD_BACKUP_PW"));
-        assert_eq!(minio.credentials.0.get("access_key_id"), Some(&"AKIA".to_string()));
+        assert_eq!(
+            minio.password.password_env.as_deref(),
+            Some("UNCLOUD_BACKUP_PW")
+        );
+        assert_eq!(
+            minio.credentials.0.get("access_key_id"),
+            Some(&"AKIA".to_string())
+        );
         let nas = cfg.target("nas").unwrap();
         let r = nas.retention.as_ref().unwrap();
         assert_eq!(r.keep_daily, Some(7));

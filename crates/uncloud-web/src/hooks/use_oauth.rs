@@ -8,7 +8,10 @@ pub struct OAuthClient {
 }
 
 pub async fn lookup_client(client_id: &str) -> Result<OAuthClient, String> {
-    let url = format!("/oauth/clients/lookup?client_id={}", urlencoding::encode(client_id));
+    let url = format!(
+        "/oauth/clients/lookup?client_id={}",
+        urlencoding::encode(client_id)
+    );
     let response = api::get_raw(&format!("{}{}", api::api_base(), url))
         .send()
         .await
@@ -16,7 +19,10 @@ pub async fn lookup_client(client_id: &str) -> Result<OAuthClient, String> {
     if response.status() != 200 {
         return Err(format!("client lookup failed ({})", response.status()));
     }
-    response.json::<OAuthClient>().await.map_err(|e| e.to_string())
+    response
+        .json::<OAuthClient>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,9 +74,15 @@ pub async fn list_connected_apps() -> Result<Vec<ConnectedApp>, String> {
         .await
         .map_err(|e| e.to_string())?;
     if response.status() != 200 {
-        return Err(format!("failed to list connected apps ({})", response.status()));
+        return Err(format!(
+            "failed to list connected apps ({})",
+            response.status()
+        ));
     }
-    response.json::<Vec<ConnectedApp>>().await.map_err(|e| e.to_string())
+    response
+        .json::<Vec<ConnectedApp>>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 pub async fn revoke_connected_app(client_id: &str) -> Result<(), String> {

@@ -1,16 +1,15 @@
 #![allow(dead_code)]
 
-use std::sync::OnceLock;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use axum_test::{TestServer, TestServerConfig};
 use serde_json::Value;
 use tempfile::TempDir;
-use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
+use testcontainers::{runners::AsyncRunner, GenericImage, ImageExt};
 use uncloud_client::Client;
 
 use uncloud_server::{
-    AppState,
     config::{
         AppsConfig, AuthConfig, Config, DatabaseConfig, FeaturesConfig, ProcessingConfig,
         SearchConfig, ServerConfig, StorageConfig, UploadConfig, VersioningConfig,
@@ -19,6 +18,7 @@ use uncloud_server::{
     processing::ProcessingService,
     routes,
     services::{AuthService, EventService, RescanService, SearchService, StorageService},
+    AppState,
 };
 
 // Shared MongoDB container — started once per test binary, port stored here.
@@ -106,7 +106,10 @@ impl TestApp {
                 name: db_name,
             },
             storage: StorageConfig {
-                default_path: Some(storage_dir.path().to_path_buf()), storages: Vec::new(), default: None, retry: Default::default(),
+                default_path: Some(storage_dir.path().to_path_buf()),
+                storages: Vec::new(),
+                default: None,
+                retry: Default::default(),
             },
             auth: AuthConfig {
                 session_duration_hours: 1,
@@ -136,9 +139,7 @@ impl TestApp {
         let database = db::connect(&config.database)
             .await
             .expect("connect to test MongoDB");
-        db::setup_indexes(&database)
-            .await
-            .expect("setup indexes");
+        db::setup_indexes(&database).await.expect("setup indexes");
 
         let auth = AuthService::new(&database, config.auth.clone());
         let storage = StorageService::new(&database, &config.storage)
@@ -152,7 +153,11 @@ impl TestApp {
 
         let db_handle = database.clone();
 
-        let sync_log = uncloud_server::services::SyncLog::new(&database, events.clone(), config.sync_audit.enabled);
+        let sync_log = uncloud_server::services::SyncLog::new(
+            &database,
+            events.clone(),
+            config.sync_audit.enabled,
+        );
         let state = Arc::new(AppState {
             config,
             db: database,
@@ -230,8 +235,12 @@ impl TestApp {
     /// Upload a file and return the FileResponse JSON.
     pub async fn upload(&self, filename: &str, content: &[u8], mime: &str) -> Value {
         use axum_test::multipart::{MultipartForm, Part};
-        let form = MultipartForm::new()
-            .add_part("file", Part::bytes(content.to_vec()).file_name(filename).mime_type(mime));
+        let form = MultipartForm::new().add_part(
+            "file",
+            Part::bytes(content.to_vec())
+                .file_name(filename)
+                .mime_type(mime),
+        );
         self.server
             .post("/api/uploads/simple")
             .multipart(form)
@@ -240,10 +249,21 @@ impl TestApp {
     }
 
     /// Upload a file into a specific folder and return the FileResponse JSON.
-    pub async fn upload_to_folder(&self, filename: &str, content: &[u8], mime: &str, parent_id: &str) -> Value {
+    pub async fn upload_to_folder(
+        &self,
+        filename: &str,
+        content: &[u8],
+        mime: &str,
+        parent_id: &str,
+    ) -> Value {
         use axum_test::multipart::{MultipartForm, Part};
         let form = MultipartForm::new()
-            .add_part("file", Part::bytes(content.to_vec()).file_name(filename).mime_type(mime))
+            .add_part(
+                "file",
+                Part::bytes(content.to_vec())
+                    .file_name(filename)
+                    .mime_type(mime),
+            )
             .add_part("parent_id", Part::text(parent_id.to_string()));
         self.server
             .post("/api/uploads/simple")
@@ -322,7 +342,10 @@ impl BoundTestApp {
                 name: db_name,
             },
             storage: StorageConfig {
-                default_path: Some(storage_dir.path().to_path_buf()), storages: Vec::new(), default: None, retry: Default::default(),
+                default_path: Some(storage_dir.path().to_path_buf()),
+                storages: Vec::new(),
+                default: None,
+                retry: Default::default(),
             },
             auth: AuthConfig {
                 session_duration_hours: 1,
@@ -350,9 +373,7 @@ impl BoundTestApp {
         let database = db::connect(&config.database)
             .await
             .expect("connect to test MongoDB");
-        db::setup_indexes(&database)
-            .await
-            .expect("setup indexes");
+        db::setup_indexes(&database).await.expect("setup indexes");
 
         let auth = AuthService::new(&database, config.auth.clone());
         let storage = StorageService::new(&database, &config.storage)
@@ -364,7 +385,11 @@ impl BoundTestApp {
             .expect("search service");
         let processing = ProcessingService::new(1, 3);
 
-        let sync_log = uncloud_server::services::SyncLog::new(&database, events.clone(), config.sync_audit.enabled);
+        let sync_log = uncloud_server::services::SyncLog::new(
+            &database,
+            events.clone(),
+            config.sync_audit.enabled,
+        );
         let state = Arc::new(AppState {
             config,
             db: database,
@@ -389,7 +414,9 @@ impl BoundTestApp {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         tokio::spawn(async move {
             axum::serve(listener, router)
-                .with_graceful_shutdown(async { shutdown_rx.await.ok(); })
+                .with_graceful_shutdown(async {
+                    shutdown_rx.await.ok();
+                })
                 .await
                 .ok();
         });

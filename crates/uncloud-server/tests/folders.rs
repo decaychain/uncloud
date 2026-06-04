@@ -22,11 +22,7 @@ async fn create_folder() {
     assert!(body["id"].as_str().is_some());
 
     // Appears in listing
-    let listing: serde_json::Value = app
-        .server
-        .get("/api/folders")
-        .await
-        .json();
+    let listing: serde_json::Value = app.server.get("/api/folders").await.json();
     let folders = listing.as_array().expect("folders array");
     assert!(folders.iter().any(|f| f["name"] == "Photos"));
 }
@@ -122,7 +118,12 @@ async fn delete_folder_removes_nested_files() {
     // Upload a file into it
     use axum_test::multipart::{MultipartForm, Part};
     let form = MultipartForm::new()
-        .add_part("file", Part::bytes(b"content".to_vec()).file_name("f.txt").mime_type("text/plain"))
+        .add_part(
+            "file",
+            Part::bytes(b"content".to_vec())
+                .file_name("f.txt")
+                .mime_type("text/plain"),
+        )
         .add_part("parent_id", Part::text(folder_id.clone()));
     let file: serde_json::Value = app
         .server

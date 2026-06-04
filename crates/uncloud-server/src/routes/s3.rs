@@ -124,11 +124,7 @@ async fn find_file_by_key(
 ) -> Result<Option<File>, Response> {
     // The key maps to the file's storage_path minus the username prefix.
     // storage_path = "{username}/{key}"
-    let storage_path = format!(
-        "{}/{}",
-        sanitize_path_component(&user.username),
-        key
-    );
+    let storage_path = format!("{}/{}", sanitize_path_component(&user.username), key);
 
     let files_coll = state.db.collection::<File>("files");
     files_coll
@@ -188,8 +184,7 @@ async fn ensure_folders(
         match existing {
             Some(f) => current_parent = Some(f.id),
             None => {
-                let new_folder =
-                    Folder::new(user.id, current_parent, folder_name.to_string());
+                let new_folder = Folder::new(user.id, current_parent, folder_name.to_string());
                 folders_coll.insert_one(&new_folder).await.map_err(|e| {
                     s3_error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -231,7 +226,11 @@ pub async fn s3_handler(
         ("GET", None, None) => list_buckets(&s3_user).await,
 
         // Bucket-level operations (no key)
-        ("GET", Some(bucket), None) if query == "location" || query.starts_with("location&") || query.starts_with("location=") => {
+        ("GET", Some(bucket), None)
+            if query == "location"
+                || query.starts_with("location&")
+                || query.starts_with("location=") =>
+        {
             // GetBucketLocation — validate bucket then return empty LocationConstraint (= us-east-1)
             if bucket != s3_user.username {
                 return s3_error_response(StatusCode::FORBIDDEN, "AccessDenied", "Access Denied");
@@ -242,9 +241,7 @@ pub async fn s3_handler(
                 r#"<?xml version="1.0" encoding="UTF-8"?><LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></LocationConstraint>"#,
             ).into_response()
         }
-        ("GET", Some(bucket), None) => {
-            list_objects_v2(state, &s3_user, bucket, &query).await
-        }
+        ("GET", Some(bucket), None) => list_objects_v2(state, &s3_user, bucket, &query).await,
         ("POST", Some(bucket), None) if query.contains("delete") => {
             delete_objects(state, &s3_user, bucket, request).await
         }
@@ -258,24 +255,20 @@ pub async fn s3_handler(
         }
 
         // Object-level operations
-        ("HEAD", Some(bucket), Some(key)) => {
-            head_object(state, &s3_user, bucket, key).await
-        }
+        ("HEAD", Some(bucket), Some(key)) => head_object(state, &s3_user, bucket, key).await,
         ("GET", Some(bucket), Some(key)) => {
             get_object(state, &s3_user, bucket, key, request.headers().clone()).await
         }
-        ("PUT", Some(bucket), Some(key)) if query.contains("partNumber=") && query.contains("uploadId=") => {
+        ("PUT", Some(bucket), Some(key))
+            if query.contains("partNumber=") && query.contains("uploadId=") =>
+        {
             upload_part(state, &s3_user, bucket, key, &query, request).await
         }
-        ("PUT", Some(bucket), Some(key)) => {
-            put_object(state, &s3_user, bucket, key, request).await
-        }
+        ("PUT", Some(bucket), Some(key)) => put_object(state, &s3_user, bucket, key, request).await,
         ("DELETE", Some(bucket), Some(_key)) if query.contains("uploadId=") => {
             abort_multipart_upload(state, &s3_user, bucket, &query).await
         }
-        ("DELETE", Some(bucket), Some(key)) => {
-            delete_object(state, &s3_user, bucket, key).await
-        }
+        ("DELETE", Some(bucket), Some(key)) => delete_object(state, &s3_user, bucket, key).await,
         ("POST", Some(bucket), Some(key)) if query.contains("uploads") => {
             create_multipart_upload(state, &s3_user, bucket, key).await
         }
@@ -341,7 +334,9 @@ async fn list_objects_v2(
             let mut it = pair.splitn(2, '=');
             Some((
                 urlencoding::decode(it.next()?).ok()?.to_string(),
-                urlencoding::decode(it.next().unwrap_or("")).ok()?.to_string(),
+                urlencoding::decode(it.next().unwrap_or(""))
+                    .ok()?
+                    .to_string(),
             ))
         })
         .collect();
@@ -395,8 +390,7 @@ async fn list_objects_v2(
 
     // Build the key for each file by stripping the username prefix
     let mut objects = Vec::new();
-    let mut common_prefixes: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
+    let mut common_prefixes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     for file in &all_files {
         let key = file
@@ -427,10 +421,7 @@ async fn list_objects_v2(
     xml.push_str(&format!("\n  <Name>{}</Name>", xml_escape(bucket)));
     xml.push_str(&format!("\n  <Prefix>{}</Prefix>", xml_escape(&prefix)));
     xml.push_str(&format!("\n  <MaxKeys>{}</MaxKeys>", max_keys));
-    xml.push_str(&format!(
-        "\n  <IsTruncated>{}</IsTruncated>",
-        is_truncated
-    ));
+    xml.push_str(&format!("\n  <IsTruncated>{}</IsTruncated>", is_truncated));
     if let Some(ref delim) = delimiter {
         xml.push_str(&format!("\n  <Delimiter>{}</Delimiter>", xml_escape(delim)));
     }
@@ -440,7 +431,10 @@ async fn list_objects_v2(
         let last_modified = file.updated_at.format("%Y-%m-%dT%H:%M:%S%.3fZ");
         xml.push_str("\n  <Contents>");
         xml.push_str(&format!("\n    <Key>{}</Key>", xml_escape(key)));
-        xml.push_str(&format!("\n    <LastModified>{}</LastModified>", last_modified));
+        xml.push_str(&format!(
+            "\n    <LastModified>{}</LastModified>",
+            last_modified
+        ));
         xml.push_str(&format!(
             "\n    <ETag>\"{}\"</ETag>",
             xml_escape(&file.checksum_sha256)
@@ -479,12 +473,7 @@ fn regex_escape(s: &str) -> String {
 // HeadObject
 // ---------------------------------------------------------------------------
 
-async fn head_object(
-    state: Arc<AppState>,
-    user: &S3User,
-    bucket: &str,
-    key: &str,
-) -> Response {
+async fn head_object(state: Arc<AppState>, user: &S3User, bucket: &str, key: &str) -> Response {
     if let Err(resp) = validate_bucket(user, bucket) {
         return resp;
     }
@@ -492,7 +481,11 @@ async fn head_object(
     let file = match find_file_by_key(&state, user, key).await {
         Ok(Some(f)) => f,
         Ok(None) => {
-            return s3_error_response(StatusCode::NOT_FOUND, "NoSuchKey", "The specified key does not exist")
+            return s3_error_response(
+                StatusCode::NOT_FOUND,
+                "NoSuchKey",
+                "The specified key does not exist",
+            )
         }
         Err(resp) => return resp,
     };
@@ -530,7 +523,11 @@ async fn get_object(
     let file = match find_file_by_key(&state, user, key).await {
         Ok(Some(f)) => f,
         Ok(None) => {
-            return s3_error_response(StatusCode::NOT_FOUND, "NoSuchKey", "The specified key does not exist")
+            return s3_error_response(
+                StatusCode::NOT_FOUND,
+                "NoSuchKey",
+                "The specified key does not exist",
+            )
         }
         Err(resp) => return resp,
     };
@@ -558,10 +555,7 @@ async fn get_object(
         if let Some(range_str) = range_value.to_str().ok() {
             if let Some((start, end)) = parse_range(range_str, total) {
                 let length = end - start + 1;
-                let reader = match backend
-                    .read_range(&file.storage_path, start, length)
-                    .await
-                {
+                let reader = match backend.read_range(&file.storage_path, start, length).await {
                     Ok(r) => r,
                     Err(e) => {
                         return s3_error_response(
@@ -793,7 +787,10 @@ async fn put_object(
                 + 1;
 
             let ver_path = version_path(&existing_file.storage_path);
-            if let Err(e) = backend.archive_version(&existing_file.storage_path, &ver_path).await {
+            if let Err(e) = backend
+                .archive_version(&existing_file.storage_path, &ver_path)
+                .await
+            {
                 return s3_error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "InternalError",
@@ -844,8 +841,13 @@ async fn put_object(
             }
 
             // Remove stale thumbnail and trigger reprocessing
-            let _ = backend.delete(&format!(".thumbs/{}.jpg", existing_file.id.to_hex())).await;
-            state.events.emit_file_created(user.id, &existing_file).await;
+            let _ = backend
+                .delete(&format!(".thumbs/{}.jpg", existing_file.id.to_hex()))
+                .await;
+            state
+                .events
+                .emit_file_created(user.id, &existing_file)
+                .await;
 
             let etag = format!("\"{}\"", checksum);
             Response::builder()
@@ -905,12 +907,7 @@ async fn put_object(
 // DeleteObject
 // ---------------------------------------------------------------------------
 
-async fn delete_object(
-    state: Arc<AppState>,
-    user: &S3User,
-    bucket: &str,
-    key: &str,
-) -> Response {
+async fn delete_object(state: Arc<AppState>, user: &S3User, bucket: &str, key: &str) -> Response {
     if let Err(resp) = validate_bucket(user, bucket) {
         return resp;
     }
@@ -959,7 +956,10 @@ async fn delete_object(
         )
         .await;
 
-    let _ = state.auth.update_user_bytes(user.id, -file.size_bytes).await;
+    let _ = state
+        .auth
+        .update_user_bytes(user.id, -file.size_bytes)
+        .await;
     state.events.emit_file_deleted(user.id, file.id).await;
 
     Response::builder()
@@ -985,11 +985,7 @@ async fn delete_objects(
     let body_bytes = match axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024).await {
         Ok(b) => b,
         Err(e) => {
-            return s3_error_response(
-                StatusCode::BAD_REQUEST,
-                "MalformedXML",
-                &e.to_string(),
-            )
+            return s3_error_response(StatusCode::BAD_REQUEST, "MalformedXML", &e.to_string())
         }
     };
 
@@ -1048,7 +1044,10 @@ async fn delete_objects(
             )
             .await;
 
-        let _ = state.auth.update_user_bytes(user.id, -file.size_bytes).await;
+        let _ = state
+            .auth
+            .update_user_bytes(user.id, -file.size_bytes)
+            .await;
         state.events.emit_file_deleted(user.id, file.id).await;
 
         deleted_xml.push_str(&format!(
@@ -1226,7 +1225,10 @@ async fn upload_part(
             return s3_error_response(
                 StatusCode::BAD_REQUEST,
                 "EntityTooLarge",
-                &format!("Part exceeds maximum size of {} bytes: {}", max_part_size, e),
+                &format!(
+                    "Part exceeds maximum size of {} bytes: {}",
+                    max_part_size, e
+                ),
             )
         }
     };
@@ -1326,11 +1328,7 @@ async fn complete_multipart_upload(
     };
 
     if upload.chunks_received.is_empty() {
-        return s3_error_response(
-            StatusCode::BAD_REQUEST,
-            "MalformedXML",
-            "No parts uploaded",
-        );
+        return s3_error_response(StatusCode::BAD_REQUEST, "MalformedXML", "No parts uploaded");
     }
 
     let backend = match state.storage.get_backend(upload.storage_id).await {
@@ -1495,7 +1493,10 @@ async fn complete_multipart_upload(
             let _ = backend
                 .delete(&format!(".thumbs/{}.jpg", existing_file.id.to_hex()))
                 .await;
-            state.events.emit_file_created(user.id, &existing_file).await;
+            state
+                .events
+                .emit_file_created(user.id, &existing_file)
+                .await;
         }
         _ => {
             // New file

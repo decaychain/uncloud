@@ -133,19 +133,28 @@ async fn dump_all_writes_manifest_with_counts() {
     let counts = dump::dump_all(&db, dir.path()).await.unwrap();
 
     // Verify manifest.json present with expected shape.
-    let manifest_bytes = tokio::fs::read(dir.path().join("manifest.json")).await.unwrap();
+    let manifest_bytes = tokio::fs::read(dir.path().join("manifest.json"))
+        .await
+        .unwrap();
     let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
     assert_eq!(manifest["schema_version"], dump::SCHEMA_VERSION);
     let collections = manifest["collections"].as_array().unwrap();
-    assert!(collections.iter().any(|c| c["name"] == "users" && c["rows"] == 1));
-    assert!(collections.iter().any(|c| c["name"] == "folders" && c["rows"] == 2));
+    assert!(collections
+        .iter()
+        .any(|c| c["name"] == "users" && c["rows"] == 1));
+    assert!(collections
+        .iter()
+        .any(|c| c["name"] == "folders" && c["rows"] == 2));
 
     // And a per-collection jsonl exists for at least the seeded ones.
     let users_path = dir.path().join("users.jsonl");
     assert!(tokio::fs::metadata(&users_path).await.is_ok());
     let users_bytes = tokio::fs::read(&users_path).await.unwrap();
     let users_text = String::from_utf8(users_bytes).unwrap();
-    let lines: Vec<&str> = users_text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let lines: Vec<&str> = users_text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
     assert_eq!(lines.len(), 1);
 
     // And the returned counts match.
@@ -168,7 +177,9 @@ async fn dump_all_produces_jsonl_and_manifest_for_every_allowlisted_collection()
     let dir = tempfile::TempDir::new().unwrap();
     let counts = dump::dump_all(&db, dir.path()).await.unwrap();
 
-    let manifest_bytes = tokio::fs::read(dir.path().join("manifest.json")).await.unwrap();
+    let manifest_bytes = tokio::fs::read(dir.path().join("manifest.json"))
+        .await
+        .unwrap();
     let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
     let manifest_names: std::collections::HashSet<&str> = manifest["collections"]
         .as_array()

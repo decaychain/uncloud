@@ -60,10 +60,7 @@ pub fn start(
     let (tx, mut rx) = mpsc::unbounded_channel::<WatcherSignal>();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| match res {
         Ok(event) => {
-            let resurrects = matches!(
-                event.kind,
-                EventKind::Create(_) | EventKind::Modify(_)
-            );
+            let resurrects = matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_));
             let _ = tx.send(WatcherSignal {
                 paths: event.paths,
                 resurrects,

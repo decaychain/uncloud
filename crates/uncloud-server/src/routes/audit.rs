@@ -8,7 +8,10 @@
 //! )).await;
 //! ```
 
-use mongodb::{Database, bson::{doc, oid::ObjectId}};
+use mongodb::{
+    bson::{doc, oid::ObjectId},
+    Database,
+};
 use uncloud_common::{SyncOperation, SyncResourceType};
 
 use crate::middleware::RequestMeta;

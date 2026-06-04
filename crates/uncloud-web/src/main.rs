@@ -1,8 +1,8 @@
 mod app;
-mod router;
-mod state;
 mod components;
 mod hooks;
+mod router;
+mod state;
 
 fn main() {
     console_error_panic_hook::set_once();

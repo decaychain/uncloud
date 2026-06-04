@@ -94,12 +94,11 @@ impl ProcessingService {
     /// pipeline. Used by the admin "rerun post-processing" button to refresh
     /// stale thumbnails/metadata after a bug fix or config change.
     pub async fn rerun_all(&self, state: Arc<AppState>) {
-        let types: Vec<TaskType> = self
-            .processors
-            .iter()
-            .map(|p| p.task_type())
-            .collect();
-        info!("rerun_all: clearing {} task type(s) and re-enqueueing", types.len());
+        let types: Vec<TaskType> = self.processors.iter().map(|p| p.task_type()).collect();
+        info!(
+            "rerun_all: clearing {} task type(s) and re-enqueueing",
+            types.len()
+        );
         for task_type in &types {
             self.reindex_task_type(task_type, state.clone()).await;
         }
@@ -120,7 +119,10 @@ impl ProcessingService {
             )
             .await
         {
-            error!("reindex_task_type: failed to clear {} tasks: {}", type_str, e);
+            error!(
+                "reindex_task_type: failed to clear {} tasks: {}",
+                type_str, e
+            );
             return;
         }
 
@@ -128,7 +130,10 @@ impl ProcessingService {
         let processor = match self.processors.iter().find(|p| p.task_type() == *task_type) {
             Some(p) => p.clone(),
             None => {
-                error!("reindex_task_type: no processor registered for {:?}", type_str);
+                error!(
+                    "reindex_task_type: no processor registered for {:?}",
+                    type_str
+                );
                 return;
             }
         };
@@ -156,7 +161,10 @@ impl ProcessingService {
             }
         }
 
-        info!("reindex_task_type: queued {} file(s) for {}", count, type_str);
+        info!(
+            "reindex_task_type: queued {} file(s) for {}",
+            count, type_str
+        );
     }
 
     /// Called at server startup to resume pending/failed tasks from a previous run.
@@ -206,8 +214,7 @@ impl ProcessingService {
                     && state.search.is_enabled();
 
                 let retryable = task.status == ProcessingStatus::Pending
-                    || (task.status == ProcessingStatus::Error
-                        && task.attempts < max_attempts)
+                    || (task.status == ProcessingStatus::Error && task.attempts < max_attempts)
                     || search_index_retry;
                 if !retryable {
                     continue;
@@ -259,7 +266,10 @@ impl ProcessingService {
             let mut cursor = match collection.find(filter).await {
                 Ok(c) => c,
                 Err(e) => {
-                    error!("Failed to query backfill candidates for {}: {}", type_str, e);
+                    error!(
+                        "Failed to query backfill candidates for {}: {}",
+                        type_str, e
+                    );
                     continue;
                 }
             };
@@ -280,7 +290,10 @@ impl ProcessingService {
         }
 
         if backfill_count > 0 {
-            info!("Backfilling {} processing task(s) for existing files", backfill_count);
+            info!(
+                "Backfilling {} processing task(s) for existing files",
+                backfill_count
+            );
         }
     }
 }

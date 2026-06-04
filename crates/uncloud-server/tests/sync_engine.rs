@@ -311,7 +311,9 @@ async fn server_to_client_folder_blocks_local_upload() {
         .unwrap();
 
     let tmp = tempfile::TempDir::new().unwrap();
-    tokio::fs::write(tmp.path().join("doc.txt"), b"original").await.unwrap();
+    tokio::fs::write(tmp.path().join("doc.txt"), b"original")
+        .await
+        .unwrap();
     client
         .upload_file(&tmp.path().join("doc.txt"), Some(&folder.id))
         .await
@@ -326,7 +328,9 @@ async fn server_to_client_folder_blocks_local_upload() {
     // mirrors the server folder structure on disk.
     tokio::time::sleep(Duration::from_secs(1)).await;
     let local_file = sync_dir.path().join("readonly").join("doc.txt");
-    tokio::fs::write(&local_file, b"local change").await.unwrap();
+    tokio::fs::write(&local_file, b"local change")
+        .await
+        .unwrap();
 
     // Second sync — local change must NOT be uploaded.
     let report2 = engine.incremental_sync().await.unwrap();

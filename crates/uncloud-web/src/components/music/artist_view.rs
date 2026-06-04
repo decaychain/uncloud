@@ -1,16 +1,15 @@
-use dioxus::prelude::*;
-use uncloud_common::MusicAlbumResponse;
-use crate::hooks::{use_music, use_player};
-use crate::hooks::use_music::LibraryScope;
-use crate::state::PlayerState;
 use super::album_grid::AlbumGrid;
 use crate::components::icons::IconAlertTriangle;
+use crate::hooks::use_music::LibraryScope;
+use crate::hooks::{use_music, use_player};
+use crate::state::PlayerState;
+use dioxus::prelude::*;
+use uncloud_common::MusicAlbumResponse;
 
 #[component]
 pub fn ArtistView(
     name: String,
-    #[props(default = LibraryScope::All)]
-    scope: LibraryScope,
+    #[props(default = LibraryScope::All)] scope: LibraryScope,
     on_back: EventHandler<()>,
     on_album_select: EventHandler<MusicAlbumResponse>,
 ) -> Element {

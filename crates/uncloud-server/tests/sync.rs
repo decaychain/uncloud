@@ -133,10 +133,7 @@ async fn sync_tree_contains_all_folders() {
     let folders = tree["folders"].as_array().expect("sync tree folders array");
 
     // All three folders should appear in the flat tree
-    let names: Vec<&str> = folders
-        .iter()
-        .filter_map(|f| f["name"].as_str())
-        .collect();
+    let names: Vec<&str> = folders.iter().filter_map(|f| f["name"].as_str()).collect();
     assert!(names.contains(&"FolderA"));
     assert!(names.contains(&"FolderB"));
     assert!(names.contains(&"ChildA"));

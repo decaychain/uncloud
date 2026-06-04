@@ -97,9 +97,7 @@ pub async fn list_credentials(
     user: AuthUser,
 ) -> Result<Json<Vec<S3CredentialResponse>>> {
     let collection = state.db.collection::<S3Credential>("s3_credentials");
-    let mut cursor = collection
-        .find(doc! { "user_id": user.id })
-        .await?;
+    let mut cursor = collection.find(doc! { "user_id": user.id }).await?;
 
     let mut creds = Vec::new();
     while cursor.advance().await? {

@@ -2,18 +2,16 @@ use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 
 use crate::components::dashboard::{all_tile_ids, default_tile_ids, tile_label};
-use crate::hooks::tauri::{
-    self, SyncLogRow, SyncPhase, SyncState, TauriListener,
-};
-use uncloud_common::{CreateInviteRequest, UpdatePreferencesRequest, UserRole, UserStatus};
+use crate::hooks::tauri::{self, SyncLogRow, SyncPhase, SyncState, TauriListener};
 use crate::hooks::use_auth;
 use crate::hooks::use_preferences;
 use crate::hooks::use_processing;
-use crate::hooks::use_search;
-use crate::hooks::use_storages;
 use crate::hooks::use_s3;
+use crate::hooks::use_search;
 use crate::hooks::use_shopping;
+use crate::hooks::use_storages;
 use crate::state::{AuthState, FontScale, RescanState, ThemeState};
+use uncloud_common::{CreateInviteRequest, UpdatePreferencesRequest, UserRole, UserStatus};
 
 #[component]
 pub fn SettingsPage(tab: String) -> Element {
@@ -161,14 +159,20 @@ fn DashboardTilesSection() -> Element {
             .as_ref()
             .map(|u| u.preferences.dashboard_tiles.clone())
             .unwrap_or_default();
-        if configured.is_empty() { default_tile_ids() } else { configured }
+        if configured.is_empty() {
+            default_tile_ids()
+        } else {
+            configured
+        }
     };
 
     let save = move |next: Vec<String>| {
         spawn(async move {
             saving.set(true);
             error.set(None);
-            let req = UpdatePreferencesRequest { dashboard_tiles: Some(next) };
+            let req = UpdatePreferencesRequest {
+                dashboard_tiles: Some(next),
+            };
             match use_preferences::update_preferences(req).await {
                 Ok(updated) => {
                     auth_state.write().user = Some(updated);
@@ -1059,7 +1063,10 @@ fn AdminSection(search_enabled: bool) -> Element {
                 }
             };
             // Prefer the default storage; fall back to the first one.
-            let target = storages.iter().find(|s| s.is_default).or_else(|| storages.first());
+            let target = storages
+                .iter()
+                .find(|s| s.is_default)
+                .or_else(|| storages.first());
             let Some(storage) = target else {
                 let mut s = rescan_state.write();
                 s.error = Some("No storage configured.".to_string());
@@ -1095,7 +1102,10 @@ fn AdminSection(search_enabled: bool) -> Element {
             reindex_loading.set(true);
             reindex_msg.set(None);
             match use_search::trigger_reindex().await {
-                Ok(()) => reindex_msg.set(Some((true, "Reindex started in the background.".to_string()))),
+                Ok(()) => reindex_msg.set(Some((
+                    true,
+                    "Reindex started in the background.".to_string(),
+                ))),
                 Err(e) => reindex_msg.set(Some((false, e))),
             }
             reindex_loading.set(false);
@@ -1677,7 +1687,11 @@ fn InviteManagementSection() -> Element {
         evt.prevent_default();
         let comment = {
             let c = invite_comment().trim().to_string();
-            if c.is_empty() { None } else { Some(c) }
+            if c.is_empty() {
+                None
+            } else {
+                Some(c)
+            }
         };
         let role = match invite_role().as_str() {
             "admin" => Some(UserRole::Admin),
@@ -1946,7 +1960,11 @@ fn CreateUserSection(on_created: EventHandler) -> Element {
                 username: u,
                 email: if e.is_empty() { None } else { Some(e) },
                 password: p,
-                role: if r == "admin" { Some(UserRole::Admin) } else { None },
+                role: if r == "admin" {
+                    Some(UserRole::Admin)
+                } else {
+                    None
+                },
             };
             match use_auth::create_user(req).await {
                 Ok(()) => {
@@ -2100,7 +2118,11 @@ fn UserManagementSection() -> Element {
     });
 
     let auth_state = use_context::<Signal<AuthState>>();
-    let current_user_id = auth_state().user.as_ref().map(|u| u.id.clone()).unwrap_or_default();
+    let current_user_id = auth_state()
+        .user
+        .as_ref()
+        .map(|u| u.id.clone())
+        .unwrap_or_default();
 
     rsx! {
         div { class: "card bg-base-100 shadow",
@@ -2409,22 +2431,22 @@ fn format_local_log_time(rfc: &str) -> String {
 /// per-file ops they enclose.
 fn local_log_badge_class(op: &str) -> &'static str {
     match op {
-        "Uploaded"            => "badge badge-success badge-sm",
-        "Downloaded"          => "badge badge-success badge-sm",
-        "Updated on server"   => "badge badge-info badge-sm",
+        "Uploaded" => "badge badge-success badge-sm",
+        "Downloaded" => "badge badge-success badge-sm",
+        "Updated on server" => "badge badge-info badge-sm",
         "Updated from server" => "badge badge-info badge-sm",
-        "Deleted"             => "badge badge-error badge-sm",
-        "SyncStart"           => "badge badge-primary badge-outline badge-sm font-semibold",
-        "SyncEnd"             => "badge badge-primary badge-sm font-semibold",
-        _                     => "badge badge-neutral badge-sm",
+        "Deleted" => "badge badge-error badge-sm",
+        "SyncStart" => "badge badge-primary badge-outline badge-sm font-semibold",
+        "SyncEnd" => "badge badge-primary badge-sm font-semibold",
+        _ => "badge badge-neutral badge-sm",
     }
 }
 
 fn local_log_op_label(op: &str) -> &str {
     match op {
         "SyncStart" => "Sync started",
-        "SyncEnd"   => "Sync completed",
-        other       => other,
+        "SyncEnd" => "Sync completed",
+        other => other,
     }
 }
 
@@ -2433,6 +2455,6 @@ fn local_log_op_label(op: &str) -> &str {
 fn local_log_row_class(op: &str) -> &'static str {
     match op {
         "SyncStart" | "SyncEnd" => "bg-base-200/60 italic",
-        _                       => "",
+        _ => "",
     }
 }

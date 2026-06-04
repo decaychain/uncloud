@@ -59,7 +59,10 @@ pub fn FilePropertiesDrawer(
     // Refetch on processing events for this file.
     let sse_event = use_context::<Signal<Option<ServerEvent>>>();
     use_effect(move || {
-        let Some(ServerEvent::ProcessingCompleted { file_id: evt_id, .. }) = sse_event() else {
+        let Some(ServerEvent::ProcessingCompleted {
+            file_id: evt_id, ..
+        }) = sse_event()
+        else {
             return;
         };
         let Some(current) = fid_signal.peek().clone() else {
@@ -178,9 +181,21 @@ fn ProcessingTab(tasks: Vec<ProcessingTaskInfo>) -> Element {
 #[component]
 fn TaskCard(task: ProcessingTaskInfo) -> Element {
     let (status_class, status_label, status_icon) = match task.status.as_str() {
-        "done" => ("badge-success", "Done", rsx! { IconCheck { class: "w-3 h-3".to_string() } }),
-        "pending" => ("badge-warning", "Pending", rsx! { span { class: "loading loading-spinner loading-xs" } }),
-        "error" => ("badge-error", "Error", rsx! { IconAlertTriangle { class: "w-3 h-3".to_string() } }),
+        "done" => (
+            "badge-success",
+            "Done",
+            rsx! { IconCheck { class: "w-3 h-3".to_string() } },
+        ),
+        "pending" => (
+            "badge-warning",
+            "Pending",
+            rsx! { span { class: "loading loading-spinner loading-xs" } },
+        ),
+        "error" => (
+            "badge-error",
+            "Error",
+            rsx! { IconAlertTriangle { class: "w-3 h-3".to_string() } },
+        ),
         _ => ("badge-ghost", task.status.as_str(), rsx! {}),
     };
 

@@ -41,7 +41,14 @@ fn main() {
 
     // Generate assets/tailwind.css from input.css.
     let status = npm_cmd("npx")
-        .args(["--no-install", "tailwindcss", "-i", "input.css", "-o", "assets/tailwind.css"])
+        .args([
+            "--no-install",
+            "tailwindcss",
+            "-i",
+            "input.css",
+            "-o",
+            "assets/tailwind.css",
+        ])
         .current_dir(crate_dir)
         .status()
         .expect("Failed to run `npx tailwindcss` — is npm installed?");

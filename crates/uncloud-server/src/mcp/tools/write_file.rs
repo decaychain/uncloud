@@ -142,10 +142,7 @@ pub async fn call(
     }
 
     let meta = mcp_request_meta();
-    let resolved_path = format!(
-        "/{}",
-        segments.join("/")
-    );
+    let resolved_path = format!("/{}", segments.join("/"));
 
     if let Some(file) = existing {
         // ---------- overwrite path: snapshot existing version, then replace ----------
@@ -159,7 +156,8 @@ pub async fn call(
         let version_number = versions_coll
             .count_documents(doc! { "file_id": file.id })
             .await
-            .map_err(|e| ToolError::exec(format!("version count failed: {}", e)))? as i32
+            .map_err(|e| ToolError::exec(format!("version count failed: {}", e)))?
+            as i32
             + 1;
 
         let ver_path = version_path(&file.storage_path);
@@ -265,10 +263,7 @@ pub async fn call(
         .await
         .map_err(|e| ToolError::exec(format!("dupe check failed: {}", e)))?
     {
-        return Err(ToolError::exec(format!(
-            "{} already exists",
-            path_str
-        )));
+        return Err(ToolError::exec(format!("{} already exists", path_str)));
     }
 
     let storage_id = state

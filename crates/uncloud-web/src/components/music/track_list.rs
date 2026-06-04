@@ -1,8 +1,8 @@
-use dioxus::prelude::*;
-use uncloud_common::{PlaylistSummary, TrackResponse};
 use crate::components::icons::{IconListMusic, IconMusic, IconPause, IconPlay};
 use crate::hooks::use_playlists;
 use crate::state::{PlayerState, PlaylistDirtyTick};
+use dioxus::prelude::*;
+use uncloud_common::{PlaylistSummary, TrackResponse};
 
 fn format_duration(secs: f64) -> String {
     let total = secs as u64;
@@ -39,9 +39,7 @@ pub fn TrackList(
         };
     }
 
-    let current_playing_id = player()
-        .current_track()
-        .map(|t| t.file.id.clone());
+    let current_playing_id = player().current_track().map(|t| t.file.id.clone());
     let is_playing = player().playing;
 
     rsx! {

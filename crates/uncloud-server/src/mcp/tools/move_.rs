@@ -53,7 +53,10 @@ pub async fn call(
 
     let target = path::resolve_target(state, user.0.id, &src_segments).await?;
     let dst_parent = path::resolve_folder(state, user.0.id, dst_parent_segments).await?;
-    let dst_parent_id = dst_parent.as_ref().map(|f| f.id.to_hex()).unwrap_or_default();
+    let dst_parent_id = dst_parent
+        .as_ref()
+        .map(|f| f.id.to_hex())
+        .unwrap_or_default();
 
     match target {
         path::Target::File(file) => {

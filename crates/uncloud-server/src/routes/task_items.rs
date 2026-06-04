@@ -49,9 +49,7 @@ async fn get_project_permission(
 fn require_editor(perm: &ProjectPermission) -> Result<()> {
     match perm {
         ProjectPermission::Editor | ProjectPermission::Admin => Ok(()),
-        ProjectPermission::Viewer => {
-            Err(AppError::Forbidden("Editor permission required".into()))
-        }
+        ProjectPermission::Viewer => Err(AppError::Forbidden("Editor permission required".into())),
     }
 }
 
@@ -117,14 +115,12 @@ fn nth_from_api(n: uncloud_common::NthWeek) -> NthWeek {
     }
 }
 
-fn recurrence_to_api(
-    r: &Option<RecurrenceRule>,
-) -> Option<uncloud_common::RecurrenceRule> {
+fn recurrence_to_api(r: &Option<RecurrenceRule>) -> Option<uncloud_common::RecurrenceRule> {
     r.as_ref().map(|rule| match rule {
         RecurrenceRule::Daily => uncloud_common::RecurrenceRule::Daily,
-        RecurrenceRule::Weekly { days } => uncloud_common::RecurrenceRule::Weekly {
-            days: days.clone(),
-        },
+        RecurrenceRule::Weekly { days } => {
+            uncloud_common::RecurrenceRule::Weekly { days: days.clone() }
+        }
         RecurrenceRule::Monthly { day_of_month } => uncloud_common::RecurrenceRule::Monthly {
             day_of_month: *day_of_month,
         },
@@ -144,14 +140,12 @@ fn recurrence_to_api(
     })
 }
 
-fn recurrence_from_api(
-    r: &Option<uncloud_common::RecurrenceRule>,
-) -> Option<RecurrenceRule> {
+fn recurrence_from_api(r: &Option<uncloud_common::RecurrenceRule>) -> Option<RecurrenceRule> {
     r.as_ref().map(|rule| match rule {
         uncloud_common::RecurrenceRule::Daily => RecurrenceRule::Daily,
-        uncloud_common::RecurrenceRule::Weekly { days } => RecurrenceRule::Weekly {
-            days: days.clone(),
-        },
+        uncloud_common::RecurrenceRule::Weekly { days } => {
+            RecurrenceRule::Weekly { days: days.clone() }
+        }
         uncloud_common::RecurrenceRule::Monthly { day_of_month } => RecurrenceRule::Monthly {
             day_of_month: *day_of_month,
         },
@@ -233,7 +227,7 @@ fn compute_next_due_date(rule: &RecurrenceRule, current: NaiveDate) -> NaiveDate
                 return current + chrono::Duration::days(7);
             }
             let current_weekday = current.weekday().num_days_from_monday() as u8; // 0=Mon
-            // Find next weekday strictly after current
+                                                                                  // Find next weekday strictly after current
             let mut sorted = days.clone();
             sorted.sort();
             if let Some(&next_day) = sorted.iter().find(|&&d| d > current_weekday) {
@@ -258,7 +252,8 @@ fn compute_next_due_date(rule: &RecurrenceRule, current: NaiveDate) -> NaiveDate
             // Clamp to month length
             let last_day = last_day_of_month(year, month);
             let day = target_day.min(last_day);
-            NaiveDate::from_ymd_opt(year, month, day).unwrap_or(current + chrono::Duration::days(30))
+            NaiveDate::from_ymd_opt(year, month, day)
+                .unwrap_or(current + chrono::Duration::days(30))
         }
         RecurrenceRule::MonthlyByWeekday { nth, weekday } => {
             let (mut year, mut month) = (current.year(), current.month());
@@ -316,12 +311,7 @@ fn weekday_from_index(i: u8) -> Option<chrono::Weekday> {
 /// Resolve "1st/2nd/.../last <weekday> of <year>-<month>" to a concrete date.
 /// Every month has at least four of every weekday (28 days = 4*7), so
 /// First/Second/Third/Fourth always succeed; Last walks back from month-end.
-fn nth_weekday_of_month(
-    year: i32,
-    month: u32,
-    nth: &NthWeek,
-    weekday: u8,
-) -> Option<NaiveDate> {
+fn nth_weekday_of_month(year: i32, month: u32, nth: &NthWeek, weekday: u8) -> Option<NaiveDate> {
     let target = weekday_from_index(weekday)?;
     match nth {
         NthWeek::Last => {
@@ -396,9 +386,7 @@ async fn count_comments_for(
         .map(|id| bson::Bson::ObjectId(*id))
         .collect();
     let coll = state.db.collection::<TaskComment>("task_comments");
-    let mut cursor = coll
-        .find(doc! { "task_id": { "$in": &bson_ids } })
-        .await?;
+    let mut cursor = coll.find(doc! { "task_id": { "$in": &bson_ids } }).await?;
     while cursor.advance().await? {
         let c: TaskComment = cursor.deserialize_current()?;
         *result.entry(c.task_id).or_insert(0) += 1;
@@ -519,14 +507,17 @@ pub async fn create_task(
     let section_id = body
         .section_id
         .as_deref()
-        .map(|s| ObjectId::parse_str(s).map_err(|_| AppError::BadRequest("Invalid section_id".into())))
+        .map(|s| {
+            ObjectId::parse_str(s).map_err(|_| AppError::BadRequest("Invalid section_id".into()))
+        })
         .transpose()?;
 
     let parent_task_id = body
         .parent_task_id
         .as_deref()
         .map(|s| {
-            ObjectId::parse_str(s).map_err(|_| AppError::BadRequest("Invalid parent_task_id".into()))
+            ObjectId::parse_str(s)
+                .map_err(|_| AppError::BadRequest("Invalid parent_task_id".into()))
         })
         .transpose()?;
 
@@ -550,11 +541,7 @@ pub async fn create_task(
         ApiTaskPriority::Low => crate::models::TaskPriority::Low,
     });
 
-    let due_date = body
-        .due_date
-        .as_deref()
-        .map(parse_date)
-        .transpose()?;
+    let due_date = body.due_date.as_deref().map(parse_date).transpose()?;
 
     let recurrence_rule = recurrence_from_api(&body.recurrence_rule);
 
@@ -563,7 +550,8 @@ pub async fn create_task(
         pos
     } else {
         let task_coll = state.db.collection::<Task>("tasks");
-        let mut pos_filter = doc! { "project_id": project_oid, "status": bson::to_bson(&status).unwrap() };
+        let mut pos_filter =
+            doc! { "project_id": project_oid, "status": bson::to_bson(&status).unwrap() };
         if let Some(sid) = section_id {
             pos_filter.insert("section_id", sid);
         }
@@ -709,8 +697,10 @@ pub async fn update_task(
         }
     }
     if let Some(ref labels) = body.labels {
-        let bson_labels: Vec<bson::Bson> =
-            labels.iter().map(|l| bson::Bson::String(l.clone())).collect();
+        let bson_labels: Vec<bson::Bson> = labels
+            .iter()
+            .map(|l| bson::Bson::String(l.clone()))
+            .collect();
         update_doc.insert("labels", bson_labels);
     }
     if let Some(ref due_date) = body.due_date {
@@ -783,9 +773,7 @@ pub async fn delete_task(
 
     // Find subtask IDs
     let mut subtask_ids: Vec<ObjectId> = Vec::new();
-    let mut cursor = task_coll
-        .find(doc! { "parent_task_id": task_id })
-        .await?;
+    let mut cursor = task_coll.find(doc! { "parent_task_id": task_id }).await?;
     while cursor.advance().await? {
         let sub: Task = cursor.deserialize_current()?;
         subtask_ids.push(sub.id);
@@ -1043,11 +1031,7 @@ pub async fn create_subtask(
         ApiTaskPriority::Low => crate::models::TaskPriority::Low,
     });
 
-    let due_date = body
-        .due_date
-        .as_deref()
-        .map(parse_date)
-        .transpose()?;
+    let due_date = body.due_date.as_deref().map(parse_date).transpose()?;
 
     // Auto-position among siblings
     let task_coll = state.db.collection::<Task>("tasks");
@@ -1379,9 +1363,7 @@ pub async fn list_comments(
             .map(|id| bson::Bson::ObjectId(*id))
             .collect();
         let user_coll = state.db.collection::<User>("users");
-        let mut user_cursor = user_coll
-            .find(doc! { "_id": { "$in": &bson_ids } })
-            .await?;
+        let mut user_cursor = user_coll.find(doc! { "_id": { "$in": &bson_ids } }).await?;
         while user_cursor.advance().await? {
             let u: User = user_cursor.deserialize_current()?;
             usernames.insert(u.id, u.username);
@@ -1497,8 +1479,7 @@ pub async fn delete_comment(
     // Author can always delete their own comment
     if comment.author_id != user.id {
         // Check if user is Admin of the project
-        let (_project, perm) =
-            get_project_permission(&state, comment.project_id, user.id).await?;
+        let (_project, perm) = get_project_permission(&state, comment.project_id, user.id).await?;
         if perm != ProjectPermission::Admin {
             return Err(AppError::Forbidden(
                 "Only the author or a project admin can delete this comment".into(),

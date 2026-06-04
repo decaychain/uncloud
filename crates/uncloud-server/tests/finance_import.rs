@@ -83,7 +83,10 @@ async fn imports_two_rows_then_dedups_on_reimport() {
     assert_eq!(first["imported"], 2);
     assert_eq!(first["skipped"], 0);
     assert_eq!(first["errors"], 0);
-    assert!(first["run_id"].as_str().is_some(), "run_id should be returned");
+    assert!(
+        first["run_id"].as_str().is_some(),
+        "run_id should be returned"
+    );
 
     // Same CSV re-uploaded: every row is a duplicate now.
     let second: Value = app
@@ -135,8 +138,9 @@ async fn lists_and_seeds_builtin_schemas() {
 
     let resp: Value = app.server.get("/api/finance/import-schemas").await.json();
     let arr = resp.as_array().expect("array");
-    assert!(arr.iter().any(|s| s["name"] == "Sparkasse CAMT V8"
-        && s["is_builtin"] == true));
+    assert!(arr
+        .iter()
+        .any(|s| s["name"] == "Sparkasse CAMT V8" && s["is_builtin"] == true));
     app.cleanup().await;
 }
 

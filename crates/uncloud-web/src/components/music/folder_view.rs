@@ -1,10 +1,10 @@
-use dioxus::prelude::*;
-use uncloud_common::{ServerEvent, TrackResponse};
-use crate::hooks::{use_music, use_player};
-use crate::state::PlayerState;
+use super::manage_categories::ManageCategoriesModal;
 use super::track_list::TrackList;
 use crate::components::icons::{IconAlertTriangle, IconMoreVertical, IconPlay};
-use super::manage_categories::ManageCategoriesModal;
+use crate::hooks::{use_music, use_player};
+use crate::state::PlayerState;
+use dioxus::prelude::*;
+use uncloud_common::{ServerEvent, TrackResponse};
 
 #[component]
 pub fn FolderView(folder_id: String) -> Element {

@@ -11,16 +11,16 @@ use serde::Deserialize;
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
 use crate::models::{
-    ProjectMember, ProjectPermission, ProjectView, TaskComment, TaskLabel, TaskProject, TaskSection,
-    Task, User,
+    ProjectMember, ProjectPermission, ProjectView, Task, TaskComment, TaskLabel, TaskProject,
+    TaskSection, User,
 };
 use crate::AppState;
 use uncloud_common::{
     AddProjectMemberRequest, CreateTaskLabelRequest, CreateTaskProjectRequest,
-    CreateTaskSectionRequest, ProjectMemberResponse, ReorderSectionsRequest, TaskLabelResponse,
-    TaskProjectResponse, TaskSectionResponse, UpdateProjectMemberRequest, UpdateTaskLabelRequest,
+    CreateTaskSectionRequest, ProjectMemberResponse, ProjectPermission as ApiProjectPermission,
+    ProjectView as ApiProjectView, ReorderSectionsRequest, TaskLabelResponse, TaskProjectResponse,
+    TaskSectionResponse, UpdateProjectMemberRequest, UpdateTaskLabelRequest,
     UpdateTaskProjectRequest, UpdateTaskSectionRequest,
-    ProjectPermission as ApiProjectPermission, ProjectView as ApiProjectView,
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -63,9 +63,7 @@ fn require_editor(permission: &ProjectPermission) -> Result<()> {
 
 fn require_admin(permission: &ProjectPermission) -> Result<()> {
     if *permission != ProjectPermission::Admin {
-        return Err(AppError::Forbidden(
-            "Admin permission required".to_string(),
-        ));
+        return Err(AppError::Forbidden("Admin permission required".to_string()));
     }
     Ok(())
 }
@@ -191,7 +189,10 @@ pub async fn list_projects(
     let users_coll = state.db.collection::<User>("users");
     let mut username_map = std::collections::HashMap::new();
     if !owner_ids.is_empty() {
-        let bson_ids: Vec<bson::Bson> = owner_ids.iter().map(|id| bson::Bson::ObjectId(*id)).collect();
+        let bson_ids: Vec<bson::Bson> = owner_ids
+            .iter()
+            .map(|id| bson::Bson::ObjectId(*id))
+            .collect();
         let mut user_cursor = users_coll
             .find(doc! { "_id": { "$in": &bson_ids } })
             .await?;
@@ -326,11 +327,8 @@ pub async fn update_project(
         update_doc.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
 
         let coll = state.db.collection::<TaskProject>("task_projects");
-        coll.update_one(
-            doc! { "_id": project_id },
-            doc! { "$set": update_doc },
-        )
-        .await?;
+        coll.update_one(doc! { "_id": project_id }, doc! { "$set": update_doc })
+            .await?;
     }
 
     // Re-fetch for response
@@ -384,9 +382,7 @@ pub async fn delete_project(
         .await?;
 
     let projects_coll = state.db.collection::<TaskProject>("task_projects");
-    let result = projects_coll
-        .delete_one(doc! { "_id": project_id })
-        .await?;
+    let result = projects_coll.delete_one(doc! { "_id": project_id }).await?;
 
     if result.deleted_count == 0 {
         return Err(AppError::NotFound("Project".to_string()));
@@ -673,11 +669,8 @@ pub async fn update_section(
     }
 
     if !update_doc.is_empty() {
-        coll.update_one(
-            doc! { "_id": section_id },
-            doc! { "$set": update_doc },
-        )
-        .await?;
+        coll.update_one(doc! { "_id": section_id }, doc! { "$set": update_doc })
+            .await?;
     }
 
     // Re-fetch

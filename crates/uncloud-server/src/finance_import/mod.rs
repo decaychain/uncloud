@@ -9,9 +9,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use encoding_rs::{Encoding, UTF_8};
 use sha2::{Digest, Sha256};
 
-use crate::models::{
-    AmountSignConvention, CurrencySource, DecimalSeparator, ImportSchema,
-};
+use crate::models::{AmountSignConvention, CurrencySource, DecimalSeparator, ImportSchema};
 
 pub mod sparkasse_camt_v8;
 
@@ -66,8 +64,7 @@ pub fn parse_csv(
         .flexible(true)
         .from_reader(text.as_bytes());
 
-    let skip_rows = schema.skip_header_rows as usize
-        + if schema.has_headers { 1 } else { 0 };
+    let skip_rows = schema.skip_header_rows as usize + if schema.has_headers { 1 } else { 0 };
 
     let mut out = Vec::new();
     for (idx, rec) in reader.records().enumerate() {
@@ -94,9 +91,8 @@ fn resolve_encoding(name: &str) -> Result<&'static Encoding, ParseError> {
     if name.eq_ignore_ascii_case("utf-8") || name.eq_ignore_ascii_case("utf8") {
         return Ok(UTF_8);
     }
-    Encoding::for_label(name.as_bytes()).ok_or_else(|| {
-        ParseError::Fatal(format!("Unknown encoding `{name}` in schema"))
-    })
+    Encoding::for_label(name.as_bytes())
+        .ok_or_else(|| ParseError::Fatal(format!("Unknown encoding `{name}` in schema")))
 }
 
 fn resolve_delimiter(s: &str) -> Result<u8, ParseError> {
@@ -124,10 +120,12 @@ fn parse_record(
     })?;
 
     let amount_str = field(rec, schema.amount_column as usize, line, "amount")?;
-    let amount_minor = parse_amount_minor(amount_str.trim(), schema.decimal_separator)
-        .ok_or_else(|| ParseError::Row {
-            line,
-            message: format!("Invalid amount `{amount_str}`"),
+    let amount_minor =
+        parse_amount_minor(amount_str.trim(), schema.decimal_separator).ok_or_else(|| {
+            ParseError::Row {
+                line,
+                message: format!("Invalid amount `{amount_str}`"),
+            }
         })?;
     let amount_minor = match schema.amount_sign_convention {
         AmountSignConvention::PositiveCredit => amount_minor,
@@ -136,19 +134,20 @@ fn parse_record(
 
     let currency = match schema.currency_source {
         CurrencySource::Column => {
-            let col = schema.currency_column.ok_or_else(|| ParseError::Fatal(
-                "Schema uses currency_source=column but currency_column is unset".into(),
-            ))?;
+            let col = schema.currency_column.ok_or_else(|| {
+                ParseError::Fatal(
+                    "Schema uses currency_source=column but currency_column is unset".into(),
+                )
+            })?;
             let raw = field(rec, col as usize, line, "currency")?.trim();
             validate_currency(raw, line)?
         }
         CurrencySource::Fixed => {
-            let fixed = schema
-                .fixed_currency
-                .as_deref()
-                .ok_or_else(|| ParseError::Fatal(
+            let fixed = schema.fixed_currency.as_deref().ok_or_else(|| {
+                ParseError::Fatal(
                     "Schema uses currency_source=fixed but fixed_currency is unset".into(),
-                ))?;
+                )
+            })?;
             validate_currency(fixed.trim(), line)?
         }
     };
@@ -171,10 +170,7 @@ fn parse_record(
 
     let source_ref = match schema.bank_ref_column {
         Some(c) => {
-            let raw = rec
-                .get(c as usize)
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
+            let raw = rec.get(c as usize).map(str::trim).filter(|s| !s.is_empty());
             match raw {
                 Some(r) => stable_hash(&[r.as_bytes()]),
                 // Fall back to row hash when the bank-ref cell is empty
@@ -342,7 +338,13 @@ fn parse_with_separator(s: &str, sep: char) -> Option<NaiveDate> {
 fn pivot_year(year_raw: &str, day: &str, month: &str) -> Option<(i32, u32, u32)> {
     let year: i32 = year_raw.parse().ok()?;
     let year = match year_raw.len() {
-        2 => if year < 70 { 2000 + year } else { 1900 + year },
+        2 => {
+            if year < 70 {
+                2000 + year
+            } else {
+                1900 + year
+            }
+        }
         4 => year,
         _ => return None,
     };
@@ -385,8 +387,8 @@ mod tests {
 
     #[test]
     fn parse_date_accepts_iso_datetime_and_ignores_time() {
-        let parsed = parse_date("2026-05-24 13:45:59", "YYYY-MM-DD HH:MM:SS")
-            .expect("date should parse");
+        let parsed =
+            parse_date("2026-05-24 13:45:59", "YYYY-MM-DD HH:MM:SS").expect("date should parse");
 
         assert_eq!(parsed.format("%Y-%m-%d").to_string(), "2026-05-24");
         assert_eq!(parsed.format("%H:%M:%S").to_string(), "00:00:00");
@@ -394,8 +396,7 @@ mod tests {
 
     #[test]
     fn parse_iso_date_format_tolerates_datetime_column() {
-        let parsed = parse_date("2026-05-24 13:45:59", "YYYY-MM-DD")
-            .expect("date should parse");
+        let parsed = parse_date("2026-05-24 13:45:59", "YYYY-MM-DD").expect("date should parse");
 
         assert_eq!(parsed.format("%Y-%m-%d").to_string(), "2026-05-24");
     }

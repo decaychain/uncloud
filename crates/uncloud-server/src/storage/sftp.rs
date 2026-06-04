@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use mongodb::{bson::doc, bson::oid::ObjectId, Database};
 use russh::client::{self, Handler, Msg};
-use russh::keys::{decode_secret_key, HashAlg, PrivateKey, PrivateKeyWithHashAlg};
 use russh::keys::PublicKey;
+use russh::keys::{decode_secret_key, HashAlg, PrivateKey, PrivateKeyWithHashAlg};
 use russh::Channel;
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
@@ -59,9 +59,7 @@ struct ConnConfig {
 #[derive(Clone)]
 enum AuthMode {
     Password(String),
-    PrivateKey {
-        key: Arc<PrivateKey>,
-    },
+    PrivateKey { key: Arc<PrivateKey> },
 }
 
 #[derive(Clone)]
@@ -508,7 +506,9 @@ async fn reopen_sftp_reader(
                 tracing::error!(
                     "sftp stream reopen `{logical_path}` at offset {offset} failed after {attempt}/{max} attempts: {e}",
                 );
-                return Err(std::io::Error::other(format!("SFTP stream reopen failed: {e}")));
+                return Err(std::io::Error::other(format!(
+                    "SFTP stream reopen failed: {e}"
+                )));
             }
         }
     }
@@ -688,11 +688,7 @@ impl SftpStorage {
 /// closure checks out its own pooled connection and (via `discard()`)
 /// removes a busted session from rotation on its way out, so the next
 /// attempt naturally grabs a healthy connection from the pool.
-async fn retry_idempotent<F, Fut, T>(
-    storage: &SftpStorage,
-    op_name: &str,
-    mut f: F,
-) -> Result<T>
+async fn retry_idempotent<F, Fut, T>(storage: &SftpStorage, op_name: &str, mut f: F) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
@@ -744,12 +740,7 @@ impl StorageBackend for SftpStorage {
     /// or a callsite refactor to provide a `Fn() -> BoxedAsyncRead` that
     /// produces a fresh reader per attempt. None of those are worth the
     /// cost until upload reliability becomes a real problem in practice.
-    async fn write_stream(
-        &self,
-        path: &str,
-        mut reader: BoxedAsyncRead,
-        _size: u64,
-    ) -> Result<()> {
+    async fn write_stream(&self, path: &str, mut reader: BoxedAsyncRead, _size: u64) -> Result<()> {
         let pooled = self.pool.checkout().await?;
         let full = self.resolve(path);
         let result = async {
@@ -1042,23 +1033,21 @@ impl ConnectionPool {
     }
 
     async fn checkout(self: &Arc<Self>) -> Result<PooledConn> {
-        let permit = match tokio::time::timeout(
-            CHECKOUT_TIMEOUT,
-            self.op_semaphore.clone().acquire_owned(),
-        )
-        .await
-        {
-            Ok(Ok(p)) => p,
-            Ok(Err(e)) => {
-                return Err(AppError::Storage(format!("SFTP op semaphore closed: {e}")));
-            }
-            Err(_) => {
-                return Err(AppError::Storage(format!(
-                    "SFTP pool checkout timed out after {}s — pool may be deadlocked",
-                    CHECKOUT_TIMEOUT.as_secs()
-                )));
-            }
-        };
+        let permit =
+            match tokio::time::timeout(CHECKOUT_TIMEOUT, self.op_semaphore.clone().acquire_owned())
+                .await
+            {
+                Ok(Ok(p)) => p,
+                Ok(Err(e)) => {
+                    return Err(AppError::Storage(format!("SFTP op semaphore closed: {e}")));
+                }
+                Err(_) => {
+                    return Err(AppError::Storage(format!(
+                        "SFTP pool checkout timed out after {}s — pool may be deadlocked",
+                        CHECKOUT_TIMEOUT.as_secs()
+                    )));
+                }
+            };
         // Try to grab a warm connection; if none, open a fresh one.
         let warm = {
             let mut available = self
@@ -1091,18 +1080,15 @@ impl ConnectionPool {
         };
 
         let ssh_config = Arc::new(client::Config::default());
-        let mut handle = client::connect(
-            ssh_config,
-            (self.cfg.host.as_str(), self.cfg.port),
-            handler,
-        )
-        .await
-        .map_err(|e| {
-            AppError::Storage(format!(
-                "SSH connect to {}:{} failed: {e}",
-                self.cfg.host, self.cfg.port
-            ))
-        })?;
+        let mut handle =
+            client::connect(ssh_config, (self.cfg.host.as_str(), self.cfg.port), handler)
+                .await
+                .map_err(|e| {
+                    AppError::Storage(format!(
+                        "SSH connect to {}:{} failed: {e}",
+                        self.cfg.host, self.cfg.port
+                    ))
+                })?;
 
         let auth_ok = match &self.cfg.auth {
             AuthMode::Password(p) => handle
@@ -1167,7 +1153,9 @@ impl std::ops::Deref for PooledConn {
 impl Drop for PooledConn {
     fn drop(&mut self) {
         let Some(conn) = self.conn.take() else { return };
-        let Some(pool) = self.pool.upgrade() else { return };
+        let Some(pool) = self.pool.upgrade() else {
+            return;
+        };
         let pool_size = pool.pool_size;
         let mut available = match pool.available.lock() {
             Ok(guard) => guard,
@@ -1215,9 +1203,7 @@ async fn ensure_dir(sftp: &SftpSession, dir: &str) -> Result<()> {
         Ok(()) => Ok(()),
         // Race or stat-permission-denied-but-mkdir-saw-it: treat as ok.
         Err(e) if is_already_exists(&e) => Ok(()),
-        Err(e) => Err(AppError::Storage(format!(
-            "SFTP mkdir({dir}) failed: {e}"
-        ))),
+        Err(e) => Err(AppError::Storage(format!("SFTP mkdir({dir}) failed: {e}"))),
     }
 }
 
@@ -1274,11 +1260,7 @@ async fn load_pinned_host_key(
     }))
 }
 
-async fn save_pinned_host_key(
-    db: &Database,
-    storage_id: ObjectId,
-    seen: &SeenKey,
-) -> Result<()> {
+async fn save_pinned_host_key(db: &Database, storage_id: ObjectId, seen: &SeenKey) -> Result<()> {
     let coll = db.collection::<SftpHostKey>("sftp_host_keys");
     let row = SftpHostKey {
         id: ObjectId::new(),

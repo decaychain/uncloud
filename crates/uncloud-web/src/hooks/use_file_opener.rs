@@ -23,7 +23,10 @@ use crate::state::{PlayerState, VaultOpenTarget};
 
 #[derive(Clone)]
 pub enum FileOpenTarget {
-    Image { files: Vec<FileResponse>, index: usize },
+    Image {
+        files: Vec<FileResponse>,
+        index: usize,
+    },
     Text(FileResponse),
     TextEdit(FileResponse),
 }
@@ -56,14 +59,17 @@ pub fn use_file_opener(
                 .get("audio")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .unwrap_or_default();
-            let track = TrackResponse { file: file.clone(), audio };
+            let track = TrackResponse {
+                file: file.clone(),
+                audio,
+            };
             use_player::play_queue(player, vec![track], 0);
         } else if mime.starts_with("image/") {
-            let idx = carousel
-                .iter()
-                .position(|fi| fi.id == file.id)
-                .unwrap_or(0);
-            viewer.set(Some(FileOpenTarget::Image { files: carousel, index: idx }));
+            let idx = carousel.iter().position(|fi| fi.id == file.id).unwrap_or(0);
+            viewer.set(Some(FileOpenTarget::Image {
+                files: carousel,
+                index: idx,
+            }));
         } else if mime.starts_with("text/")
             || mime == "application/json"
             || mime == "application/xml"

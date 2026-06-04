@@ -56,9 +56,16 @@ async fn make_bucket(endpoint: &str) {
 }
 
 async fn make_storage(endpoint: &str) -> S3Storage {
-    S3Storage::new(endpoint, BUCKET, ACCESS_KEY, SECRET_KEY, Some("us-east-1"), Default::default())
-        .await
-        .expect("S3Storage::new")
+    S3Storage::new(
+        endpoint,
+        BUCKET,
+        ACCESS_KEY,
+        SECRET_KEY,
+        Some("us-east-1"),
+        Default::default(),
+    )
+    .await
+    .expect("S3Storage::new")
 }
 
 #[tokio::test]
@@ -164,6 +171,14 @@ async fn scan_lists_all_keys() {
 async fn missing_bucket_fails_fast() {
     let (_minio, endpoint) = start_minio().await;
     // do NOT create the bucket
-    let res = S3Storage::new(&endpoint, "no-such-bucket", ACCESS_KEY, SECRET_KEY, None, Default::default()).await;
+    let res = S3Storage::new(
+        &endpoint,
+        "no-such-bucket",
+        ACCESS_KEY,
+        SECRET_KEY,
+        None,
+        Default::default(),
+    )
+    .await;
     assert!(res.is_err(), "expected new() to fail with no bucket");
 }

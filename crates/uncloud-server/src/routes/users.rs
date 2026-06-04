@@ -122,7 +122,10 @@ pub async fn create_user(
         ));
     }
 
-    let email = req.email.map(|e| e.trim().to_string()).filter(|e| !e.is_empty());
+    let email = req
+        .email
+        .map(|e| e.trim().to_string())
+        .filter(|e| !e.is_empty());
     if let Some(ref email) = email {
         if !email.contains('@') {
             return Err(AppError::Validation("Invalid email address".to_string()));
@@ -181,7 +184,10 @@ pub async fn update_user(
         let email = email.trim();
         if email.is_empty() {
             // Clear email
-            update.get_document_mut("$set").unwrap().insert("email", mongodb::bson::Bson::Null);
+            update
+                .get_document_mut("$set")
+                .unwrap()
+                .insert("email", mongodb::bson::Bson::Null);
         } else {
             if !email.contains('@') {
                 return Err(AppError::Validation("Invalid email address".to_string()));
@@ -192,7 +198,10 @@ pub async fn update_user(
                     return Err(AppError::Conflict("Email already in use".to_string()));
                 }
             }
-            update.get_document_mut("$set").unwrap().insert("email", email);
+            update
+                .get_document_mut("$set")
+                .unwrap()
+                .insert("email", email);
         }
     }
 
@@ -268,16 +277,24 @@ pub async fn delete_user(
 
     // Delete user's files, folders, shares, and sessions
     // In a production system, you'd want to clean up storage too
-    state.db.collection::<mongodb::bson::Document>("files")
+    state
+        .db
+        .collection::<mongodb::bson::Document>("files")
         .delete_many(doc! { "owner_id": user_id })
         .await?;
-    state.db.collection::<mongodb::bson::Document>("folders")
+    state
+        .db
+        .collection::<mongodb::bson::Document>("folders")
         .delete_many(doc! { "owner_id": user_id })
         .await?;
-    state.db.collection::<mongodb::bson::Document>("shares")
+    state
+        .db
+        .collection::<mongodb::bson::Document>("shares")
         .delete_many(doc! { "owner_id": user_id })
         .await?;
-    state.db.collection::<mongodb::bson::Document>("sessions")
+    state
+        .db
+        .collection::<mongodb::bson::Document>("sessions")
         .delete_many(doc! { "user_id": user_id })
         .await?;
 
@@ -362,9 +379,7 @@ pub async fn change_user_role(
 
     // Prevent self-demotion
     if user_id == admin.id && role != UserRole::Admin {
-        return Err(AppError::BadRequest(
-            "Cannot demote yourself".to_string(),
-        ));
+        return Err(AppError::BadRequest("Cannot demote yourself".to_string()));
     }
 
     state.auth.change_role(user_id, role).await?;

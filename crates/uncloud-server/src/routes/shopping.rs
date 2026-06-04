@@ -73,12 +73,12 @@ pub async fn list_categories(
 ) -> Result<Json<Vec<CategoryResponse>>> {
     require_shopping(&state, &user)?;
 
-    let coll = state.db.collection::<ShoppingCategory>("shopping_categories");
+    let coll = state
+        .db
+        .collection::<ShoppingCategory>("shopping_categories");
 
     // Check if user has any categories
-    let count = coll
-        .count_documents(doc! { "owner_id": user.id })
-        .await?;
+    let count = coll.count_documents(doc! { "owner_id": user.id }).await?;
 
     // Seed defaults if empty
     if count == 0 {
@@ -132,7 +132,9 @@ pub async fn create_category(
         ));
     }
 
-    let coll = state.db.collection::<ShoppingCategory>("shopping_categories");
+    let coll = state
+        .db
+        .collection::<ShoppingCategory>("shopping_categories");
 
     // Determine position: max position + 1.0
     let max_position = {
@@ -192,7 +194,9 @@ pub async fn delete_category(
     let cat_id = ObjectId::parse_str(&id)
         .map_err(|_| AppError::BadRequest("Invalid category ID".to_string()))?;
 
-    let coll = state.db.collection::<ShoppingCategory>("shopping_categories");
+    let coll = state
+        .db
+        .collection::<ShoppingCategory>("shopping_categories");
 
     // Fetch the category name before deleting so we can cascade
     let cat = coll
@@ -235,13 +239,17 @@ pub async fn update_category(
 
     let name = body.name.trim().to_string();
     if name.is_empty() {
-        return Err(AppError::BadRequest("Category name cannot be empty".to_string()));
+        return Err(AppError::BadRequest(
+            "Category name cannot be empty".to_string(),
+        ));
     }
 
     let cat_id = ObjectId::parse_str(&id)
         .map_err(|_| AppError::BadRequest("Invalid category ID".to_string()))?;
 
-    let coll = state.db.collection::<ShoppingCategory>("shopping_categories");
+    let coll = state
+        .db
+        .collection::<ShoppingCategory>("shopping_categories");
 
     // Fetch old name before updating so we can cascade the rename
     let old_cat = coll
@@ -309,7 +317,9 @@ pub async fn update_category_position(
     let cat_id = ObjectId::parse_str(&id)
         .map_err(|_| AppError::BadRequest("Invalid category ID".to_string()))?;
 
-    let coll = state.db.collection::<ShoppingCategory>("shopping_categories");
+    let coll = state
+        .db
+        .collection::<ShoppingCategory>("shopping_categories");
     let result = coll
         .update_one(
             doc! { "_id": cat_id, "owner_id": user.id },
@@ -624,7 +634,9 @@ pub async fn update_item(
     }
     if let Some(ref categories) = body.categories {
         // Validate: strip out category names that no longer exist
-        let cat_coll = state.db.collection::<ShoppingCategory>("shopping_categories");
+        let cat_coll = state
+            .db
+            .collection::<ShoppingCategory>("shopping_categories");
         let mut valid_cats = Vec::new();
         for cat_name in categories {
             let exists = cat_coll
@@ -1418,10 +1430,7 @@ async fn resolve_usernames(
         .map(|id| bson::Bson::ObjectId(*id))
         .collect();
     let mut usernames = Vec::new();
-    if let Ok(mut cursor) = users_coll
-        .find(doc! { "_id": { "$in": &bson_ids } })
-        .await
-    {
+    if let Ok(mut cursor) = users_coll.find(doc! { "_id": { "$in": &bson_ids } }).await {
         while cursor.advance().await.unwrap_or(false) {
             if let Ok(user) = cursor.deserialize_current() {
                 usernames.push(user.username.clone());

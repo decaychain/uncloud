@@ -50,12 +50,24 @@ pub enum NthWeek {
 #[serde(tag = "type")]
 pub enum RecurrenceRule {
     Daily,
-    Weekly { days: Vec<u8> },
-    Monthly { day_of_month: u8 },
+    Weekly {
+        days: Vec<u8>,
+    },
+    Monthly {
+        day_of_month: u8,
+    },
     /// `weekday` uses the same 0=Mon..6=Sun encoding as `Weekly { days }`.
-    MonthlyByWeekday { nth: NthWeek, weekday: u8 },
-    Yearly { month: u8, day: u8 },
-    Custom { interval_days: u32 },
+    MonthlyByWeekday {
+        nth: NthWeek,
+        weekday: u8,
+    },
+    Yearly {
+        month: u8,
+        day: u8,
+    },
+    Custom {
+        interval_days: u32,
+    },
 }
 
 // --- Response types ---

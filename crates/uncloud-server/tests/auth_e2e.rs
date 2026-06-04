@@ -191,7 +191,8 @@ async fn register_active_user_gets_session() {
 #[tokio::test]
 async fn login_with_email() {
     let app = TestApp::new().await;
-    app.register("alice", "alice@example.com", "password123!").await;
+    app.register("alice", "alice@example.com", "password123!")
+        .await;
 
     // Login using email instead of username
     let res = app
@@ -497,8 +498,7 @@ async fn admin_change_role_demote() {
 #[tokio::test]
 async fn admin_cannot_self_demote() {
     let app = TestApp::new().await;
-    let admin: serde_json::Value =
-        app.create_admin_and_login("admin", "password123!").await;
+    let admin: serde_json::Value = app.create_admin_and_login("admin", "password123!").await;
     let admin_id = admin["id"].as_str().expect("admin id");
 
     let res = app

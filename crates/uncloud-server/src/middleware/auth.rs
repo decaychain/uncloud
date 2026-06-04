@@ -92,9 +92,23 @@ pub async fn auth_middleware(
 ) -> Response {
     // Try cookie first
     let cookie_val = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
-    let bearer_val = request.headers().get("Authorization").and_then(|h| h.to_str().ok()).map(|s| s.to_string());
-    let origin_val = request.headers().get("Origin").and_then(|h| h.to_str().ok()).map(|s| s.to_string());
-    tracing::debug!("AUTH: cookie={:?}, bearer={:?}, origin={:?}, uri={}", cookie_val, bearer_val, origin_val, request.uri());
+    let bearer_val = request
+        .headers()
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
+    let origin_val = request
+        .headers()
+        .get("Origin")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
+    tracing::debug!(
+        "AUTH: cookie={:?}, bearer={:?}, origin={:?}, uri={}",
+        cookie_val,
+        bearer_val,
+        origin_val,
+        request.uri()
+    );
 
     if let Some(cookie) = jar.get(SESSION_COOKIE) {
         if let Ok((user, _session)) = state.auth.validate_session(cookie.value()).await {
@@ -228,6 +242,10 @@ where
         parts: &mut axum::http::request::Parts,
         _state: &S,
     ) -> Result<Self, Self::Rejection> {
-        Ok(parts.extensions.get::<Scopes>().cloned().unwrap_or_default())
+        Ok(parts
+            .extensions
+            .get::<Scopes>()
+            .cloned()
+            .unwrap_or_default())
     }
 }

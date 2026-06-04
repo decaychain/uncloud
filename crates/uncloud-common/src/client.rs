@@ -166,7 +166,10 @@ impl ApiClient {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn create_folder(&self, req: CreateFolderRequest) -> Result<FolderResponse, ApiError> {
+    pub async fn create_folder(
+        &self,
+        req: CreateFolderRequest,
+    ) -> Result<FolderResponse, ApiError> {
         let response = self
             .client
             .post(self.url("/api/folders"))

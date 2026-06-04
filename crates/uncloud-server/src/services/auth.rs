@@ -146,7 +146,9 @@ impl AuthService {
         }
 
         // Normalize: treat empty/whitespace-only email as None
-        let email = email.map(|e| e.trim().to_string()).filter(|e| !e.is_empty());
+        let email = email
+            .map(|e| e.trim().to_string())
+            .filter(|e| !e.is_empty());
 
         if let Some(ref email) = email {
             if !email.contains('@') {
@@ -289,8 +291,7 @@ impl AuthService {
 
     /// Purge demo accounts older than `demo_ttl_hours`. Called by a background task.
     pub async fn purge_demo_accounts(&self, db: &Database) -> Result<u64> {
-        let cutoff = Utc::now()
-            - chrono::Duration::hours(self.config.demo_ttl_hours as i64);
+        let cutoff = Utc::now() - chrono::Duration::hours(self.config.demo_ttl_hours as i64);
         let cutoff_bson = mongodb::bson::DateTime::from_chrono(cutoff);
 
         let filter = doc! {
@@ -310,8 +311,10 @@ impl AuthService {
             return Ok(0);
         }
 
-        let ids_bson: Vec<mongodb::bson::Bson> =
-            user_ids.iter().map(|id| mongodb::bson::Bson::ObjectId(*id)).collect();
+        let ids_bson: Vec<mongodb::bson::Bson> = user_ids
+            .iter()
+            .map(|id| mongodb::bson::Bson::ObjectId(*id))
+            .collect();
 
         // Delete related data
         db.collection::<mongodb::bson::Document>("files")
@@ -364,9 +367,7 @@ impl AuthService {
             .ok_or(AppError::Unauthorized)?;
 
         if session.is_expired() {
-            self.sessions
-                .delete_one(doc! { "_id": session.id })
-                .await?;
+            self.sessions.delete_one(doc! { "_id": session.id }).await?;
             return Err(AppError::Unauthorized);
         }
 
@@ -467,11 +468,7 @@ impl AuthService {
     }
 
     /// Admin: reset a user's password without knowing the current one.
-    pub async fn admin_reset_password(
-        &self,
-        user_id: ObjectId,
-        new_password: &str,
-    ) -> Result<()> {
+    pub async fn admin_reset_password(&self, user_id: ObjectId, new_password: &str) -> Result<()> {
         if new_password.len() < 8 {
             return Err(AppError::Validation(
                 "Password must be at least 8 characters".to_string(),
@@ -498,13 +495,8 @@ impl AuthService {
     }
 
     /// Admin: change a user's role.
-    pub async fn change_role(
-        &self,
-        user_id: ObjectId,
-        role: UserRole,
-    ) -> Result<()> {
-        let role_str = serde_json::to_value(role)
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+    pub async fn change_role(&self, user_id: ObjectId, role: UserRole) -> Result<()> {
+        let role_str = serde_json::to_value(role).map_err(|e| AppError::Internal(e.to_string()))?;
 
         let result = self
             .users
@@ -539,8 +531,8 @@ impl AuthService {
     }
 
     async fn set_user_status(&self, user_id: ObjectId, status: UserStatus) -> Result<()> {
-        let status_str = serde_json::to_value(status)
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+        let status_str =
+            serde_json::to_value(status).map_err(|e| AppError::Internal(e.to_string()))?;
         self.users
             .update_one(
                 doc! { "_id": user_id },
@@ -563,8 +555,7 @@ impl AuthService {
         expires_in_hours: Option<u64>,
     ) -> Result<Invite> {
         let token = self.generate_token();
-        let expires_at =
-            expires_in_hours.map(|h| Utc::now() + chrono::Duration::hours(h as i64));
+        let expires_at = expires_in_hours.map(|h| Utc::now() + chrono::Duration::hours(h as i64));
 
         let invite = Invite::new(token, created_by, comment, role, expires_at);
         self.invites.insert_one(&invite).await?;
@@ -581,10 +572,7 @@ impl AuthService {
     }
 
     pub async fn delete_invite(&self, invite_id: ObjectId) -> Result<()> {
-        let result = self
-            .invites
-            .delete_one(doc! { "_id": invite_id })
-            .await?;
+        let result = self.invites.delete_one(doc! { "_id": invite_id }).await?;
         if result.deleted_count == 0 {
             return Err(AppError::NotFound("Invite not found".to_string()));
         }
@@ -647,7 +635,9 @@ impl AuthService {
             6,
             1,
             30,
-            secret.to_bytes().map_err(|e| AppError::Internal(e.to_string()))?,
+            secret
+                .to_bytes()
+                .map_err(|e| AppError::Internal(e.to_string()))?,
             Some("Uncloud".to_string()),
             user.username.clone(),
         )
@@ -836,7 +826,9 @@ impl AuthService {
             6,
             1,
             30,
-            secret.to_bytes().map_err(|e| AppError::Internal(e.to_string()))?,
+            secret
+                .to_bytes()
+                .map_err(|e| AppError::Internal(e.to_string()))?,
             None,
             String::new(),
         )

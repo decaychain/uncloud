@@ -11,11 +11,7 @@ async fn create_category(app: &TestApp, name: &str, parent_id: Option<&str>) -> 
         Some(parent_id) => serde_json::json!({ "name": name, "parent_id": parent_id }),
         None => serde_json::json!({ "name": name }),
     };
-    let res = app
-        .server
-        .post("/api/finance/categories")
-        .json(&body)
-        .await;
+    let res = app.server.post("/api/finance/categories").json(&body).await;
     res.assert_status(StatusCode::CREATED);
     res.json()
 }

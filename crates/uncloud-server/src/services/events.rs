@@ -14,17 +14,44 @@ use crate::services::rescan::{RescanConflict, RescanJob, RescanStatus};
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Event {
-    FileCreated { file: FileEvent },
-    FileUpdated { file: FileEvent },
-    FileDeleted { file_id: String },
-    FolderCreated { folder: FolderEvent },
-    FolderUpdated { folder: FolderEvent },
-    FolderDeleted { folder_id: String },
-    UploadProgress { upload_id: String, progress: f64 },
-    ProcessingCompleted { file_id: String, task_type: String, success: bool },
-    FileRestored { file_id: String },
-    FolderShared { folder_id: String, share_id: String },
-    FolderShareRevoked { folder_id: String, share_id: String },
+    FileCreated {
+        file: FileEvent,
+    },
+    FileUpdated {
+        file: FileEvent,
+    },
+    FileDeleted {
+        file_id: String,
+    },
+    FolderCreated {
+        folder: FolderEvent,
+    },
+    FolderUpdated {
+        folder: FolderEvent,
+    },
+    FolderDeleted {
+        folder_id: String,
+    },
+    UploadProgress {
+        upload_id: String,
+        progress: f64,
+    },
+    ProcessingCompleted {
+        file_id: String,
+        task_type: String,
+        success: bool,
+    },
+    FileRestored {
+        file_id: String,
+    },
+    FolderShared {
+        folder_id: String,
+        share_id: String,
+    },
+    FolderShareRevoked {
+        folder_id: String,
+        share_id: String,
+    },
     RescanProgress {
         job_id: String,
         storage_id: String,
@@ -133,11 +160,7 @@ impl EventService {
         }
     }
 
-    pub async fn subscribe(
-        &self,
-        user_id: ObjectId,
-        role: UserRole,
-    ) -> broadcast::Receiver<Event> {
+    pub async fn subscribe(&self, user_id: ObjectId, role: UserRole) -> broadcast::Receiver<Event> {
         let mut channels = self.channels.write().await;
 
         match channels.get_mut(&user_id) {

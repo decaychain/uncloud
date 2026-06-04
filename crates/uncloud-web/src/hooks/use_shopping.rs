@@ -61,7 +61,9 @@ pub async fn delete_category(id: &str) -> Result<(), String> {
 }
 
 pub async fn rename_category(id: &str, name: &str) -> Result<CategoryResponse, String> {
-    let body = UpdateCategoryRequest { name: name.to_string() };
+    let body = UpdateCategoryRequest {
+        name: name.to_string(),
+    };
     let response = api::put(&format!("/shopping/categories/{}", id))
         .json(&body)
         .map_err(|e| e.to_string())?
@@ -70,7 +72,10 @@ pub async fn rename_category(id: &str, name: &str) -> Result<CategoryResponse, S
         .map_err(|e| e.to_string())?;
 
     if response.ok() {
-        response.json::<CategoryResponse>().await.map_err(|e| e.to_string())
+        response
+            .json::<CategoryResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else if response.status() == 409 {
         Err("A category with this name already exists".to_string())
     } else {
@@ -319,13 +324,10 @@ pub async fn share_list(list_id: &str, username: &str) -> Result<ShoppingListSum
 }
 
 pub async fn unshare_list(list_id: &str, user_id: &str) -> Result<(), String> {
-    let response = api::delete(&format!(
-        "/shopping/lists/{}/share/{}",
-        list_id, user_id
-    ))
-    .send()
-    .await
-    .map_err(|e| e.to_string())?;
+    let response = api::delete(&format!("/shopping/lists/{}/share/{}", list_id, user_id))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
 
     if response.ok() || response.status() == 204 {
         Ok(())
@@ -364,15 +366,12 @@ pub async fn patch_list_item(
     item_id: &str,
     req: PatchShoppingListItemRequest,
 ) -> Result<(), String> {
-    let response = api::patch(&format!(
-        "/shopping/lists/{}/items/{}",
-        list_id, item_id
-    ))
-    .json(&req)
-    .map_err(|e| e.to_string())?
-    .send()
-    .await
-    .map_err(|e| e.to_string())?;
+    let response = api::patch(&format!("/shopping/lists/{}/items/{}", list_id, item_id))
+        .json(&req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
 
     if response.ok() || response.status() == 204 {
         Ok(())
@@ -382,13 +381,10 @@ pub async fn patch_list_item(
 }
 
 pub async fn remove_list_item(list_id: &str, item_id: &str) -> Result<(), String> {
-    let response = api::delete(&format!(
-        "/shopping/lists/{}/items/{}",
-        list_id, item_id
-    ))
-    .send()
-    .await
-    .map_err(|e| e.to_string())?;
+    let response = api::delete(&format!("/shopping/lists/{}/items/{}", list_id, item_id))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
 
     if response.ok() || response.status() == 204 {
         Ok(())
@@ -421,13 +417,10 @@ pub async fn update_item_position(
 }
 
 pub async fn remove_purchased(list_id: &str) -> Result<(), String> {
-    let response = api::post(&format!(
-        "/shopping/lists/{}/remove-purchased",
-        list_id
-    ))
-    .send()
-    .await
-    .map_err(|e| e.to_string())?;
+    let response = api::post(&format!("/shopping/lists/{}/remove-purchased", list_id))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
 
     if response.ok() || response.status() == 204 {
         Ok(())
@@ -449,14 +442,19 @@ pub async fn list_user_entries() -> Result<Vec<UserNameEntry>, String> {
         .map_err(|e| e.to_string())?;
 
     if response.ok() {
-        response.json::<Vec<UserNameEntry>>().await.map_err(|e| e.to_string())
+        response
+            .json::<Vec<UserNameEntry>>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err("Failed to load users".to_string())
     }
 }
 
 pub async fn list_usernames() -> Result<Vec<String>, String> {
-    list_user_entries().await.map(|entries| entries.into_iter().map(|e| e.username).collect())
+    list_user_entries()
+        .await
+        .map(|entries| entries.into_iter().map(|e| e.username).collect())
 }
 
 pub async fn update_my_features(req: UpdateFeaturesRequest) -> Result<UserResponse, String> {

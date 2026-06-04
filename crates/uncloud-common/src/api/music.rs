@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::files::FileResponse;
+use serde::{Deserialize, Serialize};
 
 /// Typed convenience struct for the `metadata["audio"]` key on FileResponse.
 /// The processor stores this shape under `file.metadata["audio"]`.

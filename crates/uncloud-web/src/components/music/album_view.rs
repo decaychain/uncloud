@@ -1,17 +1,16 @@
-use dioxus::prelude::*;
-use uncloud_common::TrackResponse;
-use crate::hooks::{api, use_music, use_player};
-use crate::hooks::use_music::LibraryScope;
-use crate::state::PlayerState;
 use super::track_list::TrackList;
 use crate::components::icons::{IconAlertTriangle, IconMusic, IconPlay};
+use crate::hooks::use_music::LibraryScope;
+use crate::hooks::{api, use_music, use_player};
+use crate::state::PlayerState;
+use dioxus::prelude::*;
+use uncloud_common::TrackResponse;
 
 #[component]
 pub fn AlbumView(
     artist: String,
     album: String,
-    #[props(default = LibraryScope::All)]
-    scope: LibraryScope,
+    #[props(default = LibraryScope::All)] scope: LibraryScope,
     on_back: EventHandler<()>,
 ) -> Element {
     let player = use_context::<Signal<PlayerState>>();
@@ -22,7 +21,11 @@ pub fn AlbumView(
     let artist_effect = artist.clone();
     let album_effect = album.clone();
     let scope_effect = scope.clone();
-    use_effect(use_reactive!(|(artist_effect, album_effect, scope_effect)| {
+    use_effect(use_reactive!(|(
+        artist_effect,
+        album_effect,
+        scope_effect,
+    )| {
         let a = artist_effect;
         let b = album_effect;
         let s = scope_effect;
@@ -57,10 +60,12 @@ pub fn AlbumView(
 
     let track_list = tracks();
     let total_tracks = track_list.len();
-    let cover_src = track_list.iter()
+    let cover_src = track_list
+        .iter()
         .find(|t| t.audio.has_cover_art)
         .map(|t| api::authenticated_media_url(&format!("/files/{}/thumb", t.file.id)));
-    let year_str = track_list.first()
+    let year_str = track_list
+        .first()
         .and_then(|t| t.audio.year)
         .map(|y| format!("{}", y));
 

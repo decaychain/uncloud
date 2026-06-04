@@ -7,18 +7,21 @@ use uncloud_common::{
     TaskResponse, TaskStatus, UpdateTaskRequest, UpdateTaskStatusRequest,
 };
 
+use super::{label_color_for, LABEL_PALETTE};
 use crate::components::file_open_viewer::FileOpenViewer;
 use crate::hooks::use_file_opener::{use_file_opener, FileOpenTarget};
 use crate::hooks::{use_files, use_tasks};
 use crate::state::AuthState;
-use super::{LABEL_PALETTE, label_color_for};
 
 fn format_recurrence(rule: &RecurrenceRule) -> String {
     match rule {
         RecurrenceRule::Daily => "Every day".to_string(),
         RecurrenceRule::Weekly { days } => {
             let day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-            let selected: Vec<&str> = days.iter().filter_map(|d| day_names.get(*d as usize).copied()).collect();
+            let selected: Vec<&str> = days
+                .iter()
+                .filter_map(|d| day_names.get(*d as usize).copied())
+                .collect();
             if selected.len() == 7 {
                 "Every day".to_string()
             } else if selected.is_empty() {
@@ -27,7 +30,11 @@ fn format_recurrence(rule: &RecurrenceRule) -> String {
                 format!("Every {}", selected.join(", "))
             }
         }
-        RecurrenceRule::Monthly { day_of_month } => format!("Monthly on the {}{}", day_of_month, ordinal_suffix(*day_of_month)),
+        RecurrenceRule::Monthly { day_of_month } => format!(
+            "Monthly on the {}{}",
+            day_of_month,
+            ordinal_suffix(*day_of_month)
+        ),
         RecurrenceRule::MonthlyByWeekday { nth, weekday } => {
             let day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
             let nth_label = match nth {
@@ -41,13 +48,20 @@ fn format_recurrence(rule: &RecurrenceRule) -> String {
             format!("Monthly on the {} {}", nth_label, day)
         }
         RecurrenceRule::Yearly { month, day } => {
-            let month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-            let m = month_names.get((*month as usize).saturating_sub(1)).unwrap_or(&"???");
+            let month_names = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+            let m = month_names
+                .get((*month as usize).saturating_sub(1))
+                .unwrap_or(&"???");
             format!("Every {} {}", m, day)
         }
         RecurrenceRule::Custom { interval_days } => {
-            if *interval_days == 1 { "Every day".to_string() }
-            else { format!("Every {} days", interval_days) }
+            if *interval_days == 1 {
+                "Every day".to_string()
+            } else {
+                format!("Every {} days", interval_days)
+            }
         }
     }
 }
@@ -133,11 +147,7 @@ pub fn TaskDetail(
     // captures its own mutable copy.
 
     let auth_state = use_context::<Signal<AuthState>>();
-    let current_user_id: Option<String> = auth_state
-        .read()
-        .user
-        .as_ref()
-        .map(|u| u.id.clone());
+    let current_user_id: Option<String> = auth_state.read().user.as_ref().map(|u| u.id.clone());
 
     // Recurrence editing
     let mut editing_recurrence = use_signal(|| false);
@@ -187,10 +197,8 @@ pub fn TaskDetail(
             }
             error.set(None);
 
-            let (task_res, comments_res) = futures::join!(
-                use_tasks::get_task(&tid),
-                use_tasks::list_comments(&tid),
-            );
+            let (task_res, comments_res) =
+                futures::join!(use_tasks::get_task(&tid), use_tasks::list_comments(&tid),);
 
             match task_res {
                 Ok(t) => {
@@ -351,7 +359,8 @@ pub fn TaskDetail(
     // Pre-clone for closures that need separate copies
     let (mut save_title_a, mut save_title_b) = (do_save_title.clone(), do_save_title.clone());
     let (mut save_desc_a, mut _save_desc_b) = (do_save_desc.clone(), do_save_desc.clone());
-    let (mut post_comment_a, mut post_comment_b) = (do_post_comment.clone(), do_post_comment.clone());
+    let (mut post_comment_a, mut post_comment_b) =
+        (do_post_comment.clone(), do_post_comment.clone());
 
     let tid_status = task_id.clone();
     let tid_priority = task_id.clone();

@@ -35,7 +35,10 @@ fn mongo_port() -> u16 {
                     .start()
                     .await
                     .expect("start mongo");
-                let port = container.get_host_port_ipv4(27017).await.expect("mongo port");
+                let port = container
+                    .get_host_port_ipv4(27017)
+                    .await
+                    .expect("mongo port");
                 Box::leak(Box::new(container));
                 port
             })
@@ -47,7 +50,9 @@ fn mongo_port() -> u16 {
 
 async fn fresh_db(name: &str) -> mongodb::Database {
     let uri = format!("mongodb://127.0.0.1:{}", mongo_port());
-    let client = mongodb::Client::with_uri_str(&uri).await.expect("mongo connect");
+    let client = mongodb::Client::with_uri_str(&uri)
+        .await
+        .expect("mongo connect");
     let db = client.database(name);
     db.drop().await.ok();
     db
@@ -66,10 +71,16 @@ struct Fixture {
 async fn make_fixture(db_name: &str) -> Fixture {
     let src_dir = TempDir::new().unwrap();
     let dst_dir = TempDir::new().unwrap();
-    let src = Arc::new(LocalStorage::new(src_dir.path().to_str().unwrap()).await.unwrap())
-        as Arc<dyn StorageBackend>;
-    let dst = Arc::new(LocalStorage::new(dst_dir.path().to_str().unwrap()).await.unwrap())
-        as Arc<dyn StorageBackend>;
+    let src = Arc::new(
+        LocalStorage::new(src_dir.path().to_str().unwrap())
+            .await
+            .unwrap(),
+    ) as Arc<dyn StorageBackend>;
+    let dst = Arc::new(
+        LocalStorage::new(dst_dir.path().to_str().unwrap())
+            .await
+            .unwrap(),
+    ) as Arc<dyn StorageBackend>;
     Fixture {
         db: fresh_db(db_name).await,
         src,
@@ -87,11 +98,7 @@ fn sha256_hex(data: &[u8]) -> String {
     hex::encode(h.finalize())
 }
 
-async fn insert_file(
-    fx: &Fixture,
-    storage_path: &str,
-    contents: &[u8],
-) -> File {
+async fn insert_file(fx: &Fixture, storage_path: &str, contents: &[u8]) -> File {
     fx.src.write(storage_path, contents).await.unwrap();
     let now = Utc::now();
     let file = File {
@@ -178,7 +185,10 @@ async fn migration_is_idempotent_after_partial_run() {
     fx.dst.write("one.txt", b"first").await.unwrap();
     fx.db
         .collection::<File>("files")
-        .update_one(doc! { "_id": f1.id }, doc! { "$set": { "storage_id": fx.dst_id } })
+        .update_one(
+            doc! { "_id": f1.id },
+            doc! { "$set": { "storage_id": fx.dst_id } },
+        )
         .await
         .unwrap();
 
@@ -350,7 +360,9 @@ async fn migration_fails_on_corrupt_dest_when_hash_verify_enabled() {
     let fx = make_fixture("uncloud_migrate_test_5").await;
     let file = insert_file(&fx, "data.bin", b"the original twelve").await;
 
-    let corrupt = Arc::new(CorruptBackend { inner: fx.dst.clone() }) as Arc<dyn StorageBackend>;
+    let corrupt = Arc::new(CorruptBackend {
+        inner: fx.dst.clone(),
+    }) as Arc<dyn StorageBackend>;
     let result = migrate::run_migration(
         &fx.db,
         fx.src.clone(),
@@ -375,7 +387,6 @@ async fn migration_fails_on_corrupt_dest_when_hash_verify_enabled() {
     assert_eq!(after.storage_id, fx.src_id);
 }
 
-
 #[tokio::test]
 #[ignore]
 async fn delete_source_removes_blob_and_thumb_after_flip() {
@@ -397,8 +408,14 @@ async fn delete_source_removes_blob_and_thumb_after_flip() {
     .await
     .expect("migration");
 
-    assert!(!fx.src.exists("doc.bin").await.unwrap(), "source blob should be gone");
-    assert!(!fx.src.exists(&thumb).await.unwrap(), "source thumb should be gone");
+    assert!(
+        !fx.src.exists("doc.bin").await.unwrap(),
+        "source blob should be gone"
+    );
+    assert!(
+        !fx.src.exists(&thumb).await.unwrap(),
+        "source thumb should be gone"
+    );
     assert_eq!(read_all(&fx.dst, "doc.bin").await, b"sample bytes");
     assert_eq!(read_all(&fx.dst, &thumb).await, b"thumb-bytes");
 }
@@ -486,8 +503,14 @@ async fn cleanup_deletes_orphans_keeps_live() {
         .await
         .expect("cleanup");
 
-    assert!(fx.src.exists("live.bin").await.unwrap(), "live blob preserved");
-    assert!(fx.src.exists(&live_thumb).await.unwrap(), "live thumb preserved");
+    assert!(
+        fx.src.exists("live.bin").await.unwrap(),
+        "live blob preserved"
+    );
+    assert!(
+        fx.src.exists(&live_thumb).await.unwrap(),
+        "live thumb preserved"
+    );
     assert!(
         fx.src.exists(".tmp/in-flight.bin").await.unwrap(),
         ".tmp must be left alone"
@@ -516,9 +539,11 @@ async fn cleanup_dry_run_deletes_nothing() {
         .await
         .expect("cleanup dry-run");
 
-    assert!(fx.src.exists("orphan.bin").await.unwrap(), "dry-run keeps blob");
+    assert!(
+        fx.src.exists("orphan.bin").await.unwrap(),
+        "dry-run keeps blob"
+    );
 }
-
 
 #[tokio::test]
 #[ignore]
@@ -559,7 +584,10 @@ async fn cleanup_prune_broken_deletes_dangling_records() {
         .find_one(doc! { "_id": broken.id })
         .await
         .unwrap();
-    assert!(still_there.is_some(), "broken record should survive without flag");
+    assert!(
+        still_there.is_some(),
+        "broken record should survive without flag"
+    );
 
     // With --prune-broken, it goes — and so does the file_versions row.
     migrate::run_cleanup_inner(&fx.db, &fx.src, fx.src_id, false, true, false)

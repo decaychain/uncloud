@@ -6,7 +6,7 @@ use uncloud_common::{
 
 use crate::hooks::{
     use_events::use_events,
-    use_sync_events::{SyncEventsFilter, list_sync_events},
+    use_sync_events::{list_sync_events, SyncEventsFilter},
 };
 
 const PAGE_LIMIT: u32 = 100;

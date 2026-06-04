@@ -65,19 +65,31 @@ impl IntoResponse for AppError {
             }
             AppError::Database(e) => {
                 tracing::error!(error = ?e, "Database error");
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {e}"))
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Database error: {e}"),
+                )
             }
             AppError::Internal(msg) => {
                 tracing::error!("Internal error: {}", msg);
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("Internal error: {msg}"))
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Internal error: {msg}"),
+                )
             }
             AppError::Storage(msg) => {
                 tracing::error!("Storage error: {}", msg);
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("Storage error: {msg}"))
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Storage error: {msg}"),
+                )
             }
             AppError::ExternalService(msg) => {
                 tracing::warn!("External service error: {}", msg);
-                (StatusCode::BAD_GATEWAY, format!("External service error: {msg}"))
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("External service error: {msg}"),
+                )
             }
             AppError::ExternalTimeout(msg) => {
                 tracing::warn!("External service timeout: {}", msg);

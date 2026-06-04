@@ -9,19 +9,19 @@
 //! re-create it on the server.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use axum::{
-    Json, Router,
     extract::State,
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
+    Json, Router,
 };
 use tempfile::TempDir;
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 use uncloud_client::Client;
 use uncloud_sync::SyncEngine;
 
@@ -247,8 +247,5 @@ async fn non_empty_local_dir_keeps_contents_and_recreates_parent() {
     engine.run_sync_manual().await.unwrap();
     engine.run_sync_manual().await.unwrap();
     let later = create_hits.load(Ordering::SeqCst);
-    assert_eq!(
-        later, first,
-        "no zombie loop after the one-shot re-create"
-    );
+    assert_eq!(later, first, "no zombie loop after the one-shot re-create");
 }

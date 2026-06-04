@@ -31,9 +31,7 @@ pub fn parse(input: &str) -> Result<Vec<String>, ToolError> {
         return Ok(Vec::new());
     }
     if !trimmed.starts_with('/') {
-        return Err(ToolError::invalid(
-            "path must be absolute (start with '/')",
-        ));
+        return Err(ToolError::invalid("path must be absolute (start with '/')"));
     }
     let mut out = Vec::new();
     let stripped = trimmed.trim_start_matches('/').trim_end_matches('/');
@@ -84,12 +82,7 @@ pub async fn resolve_folder(
             })
             .await
             .map_err(|e| ToolError::exec(format!("folder lookup failed: {}", e)))?
-            .ok_or_else(|| {
-                ToolError::exec(format!(
-                    "no folder named `{}` at this level",
-                    seg
-                ))
-            })?;
+            .ok_or_else(|| ToolError::exec(format!("no folder named `{}` at this level", seg)))?;
         parent = Some(folder.id);
         current = Some(folder);
     }
@@ -106,9 +99,7 @@ pub async fn resolve_file(
     let (file_name, parent_segments) = match segments.split_last() {
         Some(parts) => parts,
         None => {
-            return Err(ToolError::invalid(
-                "file path must include a filename",
-            ));
+            return Err(ToolError::invalid("file path must include a filename"));
         }
     };
     let parent_folder = resolve_folder(state, owner_id, parent_segments).await?;
@@ -126,9 +117,7 @@ pub async fn resolve_file(
         })
         .await
         .map_err(|e| ToolError::exec(format!("file lookup failed: {}", e)))?
-        .ok_or_else(|| {
-            ToolError::exec(format!("no file named `{}` at this path", file_name))
-        })?;
+        .ok_or_else(|| ToolError::exec(format!("no file named `{}` at this path", file_name)))?;
     Ok(file)
 }
 
@@ -149,9 +138,7 @@ pub async fn resolve_target(
     segments: &[String],
 ) -> Result<Target, ToolError> {
     if segments.is_empty() {
-        return Err(ToolError::exec(
-            "operation cannot target the root folder",
-        ));
+        return Err(ToolError::exec("operation cannot target the root folder"));
     }
     let folders = state.db.collection::<Folder>("folders");
     let last = segments.last().unwrap();
@@ -188,10 +175,7 @@ pub async fn resolve_target(
     }
     Err(ToolError::exec(format!(
         "nothing exists at path `{}`",
-        format_args!(
-            "/{}",
-            segments.join("/")
-        )
+        format_args!("/{}", segments.join("/"))
     )))
 }
 

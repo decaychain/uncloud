@@ -12,7 +12,11 @@ use wasm_bindgen::{JsCast, JsValue};
 fn session() -> Option<JsValue> {
     let nav = web_sys::window()?.navigator();
     let s = js_sys::Reflect::get(&nav, &"mediaSession".into()).ok()?;
-    if s.is_undefined() || s.is_null() { None } else { Some(s) }
+    if s.is_undefined() || s.is_null() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 pub fn set_playback_state(state: &str) {
@@ -28,10 +32,18 @@ pub fn clear_metadata() {
 }
 
 pub fn set_metadata(title: &str, artist: &str, album: &str, artwork_url: Option<&str>) {
-    let Some(s) = session() else { return; };
-    let Some(win) = web_sys::window() else { return; };
-    let Ok(ctor) = js_sys::Reflect::get(&win, &"MediaMetadata".into()) else { return; };
-    if ctor.is_undefined() || ctor.is_null() { return; }
+    let Some(s) = session() else {
+        return;
+    };
+    let Some(win) = web_sys::window() else {
+        return;
+    };
+    let Ok(ctor) = js_sys::Reflect::get(&win, &"MediaMetadata".into()) else {
+        return;
+    };
+    if ctor.is_undefined() || ctor.is_null() {
+        return;
+    }
     let ctor: js_sys::Function = ctor.unchecked_into();
 
     let init = js_sys::Object::new();
@@ -52,22 +64,36 @@ pub fn set_metadata(title: &str, artist: &str, album: &str, artwork_url: Option<
 
     let args = js_sys::Array::new();
     args.push(&init);
-    let Ok(meta) = js_sys::Reflect::construct(&ctor, &args) else { return; };
+    let Ok(meta) = js_sys::Reflect::construct(&ctor, &args) else {
+        return;
+    };
     let _ = js_sys::Reflect::set(&s, &"metadata".into(), &meta);
 }
 
 pub fn set_action_handler(action: &str, handler: &Closure<dyn FnMut()>) {
-    let Some(s) = session() else { return; };
-    let Ok(set_fn) = js_sys::Reflect::get(&s, &"setActionHandler".into()) else { return; };
-    if set_fn.is_undefined() || set_fn.is_null() { return; }
+    let Some(s) = session() else {
+        return;
+    };
+    let Ok(set_fn) = js_sys::Reflect::get(&s, &"setActionHandler".into()) else {
+        return;
+    };
+    if set_fn.is_undefined() || set_fn.is_null() {
+        return;
+    }
     let set_fn: js_sys::Function = set_fn.unchecked_into();
     let _ = set_fn.call2(&s, &JsValue::from_str(action), handler.as_ref());
 }
 
 pub fn set_position_state(duration: f64, position: f64) {
-    let Some(s) = session() else { return; };
-    let Ok(set_fn) = js_sys::Reflect::get(&s, &"setPositionState".into()) else { return; };
-    if set_fn.is_undefined() || set_fn.is_null() { return; }
+    let Some(s) = session() else {
+        return;
+    };
+    let Ok(set_fn) = js_sys::Reflect::get(&s, &"setPositionState".into()) else {
+        return;
+    };
+    if set_fn.is_undefined() || set_fn.is_null() {
+        return;
+    }
     let set_fn: js_sys::Function = set_fn.unchecked_into();
     if !duration.is_finite() || duration <= 0.0 {
         return;

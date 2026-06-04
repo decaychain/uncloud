@@ -4,17 +4,44 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ServerEvent {
-    FileCreated { file: FileEventData },
-    FileUpdated { file: FileEventData },
-    FileDeleted { file_id: String },
-    FolderCreated { folder: FolderEventData },
-    FolderUpdated { folder: FolderEventData },
-    FolderDeleted { folder_id: String },
-    UploadProgress { upload_id: String, progress: f64 },
-    ProcessingCompleted { file_id: String, task_type: String, success: bool },
-    FileRestored { file_id: String },
-    FolderShared { folder_id: String, share_id: String },
-    FolderShareRevoked { folder_id: String, share_id: String },
+    FileCreated {
+        file: FileEventData,
+    },
+    FileUpdated {
+        file: FileEventData,
+    },
+    FileDeleted {
+        file_id: String,
+    },
+    FolderCreated {
+        folder: FolderEventData,
+    },
+    FolderUpdated {
+        folder: FolderEventData,
+    },
+    FolderDeleted {
+        folder_id: String,
+    },
+    UploadProgress {
+        upload_id: String,
+        progress: f64,
+    },
+    ProcessingCompleted {
+        file_id: String,
+        task_type: String,
+        success: bool,
+    },
+    FileRestored {
+        file_id: String,
+    },
+    FolderShared {
+        folder_id: String,
+        share_id: String,
+    },
+    FolderShareRevoked {
+        folder_id: String,
+        share_id: String,
+    },
     RescanProgress {
         job_id: String,
         storage_id: String,
@@ -38,7 +65,9 @@ pub enum ServerEvent {
         conflicts: Vec<RescanConflictEventData>,
         error: Option<String>,
     },
-    SyncEventAppended { event: SyncEventResponse },
+    SyncEventAppended {
+        event: SyncEventResponse,
+    },
     TaskChanged {
         project_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

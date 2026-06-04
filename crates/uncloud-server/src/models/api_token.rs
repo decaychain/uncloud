@@ -20,7 +20,11 @@ pub struct ApiToken {
     pub client_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,
-    #[serde(default, with = "crate::models::opt_dt", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "crate::models::opt_dt",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub expires_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_token_hash: Option<String>,

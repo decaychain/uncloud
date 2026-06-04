@@ -121,7 +121,9 @@ pub async fn register(
 ) -> Result<UserResponse, String> {
     let req = RegisterRequest {
         username: username.to_string(),
-        email: email.map(|e| e.trim().to_string()).filter(|e| !e.is_empty()),
+        email: email
+            .map(|e| e.trim().to_string())
+            .filter(|e| !e.is_empty()),
         password: password.to_string(),
         invite_token,
     };

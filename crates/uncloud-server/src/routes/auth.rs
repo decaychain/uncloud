@@ -328,12 +328,8 @@ pub async fn validate_invite(
 ) -> Result<Json<uncloud_common::InviteInfoResponse>> {
     let invite = state.auth.get_invite_info(&token).await?;
     match invite {
-        Some(inv) if inv.is_valid() => Ok(Json(uncloud_common::InviteInfoResponse {
-            valid: true,
-        })),
-        _ => Ok(Json(uncloud_common::InviteInfoResponse {
-            valid: false,
-        })),
+        Some(inv) if inv.is_valid() => Ok(Json(uncloud_common::InviteInfoResponse { valid: true })),
+        _ => Ok(Json(uncloud_common::InviteInfoResponse { valid: false })),
     }
 }
 
@@ -366,10 +362,7 @@ pub async fn logout(
     Ok((response_headers, StatusCode::NO_CONTENT))
 }
 
-pub async fn me(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-) -> Result<Json<UserResponse>> {
+pub async fn me(State(state): State<Arc<AppState>>, user: AuthUser) -> Result<Json<UserResponse>> {
     Ok(Json(user_to_response(&user, &state.config)))
 }
 

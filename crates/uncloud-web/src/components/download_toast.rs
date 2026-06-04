@@ -35,7 +35,11 @@ fn path_segments(path: &str) -> Vec<&str> {
 
 fn short_location(path: &str, fallback_name: &str) -> String {
     let parts = path_segments(path);
-    let file = parts.last().copied().filter(|s| !s.is_empty()).unwrap_or(fallback_name);
+    let file = parts
+        .last()
+        .copied()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback_name);
     let folder = parts
         .len()
         .checked_sub(2)

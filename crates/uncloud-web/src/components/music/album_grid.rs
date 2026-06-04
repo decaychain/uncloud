@@ -1,7 +1,7 @@
-use dioxus::prelude::*;
-use uncloud_common::MusicAlbumResponse;
 use crate::components::icons::{IconMusic, IconPlay};
 use crate::hooks::api;
+use dioxus::prelude::*;
+use uncloud_common::MusicAlbumResponse;
 
 #[component]
 pub fn AlbumGrid(

@@ -1,11 +1,12 @@
 use dioxus::prelude::*;
 use uncloud_common::{
     AddProjectMemberRequest, CreateTaskLabelRequest, ProjectMemberResponse, ProjectPermission,
-    TaskLabelResponse, UpdateProjectMemberRequest, UpdateTaskLabelRequest, UpdateTaskProjectRequest,
+    TaskLabelResponse, UpdateProjectMemberRequest, UpdateTaskLabelRequest,
+    UpdateTaskProjectRequest,
 };
 
-use crate::hooks::{use_shopping, use_tasks};
 use super::LABEL_PALETTE;
+use crate::hooks::{use_shopping, use_tasks};
 
 #[component]
 pub fn ProjectSettings(
@@ -26,8 +27,7 @@ pub fn ProjectSettings(
     let mut confirm_delete = use_signal(|| false);
 
     // Members state
-    let mut current_members: Signal<Vec<ProjectMemberResponse>> =
-        use_signal(|| members.clone());
+    let mut current_members: Signal<Vec<ProjectMemberResponse>> = use_signal(|| members.clone());
     let mut available_users: Signal<Vec<use_shopping::UserNameEntry>> = use_signal(Vec::new);
     let mut selected_user_id = use_signal(String::new);
     let mut selected_permission: Signal<ProjectPermission> =

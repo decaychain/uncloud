@@ -21,7 +21,10 @@ pub async fn run_list(target_filter: Option<String>) -> Result<(), Box<dyn std::
 }
 
 async fn list_one(target: &BackupTarget) -> Result<(), Box<dyn std::error::Error>> {
-    println!("── Target {:?} ({}) ──────────────────────────", target.name, target.repo);
+    println!(
+        "── Target {:?} ({}) ──────────────────────────",
+        target.name, target.repo
+    );
     let password = target.password.resolve()?;
     let target = target.clone();
     let snapshots = tokio::task::spawn_blocking(move || -> Result<_, String> {
@@ -57,7 +60,10 @@ async fn list_one(target: &BackupTarget) -> Result<(), Box<dyn std::error::Error
             .map(|t| t.to_string())
             .collect::<Vec<_>>()
             .join(",");
-        println!("{id_short:<10} {time:<25} {host:<24} {:>10} {tags}", human_bytes(size));
+        println!(
+            "{id_short:<10} {time:<25} {host:<24} {:>10} {tags}",
+            human_bytes(size)
+        );
     }
     Ok(())
 }
@@ -82,8 +88,14 @@ pub async fn run_check(
     }
 }
 
-async fn check_one(target: &BackupTarget, read_data: bool) -> Result<(), Box<dyn std::error::Error>> {
-    println!("── Target {:?} ({}) ──────────────────────────", target.name, target.repo);
+async fn check_one(
+    target: &BackupTarget,
+    read_data: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!(
+        "── Target {:?} ({}) ──────────────────────────",
+        target.name, target.repo
+    );
     let password = target.password.resolve()?;
     let target_clone = target.clone();
     tokio::task::spawn_blocking(move || -> Result<_, String> {
@@ -111,7 +123,10 @@ pub async fn run_prune(
 }
 
 async fn prune_one(target: &BackupTarget, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
-    println!("── Target {:?} ({}) ──────────────────────────", target.name, target.repo);
+    println!(
+        "── Target {:?} ({}) ──────────────────────────",
+        target.name, target.repo
+    );
     let Some(retention) = target.retention.as_ref() else {
         println!("No retention policy configured for this target — skipping.");
         return Ok(());
@@ -196,11 +211,21 @@ fn pick_targets(
 
 fn build_keep_options(r: &RetentionPolicy) -> KeepOptions {
     let mut k = KeepOptions::default();
-    if let Some(n) = r.keep_last { k.keep_last = Some(n as i32); }
-    if let Some(n) = r.keep_daily { k.keep_daily = Some(n as i32); }
-    if let Some(n) = r.keep_weekly { k.keep_weekly = Some(n as i32); }
-    if let Some(n) = r.keep_monthly { k.keep_monthly = Some(n as i32); }
-    if let Some(n) = r.keep_yearly { k.keep_yearly = Some(n as i32); }
+    if let Some(n) = r.keep_last {
+        k.keep_last = Some(n as i32);
+    }
+    if let Some(n) = r.keep_daily {
+        k.keep_daily = Some(n as i32);
+    }
+    if let Some(n) = r.keep_weekly {
+        k.keep_weekly = Some(n as i32);
+    }
+    if let Some(n) = r.keep_monthly {
+        k.keep_monthly = Some(n as i32);
+    }
+    if let Some(n) = r.keep_yearly {
+        k.keep_yearly = Some(n as i32);
+    }
     k
 }
 

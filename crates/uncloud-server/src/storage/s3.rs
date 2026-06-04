@@ -70,9 +70,7 @@ impl S3Storage {
             .bucket(bucket)
             .send()
             .await
-            .map_err(|e| {
-                AppError::Storage(format!("Cannot access S3 bucket '{bucket}': {e}"))
-            })?;
+            .map_err(|e| AppError::Storage(format!("Cannot access S3 bucket '{bucket}': {e}")))?;
 
         let temp_dir = std::env::temp_dir().join(format!("uncloud-s3-{}", Uuid::new_v4()));
         fs::create_dir_all(&temp_dir)
@@ -158,12 +156,7 @@ impl StorageBackend for S3Storage {
         Ok(())
     }
 
-    async fn write_stream(
-        &self,
-        path: &str,
-        mut reader: BoxedAsyncRead,
-        _size: u64,
-    ) -> Result<()> {
+    async fn write_stream(&self, path: &str, mut reader: BoxedAsyncRead, _size: u64) -> Result<()> {
         let staging = self.temp_dir.join(format!("ws-{}", Uuid::new_v4()));
         {
             let mut file = File::create(&staging)

@@ -53,8 +53,7 @@ fn embed_fallback_key() {
     }
     src.push_str("];\n");
 
-    let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"))
-        .join("fallback_key.rs");
+    let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set")).join("fallback_key.rs");
     fs::write(&out, src).expect("failed to write fallback_key.rs");
 }
 
@@ -66,8 +65,8 @@ fn parse_hex_key(hex: &str) -> Result<[u8; 32], String> {
     let mut out = [0u8; 32];
     for (i, byte) in out.iter_mut().enumerate() {
         let chunk = &hex[i * 2..i * 2 + 2];
-        *byte = u8::from_str_radix(chunk, 16)
-            .map_err(|e| format!("invalid hex at byte {i}: {e}"))?;
+        *byte =
+            u8::from_str_radix(chunk, 16).map_err(|e| format!("invalid hex at byte {i}: {e}"))?;
     }
     Ok(out)
 }

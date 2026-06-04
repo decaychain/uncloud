@@ -3,8 +3,8 @@ use chrono::{DateTime, Utc};
 use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
 
-pub use uncloud_common::{SyncClientOs, SyncEventSource, SyncOperation, SyncResourceType};
 use uncloud_common::SyncEventResponse;
+pub use uncloud_common::{SyncClientOs, SyncEventSource, SyncOperation, SyncResourceType};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncEvent {
