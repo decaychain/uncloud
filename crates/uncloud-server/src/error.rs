@@ -32,6 +32,12 @@ pub enum AppError {
     #[error("Storage error: {0}")]
     Storage(String),
 
+    #[error("External service error: {0}")]
+    ExternalService(String),
+
+    #[error("External service timeout: {0}")]
+    ExternalTimeout(String),
+
     #[error("Validation error: {0}")]
     Validation(String),
 
@@ -68,6 +74,17 @@ impl IntoResponse for AppError {
             AppError::Storage(msg) => {
                 tracing::error!("Storage error: {}", msg);
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("Storage error: {msg}"))
+            }
+            AppError::ExternalService(msg) => {
+                tracing::warn!("External service error: {}", msg);
+                (StatusCode::BAD_GATEWAY, format!("External service error: {msg}"))
+            }
+            AppError::ExternalTimeout(msg) => {
+                tracing::warn!("External service timeout: {}", msg);
+                (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    format!("External service timeout: {msg}"),
+                )
             }
             AppError::MethodNotAllowed(_) => (StatusCode::METHOD_NOT_ALLOWED, self.to_string()),
             AppError::RangeNotSatisfiable(total) => {
@@ -110,5 +127,21 @@ mod tests {
             .to_str()
             .unwrap();
         assert_eq!(content_range, "bytes */5000");
+    }
+
+    #[test]
+    fn external_service_error_returns_502() {
+        let err = AppError::ExternalService("mail provider connection failed".into());
+        let response = err.into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn external_timeout_returns_504() {
+        let err = AppError::ExternalTimeout("mail provider timed out".into());
+        let response = err.into_response();
+
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
     }
 }

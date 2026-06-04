@@ -26,6 +26,7 @@ pub mod audit;
 pub mod duplicates;
 pub mod oauth;
 pub mod finance;
+pub mod mail;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -283,7 +284,64 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/finance/rules/reorder", put(finance::reorder_rules))
         .route("/finance/rules/apply", post(finance::apply_rules))
-        .route("/finance/rules/test", post(finance::test_rule));
+        .route("/finance/rules/test", post(finance::test_rule))
+        // Mail client foundation
+        .route("/mail/accounts", get(mail::list_accounts).post(mail::create_account))
+        .route("/mail/accounts/{id}", put(mail::update_account).delete(mail::delete_account))
+        .route(
+            "/mail/accounts/{id}/credential",
+            get(mail::get_account_credential)
+                .put(mail::set_account_credential)
+                .delete(mail::clear_account_credential),
+        )
+        .route("/mail/accounts/{id}/test-imap", post(mail::test_account_imap))
+        .route("/mail/accounts/{id}/test-smtp", post(mail::test_account_smtp))
+        .route(
+            "/mail/accounts/{id}/diagnostics",
+            post(mail::diagnose_account_provider),
+        )
+        .route("/mail/accounts/{id}/send", post(mail::send_account_message))
+        .route("/mail/accounts/{id}/sync", post(mail::sync_account))
+        .route(
+            "/mail/accounts/{id}/drafts",
+            get(mail::list_drafts).post(mail::create_draft),
+        )
+        .route(
+            "/mail/drafts/{id}",
+            put(mail::update_draft).delete(mail::delete_draft),
+        )
+        .route(
+            "/mail/drafts/{id}/attachments",
+            post(mail::upload_draft_attachment),
+        )
+        .route(
+            "/mail/drafts/{draft_id}/attachments/{attachment_id}",
+            delete(mail::delete_draft_attachment),
+        )
+        .route("/mail/accounts/{account_id}/folders", get(mail::list_folders))
+        .route("/mail/accounts/{account_id}/folders/refresh", post(mail::refresh_folders))
+        .route(
+            "/mail/accounts/{account_id}/folders/{folder_id}",
+            put(mail::update_folder),
+        )
+        .route(
+            "/mail/accounts/{account_id}/folders/{folder_id}/sync",
+            post(mail::sync_folder),
+        )
+        .route(
+            "/mail/accounts/{account_id}/folders/{folder_id}/messages",
+            get(mail::list_messages),
+        )
+        .route("/mail/messages/{message_id}", get(mail::get_message))
+        .route("/mail/messages/{message_id}/mutate", post(mail::mutate_message))
+        .route("/mail/attachments/{attachment_id}/open", get(mail::open_attachment))
+        .route("/mail/attachments/{attachment_id}/download", get(mail::download_attachment))
+        .route(
+            "/mail/attachments/{attachment_id}/save",
+            post(mail::save_attachment_to_files).layer(middleware::from_fn(require_files_write)),
+        )
+        .route("/mail/identities", get(mail::list_identities).post(mail::create_identity))
+        .route("/mail/identities/{id}", put(mail::update_identity).delete(mail::delete_identity));
 
     // v1-only routes (API tokens, S3 credentials, apps)
     let v1_only = Router::new()

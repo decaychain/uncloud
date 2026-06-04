@@ -35,6 +35,9 @@ fn compute_features_enabled(config: &crate::config::Config, disabled: &[String])
     if config.features.finance && !disabled.contains(&"finance".to_string()) {
         enabled.push("finance".to_string());
     }
+    if config.features.mail && !disabled.contains(&"mail".to_string()) {
+        enabled.push("mail".to_string());
+    }
     enabled
 }
 
@@ -472,6 +475,23 @@ pub async fn update_my_features(
                 .update_one(
                     doc! { "_id": user.id },
                     doc! { "$addToSet": { "disabled_features": "shopping" } },
+                )
+                .await?;
+        }
+    }
+    if let Some(enabled) = body.mail {
+        if enabled {
+            users_coll
+                .update_one(
+                    doc! { "_id": user.id },
+                    doc! { "$pull": { "disabled_features": "mail" } },
+                )
+                .await?;
+        } else {
+            users_coll
+                .update_one(
+                    doc! { "_id": user.id },
+                    doc! { "$addToSet": { "disabled_features": "mail" } },
                 )
                 .await?;
         }

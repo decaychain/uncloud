@@ -23,6 +23,7 @@ pub mod sftp_host_key;
 pub mod migration_lock;
 pub mod backup_lock;
 pub mod finance;
+pub mod mail;
 
 pub use folder_share::*;
 pub use user::*;
@@ -49,6 +50,7 @@ pub use sftp_host_key::*;
 pub use migration_lock::*;
 pub use backup_lock::*;
 pub use finance::*;
+pub use mail::*;
 
 /// Serde module for `Option<chrono::DateTime<Utc>>` ↔ BSON Date (nullable).
 /// Usage: `#[serde(with = "crate::models::opt_dt")]`

@@ -125,7 +125,9 @@ impl TestApp {
             apps: AppsConfig::default(),
             features: FeaturesConfig::default(),
             logging: uncloud_server::config::LoggingConfig::default(),
+            secrets: uncloud_server::config::SecretsConfig::default(),
             sync_audit: uncloud_server::config::SyncAuditConfig::default(),
+            mail_sync: uncloud_server::config::MailSyncConfig::default(),
             backup: uncloud_server::backup::config::BackupConfig::default(),
         };
 
@@ -162,6 +164,7 @@ impl TestApp {
             rescan: RescanService::new(),
             sync_log,
             http_client: reqwest::Client::new(),
+            mail: uncloud_server::services::MailService::new(),
         });
 
         let router = routes::create_router(state);
@@ -338,7 +341,9 @@ impl BoundTestApp {
             apps: AppsConfig::default(),
             features: FeaturesConfig::default(),
             logging: uncloud_server::config::LoggingConfig::default(),
+            secrets: uncloud_server::config::SecretsConfig::default(),
             sync_audit: uncloud_server::config::SyncAuditConfig::default(),
+            mail_sync: uncloud_server::config::MailSyncConfig::default(),
             backup: uncloud_server::backup::config::BackupConfig::default(),
         };
 
@@ -371,6 +376,7 @@ impl BoundTestApp {
             rescan: RescanService::new(),
             sync_log,
             http_client: reqwest::Client::new(),
+            mail: uncloud_server::services::MailService::new(),
         });
 
         let router = uncloud_server::routes::create_router(state);

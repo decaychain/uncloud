@@ -278,6 +278,7 @@ fn OptionalFeaturesSection() -> Element {
                                     toggling.set(true);
                                     let req = uncloud_common::UpdateFeaturesRequest {
                                         shopping: Some(new_val),
+                                        mail: None,
                                     };
                                     match use_shopping::update_my_features(req).await {
                                         Ok(updated_user) => {

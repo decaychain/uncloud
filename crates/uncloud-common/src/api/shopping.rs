@@ -142,4 +142,6 @@ pub struct UpdatePositionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateFeaturesRequest {
     pub shopping: Option<bool>,
+    #[serde(default)]
+    pub mail: Option<bool>,
 }

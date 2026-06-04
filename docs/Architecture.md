@@ -75,6 +75,8 @@ Uncloud/
           vault_recents.rs     ← per-user "recent password vaults" list
           admin_processing.rs  ← admin: rerun all processing tasks
           duplicates.rs        ← duplicate detection: hash-grouped sets, mirror clusters, subset pairs
+          mail.rs              ← experimental mail accounts, identities, IMAP folder refresh,
+                                 latest-first read-only summary sync, MIME body fetch
         services/
           auth.rs              ← AuthService (sessions, password hashing, TOTP, invites,
                                  demo accounts, user bytes)
@@ -84,6 +86,7 @@ Uncloud/
           sharing.rs           ← FolderShare resolution (effective permission for a path)
           sync_log.rs          ← SyncLogService (append events, prune, broadcast)
           rescan.rs            ← RescanService (background storage rescan jobs)
+          mail.rs              ← MailService (experimental IMAP provider boundary)
         storage/
           mod.rs               ← StorageBackend trait
           local.rs             ← LocalStorage impl (filesystem)
@@ -117,6 +120,8 @@ Uncloud/
           sync_event.rs        ← SyncEvent (audit log row, TTL-purged)
           backup_lock.rs       ← single-writer lock for backup runs (heartbeat-based)
           migration_lock.rs    ← single-writer lock for offline storage migrations
+          mail.rs              ← experimental mail accounts, identities, folders,
+                                 low/high UID sync state, message metadata, attachment metadata
         middleware/
           auth.rs              ← AuthUser extractor; cookie + Bearer-token auth_middleware;
                                  admin_middleware
@@ -187,6 +192,8 @@ Uncloud/
           duplicates.rs        ← Duplicates view (mirror folders / subsets / stray hash sets, with bulk delete)
           version_history.rs   ← Version history panel for a file
           shopping.rs          ← Shopping page: lists, items, categories, shops, share list
+          mail.rs              ← Experimental read-only IMAP/SMTP mail client shell
+                                 with account/folder navigation and folder settings
           passwords.rs         ← KeePass-format password vaults (browse, open, recents)
           auth/
             login.rs
@@ -208,6 +215,7 @@ Uncloud/
           use_shares.rs        ← public share link API calls
           use_folder_shares.rs ← folder-share-with-user API calls
           use_shopping.rs      ← shopping lists/items/categories/shops API calls
+          use_mail.rs          ← experimental mail accounts/folders/sync/message API calls
           use_tasks.rs         ← projects, sections, tasks, comments, schedule
           use_apps.rs          ← /api/v1/apps for sidebar
           use_s3.rs            ← /api/v1/s3/credentials CRUD
@@ -640,6 +648,14 @@ sync_audit:
 features:
   shopping: true                   # server-wide shopping feature toggle (per-user opt-out
                                    # via User.disabled_features)
+  finance: true
+  mail: true                       # experimental IMAP/SMTP mail client foundation
+
+mail_sync:
+  enabled: true                    # background sync for enabled mail accounts with credentials
+  interval_secs: 300               # default per-account interval, overridable in Mail settings
+  startup_delay_secs: 60           # delay after server startup before the first tick
+  limit_per_folder: 50             # bounded UID window per folder per tick
 
 logging:
   # tracing_subscriber EnvFilter directive. RUST_LOG env var, when set, always overrides.

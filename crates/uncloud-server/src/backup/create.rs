@@ -34,7 +34,7 @@ use crate::backup::source::{FileEntry, StaticEntry, UncloudSource};
 use crate::backup::CreateArgs;
 use crate::config::Config;
 use crate::db;
-use crate::models::{File, FileVersion};
+use crate::models::{File, FileVersion, MailAttachment, MailDraftAttachment, MailMessage};
 use crate::services::StorageService;
 
 /// Top-level entry point. Resolves which targets to back up to and runs
@@ -182,10 +182,12 @@ async fn run_one_inner(
     } else {
         Vec::new()
     };
+    let mail_blobs = collect_mail_blob_entries(db, &storage_service).await?;
     println!(
-        "Blob enumeration: {} file(s), {} version(s)",
+        "Blob enumeration: {} file(s), {} version(s), {} mail blob(s)",
         files.len(),
-        versions.len()
+        versions.len(),
+        mail_blobs.len(),
     );
 
     // Step 3 — top-level run manifest. Stats reflect what the run plans to
@@ -199,6 +201,7 @@ async fn run_one_inner(
         &collection_counts,
         files.len(),
         versions.len(),
+        mail_blobs.len(),
     )
     .await?;
 
@@ -209,6 +212,7 @@ async fn run_one_inner(
     let handle = tokio::runtime::Handle::current();
     let mut all_files = files;
     all_files.extend(versions);
+    all_files.extend(mail_blobs);
     let total_blobs = all_files.len();
     let max_concurrent = config
         .backup
@@ -443,6 +447,152 @@ async fn collect_version_entries(
     Ok(out)
 }
 
+async fn collect_mail_blob_entries(
+    db: &Database,
+    storage: &Arc<StorageService>,
+) -> Result<Vec<FileEntry>, Box<dyn std::error::Error>> {
+    let mut out = Vec::new();
+    let mut messages = db
+        .collection::<MailMessage>("mail_messages")
+        .find(doc! {})
+        .await?;
+    while let Some(message) = messages.try_next().await? {
+        let Some(storage_id) = message.mail_storage_id else {
+            continue;
+        };
+        let backend = match storage.get_backend(storage_id).await {
+            Ok(backend) => backend,
+            Err(e) => {
+                tracing::warn!(
+                    "skipping mail message {} cached blobs: backend {} unavailable: {e}",
+                    message.id,
+                    storage_id
+                );
+                continue;
+            }
+        };
+        push_mail_blob_entry(
+            &mut out,
+            backend.clone(),
+            message.raw_storage_path,
+            message.raw_storage_size_bytes,
+            PathBuf::from(format!("/uncloud/mail/{}/raw.eml", message.id.to_hex())),
+            message.id,
+        );
+        push_mail_blob_entry(
+            &mut out,
+            backend.clone(),
+            message.text_storage_path,
+            message.text_storage_size_bytes,
+            PathBuf::from(format!("/uncloud/mail/{}/body.txt", message.id.to_hex())),
+            message.id,
+        );
+        push_mail_blob_entry(
+            &mut out,
+            backend,
+            message.html_storage_path,
+            message.html_storage_size_bytes,
+            PathBuf::from(format!("/uncloud/mail/{}/body.html", message.id.to_hex())),
+            message.id,
+        );
+    }
+
+    let mut attachments = db
+        .collection::<MailAttachment>("mail_attachments")
+        .find(doc! {})
+        .await?;
+    while let Some(attachment) = attachments.try_next().await? {
+        let Some(storage_id) = attachment.storage_id else {
+            continue;
+        };
+        let Some(storage_path) = attachment.storage_path else {
+            continue;
+        };
+        let Some(size) = attachment.size_bytes else {
+            tracing::warn!(
+                "skipping mail attachment {} cached blob: size is unknown",
+                attachment.id
+            );
+            continue;
+        };
+        let backend = match storage.get_backend(storage_id).await {
+            Ok(backend) => backend,
+            Err(e) => {
+                tracing::warn!(
+                    "skipping mail attachment {} cached blob: backend {} unavailable: {e}",
+                    attachment.id,
+                    storage_id
+                );
+                continue;
+            }
+        };
+        out.push(FileEntry {
+            backend,
+            storage_path,
+            snapshot_path: PathBuf::from(format!(
+                "/uncloud/mail-attachments/{}/blob",
+                attachment.id.to_hex()
+            )),
+            size,
+        });
+    }
+
+    let mut draft_attachments = db
+        .collection::<MailDraftAttachment>("mail_draft_attachments")
+        .find(doc! {})
+        .await?;
+    while let Some(attachment) = draft_attachments.try_next().await? {
+        let backend = match storage.get_backend(attachment.storage_id).await {
+            Ok(backend) => backend,
+            Err(e) => {
+                tracing::warn!(
+                    "skipping mail draft attachment {} cached blob: backend {} unavailable: {e}",
+                    attachment.id,
+                    attachment.storage_id
+                );
+                continue;
+            }
+        };
+        out.push(FileEntry {
+            backend,
+            storage_path: attachment.storage_path,
+            snapshot_path: PathBuf::from(format!(
+                "/uncloud/mail-draft-attachments/{}/blob",
+                attachment.id.to_hex()
+            )),
+            size: attachment.size_bytes,
+        });
+    }
+    Ok(out)
+}
+
+fn push_mail_blob_entry(
+    out: &mut Vec<FileEntry>,
+    backend: Arc<dyn crate::storage::StorageBackend>,
+    storage_path: Option<String>,
+    size: Option<u64>,
+    snapshot_path: PathBuf,
+    message_id: mongodb::bson::oid::ObjectId,
+) {
+    let Some(storage_path) = storage_path else {
+        return;
+    };
+    let Some(size) = size else {
+        tracing::warn!(
+            "skipping mail message {} cached blob {}: size is unknown",
+            message_id,
+            storage_path
+        );
+        return;
+    };
+    out.push(FileEntry {
+        backend,
+        storage_path,
+        snapshot_path,
+        size,
+    });
+}
+
 async fn enumerate_static_entries(
     root: &std::path::Path,
 ) -> Result<Vec<StaticEntry>, Box<dyn std::error::Error>> {
@@ -512,6 +662,7 @@ async fn write_run_manifest(
     counts: &[(String, usize)],
     files: usize,
     versions: usize,
+    mail_blobs: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let collections: Vec<serde_json::Value> = counts
         .iter()
@@ -534,6 +685,7 @@ async fn write_run_manifest(
         "stats": {
             "files": files,
             "versions": versions,
+            "mail_blobs": mail_blobs,
             "db_rows": counts.iter().map(|(_, n)| n).sum::<usize>(),
         },
         "collections": collections,

@@ -7,7 +7,9 @@
 
 use dioxus::prelude::*;
 
-fn default_class() -> String { "w-4 h-4".to_string() }
+fn default_class() -> String {
+    "w-4 h-4".to_string()
+}
 
 macro_rules! lucide_icon {
     ($name:ident, $($body:tt)*) => {
@@ -32,8 +34,11 @@ macro_rules! lucide_icon {
     };
 }
 
-lucide_icon!(IconFolder,
-    path { d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" }
+lucide_icon!(
+    IconFolder,
+    path {
+        d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
+    }
 );
 
 /// Filled folder — uses `fill="currentColor"` for a solid shape so it reads as
@@ -75,6 +80,32 @@ lucide_icon!(IconShoppingCart,
     path { d: "M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57l1.65-7.43H5.12" }
 );
 
+lucide_icon!(IconMail,
+    rect { width: "20", height: "16", x: "2", y: "4", rx: "2" }
+    path { d: "m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" }
+);
+
+lucide_icon!(IconSend,
+    path { d: "m22 2-7 20-4-9-9-4Z" }
+    path { d: "M22 2 11 13" }
+);
+
+lucide_icon!(IconReply,
+    polyline { points: "9 17 4 12 9 7" }
+    path { d: "M20 18v-2a4 4 0 0 0-4-4H4" }
+);
+
+lucide_icon!(IconReplyAll,
+    polyline { points: "7 17 2 12 7 7" }
+    polyline { points: "12 17 7 12 12 7" }
+    path { d: "M22 18v-2a4 4 0 0 0-4-4H7" }
+);
+
+lucide_icon!(IconForward,
+    polyline { points: "15 17 20 12 15 7" }
+    path { d: "M4 18v-2a4 4 0 0 1 4-4h12" }
+);
+
 lucide_icon!(IconWallet,
     path { d: "M19 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a2 2 0 0 1-2-2V5" }
     path { d: "M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4" }
@@ -113,8 +144,11 @@ lucide_icon!(IconUsers,
     path { d: "M16 3.13a4 4 0 0 1 0 7.75" }
 );
 
-lucide_icon!(IconShield,
-    path { d: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" }
+lucide_icon!(
+    IconShield,
+    path {
+        d: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"
+    }
 );
 
 lucide_icon!(IconLink,
@@ -128,6 +162,19 @@ lucide_icon!(IconTrash,
     path { d: "M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" }
     line { x1: "10", x2: "10", y1: "11", y2: "17" }
     line { x1: "14", x2: "14", y1: "11", y2: "17" }
+);
+
+lucide_icon!(IconArchive,
+    rect { width: "20", height: "5", x: "2", y: "3", rx: "1" }
+    path { d: "M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" }
+    path { d: "M10 12h4" }
+);
+
+lucide_icon!(
+    IconStar,
+    polygon {
+        points: "12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"
+    }
 );
 
 lucide_icon!(IconListMusic,
@@ -155,8 +202,11 @@ lucide_icon!(IconX,
     path { d: "m6 6 12 12" }
 );
 
-lucide_icon!(IconCheck,
-    path { d: "M20 6 9 17l-5-5" }
+lucide_icon!(
+    IconCheck,
+    path {
+        d: "M20 6 9 17l-5-5"
+    }
 );
 
 lucide_icon!(IconCopy,
@@ -186,8 +236,11 @@ lucide_icon!(IconFolderPlus,
     line { x1: "9", y1: "13", x2: "15", y2: "13" }
 );
 
-lucide_icon!(IconFolderOpen,
-    path { d: "m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" }
+lucide_icon!(
+    IconFolderOpen,
+    path {
+        d: "m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"
+    }
 );
 
 lucide_icon!(IconFile,
@@ -265,13 +318,9 @@ lucide_icon!(IconMoreVertical,
     circle { cx: "12", cy: "19", r: "1" }
 );
 
-lucide_icon!(IconChevronRight,
-    path { d: "m9 18 6-6-6-6" }
-);
+lucide_icon!(IconChevronRight, path { d: "m9 18 6-6-6-6" });
 
-lucide_icon!(IconChevronDown,
-    path { d: "m6 9 6 6 6-6" }
-);
+lucide_icon!(IconChevronDown, path { d: "m6 9 6 6 6-6" });
 
 lucide_icon!(IconMoveRight,
     path { d: "M18 8 22 12 18 16" }
@@ -316,6 +365,13 @@ lucide_icon!(IconDownload,
     line { x1: "12", y1: "15", x2: "12", y2: "3" }
 );
 
+lucide_icon!(
+    IconPaperclip,
+    path {
+        d: "m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.586a6 6 0 1 0 8.485 8.485l8.379-8.586"
+    }
+);
+
 lucide_icon!(IconShare,
     circle { cx: "18", cy: "5", r: "3" }
     circle { cx: "6", cy: "12", r: "3" }
@@ -324,8 +380,11 @@ lucide_icon!(IconShare,
     line { x1: "15.41", y1: "6.51", x2: "8.59", y2: "10.49" }
 );
 
-lucide_icon!(IconPlay,
-    polygon { points: "6 3 20 12 6 21 6 3" }
+lucide_icon!(
+    IconPlay,
+    polygon {
+        points: "6 3 20 12 6 21 6 3"
+    }
 );
 
 lucide_icon!(IconPause,

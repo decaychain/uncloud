@@ -24,7 +24,11 @@ pub struct Config {
     #[serde(default)]
     pub logging: LoggingConfig,
     #[serde(default)]
+    pub secrets: SecretsConfig,
+    #[serde(default)]
     pub sync_audit: SyncAuditConfig,
+    #[serde(default)]
+    pub mail_sync: MailSyncConfig,
     #[serde(default)]
     pub backup: crate::backup::config::BackupConfig,
 }
@@ -375,6 +379,16 @@ pub struct FeaturesConfig {
     pub shopping: bool,
     #[serde(default = "default_true")]
     pub finance: bool,
+    #[serde(default = "default_true")]
+    pub mail: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SecretsConfig {
+    /// Base64-encoded 32-byte key used for encrypted-at-rest server secrets.
+    /// Generate with `openssl rand -base64 32` and inject through an env var.
+    #[serde(default)]
+    pub master_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -387,12 +401,36 @@ pub struct SyncAuditConfig {
     pub max_records_per_user: u32,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct MailSyncConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_mail_sync_interval_secs")]
+    pub interval_secs: u64,
+    #[serde(default = "default_mail_sync_startup_delay_secs")]
+    pub startup_delay_secs: u64,
+    #[serde(default = "default_mail_sync_limit_per_folder")]
+    pub limit_per_folder: u32,
+}
+
 fn default_sync_audit_retention_days() -> u32 {
     7
 }
 
 fn default_sync_audit_max_records_per_user() -> u32 {
     10_000
+}
+
+fn default_mail_sync_interval_secs() -> u64 {
+    300
+}
+
+fn default_mail_sync_startup_delay_secs() -> u64 {
+    60
+}
+
+fn default_mail_sync_limit_per_folder() -> u32 {
+    50
 }
 
 impl Default for SyncAuditConfig {
@@ -405,13 +443,28 @@ impl Default for SyncAuditConfig {
     }
 }
 
+impl Default for MailSyncConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_secs: default_mail_sync_interval_secs(),
+            startup_delay_secs: default_mail_sync_startup_delay_secs(),
+            limit_per_folder: default_mail_sync_limit_per_folder(),
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
 
 impl Default for FeaturesConfig {
     fn default() -> Self {
-        Self { shopping: true, finance: true }
+        Self {
+            shopping: true,
+            finance: true,
+            mail: true,
+        }
     }
 }
 
@@ -548,7 +601,9 @@ impl Default for Config {
             apps: AppsConfig::default(),
             features: FeaturesConfig::default(),
             logging: LoggingConfig::default(),
+            secrets: SecretsConfig::default(),
             sync_audit: SyncAuditConfig::default(),
+            mail_sync: MailSyncConfig::default(),
             backup: crate::backup::config::BackupConfig::default(),
         }
     }

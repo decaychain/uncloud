@@ -14,11 +14,11 @@
 //!    - `overwrite` (with `--yes-i-know-this-is-destructive`):
 //!       drop_collection before insert.
 //! 6. Restore each allowlisted collection from `/uncloud/database/*.jsonl`,
-//!    rewriting `storage_id` fields through the remap and skipping
+//!    rewriting `storage_id` / mail storage fields through the remap and skipping
 //!    `storages` entirely.
-//! 7. Restore blob bytes from `/uncloud/blobs/<file_id>` and (if present)
-//!    `/uncloud/versions/<file_id>/<version_id>` straight into the
-//!    matched destination backends.
+//! 7. Restore blob bytes from `/uncloud/blobs/<file_id>`, mail cache paths,
+//!    and (if present) `/uncloud/versions/<file_id>/<version_id>` straight
+//!    into the matched destination backends.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,7 +39,7 @@ use crate::backup::repo;
 use crate::backup::{ConflictPolicy, RestoreArgs};
 use crate::config::Config;
 use crate::db;
-use crate::models::Storage;
+use crate::models::{MailAttachment, MailDraftAttachment, MailMessage, Storage};
 use crate::services::StorageService;
 use crate::storage::StorageBackend;
 
@@ -79,6 +79,13 @@ const RESTORE_COLLECTIONS: &[&str] = &[
     "finance_import_runs",
     "finance_balance_snapshots",
     "finance_rules",
+    "mail_accounts",
+    "mail_identities",
+    "mail_folders",
+    "mail_messages",
+    "mail_attachments",
+    "mail_drafts",
+    "mail_draft_attachments",
 ];
 
 pub async fn run(args: RestoreArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -92,9 +99,7 @@ pub async fn run(args: RestoreArgs) -> Result<(), Box<dyn std::error::Error>> {
         .clone();
 
     if args.conflict_policy == ConflictPolicy::Overwrite && !args.yes_i_know_this_is_destructive {
-        return Err(
-            "--conflict-policy=overwrite requires --yes-i-know-this-is-destructive".into(),
-        );
+        return Err("--conflict-policy=overwrite requires --yes-i-know-this-is-destructive".into());
     }
 
     let password = target.password.resolve()?;
@@ -129,7 +134,10 @@ async fn run_inner(
     password: &str,
     args: &RestoreArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("── Restore from {:?} ({}) ──────────────────────────", target.name, target.repo);
+    println!(
+        "── Restore from {:?} ({}) ──────────────────────────",
+        target.name, target.repo
+    );
 
     // Open + index + resolve snapshot, all on a blocking thread.
     let target_clone = target.clone();
@@ -162,18 +170,28 @@ async fn run_inner(
         snap_options.include_versions, snap_options.include_trash, snap_options.include_thumbnails
     );
     let snap_storages = read_collection_jsonl(&indexed_repo, snap_tree, "storages").await?;
-    println!("Snapshot contains {} storage definition(s).", snap_storages.len());
+    println!(
+        "Snapshot contains {} storage definition(s).",
+        snap_storages.len()
+    );
 
     let dest_storages: Vec<Storage> = {
         let coll = db.collection::<Storage>("storages");
         let mut cur = coll.find(doc! {}).await?;
         let mut v = Vec::new();
-        while let Some(s) = cur.try_next().await? { v.push(s); }
+        while let Some(s) = cur.try_next().await? {
+            v.push(s);
+        }
         v
     };
     let default_storage_id = pick_default_storage(&dest_storages, args.default_storage.as_deref())?;
 
-    let remap = build_remap(&snap_storages, &dest_storages, default_storage_id, &args.target)?;
+    let remap = build_remap(
+        &snap_storages,
+        &dest_storages,
+        default_storage_id,
+        &args.target,
+    )?;
     print_remap_plan(&remap, &snap_storages, &dest_storages);
 
     if args.dry_run {
@@ -230,12 +248,9 @@ fn pick_default_storage(
             .ok_or_else(|| format!("--default-storage {name:?} is not configured"))?;
         Ok(s.id)
     } else {
-        let s = dest
-            .iter()
-            .find(|s| s.is_default)
-            .ok_or_else(|| {
-                "no default storage on destination — pass --default-storage <name>".to_string()
-            })?;
+        let s = dest.iter().find(|s| s.is_default).ok_or_else(|| {
+            "no default storage on destination — pass --default-storage <name>".to_string()
+        })?;
         Ok(s.id)
     }
 }
@@ -275,10 +290,19 @@ fn print_remap_plan(
         let snap_name = s.get_str("name").unwrap_or("(unnamed)");
         let dest_id = remap.get(&snap_id).copied();
         let dest_name = dest_id
-            .and_then(|did| dest_storages.iter().find(|d| d.id == did).map(|d| d.name.clone()))
+            .and_then(|did| {
+                dest_storages
+                    .iter()
+                    .find(|d| d.id == did)
+                    .map(|d| d.name.clone())
+            })
             .unwrap_or_else(|| "(unmapped)".into());
         let matched = dest_storages.iter().any(|d| d.name == snap_name);
-        let suffix = if matched { "matched" } else { "default fallback" };
+        let suffix = if matched {
+            "matched"
+        } else {
+            "default fallback"
+        };
         println!("  {snap_name:?}  →  {dest_name:?}  ({suffix})");
     }
 }
@@ -332,12 +356,20 @@ async fn restore_collection(
     for mut doc in docs {
         if matches!(name, "files" | "folders") {
             remap_storage_id(&mut doc, remap);
+        } else if matches!(name, "mail_accounts" | "mail_messages") {
+            remap_mail_storage_id(&mut doc, remap);
+        } else if matches!(name, "mail_attachments" | "mail_draft_attachments") {
+            remap_storage_id(&mut doc, remap);
         } else if name == "sftp_host_keys" {
             // Drop any host-key row whose source storage isn't represented
             // on the destination. The destination will TOFU-pin its own
             // keys on first use.
-            let Some(sid) = doc.get_object_id("storage_id").ok() else { continue };
-            if !remap.contains_key(&sid) { continue; }
+            let Some(sid) = doc.get_object_id("storage_id").ok() else {
+                continue;
+            };
+            if !remap.contains_key(&sid) {
+                continue;
+            }
             remap_storage_id(&mut doc, remap);
         }
         prepared.push(doc);
@@ -355,6 +387,17 @@ fn remap_storage_id(doc: &mut Document, remap: &std::collections::HashMap<Object
     if let Ok(sid) = doc.get_object_id("storage_id") {
         if let Some(new) = remap.get(&sid).copied() {
             doc.insert("storage_id", Bson::ObjectId(new));
+        }
+    }
+}
+
+fn remap_mail_storage_id(
+    doc: &mut Document,
+    remap: &std::collections::HashMap<ObjectId, ObjectId>,
+) {
+    if let Ok(sid) = doc.get_object_id("mail_storage_id") {
+        if let Some(new) = remap.get(&sid).copied() {
+            doc.insert("mail_storage_id", Bson::ObjectId(new));
         }
     }
 }
@@ -378,9 +421,14 @@ async fn read_collection_jsonl(
         .map_err(|e| format!("collection `{name}` is not valid UTF-8: {e}"))?;
     let mut out = Vec::new();
     for (line_no, line) in text.lines().enumerate() {
-        if line.trim().is_empty() { continue; }
+        if line.trim().is_empty() {
+            continue;
+        }
         let value: serde_json::Value = serde_json::from_str(line).map_err(|e| {
-            format!("collection `{name}` line {}: invalid JSON: {e}", line_no + 1)
+            format!(
+                "collection `{name}` line {}: invalid JSON: {e}",
+                line_no + 1
+            )
         })?;
         let doc = dump::json_to_document(value)?;
         out.push(doc);
@@ -488,7 +536,125 @@ async fn restore_all_blobs(
         }
     }
 
+    let mut messages = db
+        .collection::<MailMessage>("mail_messages")
+        .find(doc! {})
+        .await?;
+    while let Some(message) = messages.try_next().await? {
+        let Some(storage_id) = message.mail_storage_id else {
+            continue;
+        };
+        let backend = match storage_service.get_backend(storage_id).await {
+            Ok(backend) => backend,
+            Err(e) => {
+                tracing::warn!("skipping cached mail body for message {}: {e}", message.id);
+                continue;
+            }
+        };
+        count += restore_optional_mail_blob(
+            repo,
+            snap_tree,
+            &backend,
+            PathBuf::from(format!("/uncloud/mail/{}/raw.eml", message.id.to_hex())),
+            message.raw_storage_path.as_deref(),
+        )
+        .await?;
+        count += restore_optional_mail_blob(
+            repo,
+            snap_tree,
+            &backend,
+            PathBuf::from(format!("/uncloud/mail/{}/body.txt", message.id.to_hex())),
+            message.text_storage_path.as_deref(),
+        )
+        .await?;
+        count += restore_optional_mail_blob(
+            repo,
+            snap_tree,
+            &backend,
+            PathBuf::from(format!("/uncloud/mail/{}/body.html", message.id.to_hex())),
+            message.html_storage_path.as_deref(),
+        )
+        .await?;
+    }
+
+    let mut attachments = db
+        .collection::<MailAttachment>("mail_attachments")
+        .find(doc! {})
+        .await?;
+    while let Some(attachment) = attachments.try_next().await? {
+        let Some(storage_id) = attachment.storage_id else {
+            continue;
+        };
+        let backend = match storage_service.get_backend(storage_id).await {
+            Ok(backend) => backend,
+            Err(e) => {
+                tracing::warn!("skipping cached mail attachment {}: {e}", attachment.id);
+                continue;
+            }
+        };
+        count += restore_optional_mail_blob(
+            repo,
+            snap_tree,
+            &backend,
+            PathBuf::from(format!(
+                "/uncloud/mail-attachments/{}/blob",
+                attachment.id.to_hex()
+            )),
+            attachment.storage_path.as_deref(),
+        )
+        .await?;
+    }
+
+    let mut draft_attachments = db
+        .collection::<MailDraftAttachment>("mail_draft_attachments")
+        .find(doc! {})
+        .await?;
+    while let Some(attachment) = draft_attachments.try_next().await? {
+        let backend = match storage_service.get_backend(attachment.storage_id).await {
+            Ok(backend) => backend,
+            Err(e) => {
+                tracing::warn!(
+                    "skipping cached mail draft attachment {}: {e}",
+                    attachment.id
+                );
+                continue;
+            }
+        };
+        count += restore_optional_mail_blob(
+            repo,
+            snap_tree,
+            &backend,
+            PathBuf::from(format!(
+                "/uncloud/mail-draft-attachments/{}/blob",
+                attachment.id.to_hex()
+            )),
+            Some(&attachment.storage_path),
+        )
+        .await?;
+    }
+
     Ok(count)
+}
+
+async fn restore_optional_mail_blob(
+    repo: &Arc<Repository<IndexedFullStatus>>,
+    snap_tree: TreeId,
+    backend: &Arc<dyn StorageBackend>,
+    snapshot_path: PathBuf,
+    target_path: Option<&str>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let Some(target_path) = target_path.filter(|path| !path.trim().is_empty()) else {
+        return Ok(0);
+    };
+    if restore_blob(repo, snap_tree, &snapshot_path, backend, target_path).await? {
+        Ok(1)
+    } else {
+        tracing::warn!(
+            "snapshot has no cached mail blob {} — skipped",
+            snapshot_path.display()
+        );
+        Ok(0)
+    }
 }
 
 /// Manifest options the restore engine cares about. Anything else in
@@ -513,7 +679,10 @@ async fn read_snapshot_options(
         None => return Ok(default_pre_options_manifest()),
     };
     let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-    let opts = value.get("options").cloned().unwrap_or(serde_json::Value::Null);
+    let opts = value
+        .get("options")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     if opts.is_null() {
         return Ok(default_pre_options_manifest());
     }

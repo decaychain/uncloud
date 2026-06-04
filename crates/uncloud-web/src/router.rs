@@ -1,18 +1,17 @@
-use dioxus::prelude::*;
-use gloo_storage::Storage;
 use crate::components::{
     auth::{Login, Register},
     dashboard::DashboardPage,
     duplicates::DuplicatesPage,
+    file_browser::FileBrowser,
     finance::{
         FinanceAccountsPage, FinanceCategoriesPage, FinanceImportsPage, FinanceRulesPage,
         FinanceSchemasPage, FinanceTransactionsPage,
     },
-    file_browser::FileBrowser,
-    layout::Layout,
     gallery::{Gallery, GalleryAlbum},
+    layout::Layout,
+    mail::MailPage,
     music::{
-        Music, MusicArtistView, MusicAlbumView as MusicAlbumViewComp, MusicFolderView,
+        Music, MusicAlbumView as MusicAlbumViewComp, MusicArtistView, MusicFolderView,
         MusicPlaylistView, MusicScopeCategoryView, MusicScopeFolderView,
     },
     oauth_consent::OAuthConsent,
@@ -21,9 +20,11 @@ use crate::components::{
     setup::Setup,
     shares_page::SharesPage,
     shopping,
-    tasks::{TasksAssignedPage, TasksSchedulePage, TasksProjectPage},
+    tasks::{TasksAssignedPage, TasksProjectPage, TasksSchedulePage},
     trash::Trash,
 };
+use dioxus::prelude::*;
+use gloo_storage::Storage;
 
 #[derive(Debug, Clone, Routable, PartialEq)]
 #[rustfmt::skip]
@@ -128,6 +129,12 @@ pub enum Route {
         #[route("/shopping/list/:id")]
         ShoppingList { id: String },
 
+        #[route("/mail")]
+        Mail {},
+
+        #[route("/mail/account/:account_id")]
+        MailAccount { account_id: String },
+
         #[route("/settings")]
         Settings {},
 
@@ -177,7 +184,9 @@ fn Dashboard() -> Element {
 #[component]
 fn Settings() -> Element {
     let nav = use_navigator();
-    nav.replace(Route::SettingsTab { tab: "account".to_string() });
+    nav.replace(Route::SettingsTab {
+        tab: "account".to_string(),
+    });
     rsx! {}
 }
 
@@ -348,6 +357,20 @@ fn Shopping() -> Element {
 fn ShoppingList(id: String) -> Element {
     rsx! {
         shopping::ShoppingListView { key: "{id}", list_id: id }
+    }
+}
+
+#[component]
+fn Mail() -> Element {
+    rsx! {
+        MailPage { route_account_id: None }
+    }
+}
+
+#[component]
+fn MailAccount(account_id: String) -> Element {
+    rsx! {
+        MailPage { key: "{account_id}", route_account_id: Some(account_id) }
     }
 }
 

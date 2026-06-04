@@ -105,6 +105,29 @@ sync_audit:
   # Hard cap on events per user (prune task trims older rows past this)
   max_records_per_user: 10000
 
+# Feature toggles. Users can opt out of some features via preferences; these
+# are server-wide availability switches.
+features:
+  shopping: true
+  finance: true
+  mail: true
+
+# Background mail sync. Only enabled mail accounts with stored credentials and
+# per-account sync enabled are synced. Accounts can override interval_secs in
+# Mail account settings.
+mail_sync:
+  enabled: true
+  # Default scheduled sync interval, in seconds, for accounts without an
+  # explicit per-account override.
+  interval_secs: 300
+  startup_delay_secs: 60
+  limit_per_folder: 50
+
+# Server-side encrypted secrets. Mail credential storage requires a stable
+# 32-byte master key. Generate one with: openssl rand -base64 32
+secrets:
+  # master_key: ${UNCLOUD_SECRETS_MASTER_KEY}
+
 # Logging
 logging:
   # tracing_subscriber EnvFilter directive. `RUST_LOG` env var, when set,

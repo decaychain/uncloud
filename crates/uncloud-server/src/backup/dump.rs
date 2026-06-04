@@ -18,7 +18,7 @@ use std::path::Path;
 use bson::{Bson, Document};
 use futures::stream::TryStreamExt;
 use mongodb::Database;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 
@@ -62,6 +62,13 @@ pub const COLLECTION_ALLOWLIST: &[&str] = &[
     "finance_import_runs",
     "finance_balance_snapshots",
     "finance_rules",
+    "mail_accounts",
+    "mail_identities",
+    "mail_folders",
+    "mail_messages",
+    "mail_attachments",
+    "mail_drafts",
+    "mail_draft_attachments",
 ];
 
 /// Top-level schema version stamped into `/database/manifest.json`.
@@ -96,11 +103,7 @@ pub fn json_to_document(value: Value) -> Result<Document> {
 
 /// Stream every row in `collection` as JSON Lines into `writer`.
 /// Returns the number of rows written.
-pub async fn dump_collection<W>(
-    db: &Database,
-    collection: &str,
-    writer: &mut W,
-) -> Result<usize>
+pub async fn dump_collection<W>(db: &Database, collection: &str, writer: &mut W) -> Result<usize>
 where
     W: AsyncWriteExt + Unpin,
 {
@@ -135,10 +138,7 @@ where
 /// Dump every allowlisted collection into `<dir>/<collection>.jsonl` and
 /// write `<dir>/manifest.json`. Returns per-collection row counts so callers
 /// can surface them in summaries / manifests.
-pub async fn dump_all(
-    db: &Database,
-    dir: &Path,
-) -> Result<Vec<(String, usize)>> {
+pub async fn dump_all(db: &Database, dir: &Path) -> Result<Vec<(String, usize)>> {
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|e| AppError::Internal(format!("create dump dir {dir:?}: {e}")))?;
