@@ -229,6 +229,8 @@ pub struct MailDraft {
     pub subject: String,
     pub body_text: String,
     #[serde(default)]
+    pub body_html: Option<String>,
+    #[serde(default)]
     pub in_reply_to: Option<String>,
     #[serde(default)]
     pub references: Vec<String>,

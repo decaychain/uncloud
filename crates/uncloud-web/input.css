@@ -10,6 +10,57 @@
   animation: uc-blink 0.5s ease-in-out 3;
 }
 
+.uc-mail-editor-shell {
+  min-height: 18rem;
+}
+
+.uc-mail-editor-shell .tiptap {
+  min-height: 18rem;
+  outline: none;
+}
+
+.uc-mail-editor-prose {
+  min-height: 18rem;
+  padding: 0.875rem 1rem;
+  color: hsl(var(--bc));
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.uc-mail-editor-prose p {
+  margin: 0 0 0.75rem;
+}
+
+.uc-mail-editor-prose p:last-child {
+  margin-bottom: 0;
+}
+
+.uc-mail-editor-prose ul,
+.uc-mail-editor-prose ol {
+  margin: 0 0 0.75rem;
+  padding-left: 1.35rem;
+}
+
+.uc-mail-editor-prose blockquote {
+  margin: 0 0 0.75rem;
+  border-left: 2px solid hsl(var(--bc) / 0.2);
+  padding-left: 0.875rem;
+  color: hsl(var(--bc) / 0.68);
+}
+
+.uc-mail-editor-prose a {
+  color: hsl(var(--p));
+  text-decoration: underline;
+}
+
+.uc-mail-editor-prose .is-editor-empty:first-child::before {
+  color: hsl(var(--bc) / 0.4);
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+
 /* Safe-area insets for edge-to-edge on Android (and iOS, if we ever get
    there). The navbar uses `.pt-safe` so its `bg-base-200` extends up under
    the status bar; the player / bottom page uses `.pb-safe` so their

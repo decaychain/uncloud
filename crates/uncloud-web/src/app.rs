@@ -5,6 +5,7 @@ use crate::router::Route;
 use crate::state::{AuthState, FontScale, HighlightTarget, PinnedPlaylistState, PlayerState, PlaylistDirtyTick, RescanState, ThemeState, VaultOpenTarget, ViewMode};
 
 const TAILWIND: Asset = asset!("/assets/tailwind.css");
+const MAIL_EDITOR: Asset = asset!("/assets/mail-editor.js");
 const FAVICON: Asset = asset!("/assets/favicon.ico");
 const FAVICON_PNG: Asset = asset!("/assets/favicon-32.png");
 const APPLE_TOUCH_ICON: Asset = asset!("/assets/apple-touch-icon.png");
@@ -110,6 +111,7 @@ pub fn App() -> Element {
 
     rsx! {
         document::Stylesheet { href: TAILWIND }
+        document::Script { src: MAIL_EDITOR }
         document::Link { rel: "icon", href: FAVICON, sizes: "16x16 32x32 48x48" }
         document::Link { rel: "icon", href: FAVICON_PNG, r#type: "image/png", sizes: "32x32" }
         document::Link { rel: "apple-touch-icon", href: APPLE_TOUCH_ICON }

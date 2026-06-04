@@ -248,6 +248,8 @@ pub struct SendMailMessageRequest {
     pub subject: String,
     pub body_text: String,
     #[serde(default)]
+    pub body_html: Option<String>,
+    #[serde(default)]
     pub in_reply_to: Option<String>,
     #[serde(default)]
     pub references: Vec<String>,
@@ -265,6 +267,7 @@ pub struct MailDraftResponse {
     pub bcc: Vec<MailAddressDto>,
     pub subject: String,
     pub body_text: String,
+    pub body_html: Option<String>,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
     pub created_at: String,
@@ -289,6 +292,8 @@ pub struct UpsertMailDraftRequest {
     pub subject: String,
     #[serde(default)]
     pub body_text: String,
+    #[serde(default)]
+    pub body_html: Option<String>,
     #[serde(default)]
     pub in_reply_to: Option<String>,
     #[serde(default)]

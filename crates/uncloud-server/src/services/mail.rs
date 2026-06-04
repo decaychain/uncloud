@@ -22,7 +22,7 @@ use lettre::transport::smtp::{
 use lettre::{
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
     message::{
-        Mailbox,
+        Mailbox, MultiPart,
         header::{HeaderName, HeaderValue},
     },
 };
@@ -321,7 +321,7 @@ impl MailService {
         })
     }
 
-    pub async fn send_smtp_plain_text(
+    pub async fn send_smtp_message(
         &self,
         settings: &MailServerConfig,
         password: &str,
@@ -342,7 +342,7 @@ impl MailService {
             .timeout(Some(MAIL_OP_TIMEOUT))
             .build::<Tokio1Executor>();
         let message_id = message.message_id.clone();
-        let smtp_message = build_plain_text_message(message)?;
+        let smtp_message = build_smtp_message(message)?;
         let raw_message = smtp_message.formatted();
         let response = imap_timeout(
             "SMTP send",
@@ -917,7 +917,7 @@ fn mail_move_unsupported_message() -> String {
         .to_string()
 }
 
-fn build_plain_text_message(message: RemoteOutgoingMessage) -> Result<Message> {
+fn build_smtp_message(message: RemoteOutgoingMessage) -> Result<Message> {
     let mut builder = Message::builder()
         .message_id(Some(message.message_id.clone()))
         .from(mailbox_from_address(&message.from)?)
@@ -949,9 +949,22 @@ fn build_plain_text_message(message: RemoteOutgoingMessage) -> Result<Message> {
         ));
     }
 
-    builder
-        .body(message.body_text)
-        .map_err(|e| AppError::BadRequest(format!("mail message could not be built: {e}")))
+    let body_html = message
+        .body_html
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    match body_html {
+        Some(body_html) => builder
+            .multipart(MultiPart::alternative_plain_html(
+                message.body_text,
+                body_html,
+            ))
+            .map_err(|e| AppError::BadRequest(format!("mail message could not be built: {e}"))),
+        None => builder
+            .body(message.body_text)
+            .map_err(|e| AppError::BadRequest(format!("mail message could not be built: {e}"))),
+    }
 }
 
 fn clean_message_header_value(value: Option<&str>) -> Result<Option<String>> {
@@ -1080,6 +1093,7 @@ pub struct RemoteOutgoingMessage {
     pub bcc: Vec<RemoteMailAddress>,
     pub subject: String,
     pub body_text: String,
+    pub body_html: Option<String>,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
 }
@@ -1597,7 +1611,7 @@ fn normalize_plain_text(input: &str) -> String {
 mod tests {
     use super::{
         MailService, RemoteMailAddress, RemoteMessageFlag, RemoteOutgoingMessage, UidSyncDirection,
-        UidSyncPlan, bodystructure_has_attachment, build_plain_text_message, display_name,
+        UidSyncPlan, bodystructure_has_attachment, build_smtp_message, display_name,
         flag_store_query, latest_cached_refresh_plan, mail_move_unsupported_message,
         mailbox_from_address, map_imap_command_error, map_imap_login_error, next_uid_sync_plan,
         parent_path, parse_message_body, quoted_imap_search_string, sync_completed,
@@ -1781,8 +1795,8 @@ mod tests {
     }
 
     #[test]
-    fn build_plain_text_message_requires_valid_recipients() {
-        let err = build_plain_text_message(RemoteOutgoingMessage {
+    fn build_smtp_message_requires_valid_recipients() {
+        let err = build_smtp_message(RemoteOutgoingMessage {
             message_id: "<test@uncloud.local>".to_string(),
             from: RemoteMailAddress {
                 name: Some("Sender".to_string()),
@@ -1797,6 +1811,7 @@ mod tests {
             bcc: Vec::new(),
             subject: "Test".to_string(),
             body_text: "Body".to_string(),
+            body_html: None,
             in_reply_to: None,
             references: Vec::new(),
         })
@@ -1806,8 +1821,8 @@ mod tests {
     }
 
     #[test]
-    fn build_plain_text_message_omits_bcc_header() {
-        let message = build_plain_text_message(RemoteOutgoingMessage {
+    fn build_smtp_message_omits_bcc_header() {
+        let message = build_smtp_message(RemoteOutgoingMessage {
             message_id: "<test@uncloud.local>".to_string(),
             from: RemoteMailAddress {
                 name: Some("Sender".to_string()),
@@ -1825,6 +1840,7 @@ mod tests {
             }],
             subject: "Test".to_string(),
             body_text: "Body".to_string(),
+            body_html: None,
             in_reply_to: None,
             references: Vec::new(),
         })
@@ -1836,8 +1852,8 @@ mod tests {
     }
 
     #[test]
-    fn build_plain_text_message_includes_reply_chain_headers() {
-        let message = build_plain_text_message(RemoteOutgoingMessage {
+    fn build_smtp_message_includes_reply_chain_headers() {
+        let message = build_smtp_message(RemoteOutgoingMessage {
             message_id: "<test@uncloud.local>".to_string(),
             from: RemoteMailAddress {
                 name: Some("Sender".to_string()),
@@ -1852,6 +1868,7 @@ mod tests {
             bcc: Vec::new(),
             subject: "Re: Test".to_string(),
             body_text: "Body".to_string(),
+            body_html: None,
             in_reply_to: Some("<original@example.com>".to_string()),
             references: vec![
                 "<root@example.com>".to_string(),
@@ -1863,6 +1880,37 @@ mod tests {
 
         assert!(formatted.contains("In-Reply-To: <original@example.com>"));
         assert!(formatted.contains("References: <root@example.com> <original@example.com>"));
+    }
+
+    #[test]
+    fn build_smtp_message_uses_multipart_alternative_for_html() {
+        let message = build_smtp_message(RemoteOutgoingMessage {
+            message_id: "<test@uncloud.local>".to_string(),
+            from: RemoteMailAddress {
+                name: Some("Sender".to_string()),
+                address: "sender@example.com".to_string(),
+            },
+            reply_to: None,
+            to: vec![RemoteMailAddress {
+                name: None,
+                address: "visible@example.com".to_string(),
+            }],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Test".to_string(),
+            body_text: "Plain body".to_string(),
+            body_html: Some("<p><strong>HTML body</strong></p>".to_string()),
+            in_reply_to: None,
+            references: Vec::new(),
+        })
+        .unwrap();
+        let formatted = String::from_utf8(message.formatted()).unwrap();
+
+        assert!(formatted.contains("Content-Type: multipart/alternative;"));
+        assert!(formatted.contains("Content-Type: text/plain; charset=utf-8"));
+        assert!(formatted.contains("Content-Type: text/html; charset=utf-8"));
+        assert!(formatted.contains("Plain body"));
+        assert!(formatted.contains("<strong>HTML body</strong>"));
     }
 
     #[test]

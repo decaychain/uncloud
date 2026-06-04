@@ -132,9 +132,11 @@ the account's SMTP settings.
   folder choice and normal Files quota/audit/event handling.
 - Manual message mutations for the first write-path spike: mark read/unread,
   star/unstar, move to a selected folder, archive, and move to trash.
-- Minimal SMTP send through a selected identity or account fallback. The compose
-  path sends plain text only, uses the stored account credential, and can attach
-  `In-Reply-To` / `References` headers for replies.
+- SMTP send through a selected identity or account fallback. The compose path
+  sends plain text, or `multipart/alternative` with sanitized HTML plus a
+  plain-text alternative when rich body HTML is present. It uses the stored
+  account credential and can attach `In-Reply-To` / `References` headers for
+  replies.
 - Local draft storage in MongoDB through `mail_drafts`, with list/create/update
   and delete endpoints. Drafts are local-only for now and are removed after a
   successful send when the send request references the draft id.
@@ -147,6 +149,9 @@ the account's SMTP settings.
   mutation/compose controls.
 - Compose v2 UI basics: reply, reply-all, forward, local draft autosave, manual
   save/discard, and a local drafts list per account.
+- Rich compose prototype: a locally bundled Tiptap editor is embedded in the
+  reader pane, not a modal, and draft/send payloads carry both `body_text` and
+  optional sanitized `body_html`.
 - Mail notices and errors use a consistent bottom-right toast overlay. Errors
   stay visible until dismissed; non-error notices auto-dismiss after a short
   timeout and always remain manually dismissible.
@@ -158,7 +163,8 @@ the account's SMTP settings.
 
 - Stored credentials currently cover IMAP app passwords only. OAuth refresh
   tokens and SMTP credential handling still need a credential type model.
-- SMTP is wired for connection/authentication testing and plain-text send.
+- SMTP is wired for connection/authentication testing and plain-text or
+  HTML-plus-plain-text send.
 - Message sync stores summaries first. Message bodies are fetched on demand and
   cached after the first successful reader open.
 - Raw RFC822 bodies plus parsed text/html sidecars are stored through the
@@ -175,10 +181,10 @@ the account's SMTP settings.
   the destination UID and the foundation does not yet consume UIDPLUS response
   codes.
 - Compose, search, threading, permanent delete, and provider-side Drafts upload
-  are not fully implemented. Compose currently supports plain-text send,
-  reply/reply-all/forward prefilling, local drafts, and reply-chain headers, but
-  still has no outgoing attachments, rich editor, HTML send, IMAP Drafts upload,
-  or provider-specific sent-copy policy.
+  are not fully implemented. Compose currently supports rich body editing,
+  plain-text/HTML alternative send, reply/reply-all/forward prefilling, local
+  drafts, and reply-chain headers, but still has no outgoing attachments, IMAP
+  Drafts upload, or provider-specific sent-copy policy.
 - Sent-copy detection is intentionally conservative. If checking the Sent folder
   fails, Uncloud reports the failure and does not append, to avoid creating a
   duplicate when the provider may have saved the message already.
@@ -328,15 +334,16 @@ Remaining credential work before scheduler/background sync:
   messages can include `In-Reply-To` and `References` headers.
 - Local draft storage, autosave, manual save/discard, and draft removal after
   successful send are wired.
-- Support HTML body after plain-text send has been tested with real providers.
+- Rich compose sends `multipart/alternative` when HTML is present, with
+  server-side sanitization before draft persistence and SMTP send.
 - Add outgoing attachments after the local draft and reply flow has been tested
   against real accounts.
 - Decide whether to upload drafts to the provider Drafts folder or keep local
   drafts as the first-version behavior.
 - Add a user/provider setting for sent-copy policy once we know how common
   providers behave.
-- Add richer compose editor behavior after plain text reply/forward proves
-  stable.
+- Polish rich compose behavior: active toolbar states, keyboard shortcuts,
+  paste cleanup, signatures, and mobile editing ergonomics.
 
 ### 7. UI
 
@@ -347,8 +354,8 @@ data before adding write actions:
 - Folder list, sync status, role labels, and per-folder settings.
 - Read-only message list.
 - Message reader with sanitized HTML and plain-text fallback.
-- Compose modal with reply/reply-all/forward prefilling and local draft
-  autosave.
+- Reader-pane compose surface with Tiptap rich editing, reply/reply-all/forward
+  prefilling, and local draft autosave.
 - Consistent bottom-right toast notifications for Mail errors and notices, with
   sticky errors and auto-dismissing non-error notices.
 - After the first prototype lands, extract the Files copy/move destination

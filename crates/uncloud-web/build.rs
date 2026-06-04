@@ -22,6 +22,8 @@ fn main() {
     println!("cargo:rerun-if-changed=input.css");
     println!("cargo:rerun-if-changed=tailwind.config.js");
     println!("cargo:rerun-if-changed=index.html");
+    println!("cargo:rerun-if-changed=package.json");
+    println!("cargo:rerun-if-changed=package-lock.json");
 
     // Install npm dependencies the first time (or if node_modules is missing).
     let node_modules = crate_dir.join("node_modules");
@@ -46,5 +48,26 @@ fn main() {
 
     if !status.success() {
         panic!("`npx tailwindcss` exited with a non-zero status");
+    }
+
+    // Bundle the small JavaScript bridge that embeds Tiptap for the mail
+    // compose editor. The output is referenced through Dioxus' asset system.
+    let status = npm_cmd("npx")
+        .args([
+            "--no-install",
+            "esbuild",
+            "src/mail_editor.js",
+            "--bundle",
+            "--format=iife",
+            "--global-name=UncloudMailEditorBundle",
+            "--outfile=assets/mail-editor.js",
+            "--log-level=warning",
+        ])
+        .current_dir(crate_dir)
+        .status()
+        .expect("Failed to run `npx esbuild` — is npm installed?");
+
+    if !status.success() {
+        panic!("`npx esbuild` exited with a non-zero status");
     }
 }

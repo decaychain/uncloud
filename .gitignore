@@ -35,6 +35,7 @@ config.yaml
 # Node / Tailwind
 /crates/uncloud-web/node_modules/
 /crates/uncloud-web/assets/tailwind.css
+/crates/uncloud-web/assets/mail-editor.js
 
 # Logs
 *.log

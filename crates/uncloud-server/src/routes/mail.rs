@@ -185,6 +185,7 @@ fn draft_to_response(draft: &MailDraft) -> MailDraftResponse {
         bcc: draft.bcc.iter().map(address_to_response).collect(),
         subject: draft.subject.clone(),
         body_text: draft.body_text.clone(),
+        body_html: draft.body_html.clone(),
         in_reply_to: draft.in_reply_to.clone(),
         references: draft.references.clone(),
         created_at: draft.created_at.to_rfc3339(),
@@ -555,6 +556,26 @@ fn clean_message_header_values(values: Vec<String>, name: &str) -> Result<Vec<St
             },
         )
         .collect()
+}
+
+fn sanitize_optional_mail_html(value: Option<String>) -> Option<String> {
+    let value = value?.trim().to_string();
+    if value.is_empty() {
+        return None;
+    }
+
+    let mut builder = ammonia::Builder::default();
+    builder.url_relative(ammonia::UrlRelative::Deny);
+    builder.attribute_filter(|element, attribute, value| match (element, attribute) {
+        ("img", "src") | ("img", "srcset") | ("source", "src") | ("source", "srcset") => None,
+        _ => Some(value.into()),
+    });
+    let cleaned = builder.clean(&value).to_string();
+    if cleaned.trim().is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
 }
 
 fn recipient_count(req: &SendMailMessageRequest) -> usize {
@@ -1013,6 +1034,7 @@ struct NormalizedDraftPayload {
     bcc: Vec<MailAddress>,
     subject: String,
     body_text: String,
+    body_html: Option<String>,
     in_reply_to: Option<String>,
     references: Vec<String>,
 }
@@ -1220,6 +1242,7 @@ async fn normalize_draft_payload(
         bcc: req.bcc.iter().map(response_address_to_model).collect(),
         subject: req.subject,
         body_text: req.body_text,
+        body_html: sanitize_optional_mail_html(req.body_html),
         in_reply_to: clean_optional_message_header_value(req.in_reply_to, "In-Reply-To")?,
         references: clean_message_header_values(req.references, "References")?,
     })
@@ -1287,12 +1310,13 @@ pub async fn send_account_message(
         bcc: req.bcc.iter().map(response_address_to_remote).collect(),
         subject: req.subject,
         body_text: req.body_text,
+        body_html: sanitize_optional_mail_html(req.body_html),
         in_reply_to: clean_optional_message_header_value(req.in_reply_to, "In-Reply-To")?,
         references: clean_message_header_values(req.references, "References")?,
     };
     let sent = state
         .mail
-        .send_smtp_plain_text(&account.smtp, &password, remote)
+        .send_smtp_message(&account.smtp, &password, remote)
         .await?;
     let sent_copy = handle_sent_copy(
         &state,
@@ -1524,6 +1548,7 @@ pub async fn create_draft(
         bcc: payload.bcc,
         subject: payload.subject,
         body_text: payload.body_text,
+        body_html: payload.body_html,
         in_reply_to: payload.in_reply_to,
         references: payload.references,
         created_at: now,
@@ -1585,6 +1610,7 @@ pub async fn update_draft(
                     "bcc": bcc,
                     "subject": payload.subject,
                     "body_text": payload.body_text,
+                    "body_html": payload.body_html.map(bson::Bson::String).unwrap_or(bson::Bson::Null),
                     "in_reply_to": payload.in_reply_to.map(bson::Bson::String).unwrap_or(bson::Bson::Null),
                     "references": payload.references,
                     "updated_at": bson::DateTime::from_chrono(now),
@@ -3214,6 +3240,7 @@ mod tests {
             bcc: Vec::new(),
             subject: "Test".to_string(),
             body_text: "Body".to_string(),
+            body_html: None,
             in_reply_to: None,
             references: Vec::new(),
         };
