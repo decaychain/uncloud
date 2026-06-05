@@ -1761,10 +1761,10 @@ fn normalize_plain_text(input: &str) -> String {
 mod tests {
     use super::{
         bodystructure_has_attachment, build_smtp_message, display_name, flag_store_query,
-        latest_cached_refresh_plan, mail_move_unsupported_message, mailbox_from_address,
-        map_imap_command_error, map_imap_login_error, next_uid_sync_plan, parent_path,
-        parse_message_body, quoted_imap_search_string, sync_completed, sync_fetch_plans,
-        updated_uid_cursors, MailService, RemoteMailAddress, RemoteMessageFlag,
+        latest_cached_refresh_plan, mail_move_unsupported_message, mail_tls_connector,
+        mailbox_from_address, map_imap_command_error, map_imap_login_error, next_uid_sync_plan,
+        parent_path, parse_message_body, quoted_imap_search_string, sync_completed,
+        sync_fetch_plans, updated_uid_cursors, MailService, RemoteMailAddress, RemoteMessageFlag,
         RemoteOutgoingAttachment, RemoteOutgoingMessage, UidSyncDirection, UidSyncPlan,
     };
     use crate::error::AppError;
@@ -1788,6 +1788,11 @@ mod tests {
         drop(guard);
         assert!(!service.is_account_syncing(account_id));
         assert!(service.try_begin_account_sync(account_id).is_some());
+    }
+
+    #[test]
+    fn imap_tls_connector_builds_with_selected_crypto_provider() {
+        mail_tls_connector().unwrap();
     }
 
     #[test]
