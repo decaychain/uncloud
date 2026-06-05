@@ -38,6 +38,13 @@ struct MailEditorListener {
     cb: Closure<dyn FnMut(web_sys::Event)>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MailMobilePane {
+    Folders,
+    Messages,
+    Detail,
+}
+
 impl Drop for MailEditorListener {
     fn drop(&mut self) {
         if let Some(win) = web_sys::window() {
@@ -61,6 +68,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
     let mut selected_account = use_signal(String::new);
     let mut selected_folder = use_signal(String::new);
     let mut selected_message = use_signal(String::new);
+    let mut mobile_mail_pane = use_signal(|| MailMobilePane::Folders);
     let mut loading = use_signal(|| true);
     let mut syncing = use_signal(|| false);
     let mut refreshing_folders = use_signal(|| false);
@@ -223,6 +231,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                     };
                     accounts.set(list);
                     selected_account.set(selected.clone());
+                    mobile_mail_pane.set(MailMobilePane::Folders);
                     if requested_account_id != selected {
                         if selected.is_empty() {
                             nav.replace(Route::Mail {});
@@ -412,6 +421,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                             if !selected.is_empty() && !still_selected {
                                 selected_message.set(String::new());
                                 detail.set(None);
+                                mobile_mail_pane.set(MailMobilePane::Messages);
                             }
                         }
                     }
@@ -426,6 +436,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
     let drafts_snapshot = drafts();
     let messages_snapshot = messages();
     let detail_snapshot = detail();
+    let mobile_mail_pane_snapshot = mobile_mail_pane();
     let selected_account_id = selected_account();
     let selected_folder_id = selected_folder();
     let selected_message_id = selected_message();
@@ -646,6 +657,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                             compose_attachments.set(Vec::new());
                             bump_compose_editor_key(&mut compose_editor_key);
                             show_compose.set(true);
+                            mobile_mail_pane.set(MailMobilePane::Detail);
                         },
                         IconSend { class: "w-4 h-4".to_string() }
                         span { "Compose" }
@@ -681,6 +693,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                 if !selected.is_empty() && !still_selected {
                                                     selected_message.set(String::new());
                                                     detail.set(None);
+                                                    mobile_mail_pane.set(MailMobilePane::Messages);
                                                 }
                                             }
                                         }
@@ -726,7 +739,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                 }
             } else {
                 div { class: "grid min-h-0 grid-cols-1 gap-3 lg:h-[calc(100vh-9rem)] lg:grid-cols-[18rem_minmax(22rem,30rem)_minmax(0,1fr)]",
-                    section { class: "flex min-h-[18rem] flex-col border border-base-300 bg-base-100 lg:min-h-0",
+                    section { class: "{mail_folders_pane_class(mobile_mail_pane_snapshot)}",
                         if !drafts_snapshot.is_empty() {
                             div { class: "border-b border-base-300",
                                 div { class: "flex items-center justify-between px-3 py-2",
@@ -775,6 +788,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                             compose_attachments.set(draft_for_open.attachments.clone());
                                                             bump_compose_editor_key(&mut compose_editor_key);
                                                             show_compose.set(true);
+                                                            mobile_mail_pane.set(MailMobilePane::Detail);
                                                         },
                                                         div { class: "truncate font-medium", "{draft_subject}" }
                                                         div { class: "truncate text-xs text-base-content/50",
@@ -871,6 +885,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                     let account_id = account_id.clone();
                                                     let folder_id = id.clone();
                                                     let auto_sync_empty_folder = auto_sync_empty_folder;
+                                                    mobile_mail_pane.set(MailMobilePane::Messages);
                                                     spawn(async move {
                                                         selected_folder.set(folder_id.clone());
                                                         selected_message.set(String::new());
@@ -942,15 +957,23 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                         }
                     }
 
-                    section { class: "flex min-h-[24rem] flex-col border border-base-300 bg-base-100 lg:min-h-0",
+                    section { class: "{mail_messages_pane_class(mobile_mail_pane_snapshot)}",
                         div { class: "flex items-center justify-between border-b border-base-300 px-3 py-2",
-                            div {
-                                div { class: "text-xs font-semibold uppercase text-base-content/60", "Messages" }
-                                div { class: "truncate text-sm",
-                                    if let Some(folder) = active_folder.as_ref() {
-                                        "{folder.path}"
-                                    } else {
-                                        "Select a folder"
+                            div { class: "flex min-w-0 items-center gap-2",
+                                button {
+                                    class: "btn btn-ghost btn-sm h-8 min-h-8 px-2 lg:hidden",
+                                    onclick: move |_| mobile_mail_pane.set(MailMobilePane::Folders),
+                                    IconChevronRight { class: "h-4 w-4 rotate-180".to_string() }
+                                    span { "Folders" }
+                                }
+                                div { class: "min-w-0",
+                                    div { class: "text-xs font-semibold uppercase text-base-content/60", "Messages" }
+                                    div { class: "truncate text-sm",
+                                        if let Some(folder) = active_folder.as_ref() {
+                                            "{folder.path}"
+                                        } else {
+                                            "Select a folder"
+                                        }
                                     }
                                 }
                             }
@@ -1064,6 +1087,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                             },
                                             onclick: move |_| {
                                                 let message_id = id.clone();
+                                                mobile_mail_pane.set(MailMobilePane::Detail);
                                                 spawn(async move {
                                                     selected_message.set(message_id.clone());
                                                     move_target_folder.set(String::new());
@@ -1148,7 +1172,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                         }
                     }
 
-                    section { class: "flex min-h-[28rem] flex-col border border-base-300 bg-base-100 lg:min-h-0",
+                    section { class: "{mail_detail_pane_class(mobile_mail_pane_snapshot)}",
                         if show_compose() {
                             if let Some(account) = active_account.clone() {
                                 {
@@ -1273,9 +1297,24 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                         div { class: "flex min-h-0 flex-1 flex-col",
                                             div { class: "border-b border-base-300 px-4 py-3",
                                                 div { class: "flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between",
-                                                    div { class: "min-w-0",
-                                                        div { class: "text-lg font-semibold", "{compose_title}" }
-                                                        div { class: "mt-1 truncate text-sm text-base-content/60", "{account.email_address}" }
+                                                    div { class: "flex min-w-0 items-start gap-2",
+                                                        button {
+                                                            class: "btn btn-ghost btn-sm h-8 min-h-8 px-2 lg:hidden",
+                                                            onclick: move |_| {
+                                                                show_compose.set(false);
+                                                                if selected_folder.peek().is_empty() {
+                                                                    mobile_mail_pane.set(MailMobilePane::Folders);
+                                                                } else {
+                                                                    mobile_mail_pane.set(MailMobilePane::Messages);
+                                                                }
+                                                            },
+                                                            IconChevronRight { class: "h-4 w-4 rotate-180".to_string() }
+                                                            span { "Messages" }
+                                                        }
+                                                        div { class: "min-w-0",
+                                                            div { class: "text-lg font-semibold", "{compose_title}" }
+                                                            div { class: "mt-1 truncate text-sm text-base-content/60", "{account.email_address}" }
+                                                        }
                                                     }
                                                     div { class: "flex flex-wrap items-center gap-2",
                                                         if !draft_status.is_empty() {
@@ -1284,7 +1323,16 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                         button {
                                                             class: "btn btn-ghost btn-sm h-8 min-h-8",
                                                             disabled: sending_message(),
-                                                            onclick: move |_| show_compose.set(false),
+                                                            onclick: move |_| {
+                                                                show_compose.set(false);
+                                                                if selected_message.peek().is_empty() {
+                                                                    if selected_folder.peek().is_empty() {
+                                                                        mobile_mail_pane.set(MailMobilePane::Folders);
+                                                                    } else {
+                                                                        mobile_mail_pane.set(MailMobilePane::Messages);
+                                                                    }
+                                                                }
+                                                            },
                                                             "Close"
                                                         }
                                                     }
@@ -1520,6 +1568,11 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                                 compose_body_html.set(String::new());
                                                                 compose_attachments.set(Vec::new());
                                                                 show_compose.set(false);
+                                                                if selected_folder.peek().is_empty() {
+                                                                    mobile_mail_pane.set(MailMobilePane::Folders);
+                                                                } else {
+                                                                    mobile_mail_pane.set(MailMobilePane::Messages);
+                                                                }
                                                             });
                                                         },
                                                         "Discard"
@@ -1643,6 +1696,13 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                                         compose_body_html.set(String::new());
                                                                         compose_attachments.set(Vec::new());
                                                                         show_compose.set(false);
+                                                                        if selected_message.peek().is_empty() {
+                                                                            if selected_folder.peek().is_empty() {
+                                                                                mobile_mail_pane.set(MailMobilePane::Folders);
+                                                                            } else {
+                                                                                mobile_mail_pane.set(MailMobilePane::Messages);
+                                                                            }
+                                                                        }
                                                                     }
                                                                     Err(e) => error.set(Some(e)),
                                                                 }
@@ -1668,6 +1728,14 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                 }
                             }
                         } else if loading_detail() {
+                            div { class: "flex items-center gap-2 border-b border-base-300 px-4 py-3 lg:hidden",
+                                button {
+                                    class: "btn btn-ghost btn-sm h-8 min-h-8 px-2",
+                                    onclick: move |_| mobile_mail_pane.set(MailMobilePane::Messages),
+                                    IconChevronRight { class: "h-4 w-4 rotate-180".to_string() }
+                                    span { "Messages" }
+                                }
+                            }
                             div { class: "flex flex-1 items-center justify-center",
                                 span { class: "loading loading-spinner loading-md" }
                             }
@@ -1694,12 +1762,20 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                 rsx! {
                                     div { class: "border-b border-base-300 px-4 py-3",
                                         div { class: "flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between",
-                                            div { class: "min-w-0",
-                                                div { class: "text-lg font-semibold", "{message_subject(&row.message)}" }
-                                                div { class: "mt-2 grid gap-1 text-sm text-base-content/70",
-                                                    div { "From: {message_sender(&row.message)}" }
-                                                    div { "To: {message_recipients(&row.message)}" }
-                                                    div { "Date: {short_date(row.message.internal_date.as_deref().or(row.message.date.as_deref()))}" }
+                                            div { class: "flex min-w-0 items-start gap-2",
+                                                button {
+                                                    class: "btn btn-ghost btn-sm h-8 min-h-8 px-2 lg:hidden",
+                                                    onclick: move |_| mobile_mail_pane.set(MailMobilePane::Messages),
+                                                    IconChevronRight { class: "h-4 w-4 rotate-180".to_string() }
+                                                    span { "Messages" }
+                                                }
+                                                div { class: "min-w-0",
+                                                    div { class: "text-lg font-semibold", "{message_subject(&row.message)}" }
+                                                    div { class: "mt-2 grid gap-1 text-sm text-base-content/70",
+                                                        div { "From: {message_sender(&row.message)}" }
+                                                        div { "To: {message_recipients(&row.message)}" }
+                                                        div { "Date: {short_date(row.message.internal_date.as_deref().or(row.message.date.as_deref()))}" }
+                                                    }
                                                 }
                                             }
                                             div { class: "flex flex-wrap items-center gap-1",
@@ -1915,6 +1991,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                                             selected_message.set(String::new());
                                                                             move_target_folder.set(String::new());
                                                                             detail.set(None);
+                                                                            mobile_mail_pane.set(MailMobilePane::Messages);
                                                                             if let Ok(rows) = use_mail::list_folders(&account_id).await {
                                                                                 folders.set(rows);
                                                                             }
@@ -1951,6 +2028,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                                             selected_message.set(String::new());
                                                                             move_target_folder.set(String::new());
                                                                             detail.set(None);
+                                                                            mobile_mail_pane.set(MailMobilePane::Messages);
                                                                             if let Ok(rows) = use_mail::list_folders(&account_id).await {
                                                                                 folders.set(rows);
                                                                             }
@@ -2006,6 +2084,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                                                 selected_message.set(String::new());
                                                                                 move_target_folder.set(String::new());
                                                                                 detail.set(None);
+                                                                                mobile_mail_pane.set(MailMobilePane::Messages);
                                                                                 if let Ok(rows) = use_mail::list_folders(&account_id).await {
                                                                                     folders.set(rows);
                                                                                 }
@@ -2106,6 +2185,11 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                             div { class: "flex flex-1 flex-col items-center justify-center gap-2 text-base-content/60",
                                 IconFileText { class: "h-8 w-8".to_string() }
                                 div { class: "text-sm", "Select a message" }
+                                button {
+                                    class: "btn btn-sm btn-ghost lg:hidden",
+                                    onclick: move |_| mobile_mail_pane.set(MailMobilePane::Messages),
+                                    "Back to messages"
+                                }
                             }
                         }
                     }
@@ -2349,6 +2433,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                 message_next_cursor.set(None);
                                                 message_has_more.set(false);
                                                 detail.set(None);
+                                                mobile_mail_pane.set(MailMobilePane::Folders);
                                                 if let Ok(list) = use_mail::list_accounts().await {
                                                     accounts.set(list);
                                                 }
@@ -3073,6 +3158,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                                     message_next_cursor.set(None);
                                                                     message_has_more.set(false);
                                                                     detail.set(None);
+                                                                    mobile_mail_pane.set(MailMobilePane::Folders);
                                                                     if next.is_empty() {
                                                                         folders.set(Vec::new());
                                                                     } else {
@@ -4111,6 +4197,39 @@ fn mail_body_html_for_display(body: &str, load_remote_images: bool) -> String {
         body.replace("data-uc-remote-src=", "src=")
     } else {
         body.to_string()
+    }
+}
+
+fn mail_folders_pane_class(active: MailMobilePane) -> &'static str {
+    match active {
+        MailMobilePane::Folders => {
+            "flex h-[calc(100vh-12rem)] min-h-[24rem] flex-col border border-base-300 bg-base-100 lg:h-auto lg:min-h-0"
+        }
+        _ => {
+            "hidden h-[calc(100vh-12rem)] min-h-[24rem] flex-col border border-base-300 bg-base-100 lg:flex lg:h-auto lg:min-h-0"
+        }
+    }
+}
+
+fn mail_messages_pane_class(active: MailMobilePane) -> &'static str {
+    match active {
+        MailMobilePane::Messages => {
+            "flex h-[calc(100vh-12rem)] min-h-[24rem] flex-col border border-base-300 bg-base-100 lg:h-auto lg:min-h-0"
+        }
+        _ => {
+            "hidden h-[calc(100vh-12rem)] min-h-[24rem] flex-col border border-base-300 bg-base-100 lg:flex lg:h-auto lg:min-h-0"
+        }
+    }
+}
+
+fn mail_detail_pane_class(active: MailMobilePane) -> &'static str {
+    match active {
+        MailMobilePane::Detail => {
+            "flex h-[calc(100vh-12rem)] min-h-[24rem] flex-col border border-base-300 bg-base-100 lg:h-auto lg:min-h-0"
+        }
+        _ => {
+            "hidden h-[calc(100vh-12rem)] min-h-[24rem] flex-col border border-base-300 bg-base-100 lg:flex lg:h-auto lg:min-h-0"
+        }
     }
 }
 
