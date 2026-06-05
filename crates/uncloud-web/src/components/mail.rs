@@ -11,8 +11,8 @@ use uncloud_common::{
     MailServerSettings, SendMailMessageRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
     UpdateMailIdentityRequest, UpsertMailDraftRequest,
 };
-use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
 use web_sys::HtmlInputElement;
 
 use crate::components::icons::{
@@ -109,7 +109,6 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
     let mut account_smtp_security = use_signal(|| "tls".to_string());
     let mut account_smtp_username = use_signal(String::new);
     let mut account_password = use_signal(String::new);
-    let mut account_enabled = use_signal(|| true);
     let mut account_sync_enabled = use_signal(|| false);
     let mut account_sync_interval_minutes = use_signal(String::new);
     let mut saving_account_settings = use_signal(|| false);
@@ -595,7 +594,6 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                         account_smtp_security.set(security_to_value(account.smtp.security).to_string());
                                         account_smtp_username.set(account.smtp.username.clone());
                                         account_password.set(String::new());
-                                        account_enabled.set(account.enabled);
                                         account_sync_enabled.set(account.sync_enabled);
                                         account_sync_interval_minutes.set(
                                             account
@@ -2335,7 +2333,6 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                 security: smtp_sec,
                                                 username: smtp_user,
                                             },
-                                            enabled: true,
                                             sync_enabled: false,
                                             sync_interval_secs: None,
                                         };
@@ -2509,24 +2506,12 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                         input {
                                             class: "toggle toggle-sm",
                                             r#type: "checkbox",
-                                            checked: account_enabled(),
-                                            onchange: move |e| account_enabled.set(e.checked()),
-                                        }
-                                        span {
-                                            span { class: "block text-sm font-medium", "Enabled" }
-                                            span { class: "block text-xs text-base-content/60", "Disabled accounts remain configured but hidden from future automatic sync." }
-                                        }
-                                    }
-                                    label { class: "label cursor-pointer justify-start gap-3 rounded border border-base-300 px-3",
-                                        input {
-                                            class: "toggle toggle-sm",
-                                            r#type: "checkbox",
                                             checked: account_sync_enabled(),
                                             onchange: move |e| account_sync_enabled.set(e.checked()),
                                         }
                                         span {
-                                            span { class: "block text-sm font-medium", "Include in scheduled sync" }
-                                            span { class: "block text-xs text-base-content/60", "Manual sync remains available from the mail view." }
+                                            span { class: "block text-sm font-medium", "Automatic sync" }
+                                            span { class: "block text-xs text-base-content/60", "Periodically sync this account in the background. Manual sync remains available." }
                                         }
                                     }
                                     label { class: "form-control",
@@ -3154,7 +3139,6 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                     let imap_sec = security_from_value(&account_imap_security());
                                                     let smtp_sec = security_from_value(&account_smtp_security());
                                                     let pass = account_password();
-                                                    let enabled = account_enabled();
                                                     let sync_enabled = account_sync_enabled();
                                                     let sync_interval_secs = match sync_interval_secs_from_minutes(
                                                         &account_sync_interval_minutes(),
@@ -3184,7 +3168,6 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                                 security: smtp_sec,
                                                                 username: smtp_user,
                                                             }),
-                                                            enabled: Some(enabled),
                                                             sync_enabled: Some(sync_enabled),
                                                             sync_interval_secs: Some(sync_interval_secs),
                                                         };

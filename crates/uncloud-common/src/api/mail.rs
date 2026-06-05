@@ -55,7 +55,6 @@ pub struct MailAccountResponse {
     pub email_address: String,
     pub imap: MailServerSettings,
     pub smtp: MailServerSettings,
-    pub enabled: bool,
     pub sync_enabled: bool,
     pub sync_interval_secs: Option<u64>,
     pub sync_in_progress: bool,
@@ -71,8 +70,6 @@ pub struct CreateMailAccountRequest {
     pub email_address: String,
     pub imap: MailServerSettings,
     pub smtp: MailServerSettings,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
     #[serde(default)]
     pub sync_enabled: bool,
     #[serde(default)]
@@ -85,7 +82,6 @@ pub struct UpdateMailAccountRequest {
     pub email_address: Option<String>,
     pub imap: Option<MailServerSettings>,
     pub smtp: Option<MailServerSettings>,
-    pub enabled: Option<bool>,
     pub sync_enabled: Option<bool>,
     pub sync_interval_secs: Option<Option<u64>>,
 }
@@ -503,8 +499,4 @@ pub struct MailProviderErrorDiagnostic {
     pub folder_path: Option<String>,
     pub message: String,
     pub at: Option<String>,
-}
-
-fn default_true() -> bool {
-    true
 }

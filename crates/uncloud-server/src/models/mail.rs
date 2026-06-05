@@ -29,8 +29,6 @@ pub struct MailAccount {
     pub email_address: String,
     pub imap: MailServerConfig,
     pub smtp: MailServerConfig,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
     #[serde(default)]
     pub sync_enabled: bool,
     #[serde(default)]

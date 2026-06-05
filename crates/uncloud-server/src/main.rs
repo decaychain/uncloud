@@ -1,5 +1,5 @@
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::Method;
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::routing::get;
 use clap::{Parser, Subcommand};
 use std::sync::Arc;
@@ -12,13 +12,13 @@ use mongodb::bson::{self, doc};
 use uncloud_server::models::{File, FileVersion, Folder, UserRole, UserStatus};
 
 use uncloud_server::{
+    AppState,
     config::Config,
     db, models, processing, routes,
     services::{
         AuthService, EventService, MailService, RescanService, SearchService, StorageService,
     },
     supervisor::Supervisor,
-    AppState,
 };
 
 // ── CLI definition ──────────────────────────────────────────────────────────
@@ -589,6 +589,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(msg) = uncloud_server::backup::lock::check_no_active_backup(&db).await {
         return Err(format!("Refusing to start: {msg}").into());
     }
+    uncloud_server::routes::mail::migrate_mail_account_enabled_flag(&db).await?;
 
     // Initialize services
     let auth = AuthService::new(&db, config.auth.clone());

@@ -569,9 +569,7 @@ fn MailSidebarAccounts() -> Element {
                                 span { class: "min-w-0 flex-1",
                                     span { class: "block truncate text-sm", "{account.display_name}" }
                                     span { class: "block truncate text-xs opacity-60", "{account.email_address}" }
-                                    if !account.enabled {
-                                        span { class: "badge badge-ghost badge-xs mt-1", "Disabled" }
-                                    } else if account.sync_in_progress {
+                                    if account.sync_in_progress {
                                         span { class: "mt-1 inline-flex items-center gap-1 text-xs opacity-60",
                                             span { class: "loading loading-spinner loading-xs" }
                                             span { "Syncing" }

@@ -119,8 +119,8 @@ the account's SMTP settings.
 - Manual read-only message summary sync for one folder or all cached selectable
   folders included in account sync. Each sync fetches a bounded UID window of
   envelope, flags, internal date, and RFC822 size metadata.
-- Background read-only account sync for enabled accounts with stored
-  credentials and account sync enabled. The scheduler is controlled by
+- Background read-only account sync for accounts with stored credentials and
+  automatic sync enabled. The scheduler is controlled by
   `mail_sync.enabled`, `mail_sync.interval_secs`,
   `mail_sync.startup_delay_secs`, and `mail_sync.limit_per_folder`.
   Individual accounts can override the default interval from Account settings.
@@ -308,9 +308,10 @@ Remaining credential work:
   not wait for the full backfill to finish.
 - Manual sync responses report new, refreshed, and removed message counts.
 - A lightweight background scheduler runs the same account sync strategy
-  periodically for enabled accounts with stored credentials. Each account can
-  use the server default interval or a per-account override. The scheduler uses
-  an in-memory per-account lock, so scheduled and manual sync do not overlap.
+  periodically for accounts with stored credentials and automatic sync enabled.
+  Each account can use the server default interval or a per-account override.
+  The scheduler uses an in-memory per-account lock, so scheduled and manual
+  sync do not overlap.
 - Next: replace the lightweight loop with a queue if we need cross-process
   coordination or finer per-folder scheduling.
 - Fetch raw RFC822 bodies only when needed, or in bounded batches.

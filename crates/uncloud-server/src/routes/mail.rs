@@ -15,7 +15,10 @@ use bson::doc;
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use kuchikiki::traits::TendrilSink;
-use mongodb::bson::{self, oid::ObjectId};
+use mongodb::{
+    Database,
+    bson::{self, oid::ObjectId},
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::time::sleep;
@@ -181,7 +184,6 @@ fn account_to_response(account: &MailAccount, sync_in_progress: bool) -> MailAcc
         email_address: account.email_address.clone(),
         imap: server_to_response(&account.imap),
         smtp: server_to_response(&account.smtp),
-        enabled: account.enabled,
         sync_enabled: account.sync_enabled,
         sync_interval_secs: account.sync_interval_secs,
         sync_in_progress,
@@ -619,6 +621,33 @@ fn credential_status(account: &MailAccount) -> MailCredentialStatusResponse {
         account_id: account.id.to_hex(),
         credential_configured: account.credential_configured || account.credential.is_some(),
     }
+}
+
+pub async fn migrate_mail_account_enabled_flag(db: &Database) -> Result<()> {
+    let accounts = db.collection::<bson::Document>(ACCOUNTS);
+    let disabled = accounts
+        .update_many(
+            doc! { "enabled": false },
+            doc! {
+                "$set": { "sync_enabled": false },
+                "$unset": { "enabled": "" },
+            },
+        )
+        .await?;
+    let remaining = accounts
+        .update_many(
+            doc! { "enabled": { "$exists": true } },
+            doc! { "$unset": { "enabled": "" } },
+        )
+        .await?;
+    let modified = disabled.modified_count + remaining.modified_count;
+    if modified > 0 {
+        tracing::info!(
+            modified,
+            "migrated obsolete mail account enabled flag into sync_enabled"
+        );
+    }
+    Ok(())
 }
 
 fn provider_endpoint_diagnostics(settings: &MailServerConfig) -> MailProviderEndpointDiagnostics {
@@ -1100,7 +1129,6 @@ pub async fn create_account(
         email_address: email_address.clone(),
         imap: validate_server(req.imap)?,
         smtp: validate_server(req.smtp)?,
-        enabled: req.enabled,
         sync_enabled: req.sync_enabled,
         sync_interval_secs: validate_account_sync_interval(req.sync_interval_secs)?,
         credential_configured: false,
@@ -1180,9 +1208,6 @@ pub async fn update_account(
             "smtp",
             bson::to_bson(&server).map_err(|e| AppError::Internal(e.to_string()))?,
         );
-    }
-    if let Some(value) = req.enabled {
-        set.insert("enabled", value);
     }
     if let Some(value) = req.sync_enabled {
         set.insert("sync_enabled", value);
@@ -3145,7 +3170,6 @@ pub async fn run_scheduled_mail_sync_tick(state: Arc<AppState>) -> Result<usize>
         .db
         .collection::<MailAccount>(ACCOUNTS)
         .find(doc! {
-            "enabled": true,
             "sync_enabled": true,
         })
         .sort(doc! { "email_address": 1 })

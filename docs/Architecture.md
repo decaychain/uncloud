@@ -653,7 +653,7 @@ features:                          # server-wide built-in app availability
   music: true                      # music library + playlists
 
 mail_sync:
-  enabled: true                    # background sync for enabled mail accounts with credentials
+  enabled: true                    # background sync for mail accounts with credentials and automatic sync enabled
   interval_secs: 300               # default per-account interval, overridable in Mail settings
   startup_delay_secs: 60           # delay after server startup before the first tick
   limit_per_folder: 50             # bounded UID window per folder per tick
