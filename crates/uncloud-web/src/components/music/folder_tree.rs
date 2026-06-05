@@ -19,7 +19,6 @@ pub fn FolderTreeView(root_folder_id: Option<String>) -> Element {
     let mut expanded: Signal<HashSet<String>> = use_signal(HashSet::new);
     let mut loaded_children: Signal<HashSet<String>> = use_signal(HashSet::new);
     let mut loading_children: Signal<HashSet<String>> = use_signal(HashSet::new);
-    let mut open_tracks: Signal<HashSet<String>> = use_signal(HashSet::new);
     let mut tracks_by_folder: Signal<HashMap<String, Vec<TrackResponse>>> =
         use_signal(HashMap::new);
     let mut track_cursors: Signal<HashMap<String, Option<String>>> = use_signal(HashMap::new);
@@ -38,7 +37,6 @@ pub fn FolderTreeView(root_folder_id: Option<String>) -> Element {
             expanded.set(HashSet::new());
             loaded_children.set(HashSet::new());
             loading_children.set(HashSet::new());
-            open_tracks.set(HashSet::new());
             tracks_by_folder.set(HashMap::new());
             track_cursors.set(HashMap::new());
             loading_tracks.set(HashSet::new());
@@ -99,7 +97,6 @@ pub fn FolderTreeView(root_folder_id: Option<String>) -> Element {
     };
     let expanded_now = expanded();
     let loading_children_now = loading_children();
-    let open_tracks_now = open_tracks();
     let tracks_now = tracks_by_folder();
     let track_cursors_now = track_cursors();
     let loading_tracks_now = loading_tracks();
@@ -121,10 +118,10 @@ pub fn FolderTreeView(root_folder_id: Option<String>) -> Element {
                     {
                         let id = folder.folder_id.clone();
                         let id_for_toggle = id.clone();
+                        let id_for_label_toggle = id.clone();
                         let is_expanded = expanded_now.contains(&id);
                         let is_loading = loading_children_now.contains(&id);
                         let is_active = active_folder_id.as_deref() == Some(&id);
-                        let tracks_open = open_tracks_now.contains(&id);
                         let tracks_loading = loading_tracks_now.contains(&id);
                         let has_loaded_tracks = tracks_now.contains_key(&id);
                         let folder_tracks = tracks_now.get(&id).cloned().unwrap_or_default();
@@ -132,12 +129,20 @@ pub fn FolderTreeView(root_folder_id: Option<String>) -> Element {
                         let track_error = track_errors_now.get(&id).cloned();
                         let indent_px = depth * 18;
                         let track_count = format_track_count(folder.track_count);
-                        let id_for_tracks_toggle = id.clone();
                         let id_for_load_more = id.clone();
+                        let has_direct_tracks = folder.track_count > 0;
+                        let can_expand = folder.has_children || has_direct_tracks;
+                        let is_disclosure_loading =
+                            is_loading || (tracks_loading && !has_loaded_tracks && has_direct_tracks);
+                        let show_tracks = is_expanded
+                            && (has_direct_tracks
+                                || tracks_loading
+                                || has_loaded_tracks
+                                || track_error.is_some());
                         rsx! {
                             div {
                                 key: "{id}",
-                                class: if is_active || tracks_open {
+                                class: if is_active || is_expanded {
                                     "grid grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[minmax(0,1fr)_7rem] items-center gap-3 bg-primary/10 px-3 py-2"
                                 } else {
                                     "grid grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[minmax(0,1fr)_7rem] items-center gap-3 px-3 py-2 hover:bg-base-200/70"
@@ -145,47 +150,27 @@ pub fn FolderTreeView(root_folder_id: Option<String>) -> Element {
                                 div {
                                     class: "flex min-w-0 items-center gap-2",
                                     style: "padding-left: {indent_px}px",
-                                    if folder.has_children {
+                                    if can_expand {
                                         button {
                                             class: "btn btn-ghost btn-xs btn-circle flex-shrink-0",
                                             "aria-label": if is_expanded { "Collapse folder" } else { "Expand folder" },
                                             onclick: move |_| {
-                                                let id = id_for_toggle.clone();
-                                                if expanded.peek().contains(&id) {
-                                                    expanded.write().remove(&id);
-                                                    return;
-                                                }
-
-                                                expanded.write().insert(id.clone());
-                                                if loaded_children.peek().contains(&id)
-                                                    || loading_children.peek().contains(&id)
-                                                {
-                                                    return;
-                                                }
-
-                                                loading_children.write().insert(id.clone());
-                                                let parent_id = id.clone();
-                                                spawn(async move {
-                                                    match use_music::list_music_child_folders(&parent_id).await {
-                                                        Ok(children) => {
-                                                            let mut current = folders.write();
-                                                            let known: HashSet<String> = current
-                                                                .iter()
-                                                                .map(|folder| folder.folder_id.clone())
-                                                                .collect();
-                                                            current.extend(
-                                                                children
-                                                                    .into_iter()
-                                                                    .filter(|child| !known.contains(&child.folder_id)),
-                                                            );
-                                                            loaded_children.write().insert(parent_id.clone());
-                                                        }
-                                                        Err(err) => error.set(Some(err)),
-                                                    }
-                                                    loading_children.write().remove(&parent_id);
-                                                });
+                                                toggle_folder(
+                                                    id_for_toggle.clone(),
+                                                    folder.has_children,
+                                                    has_direct_tracks,
+                                                    expanded,
+                                                    loaded_children,
+                                                    loading_children,
+                                                    folders,
+                                                    tracks_by_folder,
+                                                    track_cursors,
+                                                    loading_tracks,
+                                                    track_errors,
+                                                    error,
+                                                );
                                             },
-                                            if is_loading {
+                                            if is_disclosure_loading {
                                                 span { class: "loading loading-spinner loading-xs" }
                                             } else if is_expanded {
                                                 IconChevronDown { class: "w-4 h-4".to_string() }
@@ -196,57 +181,48 @@ pub fn FolderTreeView(root_folder_id: Option<String>) -> Element {
                                     } else {
                                         span { class: "w-6 flex-shrink-0" }
                                     }
-                                    button {
-                                        class: if tracks_open {
-                                            "flex min-w-0 flex-1 items-center gap-2 text-left text-primary"
-                                        } else {
-                                            "flex min-w-0 flex-1 items-center gap-2 text-left"
-                                        },
-                                        onclick: move |_| {
-                                            let id = id_for_tracks_toggle.clone();
-                                            if open_tracks.peek().contains(&id) {
-                                                open_tracks.write().remove(&id);
-                                                return;
+                                    if can_expand {
+                                        button {
+                                            class: if is_expanded {
+                                                "flex min-w-0 flex-1 items-center gap-2 text-left text-primary"
+                                            } else {
+                                                "flex min-w-0 flex-1 items-center gap-2 text-left"
+                                            },
+                                            onclick: move |_| {
+                                                toggle_folder(
+                                                    id_for_label_toggle.clone(),
+                                                    folder.has_children,
+                                                    has_direct_tracks,
+                                                    expanded,
+                                                    loaded_children,
+                                                    loading_children,
+                                                    folders,
+                                                    tracks_by_folder,
+                                                    track_cursors,
+                                                    loading_tracks,
+                                                    track_errors,
+                                                    error,
+                                                );
+                                            },
+                                            if is_expanded {
+                                                IconFolderOpen { class: "w-4 h-4 flex-shrink-0".to_string() }
+                                            } else {
+                                                IconFolder { class: "w-4 h-4 flex-shrink-0 opacity-70".to_string() }
                                             }
-
-                                            open_tracks.write().insert(id.clone());
-                                            if tracks_by_folder.peek().contains_key(&id)
-                                                || loading_tracks.peek().contains(&id)
-                                            {
-                                                return;
-                                            }
-
-                                            loading_tracks.write().insert(id.clone());
-                                            track_errors.write().remove(&id);
-                                            let folder_id = id.clone();
-                                            spawn(async move {
-                                                match use_music::list_music_tracks(Some(&folder_id), None).await {
-                                                    Ok(response) => {
-                                                        tracks_by_folder.write().insert(
-                                                            folder_id.clone(),
-                                                            response.tracks,
-                                                        );
-                                                        track_cursors.write().insert(
-                                                            folder_id.clone(),
-                                                            response.next_cursor,
-                                                        );
-                                                    }
-                                                    Err(err) => {
-                                                        track_errors.write().insert(folder_id.clone(), err);
-                                                    }
-                                                }
-                                                loading_tracks.write().remove(&folder_id);
-                                            });
-                                        },
-                                        if tracks_open {
-                                            IconChevronDown { class: "w-3.5 h-3.5 flex-shrink-0 opacity-70".to_string() }
-                                            IconFolderOpen { class: "w-4 h-4 flex-shrink-0".to_string() }
-                                        } else {
-                                            IconChevronRight { class: "w-3.5 h-3.5 flex-shrink-0 opacity-40".to_string() }
-                                            IconFolder { class: "w-4 h-4 flex-shrink-0 opacity-70".to_string() }
+                                            span { class: "truncate font-medium", "{folder.name}" }
+                                            span { class: "hidden min-w-0 truncate text-xs text-base-content/50 sm:inline", "{folder.path}" }
                                         }
-                                        span { class: "truncate font-medium", "{folder.name}" }
-                                        span { class: "hidden min-w-0 truncate text-xs text-base-content/50 sm:inline", "{folder.path}" }
+                                    } else {
+                                        div {
+                                            class: if is_expanded {
+                                                "flex min-w-0 flex-1 items-center gap-2 text-left text-primary"
+                                            } else {
+                                                "flex min-w-0 flex-1 items-center gap-2 text-left"
+                                            },
+                                            IconFolder { class: "w-4 h-4 flex-shrink-0 opacity-70".to_string() }
+                                            span { class: "truncate font-medium", "{folder.name}" }
+                                            span { class: "hidden min-w-0 truncate text-xs text-base-content/50 sm:inline", "{folder.path}" }
+                                        }
                                     }
                                 }
                                 div { class: "flex items-center justify-end gap-2",
@@ -275,7 +251,7 @@ pub fn FolderTreeView(root_folder_id: Option<String>) -> Element {
                                     }
                                 }
                             }
-                            if tracks_open {
+                            if show_tracks {
                                 div {
                                     key: "{id}-tracks",
                                     class: "border-t border-base-200 bg-base-100/80 px-3 py-3",
@@ -360,6 +336,78 @@ pub fn FolderTreeView(root_folder_id: Option<String>) -> Element {
                 on_changed: move |_| {},
             }
         }
+    }
+}
+
+fn toggle_folder(
+    folder_id: String,
+    has_children: bool,
+    has_direct_tracks: bool,
+    mut expanded: Signal<HashSet<String>>,
+    mut loaded_children: Signal<HashSet<String>>,
+    mut loading_children: Signal<HashSet<String>>,
+    mut folders: Signal<Vec<MusicFolderResponse>>,
+    mut tracks_by_folder: Signal<HashMap<String, Vec<TrackResponse>>>,
+    mut track_cursors: Signal<HashMap<String, Option<String>>>,
+    mut loading_tracks: Signal<HashSet<String>>,
+    mut track_errors: Signal<HashMap<String, String>>,
+    mut error: Signal<Option<String>>,
+) {
+    if expanded.peek().contains(&folder_id) {
+        expanded.write().remove(&folder_id);
+        return;
+    }
+
+    expanded.write().insert(folder_id.clone());
+
+    if has_children
+        && !loaded_children.peek().contains(&folder_id)
+        && !loading_children.peek().contains(&folder_id)
+    {
+        loading_children.write().insert(folder_id.clone());
+        let parent_id = folder_id.clone();
+        spawn(async move {
+            match use_music::list_music_child_folders(&parent_id).await {
+                Ok(children) => {
+                    let mut current = folders.write();
+                    let known: HashSet<String> = current
+                        .iter()
+                        .map(|folder| folder.folder_id.clone())
+                        .collect();
+                    current.extend(
+                        children
+                            .into_iter()
+                            .filter(|child| !known.contains(&child.folder_id)),
+                    );
+                    loaded_children.write().insert(parent_id.clone());
+                }
+                Err(err) => error.set(Some(err)),
+            }
+            loading_children.write().remove(&parent_id);
+        });
+    }
+
+    if has_direct_tracks
+        && !tracks_by_folder.peek().contains_key(&folder_id)
+        && !loading_tracks.peek().contains(&folder_id)
+    {
+        loading_tracks.write().insert(folder_id.clone());
+        track_errors.write().remove(&folder_id);
+        let id = folder_id.clone();
+        spawn(async move {
+            match use_music::list_music_tracks(Some(&id), None).await {
+                Ok(response) => {
+                    tracks_by_folder.write().insert(id.clone(), response.tracks);
+                    track_cursors
+                        .write()
+                        .insert(id.clone(), response.next_cursor);
+                }
+                Err(err) => {
+                    track_errors.write().insert(id.clone(), err);
+                }
+            }
+            loading_tracks.write().remove(&id);
+        });
     }
 }
 
