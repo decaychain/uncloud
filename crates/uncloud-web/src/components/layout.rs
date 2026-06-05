@@ -4,6 +4,7 @@ use crate::hooks::use_events::use_events;
 use crate::hooks::use_storages::{RescanConflict, RescanJob, RescanStatus};
 use dioxus::prelude::*;
 use uncloud_common::ServerEvent;
+use wasm_bindgen::JsCast;
 
 fn parse_rescan_status(status: &str) -> RescanStatus {
     match status {
@@ -15,6 +16,16 @@ fn parse_rescan_status(status: &str) -> RescanStatus {
 }
 use crate::router::Route;
 use crate::state::{AuthState, PinnedPlaylistState, PlayerState, RescanState, ThemeState};
+
+fn set_main_sidebar_open(open: bool) {
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        if let Ok(Some(el)) = doc.query_selector("#main-sidebar") {
+            if let Some(input) = el.dyn_ref::<web_sys::HtmlInputElement>() {
+                input.set_checked(open);
+            }
+        }
+    }
+}
 
 #[component]
 pub fn Layout() -> Element {
@@ -193,10 +204,10 @@ pub fn Layout() -> Element {
     rsx! {
         document::Title { "{page_title}" }
         div { "data-theme": theme, class: "min-h-screen bg-base-100",
-            div { class: "drawer lg:drawer-open",
-                input { id: "main-sidebar", r#type: "checkbox", class: "drawer-toggle" }
+            div { class: "uc-drawer",
+                input { id: "main-sidebar", r#type: "checkbox", class: "uc-drawer-toggle" }
 
-                div { class: "drawer-content flex flex-col",
+                div { class: "uc-drawer-content flex flex-col",
                     Navbar {}
                     if on_music_route {
                         main { class: "{main_class}",
@@ -226,13 +237,23 @@ pub fn Layout() -> Element {
                     }
                 }
 
-                div { class: "drawer-side z-40",
+                div { class: "uc-drawer-side z-40",
                     label {
                         r#for: "main-sidebar",
                         "aria-label": "close sidebar",
-                        class: "drawer-overlay",
+                        class: "uc-drawer-overlay",
+                        onpointerdown: move |e| {
+                            let pointer_type = e.pointer_type();
+                            if pointer_type == "touch" || pointer_type == "pen" {
+                                e.prevent_default();
+                                set_main_sidebar_open(false);
+                            }
+                        },
+                        onclick: move |_| set_main_sidebar_open(false),
                     }
-                    crate::components::sidebar::Sidebar {}
+                    div { class: "uc-drawer-panel",
+                        crate::components::sidebar::Sidebar {}
+                    }
                 }
             }
             crate::components::player::Player {}
@@ -368,9 +389,18 @@ fn Navbar() -> Element {
         div { class: "navbar bg-base-200 shadow-sm sticky top-0 z-30 gap-2 pt-safe",
             // Left: hamburger + section title (mobile only)
             div { class: "flex-shrink-0 flex items-center gap-1",
-                label {
-                    r#for: "main-sidebar",
+                button {
+                    r#type: "button",
                     class: "btn btn-ghost btn-circle lg:hidden",
+                    "aria-label": "open sidebar",
+                    onpointerdown: move |e| {
+                        let pointer_type = e.pointer_type();
+                        if pointer_type == "touch" || pointer_type == "pen" {
+                            e.prevent_default();
+                            set_main_sidebar_open(true);
+                        }
+                    },
+                    onclick: move |_| set_main_sidebar_open(true),
                     IconMenu { class: "w-5 h-5".to_string() }
                 }
                 span { class: "text-lg font-semibold lg:hidden", "{section_title}" }

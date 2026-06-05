@@ -1,20 +1,20 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use bson::doc;
 use chrono::Utc;
 use mongodb::bson::oid::ObjectId;
 use serde::Deserialize;
 
+use crate::AppState;
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
 use crate::models::{File, Folder, FolderShare, MusicCategory};
 use crate::routes::files::{build_folder_path, file_to_response, resolve_included_folder_ids_by};
 use crate::services::sync_log::escape_regex;
-use crate::AppState;
 use uncloud_common::{
     ArtistResponse, AudioMeta, CreateMusicCategoryRequest, InheritableSetting, MusicAlbumResponse,
     MusicCategory as MusicCategoryDto, MusicFolderResponse, MusicSearchResponse,
@@ -123,6 +123,12 @@ pub async fn list_music_folders(
     Query(query): Query<ListFoldersQuery>,
 ) -> Result<Json<Vec<MusicFolderResponse>>> {
     use futures::TryStreamExt;
+
+    if let Some(folder_ids) = query.folder_ids.as_deref() {
+        let requested = parse_folder_id_query(folder_ids)?;
+        let folders = list_music_folders_by_explicit_ids(&state, user.id, &requested).await?;
+        return Ok(Json(folders));
+    }
 
     let folders_coll = state.db.collection::<Folder>("folders");
     let files_coll = state.db.collection::<File>("files");
@@ -264,18 +270,7 @@ pub async fn list_music_folders(
         folder.has_children = parent_ids.contains(&folder.folder_id);
     }
 
-    if let Some(folder_ids) = query.folder_ids.as_deref() {
-        let requested: HashSet<String> = folder_ids
-            .split(',')
-            .filter(|id| !id.is_empty())
-            .map(|id| {
-                ObjectId::parse_str(id)
-                    .map(|_| id.to_string())
-                    .map_err(|_| AppError::BadRequest("Invalid folder_ids".to_string()))
-            })
-            .collect::<Result<HashSet<_>>>()?;
-        result.retain(|folder| requested.contains(&folder.folder_id));
-    } else if let Some(parent_id) = query.parent_id.as_deref() {
+    if let Some(parent_id) = query.parent_id.as_deref() {
         ObjectId::parse_str(parent_id)
             .map_err(|_| AppError::BadRequest("Invalid parent_id".to_string()))?;
         result.retain(|folder| folder.parent_folder_id.as_deref() == Some(parent_id));
@@ -286,6 +281,290 @@ pub async fn list_music_folders(
     result.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
 
     Ok(Json(result))
+}
+
+fn parse_folder_id_query(folder_ids: &str) -> Result<Vec<ObjectId>> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+
+    for id in folder_ids.split(',').filter(|id| !id.is_empty()) {
+        let oid = ObjectId::parse_str(id)
+            .map_err(|_| AppError::BadRequest("Invalid folder_ids".to_string()))?;
+        if seen.insert(oid) {
+            out.push(oid);
+        }
+    }
+
+    Ok(out)
+}
+
+async fn list_music_folders_by_explicit_ids(
+    state: &AppState,
+    user_id: ObjectId,
+    requested_ids: &[ObjectId],
+) -> Result<Vec<MusicFolderResponse>> {
+    use futures::TryStreamExt;
+
+    if requested_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let folders_coll = state.db.collection::<Folder>("folders");
+    let files_coll = state.db.collection::<File>("files");
+    let requested: HashSet<ObjectId> = requested_ids.iter().copied().collect();
+
+    let owned_by_id = load_folder_ancestor_closure(&folders_coll, &requested, &[user_id]).await?;
+
+    let shares_coll = state.db.collection::<FolderShare>("folder_shares");
+    let shares: Vec<FolderShare> = shares_coll
+        .find(doc! { "grantee_id": user_id, "music_include": "include" })
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut share_roots_by_owner: HashMap<ObjectId, HashSet<ObjectId>> = HashMap::new();
+    for share in &shares {
+        share_roots_by_owner
+            .entry(share.owner_id)
+            .or_default()
+            .insert(share.folder_id);
+    }
+
+    let shared_owner_ids: Vec<ObjectId> = share_roots_by_owner.keys().copied().collect();
+    let shared_by_id =
+        load_folder_ancestor_closure(&folders_coll, &requested, &shared_owner_ids).await?;
+
+    let mut response_ids = Vec::new();
+    let mut response_owners: HashMap<ObjectId, ObjectId> = HashMap::new();
+    let mut responses_by_id: HashMap<ObjectId, MusicFolderResponse> = HashMap::new();
+
+    for folder_id in &requested {
+        if let Some(folder) = owned_by_id.get(folder_id) {
+            if !folder_effective_music_included(*folder_id, &owned_by_id) {
+                continue;
+            }
+
+            response_ids.push(*folder_id);
+            response_owners.insert(*folder_id, folder.owner_id);
+            responses_by_id.insert(
+                *folder_id,
+                MusicFolderResponse {
+                    folder_id: folder_id.to_hex(),
+                    parent_folder_id: folder.parent_id.and_then(|pid| {
+                        folder_effective_music_included(pid, &owned_by_id).then(|| pid.to_hex())
+                    }),
+                    name: folder.name.clone(),
+                    path: build_owned_folder_path(*folder_id, &owned_by_id),
+                    track_count: 0,
+                    cover_file_id: None,
+                    has_children: false,
+                },
+            );
+            continue;
+        }
+
+        let Some(folder) = shared_by_id.get(folder_id) else {
+            continue;
+        };
+        if !shared_folder_accessible(*folder_id, &shared_by_id, &share_roots_by_owner) {
+            continue;
+        }
+
+        response_ids.push(*folder_id);
+        response_owners.insert(*folder_id, folder.owner_id);
+        responses_by_id.insert(
+            *folder_id,
+            MusicFolderResponse {
+                folder_id: folder_id.to_hex(),
+                parent_folder_id: folder.parent_id.and_then(|pid| {
+                    shared_folder_accessible(pid, &shared_by_id, &share_roots_by_owner)
+                        .then(|| pid.to_hex())
+                }),
+                name: folder.name.clone(),
+                path: build_owned_folder_path(*folder_id, &shared_by_id),
+                track_count: 0,
+                cover_file_id: None,
+                has_children: false,
+            },
+        );
+    }
+
+    let stats = batch_audio_folder_stats(&files_coll, &response_ids).await?;
+    let child_parent_ids = explicit_folder_child_parent_ids(
+        &folders_coll,
+        user_id,
+        &response_ids,
+        &response_owners,
+        &share_roots_by_owner,
+    )
+    .await?;
+
+    for folder_id in &response_ids {
+        if let Some(response) = responses_by_id.get_mut(folder_id) {
+            if let Some(stats) = stats.get(folder_id) {
+                response.track_count = stats.track_count;
+                response.cover_file_id = stats.cover_file_id.map(|id| id.to_hex());
+            }
+            response.has_children = child_parent_ids.contains(folder_id);
+        }
+    }
+
+    let mut result: Vec<MusicFolderResponse> = responses_by_id.into_values().collect();
+    result.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
+    Ok(result)
+}
+
+async fn load_folder_ancestor_closure(
+    folders_coll: &mongodb::Collection<Folder>,
+    seed_ids: &HashSet<ObjectId>,
+    owner_ids: &[ObjectId],
+) -> Result<HashMap<ObjectId, Folder>> {
+    if seed_ids.is_empty() || owner_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let owner_bson: Vec<bson::Bson> = owner_ids
+        .iter()
+        .copied()
+        .map(bson::Bson::ObjectId)
+        .collect();
+    let mut pending = seed_ids.clone();
+    let mut by_id = HashMap::new();
+
+    while !pending.is_empty() {
+        let id_bson: Vec<bson::Bson> = pending.iter().copied().map(bson::Bson::ObjectId).collect();
+        let mut cursor = folders_coll
+            .find(doc! {
+                "_id": { "$in": &id_bson },
+                "owner_id": { "$in": &owner_bson },
+                "deleted_at": bson::Bson::Null,
+            })
+            .await?;
+
+        let mut next = HashSet::new();
+        while cursor.advance().await? {
+            let folder: Folder = cursor.deserialize_current()?;
+            if by_id.contains_key(&folder.id) {
+                continue;
+            }
+            if let Some(parent_id) = folder.parent_id {
+                if !by_id.contains_key(&parent_id) {
+                    next.insert(parent_id);
+                }
+            }
+            by_id.insert(folder.id, folder);
+        }
+
+        pending = next;
+    }
+
+    Ok(by_id)
+}
+
+fn folder_effective_music_included(folder_id: ObjectId, by_id: &HashMap<ObjectId, Folder>) -> bool {
+    let mut current = Some(folder_id);
+    let mut seen = HashSet::new();
+
+    while let Some(id) = current {
+        if !seen.insert(id) {
+            return false;
+        }
+        let Some(folder) = by_id.get(&id) else {
+            return false;
+        };
+        if let Some(include) = folder.music_include.as_include_flag() {
+            return include;
+        }
+        current = folder.parent_id;
+    }
+
+    false
+}
+
+fn shared_folder_accessible(
+    folder_id: ObjectId,
+    by_id: &HashMap<ObjectId, Folder>,
+    share_roots_by_owner: &HashMap<ObjectId, HashSet<ObjectId>>,
+) -> bool {
+    let mut current = Some(folder_id);
+    let mut seen = HashSet::new();
+
+    while let Some(id) = current {
+        if !seen.insert(id) {
+            return false;
+        }
+        let Some(folder) = by_id.get(&id) else {
+            return false;
+        };
+        if share_roots_by_owner
+            .get(&folder.owner_id)
+            .is_some_and(|roots| roots.contains(&id))
+        {
+            return true;
+        }
+        current = folder.parent_id;
+    }
+
+    false
+}
+
+fn build_owned_folder_path(folder_id: ObjectId, by_id: &HashMap<ObjectId, Folder>) -> String {
+    let refs: HashMap<ObjectId, &Folder> = by_id.iter().map(|(id, folder)| (*id, folder)).collect();
+    build_folder_path(folder_id, &refs)
+}
+
+async fn explicit_folder_child_parent_ids(
+    folders_coll: &mongodb::Collection<Folder>,
+    user_id: ObjectId,
+    parent_ids: &[ObjectId],
+    response_owners: &HashMap<ObjectId, ObjectId>,
+    share_roots_by_owner: &HashMap<ObjectId, HashSet<ObjectId>>,
+) -> Result<HashSet<ObjectId>> {
+    if parent_ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let parent_bson: Vec<bson::Bson> = parent_ids
+        .iter()
+        .copied()
+        .map(bson::Bson::ObjectId)
+        .collect();
+    let mut owner_ids: HashSet<ObjectId> = HashSet::from([user_id]);
+    owner_ids.extend(share_roots_by_owner.keys().copied());
+    let owner_bson: Vec<bson::Bson> = owner_ids
+        .iter()
+        .copied()
+        .map(bson::Bson::ObjectId)
+        .collect();
+
+    let mut cursor = folders_coll
+        .find(doc! {
+            "parent_id": { "$in": &parent_bson },
+            "owner_id": { "$in": &owner_bson },
+            "deleted_at": bson::Bson::Null,
+        })
+        .await?;
+
+    let mut out = HashSet::new();
+    while cursor.advance().await? {
+        let child: Folder = cursor.deserialize_current()?;
+        let Some(parent_id) = child.parent_id else {
+            continue;
+        };
+        let Some(parent_owner) = response_owners.get(&parent_id) else {
+            continue;
+        };
+
+        if *parent_owner == user_id {
+            if child.owner_id == user_id && child.music_include.as_include_flag() != Some(false) {
+                out.insert(parent_id);
+            }
+        } else if child.owner_id == *parent_owner {
+            out.insert(parent_id);
+        }
+    }
+
+    Ok(out)
 }
 
 #[derive(Default, Clone)]

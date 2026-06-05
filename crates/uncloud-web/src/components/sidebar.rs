@@ -808,7 +808,7 @@ fn MusicSidebarPlaylists() -> Element {
         let _ = refresh();
         let _ = dirty().0;
         spawn(async move {
-            if let Ok(p) = use_playlists::list_playlists().await {
+            if let Ok(p) = use_playlists::list_playlists_light().await {
                 playlists.set(p);
             }
         });

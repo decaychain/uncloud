@@ -1,18 +1,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
 use axum::Json;
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use bson::doc;
 use chrono::Utc;
 use mongodb::bson::oid::ObjectId;
+use serde::Deserialize;
 
+use crate::AppState;
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
 use crate::models::{File, Playlist, PlaylistTrack};
 use crate::routes::files::file_to_response;
-use crate::AppState;
 use uncloud_common::{
     AddTracksRequest, AudioMeta, CreatePlaylistRequest, PlaylistResponse, PlaylistSummary,
     RemoveTracksRequest, ReorderTracksRequest, TrackResponse, UpdatePlaylistRequest,
@@ -62,12 +63,69 @@ fn playlist_to_summary(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ListPlaylistsQuery {
+    #[serde(default)]
+    pub light: bool,
+}
+
+async fn list_playlist_summaries_light(
+    coll: &mongodb::Collection<Playlist>,
+    owner_id: ObjectId,
+) -> Result<Vec<PlaylistSummary>> {
+    use futures::StreamExt;
+
+    let pipeline = vec![
+        doc! { "$match": { "owner_id": owner_id } },
+        doc! { "$sort": { "updated_at": -1 } },
+        doc! {
+            "$project": {
+                "name": 1,
+                "description": 1,
+                "track_count": { "$size": { "$ifNull": ["$tracks", []] } },
+            }
+        },
+    ];
+
+    let mut cursor = coll.aggregate(pipeline).await?;
+    let mut out = Vec::new();
+
+    while let Some(doc) = cursor.next().await {
+        let doc = doc?;
+        let Ok(id) = doc.get_object_id("_id") else {
+            continue;
+        };
+        let name = doc.get_str("name").unwrap_or("").to_string();
+        let description = doc.get_str("description").ok().map(str::to_string);
+        let track_count = doc
+            .get_i32("track_count")
+            .map(|n| n as usize)
+            .or_else(|_| doc.get_i64("track_count").map(|n| n as usize))
+            .unwrap_or(0);
+
+        out.push(PlaylistSummary {
+            id: id.to_hex(),
+            name,
+            description,
+            track_count,
+            cover_file_id: None,
+        });
+    }
+
+    Ok(out)
+}
+
 /// `GET /api/playlists`
 pub async fn list_playlists(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    Query(query): Query<ListPlaylistsQuery>,
 ) -> Result<Json<Vec<PlaylistSummary>>> {
     let coll = state.db.collection::<Playlist>("playlists");
+    if query.light {
+        return Ok(Json(list_playlist_summaries_light(&coll, user.id).await?));
+    }
+
     let options = mongodb::options::FindOptions::builder()
         .sort(doc! { "updated_at": -1 })
         .build();

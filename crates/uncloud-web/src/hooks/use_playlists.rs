@@ -21,6 +21,22 @@ pub async fn list_playlists() -> Result<Vec<PlaylistSummary>, String> {
     }
 }
 
+pub async fn list_playlists_light() -> Result<Vec<PlaylistSummary>, String> {
+    let response = api::get("/playlists?light=true")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if response.ok() {
+        response
+            .json::<Vec<PlaylistSummary>>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err("Failed to load playlists".to_string())
+    }
+}
+
 pub async fn create_playlist(
     name: &str,
     description: Option<&str>,
