@@ -143,9 +143,9 @@ pub fn FolderTreeView(root_folder_id: Option<String>) -> Element {
                             div {
                                 key: "{id}",
                                 class: if is_active || is_expanded {
-                                    "grid grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[minmax(0,1fr)_7rem] items-center gap-3 bg-primary/10 px-3 py-2"
+                                    "grid grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[minmax(0,1fr)_7rem] items-center gap-2 bg-primary/10 px-2 py-1.5 sm:gap-3 sm:px-3 sm:py-2"
                                 } else {
-                                    "grid grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[minmax(0,1fr)_7rem] items-center gap-3 px-3 py-2 hover:bg-base-200/70"
+                                    "grid grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[minmax(0,1fr)_7rem] items-center gap-2 px-2 py-1.5 hover:bg-base-200/70 sm:gap-3 sm:px-3 sm:py-2"
                                 },
                                 div {
                                     class: "flex min-w-0 items-center gap-2",
@@ -254,9 +254,9 @@ pub fn FolderTreeView(root_folder_id: Option<String>) -> Element {
                             if show_tracks {
                                 div {
                                     key: "{id}-tracks",
-                                    class: "border-t border-base-200 bg-base-100/80 px-3 py-3",
+                                    class: "border-t border-base-200 bg-base-100/80 px-2 py-2 sm:px-3 sm:py-3",
                                     div {
-                                        class: "space-y-2",
+                                        class: "space-y-1.5 sm:space-y-2",
                                         style: "padding-left: {indent_px + 32}px",
                                         if let Some(err) = track_error {
                                             div { class: "alert alert-warning py-2 text-sm", "{err}" }

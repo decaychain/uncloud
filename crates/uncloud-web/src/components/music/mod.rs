@@ -322,7 +322,7 @@ pub fn Music() -> Element {
     let current_view = view();
 
     rsx! {
-        div { class: "p-4 space-y-4",
+        div { class: "p-3 space-y-3 sm:p-4 sm:space-y-4",
             div { class: "flex flex-wrap items-center justify-between gap-3",
                 h1 { class: "text-2xl font-bold", "Music" }
                 div { class: "join",
