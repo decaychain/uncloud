@@ -11309,7 +11309,7 @@ checksum = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
 
 [[package]]
 name = "uncloud-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "futures",
@@ -11325,7 +11325,7 @@ dependencies = [
 
 [[package]]
 name = "uncloud-common"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "gloo-net",
@@ -11338,7 +11338,7 @@ dependencies = [
 
 [[package]]
 name = "uncloud-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm 0.10.3",
  "async-trait",
@@ -11370,7 +11370,7 @@ dependencies = [
 
 [[package]]
 name = "uncloud-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm 0.10.3",
  "ammonia",
@@ -11445,7 +11445,7 @@ dependencies = [
 
 [[package]]
 name = "uncloud-sync"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -11466,7 +11466,7 @@ dependencies = [
 
 [[package]]
 name = "uncloud-web"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "console_error_panic_hook",

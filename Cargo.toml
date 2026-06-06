@@ -25,7 +25,7 @@ rustic_backend = { git = "https://github.com/decaychain/rustic_core", rev = "a52
 opendal = { git = "https://github.com/decaychain/opendal", rev = "2ffa805cf683c4fc57c2ce6f4fcf3fe95a8d3bcd" }
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 authors = ["Uncloud Contributors"]
