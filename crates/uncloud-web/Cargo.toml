@@ -54,5 +54,6 @@ futures = "0.3"
 urlencoding = "2"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 keepass = { git = "https://github.com/decaychain/keepass-rs", features = ["save_kdbx4"] }
+totp-rs = { version = "5", features = ["otpauth"] }
 uuid = { version = "1", features = ["v4", "js"] }
 console_error_panic_hook = "0.1"

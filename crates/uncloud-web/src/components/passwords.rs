@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::components::icons::{
-    IconChevronRight, IconFingerprint, IconFolder, IconLock, IconLockOpen, IconX,
+    IconChevronRight, IconFingerprint, IconFolder, IconLock, IconLockOpen, IconShield, IconX,
 };
 use crate::hooks::{api, biometric, use_files};
 use crate::state::{AuthState, VaultSession, VaultState};
@@ -10,6 +10,7 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use keepass::db::{Database, Entry, Group};
 use keepass::DatabaseKey;
+use totp_rs::{Algorithm, Secret, TOTP};
 use uncloud_common::{FileResponse, FolderResponse};
 
 /// Idle TTL for the unlocked vault. Past this, the next mount of
@@ -26,6 +27,7 @@ struct EntryView {
     title: String,
     username: String,
     url: String,
+    has_totp: bool,
 }
 
 /// A flattened view of a group for the sidebar.
@@ -51,6 +53,7 @@ fn collect_entries(group: &Group, path: &str) -> Vec<EntryView> {
             title: entry.get_title().unwrap_or("Untitled").to_string(),
             username: entry.get_username().unwrap_or("").to_string(),
             url: entry.get_url().unwrap_or("").to_string(),
+            has_totp: entry_totp_config(entry).is_some(),
         });
     }
 
@@ -100,6 +103,7 @@ fn find_group_entries(group: &Group, group_uuid: uuid::Uuid) -> Vec<EntryView> {
                 title: e.get_title().unwrap_or("Untitled").to_string(),
                 username: e.get_username().unwrap_or("").to_string(),
                 url: e.get_url().unwrap_or("").to_string(),
+                has_totp: entry_totp_config(e).is_some(),
             })
             .collect();
     }
@@ -110,6 +114,241 @@ fn find_group_entries(group: &Group, group_uuid: uuid::Uuid) -> Vec<EntryView> {
         }
     }
     Vec::new()
+}
+
+// ── TOTP field support ────────────────────────────────────────────────────
+
+const TOTP_PRIMARY_FIELD: &str = "otp";
+const TOTP_FIELD_KEYS: [&str; 5] = [
+    "otp",
+    "TOTP Seed",
+    "TOTP Secret",
+    "TimeOtp-Secret-Base32",
+    "TimeOtp-Secret",
+];
+
+#[derive(Clone, PartialEq)]
+struct TotpConfig {
+    secret: String,
+    digits: usize,
+    period: u64,
+    algorithm: Algorithm,
+    issuer: Option<String>,
+    account_name: Option<String>,
+}
+
+fn is_totp_field_key(key: &str) -> bool {
+    TOTP_FIELD_KEYS
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(key))
+}
+
+fn entry_totp_raw_value(entry: &Entry) -> Option<String> {
+    entry
+        .fields
+        .iter()
+        .find(|(key, value)| is_totp_field_key(key) && !value.is_empty())
+        .map(|(_, value)| value.as_str().to_string())
+}
+
+fn entry_totp_config(entry: &Entry) -> Option<TotpConfig> {
+    entry_totp_raw_value(entry).and_then(|value| parse_totp_value(&value))
+}
+
+fn parse_totp_value(value: &str) -> Option<TotpConfig> {
+    let raw = value.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let lower = raw.to_ascii_lowercase();
+    if lower.starts_with("otpauth://totp/") {
+        let query = raw.split_once('?').map(|(_, query)| query).unwrap_or("");
+        let secret = normalize_totp_secret(query_param(query, "secret")?.as_str());
+        if secret.is_empty() {
+            return None;
+        }
+
+        let label = raw
+            .split_once('?')
+            .map(|(before_query, _)| before_query)
+            .unwrap_or(raw)
+            .rsplit_once('/')
+            .map(|(_, label)| label)
+            .map(decode_url_component)
+            .unwrap_or_default();
+        let label_account = label
+            .split_once(':')
+            .map(|(_, account)| account.trim().to_string())
+            .filter(|account| !account.is_empty())
+            .or_else(|| {
+                let trimmed = label.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            });
+
+        return Some(TotpConfig {
+            secret,
+            digits: query_param(query, "digits")
+                .and_then(|digits| digits.parse::<usize>().ok())
+                .filter(|digits| (6..=8).contains(digits))
+                .unwrap_or(6),
+            period: query_param(query, "period")
+                .or_else(|| query_param(query, "step"))
+                .and_then(|period| period.parse::<u64>().ok())
+                .filter(|period| *period > 0)
+                .unwrap_or(30),
+            algorithm: query_param(query, "algorithm")
+                .and_then(|algorithm| parse_totp_algorithm(&algorithm))
+                .unwrap_or(Algorithm::SHA1),
+            issuer: query_param(query, "issuer").filter(|issuer| !issuer.trim().is_empty()),
+            account_name: label_account,
+        });
+    }
+
+    let secret = normalize_totp_secret(raw);
+    (!secret.is_empty()).then_some(TotpConfig {
+        secret,
+        digits: 6,
+        period: 30,
+        algorithm: Algorithm::SHA1,
+        issuer: None,
+        account_name: None,
+    })
+}
+
+fn normalize_totp_secret(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace() && *ch != '=')
+        .flat_map(|ch| ch.to_uppercase())
+        .collect()
+}
+
+fn parse_totp_algorithm(value: &str) -> Option<Algorithm> {
+    match value.trim().to_ascii_uppercase().as_str() {
+        "SHA1" | "SHA-1" => Some(Algorithm::SHA1),
+        "SHA256" | "SHA-256" => Some(Algorithm::SHA256),
+        "SHA512" | "SHA-512" => Some(Algorithm::SHA512),
+        _ => None,
+    }
+}
+
+fn query_param(query: &str, name: &str) -> Option<String> {
+    query.split('&').find_map(|part| {
+        let (key, value) = part.split_once('=').unwrap_or((part, ""));
+        let key = decode_url_component(key);
+        key.eq_ignore_ascii_case(name)
+            .then(|| decode_url_component(value))
+    })
+}
+
+fn decode_url_component(value: &str) -> String {
+    let value = value.replace('+', " ");
+    urlencoding::decode(&value)
+        .map(|decoded| decoded.into_owned())
+        .unwrap_or(value)
+}
+
+fn totp_algorithm_label(algorithm: Algorithm) -> &'static str {
+    match algorithm {
+        Algorithm::SHA1 => "SHA1",
+        Algorithm::SHA256 => "SHA256",
+        Algorithm::SHA512 => "SHA512",
+    }
+}
+
+fn totp_storage_value(input: &str, title: &str, username: &str) -> String {
+    let trimmed = input.trim();
+    let Some(mut config) = parse_totp_value(trimmed) else {
+        return trimmed.to_string();
+    };
+    if Secret::Encoded(config.secret.clone()).to_bytes().is_err() {
+        return trimmed.to_string();
+    }
+
+    let raw_was_uri = trimmed.to_ascii_lowercase().starts_with("otpauth://totp/");
+    if !raw_was_uri && config.issuer.is_none() {
+        let issuer = title.trim();
+        if !issuer.is_empty() {
+            config.issuer = Some(issuer.to_string());
+        }
+    }
+    if config.account_name.is_none() {
+        let account = if !username.trim().is_empty() {
+            username.trim()
+        } else {
+            title.trim()
+        };
+        if !account.is_empty() {
+            config.account_name = Some(account.to_string());
+        }
+    }
+
+    let account_name = config
+        .account_name
+        .clone()
+        .unwrap_or_else(|| "account".to_string());
+    let label = config
+        .issuer
+        .as_ref()
+        .map(|issuer| format!("{issuer}:{account_name}"))
+        .unwrap_or(account_name);
+
+    let mut uri = format!(
+        "otpauth://totp/{}?secret={}&algorithm={}&digits={}&period={}",
+        urlencoding::encode(&label),
+        config.secret,
+        totp_algorithm_label(config.algorithm),
+        config.digits,
+        config.period,
+    );
+    if let Some(issuer) = config.issuer {
+        uri.push_str("&issuer=");
+        uri.push_str(&urlencoding::encode(&issuer));
+    }
+    uri
+}
+
+fn remove_totp_fields(entry: &mut Entry) {
+    let keys: Vec<String> = entry
+        .fields
+        .keys()
+        .filter(|key| is_totp_field_key(key))
+        .cloned()
+        .collect();
+    for key in keys {
+        entry.fields.remove(&key);
+    }
+}
+
+fn now_unix_secs() -> u64 {
+    (js_sys::Date::now() / 1000.0).floor() as u64
+}
+
+fn generate_totp_code(config: &TotpConfig, now: u64) -> Result<String, String> {
+    let secret = Secret::Encoded(config.secret.clone())
+        .to_bytes()
+        .map_err(|_| "Invalid Base32 secret".to_string())?;
+    let totp = TOTP::new_unchecked(
+        config.algorithm,
+        config.digits,
+        1,
+        config.period.max(1),
+        secret,
+        None,
+        String::new(),
+    );
+    Ok(totp.generate(now))
+}
+
+fn totp_remaining_secs(config: &TotpConfig, now: u64) -> u64 {
+    let period = config.period.max(1);
+    let remaining = period - (now % period);
+    if remaining == 0 {
+        period
+    } else {
+        remaining
+    }
 }
 
 // ── Biometric enrolment prompt state ──────────────────────────────────────
@@ -1532,7 +1771,15 @@ fn VaultBrowser(vault: Signal<Option<VaultState>>, master_password: String) -> E
                                                 selected_entry.set(Some(eid));
                                                 editing_entry.set(None);
                                             },
-                                            div { class: "font-medium", "{entry.title}" }
+                                            div { class: "flex items-center gap-2",
+                                                div { class: "font-medium truncate", "{entry.title}" }
+                                                if entry.has_totp {
+                                                    span { class: "badge badge-xs badge-primary gap-1",
+                                                        IconShield { class: "w-3 h-3".to_string() }
+                                                        "TOTP"
+                                                    }
+                                                }
+                                            }
                                             div { class: "text-sm text-base-content/60 flex items-center gap-2",
                                                 if !entry.username.is_empty() {
                                                     span { "{entry.username}" }
@@ -1665,12 +1912,25 @@ fn delete_entry_from_group(group: &mut Group, uuid: uuid::Uuid) -> bool {
 fn EntryDetail(entry: Entry, on_edit: EventHandler<()>, on_delete: EventHandler<()>) -> Element {
     let mut show_password = use_signal(|| false);
     let copied: Signal<Option<String>> = use_signal(|| None);
+    let mut now = use_signal(now_unix_secs);
 
     let title = entry.get_title().unwrap_or("Untitled").to_string();
     let username = entry.get_username().unwrap_or("").to_string();
     let password = entry.get_password().unwrap_or("").to_string();
     let url = entry.get_url().unwrap_or("").to_string();
     let notes = entry.get("Notes").unwrap_or("").to_string();
+    let totp_config = entry_totp_config(&entry);
+    let has_totp = totp_config.is_some();
+
+    use_future(move || async move {
+        if !has_totp {
+            return;
+        }
+        loop {
+            TimeoutFuture::new(1000).await;
+            now.set(now_unix_secs());
+        }
+    });
 
     let copy_to_clipboard = {
         fn do_copy(field: String, value: String, mut copied: Signal<Option<String>>) {
@@ -1752,6 +2012,48 @@ fn EntryDetail(entry: Entry, on_edit: EventHandler<()>, on_delete: EventHandler<
                     }
                 }
 
+                if let Some(config) = totp_config.clone() {
+                    {
+                        match generate_totp_code(&config, now()) {
+                            Ok(code) => {
+                                let code_copy = code.clone();
+                                let remaining = totp_remaining_secs(&config, now());
+                                rsx! {
+                                    div { class: "flex flex-col gap-1",
+                                        span { class: "text-xs font-semibold text-base-content/60", "TOTP" }
+                                        div { class: "flex items-center gap-1",
+                                            code { class: "flex-1 text-lg bg-base-300 px-2 py-1 rounded font-mono tracking-wider",
+                                                "{code}"
+                                            }
+                                            span { class: "text-xs text-base-content/50 w-10 text-right",
+                                                "{remaining}s"
+                                            }
+                                            button {
+                                                class: "btn btn-ghost btn-xs",
+                                                onclick: move |_| copy_to_clipboard("totp".to_string(), code_copy.clone()),
+                                                if copied() == Some("totp".to_string()) { "Copied!" } else { "Copy" }
+                                            }
+                                        }
+                                        progress {
+                                            class: "progress progress-primary w-full h-1",
+                                            value: "{config.period.saturating_sub(remaining)}",
+                                            max: "{config.period}",
+                                        }
+                                    }
+                                }
+                            }
+                            Err(err) => rsx! {
+                                div { class: "flex flex-col gap-1",
+                                    span { class: "text-xs font-semibold text-base-content/60", "TOTP" }
+                                    div { class: "text-sm text-error bg-error/10 px-2 py-1 rounded",
+                                        "{err}"
+                                    }
+                                }
+                            },
+                        }
+                    }
+                }
+
                 if !url.is_empty() {
                     {
                         let u = url.clone();
@@ -1790,7 +2092,10 @@ fn EntryDetail(entry: Entry, on_edit: EventHandler<()>, on_delete: EventHandler<
                 for (key, value) in entry.fields.iter() {
                     {
                         let key_str = key.clone();
-                        let is_standard = matches!(key.as_str(), "Title" | "UserName" | "Password" | "URL" | "Notes");
+                        let is_standard = matches!(
+                            key.as_str(),
+                            "Title" | "UserName" | "Password" | "URL" | "Notes"
+                        ) || is_totp_field_key(key);
                         if !is_standard && !value.is_empty() {
                             let val = value.as_str().to_string();
                             let val_copy = val.clone();
@@ -1851,6 +2156,7 @@ fn NewEntryModal(
     let mut title = use_signal(String::new);
     let mut username = use_signal(String::new);
     let mut password = use_signal(String::new);
+    let mut totp = use_signal(String::new);
     let mut url = use_signal(String::new);
     let mut notes = use_signal(String::new);
 
@@ -1975,6 +2281,17 @@ fn NewEntryModal(
                         }
                     }
                     div { class: "form-control",
+                        label { class: "label", span { class: "label-text", "TOTP" } }
+                        input {
+                            class: "input input-bordered w-full",
+                            r#type: "password",
+                            autocomplete: "off",
+                            placeholder: "Base32 secret or otpauth:// URI",
+                            value: "{totp}",
+                            oninput: move |e| totp.set(e.value()),
+                        }
+                    }
+                    div { class: "form-control",
                         label { class: "label", span { class: "label-text", "URL" } }
                         input {
                             class: "input input-bordered w-full",
@@ -2011,6 +2328,12 @@ fn NewEntryModal(
                             }
                             if !password().is_empty() {
                                 entry.set_protected("Password", password());
+                            }
+                            if !totp().trim().is_empty() {
+                                entry.set_protected(
+                                    TOTP_PRIMARY_FIELD,
+                                    totp_storage_value(&totp(), title().trim(), username().trim()),
+                                );
                             }
                             if !url().is_empty() {
                                 entry.set_unprotected("URL", url().trim());
@@ -2129,6 +2452,7 @@ fn EntryEditor(
             .unwrap_or("")
             .to_string()
     });
+    let mut totp = use_signal(|| entry.and_then(entry_totp_raw_value).unwrap_or_default());
     let mut url = use_signal(|| entry.and_then(|e| e.get_url()).unwrap_or("").to_string());
     let mut notes = use_signal(|| entry.and_then(|e| e.get("Notes")).unwrap_or("").to_string());
 
@@ -2139,7 +2463,7 @@ fn EntryEditor(
             .map(|e| {
                 e.fields
                     .iter()
-                    .filter(|(k, _)| !standard.contains(&k.as_str()))
+                    .filter(|(k, _)| !standard.contains(&k.as_str()) && !is_totp_field_key(k))
                     .filter(|(_, v)| !v.is_empty())
                     .map(|(k, v)| (k.clone(), v.as_str().to_string(), v.is_protected()))
                     .collect::<Vec<_>>()
@@ -2264,6 +2588,17 @@ fn EntryEditor(
                     }
                 }
                 div { class: "form-control",
+                    label { class: "label", span { class: "label-text", "TOTP" } }
+                    input {
+                        class: "input input-bordered w-full input-sm",
+                        r#type: "password",
+                        autocomplete: "off",
+                        placeholder: "Base32 secret or otpauth:// URI",
+                        value: "{totp}",
+                        oninput: move |e| totp.set(e.value()),
+                    }
+                }
+                div { class: "form-control",
                     label { class: "label", span { class: "label-text", "URL" } }
                     input {
                         class: "input input-bordered w-full input-sm",
@@ -2367,6 +2702,13 @@ fn EntryEditor(
                             entry.set_unprotected("Title", title().trim());
                             entry.set_unprotected("UserName", username().trim());
                             entry.set_protected("Password", password());
+                            remove_totp_fields(entry);
+                            if !totp().trim().is_empty() {
+                                entry.set_protected(
+                                    TOTP_PRIMARY_FIELD,
+                                    totp_storage_value(&totp(), title().trim(), username().trim()),
+                                );
+                            }
                             entry.set_unprotected("URL", url().trim());
                             entry.set_unprotected("Notes", notes());
 
@@ -2374,7 +2716,7 @@ fn EntryEditor(
                             let standard = ["Title", "UserName", "Password", "URL", "Notes"];
                             let new_keys: Vec<String> = custom_fields().iter().map(|(k, _, _)| k.clone()).collect();
                             let old_custom_keys: Vec<String> = entry.fields.keys()
-                                .filter(|k| !standard.contains(&k.as_str()))
+                                .filter(|k| !standard.contains(&k.as_str()) && !is_totp_field_key(k))
                                 .cloned()
                                 .collect();
                             for old_key in &old_custom_keys {
@@ -2385,7 +2727,7 @@ fn EntryEditor(
 
                             // Set custom fields
                             for (key, value, protected) in custom_fields().iter() {
-                                if !key.trim().is_empty() {
+                                if !key.trim().is_empty() && !is_totp_field_key(key.trim()) {
                                     if *protected {
                                         entry.set_protected(key.trim(), value.as_str());
                                     } else {
