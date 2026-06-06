@@ -81,9 +81,7 @@ pub async fn list_music_root_folders() -> Result<Vec<MusicFolderResponse>, Strin
     list_music_folder_url("/music/folders?root=true").await
 }
 
-pub async fn list_music_child_folders(
-    parent_id: &str,
-) -> Result<Vec<MusicFolderResponse>, String> {
+pub async fn list_music_child_folders(parent_id: &str) -> Result<Vec<MusicFolderResponse>, String> {
     let url = format!("/music/folders?parent_id={}", encode(parent_id));
     list_music_folder_url(&url).await
 }

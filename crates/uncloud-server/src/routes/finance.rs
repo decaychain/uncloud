@@ -7,21 +7,20 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use axum::Json;
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
+use axum::Json;
 use bson::doc;
 use chrono::{DateTime, TimeZone, Utc};
 use futures::TryStreamExt;
-use mongodb::bson::Bson;
 use mongodb::bson::oid::ObjectId;
+use mongodb::bson::Bson;
 use mongodb::options::FindOptions;
 
 use sha2::{Digest, Sha256};
 
-use crate::AppState;
 use crate::error::{AppError, Result};
-use crate::finance_import::{self, ParseError, ParsedRow, sparkasse_camt_v8};
+use crate::finance_import::{self, sparkasse_camt_v8, ParseError, ParsedRow};
 use crate::finance_rules::{self, RuleEngine};
 use crate::middleware::AuthUser;
 use crate::models::{
@@ -30,6 +29,7 @@ use crate::models::{
     ImportRunError as ModelImportRunError, ImportRunStatus, ImportRunSummary, ImportSchema,
     ImportSource, ImportSourceKind, RulePatternKind, TransactionLeg,
 };
+use crate::AppState;
 use uncloud_common::{
     AccountBalanceResponse, AccountResponse, ApplyRulesResponse, BalanceSnapshotResponse,
     CategorySummaryItem, CategorySummaryResponse, CreateAccountRequest,
@@ -732,7 +732,11 @@ pub async fn create_transaction(
         raw_bank_category: None,
         notes: req.notes.and_then(|n| {
             let t = n.trim().to_string();
-            if t.is_empty() { None } else { Some(t) }
+            if t.is_empty() {
+                None
+            } else {
+                Some(t)
+            }
         }),
         tags: vec![],
         legs: vec![leg],

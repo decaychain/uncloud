@@ -1713,7 +1713,11 @@ fn InviteManagementSection() -> Element {
         evt.prevent_default();
         let comment = {
             let c = invite_comment().trim().to_string();
-            if c.is_empty() { None } else { Some(c) }
+            if c.is_empty() {
+                None
+            } else {
+                Some(c)
+            }
         };
         let role = match invite_role().as_str() {
             "admin" => Some(UserRole::Admin),

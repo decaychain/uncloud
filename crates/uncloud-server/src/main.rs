@@ -1,5 +1,5 @@
-use axum::http::Method;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+use axum::http::Method;
 use axum::routing::get;
 use clap::{Parser, Subcommand};
 use std::sync::Arc;
@@ -12,13 +12,13 @@ use mongodb::bson::{self, doc};
 use uncloud_server::models::{File, FileVersion, Folder, UserRole, UserStatus};
 
 use uncloud_server::{
-    AppState,
     config::Config,
     db, models, processing, routes,
     services::{
         AuthService, EventService, MailService, RescanService, SearchService, StorageService,
     },
     supervisor::Supervisor,
+    AppState,
 };
 
 // ── CLI definition ──────────────────────────────────────────────────────────

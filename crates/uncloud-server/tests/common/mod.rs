@@ -6,11 +6,10 @@ use std::sync::OnceLock;
 use axum_test::{TestServer, TestServerConfig};
 use serde_json::Value;
 use tempfile::TempDir;
-use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
+use testcontainers::{runners::AsyncRunner, GenericImage, ImageExt};
 use uncloud_client::Client;
 
 use uncloud_server::{
-    AppState,
     config::{
         AppsConfig, AuthConfig, Config, DatabaseConfig, FeaturesConfig, ProcessingConfig,
         SearchConfig, ServerConfig, StorageConfig, UploadConfig, VersioningConfig,
@@ -19,6 +18,7 @@ use uncloud_server::{
     processing::ProcessingService,
     routes,
     services::{AuthService, EventService, RescanService, SearchService, StorageService},
+    AppState,
 };
 
 // Shared MongoDB container — started once per test binary, port stored here.

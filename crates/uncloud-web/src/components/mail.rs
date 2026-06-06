@@ -11,8 +11,8 @@ use uncloud_common::{
     MailServerSettings, SendMailMessageRequest, UpdateMailAccountRequest, UpdateMailFolderRequest,
     UpdateMailIdentityRequest, UpsertMailDraftRequest,
 };
-use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
 use web_sys::HtmlInputElement;
 
 use crate::components::icons::{

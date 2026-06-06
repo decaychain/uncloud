@@ -6,8 +6,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::AppState;
 use crate::middleware::AuthUser;
+use crate::AppState;
 
 fn user_feature_enabled(state: &AppState, user: &AuthUser, feature: &str) -> bool {
     state.config.features.is_enabled(feature)

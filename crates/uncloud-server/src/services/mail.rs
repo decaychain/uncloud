@@ -20,20 +20,20 @@ use lettre::transport::smtp::{
     response::Response,
 };
 use lettre::{
-    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
     message::{
-        Attachment, Mailbox, MultiPart, SinglePart,
         header::{ContentType, HeaderName, HeaderValue},
+        Attachment, Mailbox, MultiPart, SinglePart,
     },
+    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
 use mail_parser::{MessageParser, MimeHeaders, PartType};
 use mongodb::bson::oid::ObjectId;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
-use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream as RustlsTlsStream;
-use tokio_rustls::rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
+use tokio_rustls::rustls::{pki_types::ServerName, ClientConfig, RootCertStore};
+use tokio_rustls::TlsConnector;
 use uncloud_common::{MailConnectionTestResponse, MailSecurity};
 
 use crate::error::{AppError, Result};
@@ -1805,7 +1805,11 @@ fn body_params_has_key(params: &BodyParams<'_>, key: &str) -> bool {
 
 fn decode_bytes(bytes: &[u8]) -> Option<String> {
     let value = String::from_utf8_lossy(bytes).trim().to_string();
-    if value.is_empty() { None } else { Some(value) }
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 pub fn decode_mail_header_text(value: &str) -> String {
@@ -2035,13 +2039,13 @@ fn normalize_plain_text(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MailService, RemoteMailAddress, RemoteMessageFlag, RemoteOutgoingAttachment,
-        RemoteOutgoingMessage, UidSyncDirection, UidSyncPlan, bodystructure_has_attachment,
-        build_smtp_message, decode_mail_header_text, display_name, flag_store_query, imap_uid_set,
-        latest_cached_refresh_plan, mail_move_unsupported_message, mail_tls_connector,
-        mailbox_from_address, map_imap_command_error, map_imap_login_error, next_uid_sync_plan,
-        parent_path, parse_message_body, quoted_imap_search_string, sync_completed,
-        sync_fetch_plans, updated_uid_cursors,
+        bodystructure_has_attachment, build_smtp_message, decode_mail_header_text, display_name,
+        flag_store_query, imap_uid_set, latest_cached_refresh_plan, mail_move_unsupported_message,
+        mail_tls_connector, mailbox_from_address, map_imap_command_error, map_imap_login_error,
+        next_uid_sync_plan, parent_path, parse_message_body, quoted_imap_search_string,
+        sync_completed, sync_fetch_plans, updated_uid_cursors, MailService, RemoteMailAddress,
+        RemoteMessageFlag, RemoteOutgoingAttachment, RemoteOutgoingMessage, UidSyncDirection,
+        UidSyncPlan,
     };
     use crate::error::AppError;
     use async_imap::error::Error as ImapError;

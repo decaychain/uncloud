@@ -5,19 +5,19 @@ use std::{
 };
 
 use axum::{
-    Json,
     body::Body,
     extract::{Multipart, Path, Query, State},
-    http::{StatusCode, header},
+    http::{header, StatusCode},
     response::Response,
+    Json,
 };
 use bson::doc;
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use kuchikiki::traits::TendrilSink;
 use mongodb::{
-    Database,
     bson::{self, oid::ObjectId},
+    Database,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -41,25 +41,25 @@ use uncloud_common::{
     UpdateMailIdentityRequest, UpsertMailDraftRequest,
 };
 
-use crate::AppState;
 use crate::error::{AppError, Result};
 use crate::middleware::{AuthUser, RequestMeta};
 use crate::models::{
     File, Folder, MailAccount, MailAddress, MailAttachment, MailDraft, MailDraftAttachment,
     MailFolder, MailIdentity, MailMessage, MailServerConfig, User,
 };
-use crate::routes::apps::{EVENT_FILE_CREATED, deliver_webhooks};
+use crate::routes::apps::{deliver_webhooks, EVENT_FILE_CREATED};
 use crate::routes::files::{check_name_conflict, file_to_response, resolve_storage_path};
-use crate::services::SecretCipher;
 use crate::services::mail::{
-    RemoteMailAddress, RemoteMailbox, RemoteMessageBody, RemoteMessageFlag, RemoteMessageFlags,
-    RemoteMessageSummary, RemoteOutgoingAttachment, RemoteOutgoingMessage, RemoteUidRange,
-    decode_mail_header_text,
+    decode_mail_header_text, RemoteMailAddress, RemoteMailbox, RemoteMessageBody,
+    RemoteMessageFlag, RemoteMessageFlags, RemoteMessageSummary, RemoteOutgoingAttachment,
+    RemoteOutgoingMessage, RemoteUidRange,
 };
 use crate::services::mail_blob::{
-    StoredMailBody, read_cached_message_body, store_draft_attachment, store_message_body,
+    read_cached_message_body, store_draft_attachment, store_message_body, StoredMailBody,
 };
 use crate::services::sharing::check_folder_access;
+use crate::services::SecretCipher;
+use crate::AppState;
 
 const ACCOUNTS: &str = "mail_accounts";
 const IDENTITIES: &str = "mail_identities";
