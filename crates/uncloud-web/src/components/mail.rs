@@ -16,9 +16,10 @@ use wasm_bindgen::closure::Closure;
 use web_sys::HtmlInputElement;
 
 use crate::components::icons::{
-    IconArchive, IconChevronRight, IconDownload, IconEye, IconFileText, IconFolder, IconFolderOpen,
-    IconForward, IconMail, IconMoveRight, IconPaperclip, IconPencil, IconPlus, IconRefreshCw,
-    IconReply, IconReplyAll, IconSend, IconSettings, IconStar, IconTrash, IconX,
+    IconArchive, IconCheck, IconChevronRight, IconDownload, IconEye, IconFileText, IconFolder,
+    IconFolderOpen, IconForward, IconMail, IconMoreVertical, IconMoveRight, IconPaperclip,
+    IconPencil, IconPlus, IconRefreshCw, IconReply, IconReplyAll, IconSend, IconSettings, IconStar,
+    IconTrash, IconX,
 };
 use crate::components::scroll_sentinel::ScrollSentinel;
 use crate::hooks::{use_files, use_mail};
@@ -68,6 +69,8 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
     let mut selected_account = use_signal(String::new);
     let mut selected_folder = use_signal(String::new);
     let mut selected_message = use_signal(String::new);
+    let mut selecting_messages = use_signal(|| false);
+    let mut selected_message_ids = use_signal(Vec::<String>::new);
     let mut mobile_mail_pane = use_signal(|| MailMobilePane::Folders);
     let mut loading = use_signal(|| true);
     let mut syncing = use_signal(|| false);
@@ -76,6 +79,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
     let mut backfilling_messages = use_signal(|| false);
     let mut loading_detail = use_signal(|| false);
     let mut mutating_message = use_signal(|| false);
+    let mut bulk_mutating_messages = use_signal(|| false);
     let mut move_target_folder = use_signal(String::new);
     let mut error = use_signal(|| None::<String>);
     let mut notice = use_signal(|| None::<String>);
@@ -231,6 +235,8 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                     };
                     accounts.set(list);
                     selected_account.set(selected.clone());
+                    selecting_messages.set(false);
+                    selected_message_ids.set(Vec::new());
                     mobile_mail_pane.set(MailMobilePane::Folders);
                     if requested_account_id != selected {
                         if selected.is_empty() {
@@ -440,6 +446,9 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
     let selected_account_id = selected_account();
     let selected_folder_id = selected_folder();
     let selected_message_id = selected_message();
+    let selecting_messages_snapshot = selecting_messages();
+    let selected_message_ids_snapshot = selected_message_ids();
+    let selected_message_count = selected_message_ids_snapshot.len();
     let active_account = accounts_snapshot
         .iter()
         .find(|a| a.id == selected_account_id)
@@ -457,6 +466,29 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
     let can_backfill_active_folder = active_folder
         .as_ref()
         .map(|folder| folder.selectable && !folder.sync_completed)
+        .unwrap_or(false);
+    let has_archive_target_for_active_folder = active_folder
+        .as_ref()
+        .map(|active| {
+            folders_snapshot.iter().any(|folder| {
+                folder.selectable
+                    && folder.id != active.id
+                    && matches!(
+                        folder.role,
+                        Some(MailFolderRole::Archive | MailFolderRole::AllMail)
+                    )
+            })
+        })
+        .unwrap_or(false);
+    let has_trash_target_for_active_folder = active_folder
+        .as_ref()
+        .map(|active| {
+            folders_snapshot.iter().any(|folder| {
+                folder.selectable
+                    && folder.id != active.id
+                    && folder.role == Some(MailFolderRole::Trash)
+            })
+        })
         .unwrap_or(false);
     let background_sync_in_progress = active_account
         .as_ref()
@@ -889,6 +921,8 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                     spawn(async move {
                                                         selected_folder.set(folder_id.clone());
                                                         selected_message.set(String::new());
+                                                        selecting_messages.set(false);
+                                                        selected_message_ids.set(Vec::new());
                                                         move_target_folder.set(String::new());
                                                         detail.set(None);
                                                         error.set(None);
@@ -958,7 +992,12 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                     }
 
                     section { class: "{mail_messages_pane_class(mobile_mail_pane_snapshot)}",
-                        div { class: "flex items-center justify-between border-b border-base-300 px-3 py-2",
+                        div {
+                            class: if selecting_messages_snapshot {
+                                "flex flex-col gap-2 border-b border-base-300 px-3 py-2"
+                            } else {
+                                "flex items-center justify-between border-b border-base-300 px-3 py-2"
+                            },
                             div { class: "flex min-w-0 items-center gap-2",
                                 button {
                                     class: "btn btn-ghost btn-sm h-8 min-h-8 px-2 lg:hidden",
@@ -977,71 +1016,359 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                     }
                                 }
                             }
-                            div { class: "flex items-center gap-1",
-                                button {
-                                    class: "btn btn-ghost btn-sm h-8 min-h-8 w-8 p-0",
-                                    title: "Folder settings",
-                                    disabled: active_folder.is_none(),
-                                    onclick: {
-                                        let active_folder = active_folder.clone();
-                                        move |_| {
-                                            if let Some(folder) = active_folder.clone() {
-                                                folder_role_value.set(folder_role_value_for(&folder));
-                                                folder_sync_enabled.set(folder.sync_enabled);
-                                                settings_folder.set(Some(folder));
-                                            }
-                                        }
-                                    },
-                                    IconSettings { class: "h-4 w-4".to_string() }
-                                }
-                                button {
-                                    class: "btn btn-sm btn-outline gap-2",
-                                    disabled: selected_account_id.is_empty()
-                                        || selected_folder_id.is_empty()
-                                        || syncing()
-                                        || refreshing_folders(),
-                                    onclick: move |_| {
-                                        let account_id = selected_account();
-                                        let folder_id = selected_folder();
-                                        if account_id.is_empty() || folder_id.is_empty() {
-                                            return;
-                                        }
-                                        spawn(async move {
-                                            syncing.set(true);
-                                            sync_status.set(Some("Syncing folder".to_string()));
-                                            error.set(None);
-                                            match use_mail::sync_folder(&account_id, &folder_id, Some(50)).await {
-                                                Ok(result) => {
-                                                    if let Some(message) = result.error {
-                                                        error.set(Some(message));
-                                                    }
-                                                    if let Ok(rows) = use_mail::list_folders(&account_id).await {
-                                                        folders.set(rows);
-                                                    }
-                                                    if let Ok(page) = use_mail::list_messages(&account_id, &folder_id, MAIL_MESSAGE_PAGE_SIZE, None).await {
-                                                        let selected = selected_message.peek().clone();
-                                                        let still_selected = page.messages.iter().any(|message| message.id == selected);
-                                                        messages.set(page.messages);
-                                                        message_next_cursor.set(page.next_cursor);
-                                                        message_has_more.set(page.has_more);
-                                                        if !selected.is_empty() && !still_selected {
-                                                            selected_message.set(String::new());
-                                                            detail.set(None);
+                            if selecting_messages_snapshot {
+                                div { class: "flex w-full flex-wrap items-center gap-1 border-t border-base-300 pt-2",
+                                    span { class: "px-2 text-xs text-base-content/60", "{selected_message_count} selected" }
+                                    button {
+                                        class: "btn btn-ghost btn-sm h-8 min-h-8 px-2",
+                                        disabled: bulk_mutating_messages(),
+                                        onclick: move |_| selected_message_ids.set(Vec::new()),
+                                        "Clear"
+                                    }
+                                    button {
+                                        class: "btn btn-ghost btn-sm h-8 min-h-8 px-2",
+                                        disabled: bulk_mutating_messages() || messages_snapshot.is_empty(),
+                                        onclick: move |_| selected_message_ids.set(loaded_message_ids(&messages())),
+                                        "All"
+                                    }
+                                    button {
+                                        class: "btn btn-ghost btn-sm h-8 min-h-8 gap-1",
+                                        disabled: bulk_mutating_messages() || selected_message_count == 0,
+                                        onclick: move |_| {
+                                            let ids = selected_message_ids();
+                                            spawn(async move {
+                                                bulk_mutating_messages.set(true);
+                                                error.set(None);
+                                                notice.set(None);
+                                                let action = MailMessageMutationAction::MarkRead;
+                                                match use_mail::bulk_mutate_messages(ids, action, None).await {
+                                                    Ok(result) => {
+                                                        if !result.messages.is_empty() {
+                                                            messages.set(replace_messages(messages(), result.messages.clone()));
+                                                            if let Some(mut current_detail) = detail() {
+                                                                if let Some(updated) = result.messages.iter().find(|message| message.id == current_detail.message.id) {
+                                                                    current_detail.message = updated.clone();
+                                                                    detail.set(Some(current_detail));
+                                                                }
+                                                            }
+                                                        }
+                                                        selected_message_ids.set(Vec::new());
+                                                        selecting_messages.set(false);
+                                                        let account_id_for_refresh = selected_account.peek().clone();
+                                                        if let Ok(rows) = use_mail::list_folders(&account_id_for_refresh).await {
+                                                            folders.set(rows);
+                                                        }
+                                                        if result.failed > 0 {
+                                                            error.set(Some(format!("{} message action(s) failed", result.failed)));
+                                                        } else {
+                                                            notice.set(Some(bulk_action_success_label(action, result.succeeded)));
                                                         }
                                                     }
+                                                    Err(e) => error.set(Some(e)),
                                                 }
-                                                Err(e) => error.set(Some(e)),
-                                            }
-                                            syncing.set(false);
-                                            sync_status.set(None);
-                                        });
-                                    },
-                                    if syncing() {
-                                        span { class: "loading loading-spinner loading-xs" }
-                                    } else {
-                                        IconRefreshCw { class: "w-4 h-4".to_string() }
+                                                bulk_mutating_messages.set(false);
+                                            });
+                                        },
+                                        IconEye { class: "h-4 w-4".to_string() }
+                                        span { "Read" }
                                     }
-                                    span { "Sync" }
+                                    button {
+                                        class: "btn btn-ghost btn-sm h-8 min-h-8 gap-1",
+                                        disabled: bulk_mutating_messages()
+                                            || selected_message_count == 0
+                                            || !has_archive_target_for_active_folder,
+                                        onclick: move |_| {
+                                            let ids = selected_message_ids();
+                                            spawn(async move {
+                                                bulk_mutating_messages.set(true);
+                                                error.set(None);
+                                                notice.set(None);
+                                                let action = MailMessageMutationAction::MarkUnread;
+                                                match use_mail::bulk_mutate_messages(ids, action, None).await {
+                                                    Ok(result) => {
+                                                        if !result.messages.is_empty() {
+                                                            messages.set(replace_messages(messages(), result.messages.clone()));
+                                                            if let Some(mut current_detail) = detail() {
+                                                                if let Some(updated) = result.messages.iter().find(|message| message.id == current_detail.message.id) {
+                                                                    current_detail.message = updated.clone();
+                                                                    detail.set(Some(current_detail));
+                                                                }
+                                                            }
+                                                        }
+                                                        selected_message_ids.set(Vec::new());
+                                                        selecting_messages.set(false);
+                                                        let account_id_for_refresh = selected_account.peek().clone();
+                                                        if let Ok(rows) = use_mail::list_folders(&account_id_for_refresh).await {
+                                                            folders.set(rows);
+                                                        }
+                                                        if result.failed > 0 {
+                                                            error.set(Some(format!("{} message action(s) failed", result.failed)));
+                                                        } else {
+                                                            notice.set(Some(bulk_action_success_label(action, result.succeeded)));
+                                                        }
+                                                    }
+                                                    Err(e) => error.set(Some(e)),
+                                                }
+                                                bulk_mutating_messages.set(false);
+                                            });
+                                        },
+                                        IconEye { class: "h-4 w-4".to_string() }
+                                        span { "Unread" }
+                                    }
+                                    button {
+                                        class: "btn btn-ghost btn-sm h-8 min-h-8 gap-1",
+                                        disabled: bulk_mutating_messages() || selected_message_count == 0,
+                                        onclick: move |_| {
+                                            let ids = selected_message_ids();
+                                            spawn(async move {
+                                                bulk_mutating_messages.set(true);
+                                                error.set(None);
+                                                notice.set(None);
+                                                let action = MailMessageMutationAction::Archive;
+                                                match use_mail::bulk_mutate_messages(ids, action, None).await {
+                                                    Ok(result) => {
+                                                        if !result.removed_message_ids.is_empty() {
+                                                            messages.set(remove_messages(messages(), &result.removed_message_ids));
+                                                            if result.removed_message_ids.iter().any(|id| id == &selected_message.peek().clone()) {
+                                                                selected_message.set(String::new());
+                                                                detail.set(None);
+                                                                mobile_mail_pane.set(MailMobilePane::Messages);
+                                                            }
+                                                        }
+                                                        selected_message_ids.set(Vec::new());
+                                                        selecting_messages.set(false);
+                                                        let account_id_for_refresh = selected_account.peek().clone();
+                                                        if let Ok(rows) = use_mail::list_folders(&account_id_for_refresh).await {
+                                                            folders.set(rows);
+                                                        }
+                                                        if result.failed > 0 {
+                                                            error.set(Some(format!("{} message action(s) failed", result.failed)));
+                                                        } else {
+                                                            notice.set(Some(bulk_action_success_label(action, result.succeeded)));
+                                                        }
+                                                    }
+                                                    Err(e) => error.set(Some(e)),
+                                                }
+                                                bulk_mutating_messages.set(false);
+                                            });
+                                        },
+                                        IconArchive { class: "h-4 w-4".to_string() }
+                                        span { "Archive" }
+                                    }
+                                    button {
+                                        class: "btn btn-ghost btn-sm h-8 min-h-8 gap-1 text-error",
+                                        disabled: bulk_mutating_messages()
+                                            || selected_message_count == 0
+                                            || !has_trash_target_for_active_folder,
+                                        onclick: move |_| {
+                                            let ids = selected_message_ids();
+                                            spawn(async move {
+                                                bulk_mutating_messages.set(true);
+                                                error.set(None);
+                                                notice.set(None);
+                                                let action = MailMessageMutationAction::Trash;
+                                                match use_mail::bulk_mutate_messages(ids, action, None).await {
+                                                    Ok(result) => {
+                                                        if !result.removed_message_ids.is_empty() {
+                                                            messages.set(remove_messages(messages(), &result.removed_message_ids));
+                                                            if result.removed_message_ids.iter().any(|id| id == &selected_message.peek().clone()) {
+                                                                selected_message.set(String::new());
+                                                                detail.set(None);
+                                                                mobile_mail_pane.set(MailMobilePane::Messages);
+                                                            }
+                                                        }
+                                                        selected_message_ids.set(Vec::new());
+                                                        selecting_messages.set(false);
+                                                        let account_id_for_refresh = selected_account.peek().clone();
+                                                        if let Ok(rows) = use_mail::list_folders(&account_id_for_refresh).await {
+                                                            folders.set(rows);
+                                                        }
+                                                        if result.failed > 0 {
+                                                            error.set(Some(format!("{} message action(s) failed", result.failed)));
+                                                        } else {
+                                                            notice.set(Some(bulk_action_success_label(action, result.succeeded)));
+                                                        }
+                                                    }
+                                                    Err(e) => error.set(Some(e)),
+                                                }
+                                                bulk_mutating_messages.set(false);
+                                            });
+                                        },
+                                        IconTrash { class: "h-4 w-4".to_string() }
+                                        span { "Trash" }
+                                    }
+                                    button {
+                                        class: "btn btn-ghost btn-sm h-8 min-h-8 px-2",
+                                        disabled: bulk_mutating_messages(),
+                                        onclick: move |_| {
+                                            selecting_messages.set(false);
+                                            selected_message_ids.set(Vec::new());
+                                        },
+                                        "Done"
+                                    }
+                                }
+                            } else {
+                                div { class: "flex items-center gap-1",
+                                    button {
+                                        class: "btn btn-ghost btn-sm h-8 min-h-8 px-2",
+                                        disabled: messages_snapshot.is_empty() || bulk_mutating_messages(),
+                                        onclick: move |_| {
+                                            selecting_messages.set(true);
+                                            selected_message_ids.set(Vec::new());
+                                        },
+                                        "Select"
+                                    }
+                                    div { class: "dropdown dropdown-end",
+                                        button {
+                                            class: "btn btn-ghost btn-sm h-8 min-h-8 w-8 p-0",
+                                            title: "More actions",
+                                            disabled: selected_account_id.is_empty() || bulk_mutating_messages(),
+                                            tabindex: "0",
+                                            IconMoreVertical { class: "h-4 w-4".to_string() }
+                                        }
+                                        ul {
+                                            class: "menu dropdown-content bg-base-100 rounded-box z-50 mt-2 w-52 border border-base-300 p-1 shadow",
+                                            tabindex: "0",
+                                            li {
+                                                button {
+                                                    disabled: selected_folder_id.is_empty() || bulk_mutating_messages(),
+                                                    onclick: move |_| {
+                                                        let account_id = selected_account();
+                                                        let folder_id = selected_folder();
+                                                        if account_id.is_empty() || folder_id.is_empty() {
+                                                            return;
+                                                        }
+                                                        spawn(async move {
+                                                            bulk_mutating_messages.set(true);
+                                                            sync_status.set(Some("Marking folder read".to_string()));
+                                                            error.set(None);
+                                                            notice.set(None);
+                                                            match use_mail::mark_folder_read(&account_id, &folder_id).await {
+                                                                Ok(result) => {
+                                                                    folders.set(result.folders);
+                                                                    messages.set(mark_messages_read(messages()));
+                                                                    if let Some(mut current_detail) = detail() {
+                                                                        current_detail.message = mark_message_read(current_detail.message);
+                                                                        detail.set(Some(current_detail));
+                                                                    }
+                                                                    if result.failed > 0 {
+                                                                        error.set(Some(format!("{} folder action(s) failed", result.failed)));
+                                                                    } else {
+                                                                        notice.set(Some("Folder marked as read".to_string()));
+                                                                    }
+                                                                }
+                                                                Err(e) => error.set(Some(e)),
+                                                            }
+                                                            sync_status.set(None);
+                                                            bulk_mutating_messages.set(false);
+                                                        });
+                                                    },
+                                                    "Mark folder as read"
+                                                }
+                                            }
+                                            li {
+                                                button {
+                                                    disabled: selected_account_id.is_empty() || bulk_mutating_messages(),
+                                                    onclick: move |_| {
+                                                        let account_id = selected_account();
+                                                        if account_id.is_empty() {
+                                                            return;
+                                                        }
+                                                        spawn(async move {
+                                                            bulk_mutating_messages.set(true);
+                                                            sync_status.set(Some("Marking account read".to_string()));
+                                                            error.set(None);
+                                                            notice.set(None);
+                                                            match use_mail::mark_account_read(&account_id).await {
+                                                                Ok(result) => {
+                                                                    folders.set(result.folders);
+                                                                    messages.set(mark_messages_read(messages()));
+                                                                    if let Some(mut current_detail) = detail() {
+                                                                        current_detail.message = mark_message_read(current_detail.message);
+                                                                        detail.set(Some(current_detail));
+                                                                    }
+                                                                    if result.failed > 0 {
+                                                                        error.set(Some(format!("{} folder action(s) failed", result.failed)));
+                                                                    } else {
+                                                                        notice.set(Some("Account marked as read".to_string()));
+                                                                    }
+                                                                }
+                                                                Err(e) => error.set(Some(e)),
+                                                            }
+                                                            sync_status.set(None);
+                                                            bulk_mutating_messages.set(false);
+                                                        });
+                                                    },
+                                                    "Mark account as read"
+                                                }
+                                            }
+                                        }
+                                    }
+                                    button {
+                                        class: "btn btn-ghost btn-sm h-8 min-h-8 w-8 p-0",
+                                        title: "Folder settings",
+                                        disabled: active_folder.is_none(),
+                                        onclick: {
+                                            let active_folder = active_folder.clone();
+                                            move |_| {
+                                                if let Some(folder) = active_folder.clone() {
+                                                    folder_role_value.set(folder_role_value_for(&folder));
+                                                    folder_sync_enabled.set(folder.sync_enabled);
+                                                    settings_folder.set(Some(folder));
+                                                }
+                                            }
+                                        },
+                                        IconSettings { class: "h-4 w-4".to_string() }
+                                    }
+                                    button {
+                                        class: "btn btn-sm btn-outline gap-2",
+                                        disabled: selected_account_id.is_empty()
+                                            || selected_folder_id.is_empty()
+                                            || syncing()
+                                            || refreshing_folders(),
+                                        onclick: move |_| {
+                                            let account_id = selected_account();
+                                            let folder_id = selected_folder();
+                                            if account_id.is_empty() || folder_id.is_empty() {
+                                                return;
+                                            }
+                                            spawn(async move {
+                                                syncing.set(true);
+                                                sync_status.set(Some("Syncing folder".to_string()));
+                                                error.set(None);
+                                                match use_mail::sync_folder(&account_id, &folder_id, Some(50)).await {
+                                                    Ok(result) => {
+                                                        if let Some(message) = result.error {
+                                                            error.set(Some(message));
+                                                        }
+                                                        if let Ok(rows) = use_mail::list_folders(&account_id).await {
+                                                            folders.set(rows);
+                                                        }
+                                                        if let Ok(page) = use_mail::list_messages(&account_id, &folder_id, MAIL_MESSAGE_PAGE_SIZE, None).await {
+                                                            let selected = selected_message.peek().clone();
+                                                            let still_selected = page.messages.iter().any(|message| message.id == selected);
+                                                            messages.set(page.messages);
+                                                            message_next_cursor.set(page.next_cursor);
+                                                            message_has_more.set(page.has_more);
+                                                            if !selected.is_empty() && !still_selected {
+                                                                selected_message.set(String::new());
+                                                                detail.set(None);
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => error.set(Some(e)),
+                                                }
+                                                syncing.set(false);
+                                                sync_status.set(None);
+                                            });
+                                        },
+                                        if syncing() {
+                                            span { class: "loading loading-spinner loading-xs" }
+                                        } else {
+                                            IconRefreshCw { class: "w-4 h-4".to_string() }
+                                        }
+                                        span { "Sync" }
+                                    }
                                 }
                             }
                         }
@@ -1068,6 +1395,8 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                 {
                                     let id = message.id.clone();
                                     let active = id == selected_message_id;
+                                    let selected_for_bulk =
+                                        message_id_selected(&selected_message_ids_snapshot, &id);
                                     let is_seen = message_has_flag(&message, "\\Seen");
                                     let is_flagged = message_has_flag(&message, "\\Flagged");
                                     let subject_class = if is_seen {
@@ -1078,7 +1407,9 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                     rsx! {
                                         button {
                                             key: "{id}",
-                                            class: if active {
+                                            class: if selected_for_bulk {
+                                                "block w-full border-l-4 border-primary bg-primary/10 px-3 py-3 text-left"
+                                            } else if active {
                                                 "block w-full border-l-4 border-primary bg-primary/10 px-3 py-3 text-left"
                                             } else if !is_seen {
                                                 "block w-full border-l-4 border-transparent bg-base-200/50 px-3 py-3 text-left hover:bg-base-200"
@@ -1087,6 +1418,13 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                             },
                                             onclick: move |_| {
                                                 let message_id = id.clone();
+                                                if *selecting_messages.peek() {
+                                                    selected_message_ids.set(toggle_message_id(
+                                                        selected_message_ids(),
+                                                        &message_id,
+                                                    ));
+                                                    return;
+                                                }
                                                 mobile_mail_pane.set(MailMobilePane::Detail);
                                                 spawn(async move {
                                                     selected_message.set(message_id.clone());
@@ -1112,6 +1450,18 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                 });
                                             },
                                             div { class: "flex items-start justify-between gap-2",
+                                                if selecting_messages_snapshot {
+                                                    span {
+                                                        class: if selected_for_bulk {
+                                                            "mt-0.5 flex h-4 w-4 items-center justify-center rounded border border-primary bg-primary text-primary-content"
+                                                        } else {
+                                                            "mt-0.5 h-4 w-4 rounded border border-base-content/30 bg-base-100"
+                                                        },
+                                                        if selected_for_bulk {
+                                                            IconCheck { class: "h-3 w-3".to_string() }
+                                                        }
+                                                    }
+                                                }
                                                 div { class: "min-w-0 flex-1",
                                                     div { class: "flex min-w-0 items-center gap-2",
                                                         if !is_seen {
@@ -1761,7 +2111,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                     mail_own_addresses(active_account.as_ref(), &active_identities);
                                 rsx! {
                                     div { class: "border-b border-base-300 px-4 py-3",
-                                        div { class: "flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between",
+                                        div { class: "flex flex-col gap-3",
                                             div { class: "flex min-w-0 items-start gap-2",
                                                 button {
                                                     class: "btn btn-ghost btn-sm h-8 min-h-8 px-2 lg:hidden",
@@ -1778,7 +2128,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                     }
                                                 }
                                             }
-                                            div { class: "flex flex-wrap items-center gap-1",
+                                            div { class: "order-first flex flex-wrap items-center gap-1",
                                                 button {
                                                     class: "btn btn-ghost btn-sm h-8 min-h-8 gap-1",
                                                     title: "Reply",
@@ -2428,6 +2778,8 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                 selected_account.set(account.id.clone());
                                                 selected_folder.set(String::new());
                                                 selected_message.set(String::new());
+                                                selecting_messages.set(false);
+                                                selected_message_ids.set(Vec::new());
                                                 move_target_folder.set(String::new());
                                                 messages.set(Vec::new());
                                                 message_next_cursor.set(None);
@@ -3153,6 +3505,8 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                                     selected_account.set(next.clone());
                                                                     selected_folder.set(String::new());
                                                                     selected_message.set(String::new());
+                                                                    selecting_messages.set(false);
+                                                                    selected_message_ids.set(Vec::new());
                                                                     move_target_folder.set(String::new());
                                                                     messages.set(Vec::new());
                                                                     message_next_cursor.set(None);
@@ -3277,6 +3631,8 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                                 let next = account_dirty.peek().0 + 1;
                                                                 account_dirty.set(MailAccountDirtyTick(next));
                                                                 selected_account.set(updated.id.clone());
+                                                                selecting_messages.set(false);
+                                                                selected_message_ids.set(Vec::new());
                                                                 account_settings.set(None);
                                                                 notice.set(Some("Account settings saved".to_string()));
                                                             }
@@ -4260,6 +4616,71 @@ fn message_has_flag(message: &MailMessageSummaryResponse, flag: &str) -> bool {
             .trim_start_matches('\\')
             .eq_ignore_ascii_case(flag.trim_start_matches('\\'))
     })
+}
+
+fn message_id_selected(selected: &[String], id: &str) -> bool {
+    selected.iter().any(|value| value == id)
+}
+
+fn toggle_message_id(mut selected: Vec<String>, id: &str) -> Vec<String> {
+    if let Some(index) = selected.iter().position(|value| value == id) {
+        selected.remove(index);
+    } else {
+        selected.push(id.to_string());
+    }
+    selected
+}
+
+fn loaded_message_ids(messages: &[MailMessageSummaryResponse]) -> Vec<String> {
+    messages.iter().map(|message| message.id.clone()).collect()
+}
+
+fn replace_messages(
+    mut current: Vec<MailMessageSummaryResponse>,
+    updated: Vec<MailMessageSummaryResponse>,
+) -> Vec<MailMessageSummaryResponse> {
+    for row in updated {
+        if let Some(existing) = current.iter_mut().find(|message| message.id == row.id) {
+            *existing = row;
+        }
+    }
+    current
+}
+
+fn remove_messages(
+    current: Vec<MailMessageSummaryResponse>,
+    removed: &[String],
+) -> Vec<MailMessageSummaryResponse> {
+    current
+        .into_iter()
+        .filter(|message| !message_id_selected(removed, &message.id))
+        .collect()
+}
+
+fn mark_messages_read(
+    messages: Vec<MailMessageSummaryResponse>,
+) -> Vec<MailMessageSummaryResponse> {
+    messages.into_iter().map(mark_message_read).collect()
+}
+
+fn mark_message_read(mut message: MailMessageSummaryResponse) -> MailMessageSummaryResponse {
+    if !message_has_flag(&message, "\\Seen") {
+        message.flags.push("\\Seen".to_string());
+    }
+    message
+}
+
+fn bulk_action_success_label(action: MailMessageMutationAction, count: usize) -> String {
+    let noun = if count == 1 { "message" } else { "messages" };
+    match action {
+        MailMessageMutationAction::MarkRead => format!("Marked {count} {noun} as read"),
+        MailMessageMutationAction::MarkUnread => format!("Marked {count} {noun} as unread"),
+        MailMessageMutationAction::Archive => format!("Archived {count} {noun}"),
+        MailMessageMutationAction::Trash => format!("Moved {count} {noun} to trash"),
+        MailMessageMutationAction::Star => format!("Starred {count} {noun}"),
+        MailMessageMutationAction::Unstar => format!("Unstarred {count} {noun}"),
+        MailMessageMutationAction::Move => format!("Moved {count} {noun}"),
+    }
 }
 
 fn parse_compose_addresses(input: &str) -> Vec<MailAddressDto> {

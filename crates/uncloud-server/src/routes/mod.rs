@@ -540,6 +540,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/mail/accounts/{id}/send", post(mail::send_account_message))
         .route("/mail/accounts/{id}/sync", post(mail::sync_account))
         .route(
+            "/mail/accounts/{account_id}/mark-read",
+            post(mail::mark_account_read),
+        )
+        .route(
             "/mail/accounts/{id}/drafts",
             get(mail::list_drafts).post(mail::create_draft),
         )
@@ -572,8 +576,16 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             post(mail::sync_folder),
         )
         .route(
+            "/mail/accounts/{account_id}/folders/{folder_id}/mark-read",
+            post(mail::mark_folder_read),
+        )
+        .route(
             "/mail/accounts/{account_id}/folders/{folder_id}/messages",
             get(mail::list_messages),
+        )
+        .route(
+            "/mail/messages/bulk-mutate",
+            post(mail::bulk_mutate_messages),
         )
         .route("/mail/messages/{message_id}", get(mail::get_message))
         .route(

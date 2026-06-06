@@ -230,6 +230,50 @@ pub struct MailMessageMutationResponse {
     pub destination_folder_path: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailMessageBulkMutationRequest {
+    pub message_ids: Vec<String>,
+    pub action: MailMessageMutationAction,
+    #[serde(default)]
+    pub target_folder_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailMessageBulkMutationError {
+    pub message_id: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailMessageBulkMutationResponse {
+    pub requested: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub messages: Vec<MailMessageSummaryResponse>,
+    pub removed_message_ids: Vec<String>,
+    pub destination_folder_id: Option<String>,
+    pub destination_folder_path: Option<String>,
+    pub errors: Vec<MailMessageBulkMutationError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailFolderMutationError {
+    pub folder_id: String,
+    pub folder_path: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailFolderMarkReadResponse {
+    pub account_id: String,
+    pub requested: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub updated_cached_messages: u64,
+    pub folders: Vec<MailFolderResponse>,
+    pub errors: Vec<MailFolderMutationError>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SendMailMessageRequest {
     #[serde(default)]

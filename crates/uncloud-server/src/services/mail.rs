@@ -20,20 +20,20 @@ use lettre::transport::smtp::{
     response::Response,
 };
 use lettre::{
-    message::{
-        header::{ContentType, HeaderName, HeaderValue},
-        Attachment, Mailbox, MultiPart, SinglePart,
-    },
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+    message::{
+        Attachment, Mailbox, MultiPart, SinglePart,
+        header::{ContentType, HeaderName, HeaderValue},
+    },
 };
 use mail_parser::{MessageParser, MimeHeaders, PartType};
 use mongodb::bson::oid::ObjectId;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
-use tokio_rustls::client::TlsStream as RustlsTlsStream;
-use tokio_rustls::rustls::{pki_types::ServerName, ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
+use tokio_rustls::client::TlsStream as RustlsTlsStream;
+use tokio_rustls::rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use uncloud_common::{MailConnectionTestResponse, MailSecurity};
 
 use crate::error::{AppError, Result};
@@ -244,6 +244,56 @@ impl MailService {
         }
     }
 
+    pub async fn set_imap_messages_flag(
+        &self,
+        settings: &MailServerConfig,
+        password: &str,
+        folder_path: &str,
+        uids: &[u32],
+        flag: RemoteMessageFlag,
+        enabled: bool,
+    ) -> Result<Vec<RemoteMessageFlags>> {
+        match settings.security {
+            MailSecurity::Tls => {
+                let client = connect_imap_tls(settings, true).await?;
+                set_imap_messages_flag(client, settings, password, folder_path, uids, flag, enabled)
+                    .await
+            }
+            MailSecurity::StartTls => {
+                let client = connect_imap_starttls(settings).await?;
+                set_imap_messages_flag(client, settings, password, folder_path, uids, flag, enabled)
+                    .await
+            }
+            MailSecurity::Plain => {
+                let client = connect_imap_plain(settings).await?;
+                set_imap_messages_flag(client, settings, password, folder_path, uids, flag, enabled)
+                    .await
+            }
+        }
+    }
+
+    pub async fn mark_imap_folder_read(
+        &self,
+        settings: &MailServerConfig,
+        password: &str,
+        folder_path: &str,
+    ) -> Result<()> {
+        match settings.security {
+            MailSecurity::Tls => {
+                let client = connect_imap_tls(settings, true).await?;
+                mark_imap_folder_read(client, settings, password, folder_path).await
+            }
+            MailSecurity::StartTls => {
+                let client = connect_imap_starttls(settings).await?;
+                mark_imap_folder_read(client, settings, password, folder_path).await
+            }
+            MailSecurity::Plain => {
+                let client = connect_imap_plain(settings).await?;
+                mark_imap_folder_read(client, settings, password, folder_path).await
+            }
+        }
+    }
+
     pub async fn move_imap_message(
         &self,
         settings: &MailServerConfig,
@@ -285,6 +335,54 @@ impl MailService {
                     password,
                     source_folder_path,
                     uid,
+                    destination_folder_path,
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn move_imap_messages(
+        &self,
+        settings: &MailServerConfig,
+        password: &str,
+        source_folder_path: &str,
+        uids: &[u32],
+        destination_folder_path: &str,
+    ) -> Result<()> {
+        match settings.security {
+            MailSecurity::Tls => {
+                let client = connect_imap_tls(settings, true).await?;
+                move_imap_messages(
+                    client,
+                    settings,
+                    password,
+                    source_folder_path,
+                    uids,
+                    destination_folder_path,
+                )
+                .await
+            }
+            MailSecurity::StartTls => {
+                let client = connect_imap_starttls(settings).await?;
+                move_imap_messages(
+                    client,
+                    settings,
+                    password,
+                    source_folder_path,
+                    uids,
+                    destination_folder_path,
+                )
+                .await
+            }
+            MailSecurity::Plain => {
+                let client = connect_imap_plain(settings).await?;
+                move_imap_messages(
+                    client,
+                    settings,
+                    password,
+                    source_folder_path,
+                    uids,
                     destination_folder_path,
                 )
                 .await
@@ -858,6 +956,75 @@ where
     Ok(flags)
 }
 
+async fn set_imap_messages_flag<T>(
+    client: Client<T>,
+    settings: &MailServerConfig,
+    password: &str,
+    folder_path: &str,
+    uids: &[u32],
+    flag: RemoteMessageFlag,
+    enabled: bool,
+) -> Result<Vec<RemoteMessageFlags>>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
+    let Some(uid_set) = imap_uid_set(uids) else {
+        return Ok(Vec::new());
+    };
+    let mut session = login_imap_client(client, settings, password).await?;
+    imap_timeout("IMAP SELECT", session.select(folder_path))
+        .await?
+        .map_err(|e| map_imap_command_error(e, "IMAP SELECT"))?;
+
+    {
+        let query = flag_store_query(flag, enabled);
+        let updates_stream =
+            imap_timeout("IMAP UID STORE", session.uid_store(uid_set.clone(), query))
+                .await?
+                .map_err(|e| map_imap_command_error(e, "IMAP UID STORE"))?
+                .try_collect();
+        let _updates: Vec<_> = imap_timeout("IMAP UID STORE read", updates_stream)
+            .await?
+            .map_err(|e| map_imap_command_error(e, "IMAP UID STORE read"))?;
+    }
+
+    let flags = fetch_imap_messages_flags(&mut session, &uid_set).await?;
+    let _ = session.logout().await;
+    Ok(flags)
+}
+
+async fn mark_imap_folder_read<T>(
+    client: Client<T>,
+    settings: &MailServerConfig,
+    password: &str,
+    folder_path: &str,
+) -> Result<()>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
+    let mut session = login_imap_client(client, settings, password).await?;
+    let mailbox = imap_timeout("IMAP SELECT", session.select(folder_path))
+        .await?
+        .map_err(|e| map_imap_command_error(e, "IMAP SELECT"))?;
+    if mailbox.exists == 0 {
+        let _ = session.logout().await;
+        return Ok(());
+    }
+
+    let updates_stream = imap_timeout(
+        "IMAP UID STORE mark folder read",
+        session.uid_store("1:*".to_string(), "+FLAGS.SILENT (\\Seen)"),
+    )
+    .await?
+    .map_err(|e| map_imap_command_error(e, "IMAP UID STORE mark folder read"))?
+    .try_collect();
+    let _updates: Vec<_> = imap_timeout("IMAP UID STORE mark folder read output", updates_stream)
+        .await?
+        .map_err(|e| map_imap_command_error(e, "IMAP UID STORE mark folder read output"))?;
+    let _ = session.logout().await;
+    Ok(())
+}
+
 async fn move_imap_message<T>(
     client: Client<T>,
     settings: &MailServerConfig,
@@ -891,6 +1058,42 @@ where
     Ok(())
 }
 
+async fn move_imap_messages<T>(
+    client: Client<T>,
+    settings: &MailServerConfig,
+    password: &str,
+    source_folder_path: &str,
+    uids: &[u32],
+    destination_folder_path: &str,
+) -> Result<()>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
+    let Some(uid_set) = imap_uid_set(uids) else {
+        return Ok(());
+    };
+    let mut session = login_imap_client(client, settings, password).await?;
+    let capabilities = imap_timeout("IMAP CAPABILITY", session.capabilities())
+        .await?
+        .map_err(|e| map_imap_command_error(e, "IMAP CAPABILITY"))?;
+    if !capabilities.has_str("MOVE") {
+        let _ = session.logout().await;
+        return Err(AppError::BadRequest(mail_move_unsupported_message()));
+    }
+
+    imap_timeout("IMAP SELECT", session.select(source_folder_path))
+        .await?
+        .map_err(|e| map_imap_command_error(e, "IMAP SELECT"))?;
+    imap_timeout(
+        "IMAP UID MOVE",
+        session.uid_mv(uid_set, destination_folder_path),
+    )
+    .await?
+    .map_err(|e| map_imap_command_error(e, "IMAP UID MOVE"))?;
+    let _ = session.logout().await;
+    Ok(())
+}
+
 async fn fetch_imap_message_flags<T>(session: &mut Session<T>, uid: u32) -> Result<Vec<String>>
 where
     T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
@@ -910,6 +1113,50 @@ where
         .find(|fetch| fetch.uid == Some(uid))
         .map(|fetch| fetch.flags().map(flag_name).collect())
         .ok_or_else(|| AppError::NotFound("Mail message".into()))
+}
+
+async fn fetch_imap_messages_flags<T>(
+    session: &mut Session<T>,
+    uid_set: &str,
+) -> Result<Vec<RemoteMessageFlags>>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
+{
+    let fetch_stream = imap_timeout(
+        "IMAP UID FETCH flags",
+        session.uid_fetch(uid_set.to_string(), "(UID FLAGS)"),
+    )
+    .await?
+    .map_err(|e| map_imap_command_error(e, "IMAP UID FETCH flags"))?
+    .try_collect();
+    let fetches: Vec<_> = imap_timeout("IMAP UID FETCH flags read", fetch_stream)
+        .await?
+        .map_err(|e| map_imap_command_error(e, "IMAP UID FETCH flags read"))?;
+    Ok(fetches
+        .iter()
+        .filter_map(|fetch| {
+            Some(RemoteMessageFlags {
+                uid: fetch.uid?,
+                flags: fetch.flags().map(flag_name).collect(),
+            })
+        })
+        .collect())
+}
+
+fn imap_uid_set(uids: &[u32]) -> Option<String> {
+    let mut uids = uids.to_vec();
+    uids.sort_unstable();
+    uids.dedup();
+    if uids.is_empty() {
+        None
+    } else {
+        Some(
+            uids.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        )
+    }
 }
 
 async fn imap_message_exists_by_message_id<T>(
@@ -1215,6 +1462,12 @@ pub struct RemoteMessageSummary {
     pub has_attachments: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct RemoteMessageFlags {
+    pub uid: u32,
+    pub flags: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteMessageBody {
     pub raw: Vec<u8>,
@@ -1437,7 +1690,7 @@ fn remote_message_summary(fetch: &async_imap::types::Fetch) -> Option<RemoteMess
             .and_then(decode_bytes),
         subject: envelope
             .and_then(|e| e.subject.as_deref())
-            .and_then(decode_bytes),
+            .and_then(decode_mail_header_bytes),
         from: envelope
             .and_then(|e| e.from.as_ref())
             .map(|addresses| {
@@ -1447,7 +1700,7 @@ fn remote_message_summary(fetch: &async_imap::types::Fetch) -> Option<RemoteMess
                         let mailbox = address.mailbox.as_deref().and_then(decode_bytes)?;
                         let host = address.host.as_deref().and_then(decode_bytes)?;
                         Some(RemoteMailAddress {
-                            name: address.name.as_deref().and_then(decode_bytes),
+                            name: address.name.as_deref().and_then(decode_mail_header_bytes),
                             address: format!("{mailbox}@{host}"),
                         })
                     })
@@ -1463,7 +1716,7 @@ fn remote_message_summary(fetch: &async_imap::types::Fetch) -> Option<RemoteMess
                         let mailbox = address.mailbox.as_deref().and_then(decode_bytes)?;
                         let host = address.host.as_deref().and_then(decode_bytes)?;
                         Some(RemoteMailAddress {
-                            name: address.name.as_deref().and_then(decode_bytes),
+                            name: address.name.as_deref().and_then(decode_mail_header_bytes),
                             address: format!("{mailbox}@{host}"),
                         })
                     })
@@ -1479,7 +1732,7 @@ fn remote_message_summary(fetch: &async_imap::types::Fetch) -> Option<RemoteMess
                         let mailbox = address.mailbox.as_deref().and_then(decode_bytes)?;
                         let host = address.host.as_deref().and_then(decode_bytes)?;
                         Some(RemoteMailAddress {
-                            name: address.name.as_deref().and_then(decode_bytes),
+                            name: address.name.as_deref().and_then(decode_mail_header_bytes),
                             address: format!("{mailbox}@{host}"),
                         })
                     })
@@ -1495,7 +1748,7 @@ fn remote_message_summary(fetch: &async_imap::types::Fetch) -> Option<RemoteMess
                         let mailbox = address.mailbox.as_deref().and_then(decode_bytes)?;
                         let host = address.host.as_deref().and_then(decode_bytes)?;
                         Some(RemoteMailAddress {
-                            name: address.name.as_deref().and_then(decode_bytes),
+                            name: address.name.as_deref().and_then(decode_mail_header_bytes),
                             address: format!("{mailbox}@{host}"),
                         })
                     })
@@ -1552,11 +1805,33 @@ fn body_params_has_key(params: &BodyParams<'_>, key: &str) -> bool {
 
 fn decode_bytes(bytes: &[u8]) -> Option<String> {
     let value = String::from_utf8_lossy(bytes).trim().to_string();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
+    if value.is_empty() { None } else { Some(value) }
+}
+
+pub fn decode_mail_header_text(value: &str) -> String {
+    decode_mail_header_bytes(value.as_bytes()).unwrap_or_else(|| value.trim().to_string())
+}
+
+fn decode_mail_header_bytes(bytes: &[u8]) -> Option<String> {
+    if bytes.is_empty() {
+        return None;
     }
+
+    let mut raw = Vec::with_capacity(bytes.len() + "Subject: \r\n\r\n".len());
+    raw.extend_from_slice(b"Subject: ");
+    for byte in bytes {
+        raw.push(match *byte {
+            b'\r' | b'\n' => b' ',
+            value => value,
+        });
+    }
+    raw.extend_from_slice(b"\r\n\r\n");
+
+    MessageParser::default()
+        .parse(&raw)
+        .and_then(|message| message.subject().map(str::trim).map(str::to_string))
+        .filter(|value| !value.is_empty())
+        .or_else(|| decode_bytes(bytes))
 }
 
 fn parse_envelope_date(bytes: &[u8]) -> Option<DateTime<Utc>> {
@@ -1760,12 +2035,13 @@ fn normalize_plain_text(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        bodystructure_has_attachment, build_smtp_message, display_name, flag_store_query,
+        MailService, RemoteMailAddress, RemoteMessageFlag, RemoteOutgoingAttachment,
+        RemoteOutgoingMessage, UidSyncDirection, UidSyncPlan, bodystructure_has_attachment,
+        build_smtp_message, decode_mail_header_text, display_name, flag_store_query, imap_uid_set,
         latest_cached_refresh_plan, mail_move_unsupported_message, mail_tls_connector,
         mailbox_from_address, map_imap_command_error, map_imap_login_error, next_uid_sync_plan,
         parent_path, parse_message_body, quoted_imap_search_string, sync_completed,
-        sync_fetch_plans, updated_uid_cursors, MailService, RemoteMailAddress, RemoteMessageFlag,
-        RemoteOutgoingAttachment, RemoteOutgoingMessage, UidSyncDirection, UidSyncPlan,
+        sync_fetch_plans, updated_uid_cursors,
     };
     use crate::error::AppError;
     use async_imap::error::Error as ImapError;
@@ -1831,6 +2107,31 @@ mod tests {
             flag_store_query(RemoteMessageFlag::Flagged, false),
             "-FLAGS.SILENT (\\Flagged)"
         );
+    }
+
+    #[test]
+    fn imap_uid_set_sorts_and_deduplicates() {
+        assert_eq!(imap_uid_set(&[7, 3, 7, 5]).as_deref(), Some("3,5,7"));
+        assert_eq!(imap_uid_set(&[]), None);
+    }
+
+    #[test]
+    fn decode_mail_header_text_decodes_windows_1252_encoded_words() {
+        let decoded = decode_mail_header_text(
+            "=?Windows-1252?Q?Plakat_=84World_Writing_Systems=93_wieder_erh=E4ltlich?=",
+        );
+
+        assert_eq!(
+            decoded,
+            "Plakat \u{201e}World Writing Systems\u{201c} wieder erh\u{00e4}ltlich"
+        );
+    }
+
+    #[test]
+    fn decode_mail_header_text_decodes_adjacent_encoded_words() {
+        let decoded = decode_mail_header_text("=?UTF-8?Q?John_Sm=C3=AEth?= <john@example.com>");
+
+        assert_eq!(decoded, "John Sm\u{00ee}th <john@example.com>");
     }
 
     #[test]
@@ -2038,6 +2339,38 @@ mod tests {
 
         assert!(formatted.contains("In-Reply-To: <original@example.com>"));
         assert!(formatted.contains("References: <root@example.com> <original@example.com>"));
+    }
+
+    #[test]
+    fn build_smtp_message_encodes_non_ascii_subject() {
+        let subject = "Plakat \u{201e}World Writing Systems\u{201c} wieder erh\u{00e4}ltlich";
+        let message = build_smtp_message(RemoteOutgoingMessage {
+            message_id: "<test@uncloud.local>".to_string(),
+            from: RemoteMailAddress {
+                name: Some("Sender".to_string()),
+                address: "sender@example.com".to_string(),
+            },
+            reply_to: None,
+            to: vec![RemoteMailAddress {
+                name: None,
+                address: "visible@example.com".to_string(),
+            }],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: subject.to_string(),
+            body_text: "Body".to_string(),
+            body_html: None,
+            in_reply_to: None,
+            references: Vec::new(),
+            attachments: Vec::new(),
+        })
+        .unwrap();
+        let formatted = message.formatted();
+        let parsed = mail_parser::MessageParser::default()
+            .parse(&formatted)
+            .unwrap();
+
+        assert_eq!(parsed.subject(), Some(subject));
     }
 
     #[test]

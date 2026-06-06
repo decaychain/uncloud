@@ -4,7 +4,8 @@ use uncloud_common::FileResponse;
 use uncloud_common::{
     CreateMailAccountRequest, CreateMailIdentityRequest, MailAccountResponse,
     MailAccountSyncResponse, MailCredentialStatusResponse, MailDraftAttachmentResponse,
-    MailDraftResponse, MailFolderResponse, MailFolderSyncResponse, MailIdentityResponse,
+    MailDraftResponse, MailFolderMarkReadResponse, MailFolderResponse, MailFolderSyncResponse,
+    MailIdentityResponse, MailMessageBulkMutationRequest, MailMessageBulkMutationResponse,
     MailMessageDetailResponse, MailMessageListResponse, MailMessageMutationAction,
     MailMessageMutationRequest, MailMessageMutationResponse, MailPasswordAuthRequest,
     MailProviderDiagnosticsResponse, MailSyncRequest, SaveMailAttachmentRequest,
@@ -396,6 +397,39 @@ pub async fn sync_folder(
     }
 }
 
+pub async fn mark_folder_read(
+    account_id: &str,
+    folder_id: &str,
+) -> Result<MailFolderMarkReadResponse, String> {
+    let r = api::post(&format!(
+        "/mail/accounts/{account_id}/folders/{folder_id}/mark-read"
+    ))
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<MailFolderMarkReadResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn mark_account_read(account_id: &str) -> Result<MailFolderMarkReadResponse, String> {
+    let r = api::post(&format!("/mail/accounts/{account_id}/mark-read"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<MailFolderMarkReadResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
 pub async fn list_messages(
     account_id: &str,
     folder_id: &str,
@@ -448,6 +482,30 @@ pub async fn mutate_message(
         .map_err(|e| e.to_string())?;
     if r.ok() {
         r.json::<MailMessageMutationResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn bulk_mutate_messages(
+    message_ids: Vec<String>,
+    action: MailMessageMutationAction,
+    target_folder_id: Option<String>,
+) -> Result<MailMessageBulkMutationResponse, String> {
+    let r = api::post("/mail/messages/bulk-mutate")
+        .json(&MailMessageBulkMutationRequest {
+            message_ids,
+            action,
+            target_folder_id,
+        })
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<MailMessageBulkMutationResponse>()
             .await
             .map_err(|e| e.to_string())
     } else {
