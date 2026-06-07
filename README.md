@@ -4,24 +4,26 @@
 [![Latest Release](https://img.shields.io/github/v/release/decaychain/uncloud?include_prereleases&sort=semver)](https://github.com/decaychain/uncloud/releases)
 [![Fedora COPR](https://img.shields.io/badge/Fedora-COPR-294172?logo=fedora&logoColor=white)](https://copr.fedorainfracloud.org/coprs/decaychain/uncloud/)
 [![Ubuntu APT](https://img.shields.io/badge/Ubuntu-APT_repo-E95420?logo=ubuntu&logoColor=white)](https://decaychain.github.io/uncloud/)
+[![Google Play](https://img.shields.io/badge/Google_Play-Android-3DDC84?logo=googleplay&logoColor=white)](https://play.google.com/store/apps/details?id=de.lunarstream.uncloud)
 
-Self-hosted personal cloud storage. Manage your files, photos, and music from any device — all data stays on your server.
+Self-hosted personal cloud. Manage files, photos, music, mail, passwords, tasks, shopping lists, and personal finances from your own server.
 
 ## Features
 
-- **File management** — upload, download, move, copy, rename, bulk operations
-- **Version history** — automatic versioning with restore
-- **Trash** — soft delete with auto-purge
-- **Photo gallery** — timeline view and album organization
-- **Music library** — artist/album browsing, playlists, in-browser playback
+- **Files and photos** — upload, download, move, copy, rename, bulk operations, thumbnails, timeline gallery, albums, version history, trash, and sharing links
+- **Music library** — artist/album browsing, folder-based categories, lazy folder browser, playlists, in-browser playback, and native background playback on supported clients
+- **Mail client** — multi-account IMAP/SMTP client with folder roles, scheduled sync, HTML rendering, rich-text compose, identities, attachments, and bulk actions
+- **Finance tracker** — bank CSV imports, accounts, categories/subcategories, rule-based categorization, reconciliation entries, summaries, and mobile-friendly transaction review
+- **Tasks and projects** — project boards, list/schedule views, labels, sections, subtasks, checklists, comments, and sharing
+- **Shopping lists** — reusable item catalogue, shops/categories, recurring items, drag-to-reorder lists, and shared lists
+- **Password manager** — KeePass-compatible (.kdbx) vault with client-side encryption, entry/group management, password generator, TOTP fields, and Android biometric unlock
 - **Full-text search** — powered by Meilisearch
-- **Password manager** — KeePass-compatible (.kdbx) vault with client-side encryption, entry/group management, and password generator
-- **Sharing** — public links with optional password, expiry, and download limits
 - **Desktop sync** — two-way file sync with per-folder strategy
 - **Pluggable storage** — local filesystem, any S3-compatible service (AWS S3, Backblaze B2, Cloudflare R2, MinIO), or any SSH-accessible host (SFTP); mix and match per folder
 - **S3-compatible API** — point `s5cmd`, `rclone`, `aws-cli`, or any SigV4 client at Uncloud
 - **MCP server** — connect Claude.ai (or any Model Context Protocol client) to your files via OAuth 2.1; tools for listing, reading, searching, creating, writing, moving, copying, and deleting
 - **Encrypted backups** — `uncloud-server backup` writes deduplicated, encrypted snapshots (database + file blobs) to a Restic-format repository (SFTP, S3, B2, Azure, GCS, REST, or local)
+- **Optional apps** — Mail, Finance, Tasks, Shopping, and Music can be enabled or disabled per server and per user
 - **Multi-platform** — web, desktop (Linux/Windows), and Android
 
 ## Architecture
@@ -131,7 +133,12 @@ NSIS installer from [Releases](https://github.com/decaychain/uncloud/releases).
 
 ### Android
 
-Download the `.apk` from [Releases](https://github.com/decaychain/uncloud/releases) (both `amd64` and `arm64`).
+Install Uncloud from Google Play:
+
+[<img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" alt="Get it on Google Play" height="64">](https://play.google.com/store/apps/details?id=de.lunarstream.uncloud)
+
+For sideloading, the universal `.apk` is also attached to each
+[release](https://github.com/decaychain/uncloud/releases).
 
 ## Building from Source
 
