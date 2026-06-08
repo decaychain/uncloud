@@ -328,6 +328,10 @@ async fn handle_rest_inner(
         "search3" => search3(&state, &user, &params, format).await,
         "getalbumlist2" => get_album_list2(&state, &user, &params, format).await,
         "getrandomsongs" => get_random_songs(&state, &user, &params, format).await,
+        "getstarred" => Ok(empty_starred(format, "starred")),
+        "getstarred2" => Ok(empty_starred(format, "starred2")),
+        "getbookmarks" => Ok(empty_bookmarks(format)),
+        "getgenres" => Ok(empty_genres(format)),
         "stream" => stream_song(&state, &user, &params, &headers, false).await,
         "download" => stream_song(&state, &user, &params, &headers, true).await,
         "getcoverart" => get_cover_art(&state, &user, &params).await,
@@ -519,6 +523,37 @@ fn get_open_subsonic_extensions(format: ResponseFormat) -> Response {
                 .attr("name", "formPost")
                 .children(vec![XmlElement::new("version").text("1")]),
         ]),
+    };
+    ok_response(format, Some(payload))
+}
+
+fn empty_starred(format: ResponseFormat, root: &'static str) -> Response {
+    let payload = SubsonicPayload {
+        json_key: root,
+        json_value: json!({
+            "artist": [],
+            "album": [],
+            "song": [],
+        }),
+        xml: XmlElement::new(root),
+    };
+    ok_response(format, Some(payload))
+}
+
+fn empty_bookmarks(format: ResponseFormat) -> Response {
+    let payload = SubsonicPayload {
+        json_key: "bookmarks",
+        json_value: json!({ "bookmark": [] }),
+        xml: XmlElement::new("bookmarks"),
+    };
+    ok_response(format, Some(payload))
+}
+
+fn empty_genres(format: ResponseFormat) -> Response {
+    let payload = SubsonicPayload {
+        json_key: "genres",
+        json_value: json!({ "genre": [] }),
+        xml: XmlElement::new("genres"),
     };
     ok_response(format, Some(payload))
 }

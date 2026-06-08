@@ -83,6 +83,48 @@ async fn subsonic_app_password_browses_and_streams_music() {
         .json();
     assert_eq!(ping["subsonic-response"]["status"], "ok");
 
+    let starred: Value = app
+        .server
+        .get(&format!("/rest/getStarred2.view?{base}"))
+        .await
+        .json();
+    assert_eq!(starred["subsonic-response"]["status"], "ok");
+    assert_eq!(
+        starred["subsonic-response"]["starred2"]["song"]
+            .as_array()
+            .expect("starred songs")
+            .len(),
+        0
+    );
+
+    let bookmarks: Value = app
+        .server
+        .get(&format!("/rest/getBookmarks.view?{base}"))
+        .await
+        .json();
+    assert_eq!(bookmarks["subsonic-response"]["status"], "ok");
+    assert_eq!(
+        bookmarks["subsonic-response"]["bookmarks"]["bookmark"]
+            .as_array()
+            .expect("bookmarks")
+            .len(),
+        0
+    );
+
+    let genres: Value = app
+        .server
+        .get(&format!("/rest/getGenres.view?{base}"))
+        .await
+        .json();
+    assert_eq!(genres["subsonic-response"]["status"], "ok");
+    assert_eq!(
+        genres["subsonic-response"]["genres"]["genre"]
+            .as_array()
+            .expect("genres")
+            .len(),
+        0
+    );
+
     let folders: Value = app
         .server
         .get(&format!("/rest/getMusicFolders.view?{base}"))
