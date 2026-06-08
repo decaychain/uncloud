@@ -54,6 +54,8 @@ const RESTORE_COLLECTIONS: &[&str] = &[
     "folder_shares",
     "api_tokens",
     "s3_credentials",
+    "subsonic_credentials",
+    "subsonic_ids",
     "sftp_host_keys",
     "apps",
     "webhooks",

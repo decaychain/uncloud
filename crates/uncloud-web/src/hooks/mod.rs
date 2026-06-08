@@ -25,5 +25,6 @@ pub mod use_search;
 pub mod use_shares;
 pub mod use_shopping;
 pub mod use_storages;
+pub mod use_subsonic;
 pub mod use_sync_events;
 pub mod use_tasks;

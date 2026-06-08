@@ -1,20 +1,20 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use bson::doc;
 use chrono::Utc;
 use mongodb::bson::oid::ObjectId;
 use serde::Deserialize;
 
+use crate::AppState;
 use crate::error::{AppError, Result};
 use crate::middleware::AuthUser;
 use crate::models::{File, Folder, FolderShare, MusicCategory};
 use crate::routes::files::{build_folder_path, file_to_response, resolve_included_folder_ids_by};
 use crate::services::sync_log::escape_regex;
-use crate::AppState;
 use uncloud_common::{
     ArtistResponse, AudioMeta, CreateMusicCategoryRequest, InheritableSetting, MusicAlbumResponse,
     MusicCategory as MusicCategoryDto, MusicFolderResponse, MusicSearchResponse,
@@ -689,7 +689,7 @@ async fn shared_music_folder_ids(
 
 /// Helper: fetch all music-included folder IDs for the user (owned + shared),
 /// returning BSON values suitable for `$in` queries.
-async fn music_included_parent_ids(
+pub(crate) async fn music_included_parent_ids(
     state: &AppState,
     user_id: ObjectId,
 ) -> Result<Vec<mongodb::bson::Bson>> {
@@ -721,7 +721,7 @@ async fn music_included_parent_ids(
 }
 
 /// Extract audio metadata from a File document.
-fn extract_audio_meta(f: &File) -> AudioMeta {
+pub(crate) fn extract_audio_meta(f: &File) -> AudioMeta {
     let resp = file_to_response(f);
     resp.metadata
         .get("audio")
@@ -733,7 +733,7 @@ fn extract_audio_meta(f: &File) -> AudioMeta {
 /// inside one of `scope_roots` or any of its descendants. Walks the parent→
 /// children chains for owned + shared-owner folders so subtrees of shared
 /// folders work too.
-async fn restrict_to_subtrees(
+pub(crate) async fn restrict_to_subtrees(
     state: &AppState,
     user_id: ObjectId,
     parent_ids: Vec<mongodb::bson::Bson>,

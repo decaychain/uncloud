@@ -1,16 +1,16 @@
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit},
 };
 use base64::{
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use rand::RngCore;
 
 use crate::config::SecretsConfig;
 use crate::error::{AppError, Result};
-use crate::models::EncryptedMailCredential;
+use crate::models::{EncryptedMailCredential, EncryptedSubsonicCredential};
 
 const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
@@ -25,7 +25,7 @@ impl SecretCipher {
     pub fn from_config(config: &SecretsConfig) -> Result<Self> {
         let Some(raw) = config.master_key.as_deref() else {
             return Err(AppError::BadRequest(
-                "mail credential storage is not configured".into(),
+                "server secret storage is not configured".into(),
             ));
         };
         Self::from_master_key(raw)
@@ -39,12 +39,58 @@ impl SecretCipher {
     }
 
     pub fn encrypt_mail_credential(&self, password: &str) -> Result<EncryptedMailCredential> {
+        let encrypted = self.encrypt_secret(password, "mail credential")?;
+        Ok(EncryptedMailCredential {
+            version: encrypted.version,
+            algorithm: encrypted.algorithm,
+            nonce: encrypted.nonce,
+            ciphertext: encrypted.ciphertext,
+        })
+    }
+
+    pub fn decrypt_mail_credential(&self, credential: &EncryptedMailCredential) -> Result<String> {
+        self.decrypt_secret(
+            credential.version,
+            &credential.algorithm,
+            &credential.nonce,
+            &credential.ciphertext,
+            "mail credential",
+        )
+    }
+
+    pub fn encrypt_subsonic_credential(
+        &self,
+        password: &str,
+    ) -> Result<EncryptedSubsonicCredential> {
+        let encrypted = self.encrypt_secret(password, "Subsonic app password")?;
+        Ok(EncryptedSubsonicCredential {
+            version: encrypted.version,
+            algorithm: encrypted.algorithm,
+            nonce: encrypted.nonce,
+            ciphertext: encrypted.ciphertext,
+        })
+    }
+
+    pub fn decrypt_subsonic_credential(
+        &self,
+        credential: &EncryptedSubsonicCredential,
+    ) -> Result<String> {
+        self.decrypt_secret(
+            credential.version,
+            &credential.algorithm,
+            &credential.nonce,
+            &credential.ciphertext,
+            "Subsonic app password",
+        )
+    }
+
+    fn encrypt_secret(&self, password: &str, label: &str) -> Result<EncryptedMailCredential> {
         let mut nonce = [0_u8; NONCE_LEN];
         rand::thread_rng().fill_bytes(&mut nonce);
         let ciphertext = self
             .cipher
             .encrypt(Nonce::from_slice(&nonce), password.as_bytes())
-            .map_err(|_| AppError::Internal("failed to encrypt mail credential".into()))?;
+            .map_err(|_| AppError::Internal(format!("failed to encrypt {label}")))?;
         Ok(EncryptedMailCredential {
             version: 1,
             algorithm: ALGORITHM.to_string(),
@@ -53,29 +99,36 @@ impl SecretCipher {
         })
     }
 
-    pub fn decrypt_mail_credential(&self, credential: &EncryptedMailCredential) -> Result<String> {
-        if credential.version != 1 || credential.algorithm != ALGORITHM {
-            return Err(AppError::Internal(
-                "unsupported encrypted mail credential format".into(),
-            ));
+    fn decrypt_secret(
+        &self,
+        version: u8,
+        algorithm: &str,
+        nonce: &str,
+        ciphertext: &str,
+        label: &str,
+    ) -> Result<String> {
+        if version != 1 || algorithm != ALGORITHM {
+            return Err(AppError::Internal(format!(
+                "unsupported encrypted {label} format"
+            )));
         }
         let nonce = STANDARD
-            .decode(&credential.nonce)
-            .map_err(|_| AppError::Internal("invalid encrypted mail credential nonce".into()))?;
+            .decode(nonce)
+            .map_err(|_| AppError::Internal(format!("invalid encrypted {label} nonce")))?;
         if nonce.len() != NONCE_LEN {
-            return Err(AppError::Internal(
-                "invalid encrypted mail credential nonce length".into(),
-            ));
+            return Err(AppError::Internal(format!(
+                "invalid encrypted {label} nonce length"
+            )));
         }
-        let ciphertext = STANDARD.decode(&credential.ciphertext).map_err(|_| {
-            AppError::Internal("invalid encrypted mail credential ciphertext".into())
-        })?;
+        let ciphertext = STANDARD
+            .decode(ciphertext)
+            .map_err(|_| AppError::Internal(format!("invalid encrypted {label} ciphertext")))?;
         let plaintext = self
             .cipher
             .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
-            .map_err(|_| AppError::Internal("failed to decrypt mail credential".into()))?;
+            .map_err(|_| AppError::Internal(format!("failed to decrypt {label}")))?;
         String::from_utf8(plaintext)
-            .map_err(|_| AppError::Internal("mail credential is not valid UTF-8".into()))
+            .map_err(|_| AppError::Internal(format!("{label} is not valid UTF-8")))
     }
 }
 
@@ -108,6 +161,20 @@ mod tests {
         assert_eq!(
             cipher.decrypt_mail_credential(&encrypted).unwrap(),
             "app-password"
+        );
+    }
+
+    #[test]
+    fn subsonic_credential_round_trip() {
+        let cipher = SecretCipher::from_master_key(TEST_KEY).unwrap();
+        let encrypted = cipher
+            .encrypt_subsonic_credential("subsonic-app-password")
+            .unwrap();
+
+        assert_ne!(encrypted.ciphertext, "subsonic-app-password");
+        assert_eq!(
+            cipher.decrypt_subsonic_credential(&encrypted).unwrap(),
+            "subsonic-app-password"
         );
     }
 

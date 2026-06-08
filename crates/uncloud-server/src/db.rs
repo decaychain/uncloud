@@ -307,6 +307,34 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         )
         .await?;
 
+    // Subsonic app passwords and numeric compatibility IDs.
+    let subsonic_creds = db.collection::<mongodb::bson::Document>("subsonic_credentials");
+    subsonic_creds
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+
+    let subsonic_ids = db.collection::<mongodb::bson::Document>("subsonic_ids");
+    subsonic_ids
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "numeric_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    subsonic_ids
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "kind": 1, "internal_key": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
     // SFTP host-key TOFU pin (one row per storage_id).
     let sftp_keys = db.collection::<mongodb::bson::Document>("sftp_host_keys");
     sftp_keys
