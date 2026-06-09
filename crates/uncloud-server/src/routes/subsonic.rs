@@ -937,22 +937,19 @@ async fn search3(
     let query = params.first("query").unwrap_or("").trim().to_lowercase();
     let artist_count = params.i64_param("artistCount", 20, MAX_PAGE_SIZE) as usize;
     let album_count = params.i64_param("albumCount", 20, MAX_PAGE_SIZE) as usize;
+    let artist_offset = params.i64_param("artistOffset", 0, i64::MAX) as usize;
+    let album_offset = params.i64_param("albumOffset", 0, i64::MAX) as usize;
+    let song_offset = params.i64_param("songOffset", 0, i64::MAX) as u64;
     let song_count = params.i64_param("songCount", 20, MAX_PAGE_SIZE);
-    if query.is_empty() {
-        let payload = SubsonicPayload {
-            json_key: "searchResult3",
-            json_value: json!({ "artist": [], "album": [], "song": [] }),
-            xml: XmlElement::new("searchResult3"),
-        };
-        return Ok(ok_response(format, Some(payload)));
-    }
+    let music_folder_id = params.first("musicFolderId");
 
-    let artists = artist_rows(state, user, None).await?;
+    let artists = artist_rows(state, user, music_folder_id).await?;
     let mut json_artists = Vec::new();
     let mut xml_artists = Vec::new();
     for artist in artists
         .into_iter()
-        .filter(|artist| artist.name.to_lowercase().contains(&query))
+        .filter(|artist| query.is_empty() || artist.name.to_lowercase().contains(&query))
+        .skip(artist_offset)
         .take(artist_count)
     {
         json_artists.push(json!({
@@ -968,22 +965,24 @@ async fn search3(
         );
     }
 
-    let albums = album_rows(state, user, None, None).await?;
+    let albums = album_rows(state, user, music_folder_id, None).await?;
     let mut json_albums = Vec::new();
     let mut xml_albums = Vec::new();
     for album in albums
         .into_iter()
         .filter(|album| {
-            album.name.to_lowercase().contains(&query)
+            query.is_empty()
+                || album.name.to_lowercase().contains(&query)
                 || album.artist.to_lowercase().contains(&query)
         })
+        .skip(album_offset)
         .take(album_count)
     {
         json_albums.push(album.json);
         xml_albums.push(album.xml);
     }
 
-    let files = search_tracks(state, user, &query, song_count).await?;
+    let files = search_tracks(state, user, music_folder_id, &query, song_offset, song_count).await?;
     let mut json_songs = Vec::new();
     let mut xml_songs = Vec::new();
     for track in files {
@@ -2011,33 +2010,43 @@ async fn direct_folder_tracks(
 async fn search_tracks(
     state: &AppState,
     user: &User,
+    music_folder_id: Option<&str>,
     query: &str,
+    offset: u64,
     limit: i64,
 ) -> std::result::Result<Vec<TrackWithMeta>, SubsonicError> {
-    let parent_ids = scoped_parent_ids(state, user, None).await?;
+    let parent_ids = scoped_parent_ids(state, user, music_folder_id).await?;
     if parent_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let q_rx = doc! { "$regex": crate::services::sync_log::escape_regex(query), "$options": "i" };
     let options = FindOptions::builder()
         .sort(doc! { "metadata.audio.title": 1, "created_at": -1 })
+        .skip(offset)
         .limit(limit)
         .build();
+    let mut filter = doc! {
+        "parent_id": { "$in": parent_ids },
+        "mime_type": { "$regex": "^audio/" },
+        "deleted_at": Bson::Null,
+    };
+    if !query.is_empty() {
+        let q_rx =
+            doc! { "$regex": crate::services::sync_log::escape_regex(query), "$options": "i" };
+        filter.insert(
+            "$or",
+            vec![
+                doc! { "metadata.audio.title": &q_rx },
+                doc! { "metadata.audio.artist": &q_rx },
+                doc! { "metadata.audio.album": &q_rx },
+                doc! { "metadata.audio.album_artist": &q_rx },
+                doc! { "name": &q_rx },
+            ],
+        );
+    }
     let mut cursor = state
         .db
         .collection::<File>("files")
-        .find(doc! {
-            "parent_id": { "$in": parent_ids },
-            "mime_type": { "$regex": "^audio/" },
-            "deleted_at": Bson::Null,
-            "$or": [
-                { "metadata.audio.title": &q_rx },
-                { "metadata.audio.artist": &q_rx },
-                { "metadata.audio.album": &q_rx },
-                { "metadata.audio.album_artist": &q_rx },
-                { "name": &q_rx },
-            ],
-        })
+        .find(filter)
         .with_options(options)
         .await
         .map_err(to_subsonic_error)?;

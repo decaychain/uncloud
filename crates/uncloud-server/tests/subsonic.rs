@@ -148,6 +148,33 @@ async fn subsonic_app_password_browses_and_streams_music() {
     let song_id = child["id"].as_str().expect("song id");
     assert!(song_id.parse::<i64>().is_ok(), "song id is numeric");
 
+    let empty_search: Value = app
+        .server
+        .get(&format!(
+            "/rest/search3.view?{base}&query=&artistCount=10&albumCount=10&songCount=10"
+        ))
+        .await
+        .json();
+    let search = &empty_search["subsonic-response"]["searchResult3"];
+    assert_eq!(search["artist"][0]["name"], "Demo Artist");
+    assert_eq!(search["album"][0]["name"], "Demo Album");
+    assert_eq!(search["song"][0]["title"], "Demo Track");
+
+    let empty_search_page_2: Value = app
+        .server
+        .get(&format!(
+            "/rest/search3.view?{base}&query=&artistCount=10&albumCount=10&songCount=10&songOffset=1"
+        ))
+        .await
+        .json();
+    assert_eq!(
+        empty_search_page_2["subsonic-response"]["searchResult3"]["song"]
+            .as_array()
+            .expect("second search page songs")
+            .len(),
+        0
+    );
+
     let album_list: Value = app
         .server
         .get(&format!(
