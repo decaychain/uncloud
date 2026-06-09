@@ -980,7 +980,7 @@ async fn search3(
     params: &ParamMap,
     format: ResponseFormat,
 ) -> std::result::Result<Response, SubsonicError> {
-    let query = params.first("query").unwrap_or("").trim().to_lowercase();
+    let query = normalise_search_query(params.first("query").unwrap_or(""));
     let artist_count = params.i64_param("artistCount", 20, MAX_PAGE_SIZE) as usize;
     let album_count = params.i64_param("albumCount", 20, MAX_PAGE_SIZE) as usize;
     let artist_offset = params.i64_param("artistOffset", 0, i64::MAX) as usize;
@@ -989,52 +989,59 @@ async fn search3(
     let song_count = params.i64_param("songCount", 20, MAX_PAGE_SIZE);
     let music_folder_id = params.first("musicFolderId");
 
-    let artists = artist_rows(state, user, music_folder_id).await?;
     let mut json_artists = Vec::new();
     let mut xml_artists = Vec::new();
-    for artist in artists
-        .into_iter()
-        .filter(|artist| query.is_empty() || artist.name.to_lowercase().contains(&query))
-        .skip(artist_offset)
-        .take(artist_count)
-    {
-        json_artists.push(json!({
-            "id": artist.id,
-            "name": artist.name,
-            "albumCount": artist.album_count,
-        }));
-        xml_artists.push(
-            XmlElement::new("artist")
-                .attr("id", artist.id)
-                .attr("name", artist.name)
-                .attr("albumCount", artist.album_count),
-        );
+    if artist_count > 0 {
+        let artists = artist_rows(state, user, music_folder_id).await?;
+        for artist in artists
+            .into_iter()
+            .filter(|artist| query.is_empty() || artist.name.to_lowercase().contains(&query))
+            .skip(artist_offset)
+            .take(artist_count)
+        {
+            json_artists.push(json!({
+                "id": artist.id,
+                "name": artist.name,
+                "albumCount": artist.album_count,
+            }));
+            xml_artists.push(
+                XmlElement::new("artist")
+                    .attr("id", artist.id)
+                    .attr("name", artist.name)
+                    .attr("albumCount", artist.album_count),
+            );
+        }
     }
 
-    let albums = album_rows(state, user, music_folder_id, None).await?;
     let mut json_albums = Vec::new();
     let mut xml_albums = Vec::new();
-    for album in albums
-        .into_iter()
-        .filter(|album| {
-            query.is_empty()
-                || album.name.to_lowercase().contains(&query)
-                || album.artist.to_lowercase().contains(&query)
-        })
-        .skip(album_offset)
-        .take(album_count)
-    {
-        json_albums.push(album.json);
-        xml_albums.push(album.xml);
+    if album_count > 0 {
+        let albums = album_rows(state, user, music_folder_id, None).await?;
+        for album in albums
+            .into_iter()
+            .filter(|album| {
+                query.is_empty()
+                    || album.name.to_lowercase().contains(&query)
+                    || album.artist.to_lowercase().contains(&query)
+            })
+            .skip(album_offset)
+            .take(album_count)
+        {
+            json_albums.push(album.json);
+            xml_albums.push(album.xml);
+        }
     }
 
-    let files = search_tracks(state, user, music_folder_id, &query, song_offset, song_count).await?;
     let mut json_songs = Vec::new();
     let mut xml_songs = Vec::new();
-    for track in files {
-        let (json, xml) = song_entry(state, user.id, &track.file, &track.audio, None).await?;
-        json_songs.push(json);
-        xml_songs.push(xml);
+    if song_count > 0 {
+        let files =
+            search_tracks(state, user, music_folder_id, &query, song_offset, song_count).await?;
+        for track in files {
+            let (json, xml) = song_entry(state, user.id, &track.file, &track.audio, None).await?;
+            json_songs.push(json);
+            xml_songs.push(xml);
+        }
     }
 
     let payload = SubsonicPayload {
@@ -1050,6 +1057,15 @@ async fn search3(
             .children(xml_songs),
     };
     Ok(ok_response(format, Some(payload)))
+}
+
+fn normalise_search_query(query: &str) -> String {
+    let trimmed = query.trim();
+    if trimmed.is_empty() || trimmed == r#""""# {
+        String::new()
+    } else {
+        trimmed.to_lowercase()
+    }
 }
 
 async fn get_album_list2(
@@ -2078,6 +2094,9 @@ async fn search_tracks(
     offset: u64,
     limit: i64,
 ) -> std::result::Result<Vec<TrackWithMeta>, SubsonicError> {
+    if limit <= 0 {
+        return Ok(Vec::new());
+    }
     let parent_ids = scoped_parent_ids(state, user, music_folder_id).await?;
     if parent_ids.is_empty() {
         return Ok(Vec::new());

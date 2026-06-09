@@ -220,6 +220,50 @@ async fn subsonic_app_password_browses_and_streams_music() {
     assert_eq!(search["album"][0]["name"], "Demo Album");
     assert_eq!(search["song"][0]["title"], "Demo Track");
 
+    let symfonium_artist_search: Value = app
+        .server
+        .get(&format!(
+            "/rest/search3.view?{base}&query=%22%22&artistCount=10&albumCount=0&songCount=0"
+        ))
+        .await
+        .json();
+    let symfonium_artist_search = &symfonium_artist_search["subsonic-response"]["searchResult3"];
+    assert_eq!(symfonium_artist_search["artist"][0]["name"], "Demo Artist");
+    assert_eq!(
+        symfonium_artist_search["album"]
+            .as_array()
+            .expect("no albums requested")
+            .len(),
+        0
+    );
+    assert_eq!(
+        symfonium_artist_search["song"]
+            .as_array()
+            .expect("no songs requested")
+            .len(),
+        0
+    );
+
+    let symfonium_album_search: Value = app
+        .server
+        .get(&format!(
+            "/rest/search3.view?{base}&query=%22%22&artistCount=0&albumCount=10&songCount=0"
+        ))
+        .await
+        .json();
+    let symfonium_album_search = &symfonium_album_search["subsonic-response"]["searchResult3"];
+    assert_eq!(symfonium_album_search["album"][0]["name"], "Demo Album");
+
+    let symfonium_song_search: Value = app
+        .server
+        .get(&format!(
+            "/rest/search3.view?{base}&query=%22%22&artistCount=0&albumCount=0&songCount=10"
+        ))
+        .await
+        .json();
+    let symfonium_song_search = &symfonium_song_search["subsonic-response"]["searchResult3"];
+    assert_eq!(symfonium_song_search["song"][0]["title"], "Demo Track");
+
     let empty_search_page_2: Value = app
         .server
         .get(&format!(
