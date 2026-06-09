@@ -27,6 +27,12 @@ async fn subsonic_app_password_browses_and_streams_music() {
         .insert_one(&folder)
         .await
         .expect("insert music folder");
+    let child_folder = Folder::new(owner_id, Some(folder.id), "Demo Artist".to_string());
+    app.db
+        .collection::<Folder>("folders")
+        .insert_one(&child_folder)
+        .await
+        .expect("insert child music folder");
 
     let bytes = b"not really mp3 but good enough for the stream endpoint";
     let uploaded = app
@@ -48,6 +54,31 @@ async fn subsonic_app_password_browses_and_streams_music() {
         )
         .await
         .expect("update audio metadata");
+    let nested_bytes = b"nested audio bytes";
+    let nested = app
+        .upload_to_folder(
+            "nested.mp3",
+            nested_bytes,
+            "audio/mpeg",
+            &child_folder.id.to_hex(),
+        )
+        .await;
+    let nested_file_id = ObjectId::parse_str(nested["id"].as_str().unwrap()).unwrap();
+    app.db
+        .collection::<File>("files")
+        .update_one(
+            doc! { "_id": nested_file_id },
+            doc! { "$set": { "metadata.audio": {
+                "title": "ZZZ Nested Track",
+                "artist": "ZZZ Folder Artist",
+                "album": "ZZZ Folder Album",
+                "duration_secs": 9.0,
+                "track_number": 1_i32,
+                "year": 2026_i32,
+            }}},
+        )
+        .await
+        .expect("update nested audio metadata");
 
     let created: Value = app
         .server
@@ -135,6 +166,30 @@ async fn subsonic_app_password_browses_and_streams_music() {
         .expect("numeric folder id");
     assert!(folder_id.parse::<i64>().is_ok(), "folder id is numeric");
 
+    let indexes: Value = app
+        .server
+        .get(&format!(
+            "/rest/getIndexes.view?{base}&musicFolderId={folder_id}"
+        ))
+        .await
+        .json();
+    let indexed_folder_id = indexes["subsonic-response"]["indexes"]["index"][0]["artist"][0]
+        ["id"]
+        .as_str()
+        .expect("indexed folder id");
+    let indexed_directory: Value = app
+        .server
+        .get(&format!(
+            "/rest/getMusicDirectory.view?{base}&id={indexed_folder_id}"
+        ))
+        .await
+        .json();
+    assert_eq!(indexed_directory["subsonic-response"]["status"], "ok");
+    assert_eq!(
+        indexed_directory["subsonic-response"]["directory"]["child"][0]["title"],
+        "ZZZ Nested Track"
+    );
+
     let directory: Value = app
         .server
         .get(&format!(
@@ -142,7 +197,12 @@ async fn subsonic_app_password_browses_and_streams_music() {
         ))
         .await
         .json();
-    let child = &directory["subsonic-response"]["directory"]["child"][0];
+    let child = directory["subsonic-response"]["directory"]["child"]
+        .as_array()
+        .expect("directory children")
+        .iter()
+        .find(|child| child["title"] == "Demo Track")
+        .expect("demo track in root directory");
     assert_eq!(child["title"], "Demo Track");
     assert!(child.get("coverArt").is_none());
     let song_id = child["id"].as_str().expect("song id");
@@ -163,7 +223,7 @@ async fn subsonic_app_password_browses_and_streams_music() {
     let empty_search_page_2: Value = app
         .server
         .get(&format!(
-            "/rest/search3.view?{base}&query=&artistCount=10&albumCount=10&songCount=10&songOffset=1"
+            "/rest/search3.view?{base}&query=&artistCount=10&albumCount=10&songCount=10&songOffset=2"
         ))
         .await
         .json();
@@ -178,11 +238,16 @@ async fn subsonic_app_password_browses_and_streams_music() {
     let album_list: Value = app
         .server
         .get(&format!(
-            "/rest/getAlbumList2.view?{base}&type=newest&size=1"
+            "/rest/getAlbumList2.view?{base}&type=alphabeticalByName&size=10"
         ))
         .await
         .json();
-    let album = &album_list["subsonic-response"]["albumList2"]["album"][0];
+    let album = album_list["subsonic-response"]["albumList2"]["album"]
+        .as_array()
+        .expect("album list")
+        .iter()
+        .find(|album| album["name"] == "Demo Album")
+        .expect("demo album");
     assert_eq!(album["name"], "Demo Album");
     assert!(album.get("coverArt").is_none());
     let album_id = album["id"].as_str().expect("album id");

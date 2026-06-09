@@ -611,26 +611,72 @@ async fn get_indexes(
     params: &ParamMap,
     format: ResponseFormat,
 ) -> std::result::Result<Response, SubsonicError> {
-    let artists = artist_rows(state, user, params.first("musicFolderId")).await?;
-    let groups = group_artists(artists);
+    let folders = accessible_music_folders(state, user.id)
+        .await
+        .map_err(to_subsonic_error)?;
+    let folders_by_id: HashMap<ObjectId, AccessibleFolder> = folders
+        .into_iter()
+        .map(|folder| (folder.folder.id, folder))
+        .collect();
+    let accessible: HashSet<ObjectId> = folders_by_id.keys().copied().collect();
+    let scope_id = match params.first("musicFolderId") {
+        Some(id) => {
+            let alias = alias_for_param(state, user.id, id).await?;
+            if alias.kind != SubsonicIdKind::Folder.as_str() {
+                return Err(SubsonicError::not_found("Music folder"));
+            }
+            let folder_id = ObjectId::parse_str(&alias.internal_key)
+                .map_err(|_| SubsonicError::not_found("Music folder"))?;
+            if !accessible.contains(&folder_id) {
+                return Err(SubsonicError::not_found("Music folder"));
+            }
+            Some(folder_id)
+        }
+        None => None,
+    };
+
+    let mut indexed_folders: Vec<&AccessibleFolder> = folders_by_id
+        .values()
+        .filter(|folder| match scope_id {
+            Some(scope_id) => folder.folder.parent_id == Some(scope_id),
+            None => folder
+                .folder
+                .parent_id
+                .map(|parent_id| !accessible.contains(&parent_id))
+                .unwrap_or(true),
+        })
+        .collect();
+    indexed_folders.sort_by(|a, b| {
+        a.folder
+            .name
+            .to_lowercase()
+            .cmp(&b.folder.name.to_lowercase())
+    });
+
+    let groups = group_indexed_folders(indexed_folders);
     let modified = Utc::now().timestamp_millis();
 
     let mut json_indexes = Vec::new();
     let mut xml_indexes = Vec::new();
-    for (letter, artists) in groups {
+    for (letter, folders) in groups {
         let mut json_artists = Vec::new();
         let mut xml_artists = Vec::new();
-        for artist in artists {
+        for folder in folders {
+            let id = subsonic_id_for(
+                state,
+                user.id,
+                SubsonicIdKind::Folder,
+                folder.folder.id.to_hex(),
+            )
+            .await?;
             json_artists.push(json!({
-                "id": artist.id,
-                "name": artist.name,
-                "albumCount": artist.album_count,
+                "id": &id,
+                "name": folder.folder.name,
             }));
             xml_artists.push(
                 XmlElement::new("artist")
-                    .attr("id", artist.id)
-                    .attr("name", artist.name)
-                    .attr("albumCount", artist.album_count),
+                    .attr("id", id)
+                    .attr("name", &folder.folder.name),
             );
         }
         json_indexes.push(json!({ "name": letter, "artist": json_artists }));
@@ -1695,6 +1741,23 @@ fn group_artists(rows: Vec<ArtistRow>) -> BTreeMap<String, Vec<ArtistRow>> {
     let mut groups: BTreeMap<String, Vec<ArtistRow>> = BTreeMap::new();
     for row in rows {
         let first = row
+            .name
+            .chars()
+            .find(|c| c.is_alphanumeric())
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_else(|| "#".to_string());
+        groups.entry(first).or_default().push(row);
+    }
+    groups
+}
+
+fn group_indexed_folders<'a>(
+    rows: Vec<&'a AccessibleFolder>,
+) -> BTreeMap<String, Vec<&'a AccessibleFolder>> {
+    let mut groups: BTreeMap<String, Vec<&AccessibleFolder>> = BTreeMap::new();
+    for row in rows {
+        let first = row
+            .folder
             .name
             .chars()
             .find(|c| c.is_alphanumeric())
