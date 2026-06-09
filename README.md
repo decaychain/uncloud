@@ -11,7 +11,7 @@ Self-hosted personal cloud. Manage files, photos, music, mail, passwords, tasks,
 ## Features
 
 - **Files and photos** — upload, download, move, copy, rename, bulk operations, thumbnails, timeline gallery, albums, version history, trash, and sharing links
-- **Music library** — artist/album browsing, folder-based categories, lazy folder browser, playlists, in-browser playback, and native background playback on supported clients
+- **Music library** — artist/album browsing, folder-based categories, lazy folder browser, playlists, in-browser playback, native background playback on supported clients, and Subsonic/OpenSubsonic-compatible access
 - **Mail client** — multi-account IMAP/SMTP client with folder roles, scheduled sync, HTML rendering, rich-text compose, identities, attachments, and bulk actions
 - **Finance tracker** — bank CSV imports, accounts, categories/subcategories, rule-based categorization, reconciliation entries, summaries, and mobile-friendly transaction review
 - **Tasks and projects** — project boards, list/schedule views, labels, sections, subtasks, checklists, comments, and sharing
@@ -158,6 +158,17 @@ cargo run -p uncloud-server
 ## Configuration
 
 See [`config.example.yaml`](config.example.yaml) for all available options.
+
+## Subsonic-compatible Music Clients
+
+Uncloud exposes a Subsonic/OpenSubsonic-compatible API at `/rest/...` for
+external music players such as Symfonium and Feishin. Enable Music for the
+user, include folders in the Music library, then create a Subsonic app password
+from Settings. Use your Uncloud server URL, username, and that app password in
+the client.
+
+The API streams original files from your library. Transcoding is deliberately
+not supported.
 
 ## Connecting an MCP client
 
