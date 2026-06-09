@@ -69,9 +69,21 @@ Library:
 - `getArtist`
 - `getAlbum`
 - `getSong`
+- `search2`
 - `search3`
+- `getAlbumList`
 - `getAlbumList2`
 - `getRandomSongs`
+- `getGenres`
+- `getStarred`
+- `getStarred2`
+- `getTopSongs` returns an empty song list in v1.
+- `getSimilarSongs` returns an empty song list in v1.
+- `getSimilarSongs2` returns an empty song list in v1.
+- `getArtistInfo` returns an empty metadata object in v1.
+- `getArtistInfo2` returns an empty metadata object in v1.
+- `getAlbumInfo` returns an empty metadata object in v1.
+- `getAlbumInfo2` returns an empty metadata object in v1.
 
 Media:
 
@@ -90,6 +102,9 @@ Playlists:
 Annotation:
 
 - `scrobble` returns success and does not persist play history in v1.
+- `star`, `unstar`, `setRating`, `createBookmark`, and `deleteBookmark`
+  return success and do not persist state in v1.
+- `getBookmarks` returns an empty list in v1.
 
 Unsupported endpoints should return a normal Subsonic failed response rather
 than an Axum 404 whenever the request reached the Subsonic router.

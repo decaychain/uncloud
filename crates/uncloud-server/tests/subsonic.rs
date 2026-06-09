@@ -157,6 +157,36 @@ async fn subsonic_app_password_browses_and_streams_music() {
         0
     );
 
+    for (method, root, child) in [
+        ("getArtistInfo", "artistInfo", "similarArtist"),
+        ("getArtistInfo2", "artistInfo2", "similarArtist"),
+        ("getAlbumInfo", "albumInfo", "notes"),
+        ("getAlbumInfo2", "albumInfo2", "notes"),
+        ("getTopSongs", "topSongs", "song"),
+        ("getSimilarSongs", "similarSongs", "song"),
+        ("getSimilarSongs2", "similarSongs2", "song"),
+    ] {
+        let response: Value = app
+            .server
+            .get(&format!("/rest/{method}.view?{base}&id=1&artist=Demo"))
+            .await
+            .json();
+        assert_eq!(response["subsonic-response"]["status"], "ok");
+        assert!(
+            response["subsonic-response"][root].get(child).is_some(),
+            "{method} returned expected compatibility payload"
+        );
+    }
+
+    for method in ["star", "unstar", "setRating", "createBookmark", "deleteBookmark"] {
+        let response: Value = app
+            .server
+            .get(&format!("/rest/{method}.view?{base}&id=1"))
+            .await
+            .json();
+        assert_eq!(response["subsonic-response"]["status"], "ok");
+    }
+
     let folders: Value = app
         .server
         .get(&format!("/rest/getMusicFolders.view?{base}"))
@@ -223,6 +253,18 @@ async fn subsonic_app_password_browses_and_streams_music() {
     assert_eq!(search["album"][0]["coverArt"], song_id);
     assert_eq!(search["song"][0]["title"], "Demo Track");
     assert_eq!(search["song"][0]["coverArt"], song_id);
+
+    let legacy_search: Value = app
+        .server
+        .get(&format!(
+            "/rest/search2.view?{base}&query=&artistCount=10&albumCount=10&songCount=10"
+        ))
+        .await
+        .json();
+    assert_eq!(
+        legacy_search["subsonic-response"]["searchResult2"]["song"][0]["title"],
+        "Demo Track"
+    );
 
     let symfonium_artist_search: Value = app
         .server
@@ -306,6 +348,18 @@ async fn subsonic_app_password_browses_and_streams_music() {
     assert!(
         artist_id.parse::<i64>().is_ok(),
         "album artist id is numeric"
+    );
+
+    let legacy_album_list: Value = app
+        .server
+        .get(&format!(
+            "/rest/getAlbumList.view?{base}&type=alphabeticalByName&size=10"
+        ))
+        .await
+        .json();
+    assert_eq!(
+        legacy_album_list["subsonic-response"]["albumList"]["album"][0]["name"],
+        "Demo Album"
     );
 
     let album_detail: Value = app

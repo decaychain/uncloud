@@ -325,13 +325,22 @@ async fn handle_rest_inner(
         "getartist" => get_artist(&state, &user, &params, format).await,
         "getalbum" => get_album(&state, &user, &params, format).await,
         "getsong" => get_song(&state, &user, &params, format).await,
-        "search3" => search3(&state, &user, &params, format).await,
-        "getalbumlist2" => get_album_list2(&state, &user, &params, format).await,
+        "search2" => search_result(&state, &user, &params, format, "searchResult2").await,
+        "search3" => search_result(&state, &user, &params, format, "searchResult3").await,
+        "getalbumlist" => get_album_list(&state, &user, &params, format, "albumList").await,
+        "getalbumlist2" => get_album_list(&state, &user, &params, format, "albumList2").await,
         "getrandomsongs" => get_random_songs(&state, &user, &params, format).await,
         "getstarred" => Ok(empty_starred(format, "starred")),
         "getstarred2" => Ok(empty_starred(format, "starred2")),
         "getbookmarks" => Ok(empty_bookmarks(format)),
         "getgenres" => Ok(empty_genres(format)),
+        "getartistinfo" => Ok(empty_artist_info(format, "artistInfo")),
+        "getartistinfo2" => Ok(empty_artist_info(format, "artistInfo2")),
+        "getalbuminfo" => Ok(empty_album_info(format, "albumInfo")),
+        "getalbuminfo2" => Ok(empty_album_info(format, "albumInfo2")),
+        "gettopsongs" => Ok(empty_songs(format, "topSongs")),
+        "getsimilarsongs" => Ok(empty_songs(format, "similarSongs")),
+        "getsimilarsongs2" => Ok(empty_songs(format, "similarSongs2")),
         "stream" => stream_song(&state, &user, &params, &headers, false).await,
         "download" => stream_song(&state, &user, &params, &headers, true).await,
         "getcoverart" => get_cover_art(&state, &user, &params).await,
@@ -340,6 +349,9 @@ async fn handle_rest_inner(
         "createplaylist" => create_playlist(&state, &user, &params, format).await,
         "updateplaylist" => update_playlist(&state, &user, &params, format).await,
         "deleteplaylist" => delete_playlist(&state, &user, &params, format).await,
+        "star" | "unstar" | "setrating" | "createbookmark" | "deletebookmark" => {
+            Ok(ok_response(format, None))
+        }
         "scrobble" => Ok(ok_response(format, None)),
         _ => Err(SubsonicError::generic(format!(
             "Subsonic method `{method_name}` is not supported"
@@ -554,6 +566,60 @@ fn empty_genres(format: ResponseFormat) -> Response {
         json_key: "genres",
         json_value: json!({ "genre": [] }),
         xml: XmlElement::new("genres"),
+    };
+    ok_response(format, Some(payload))
+}
+
+fn empty_artist_info(format: ResponseFormat, root: &'static str) -> Response {
+    let payload = SubsonicPayload {
+        json_key: root,
+        json_value: json!({
+            "biography": "",
+            "musicBrainzId": "",
+            "lastFmUrl": "",
+            "smallImageUrl": "",
+            "mediumImageUrl": "",
+            "largeImageUrl": "",
+            "similarArtist": [],
+        }),
+        xml: XmlElement::new(root)
+            .attr("biography", "")
+            .attr("musicBrainzId", "")
+            .attr("lastFmUrl", "")
+            .attr("smallImageUrl", "")
+            .attr("mediumImageUrl", "")
+            .attr("largeImageUrl", ""),
+    };
+    ok_response(format, Some(payload))
+}
+
+fn empty_album_info(format: ResponseFormat, root: &'static str) -> Response {
+    let payload = SubsonicPayload {
+        json_key: root,
+        json_value: json!({
+            "notes": "",
+            "musicBrainzId": "",
+            "lastFmUrl": "",
+            "smallImageUrl": "",
+            "mediumImageUrl": "",
+            "largeImageUrl": "",
+        }),
+        xml: XmlElement::new(root)
+            .attr("notes", "")
+            .attr("musicBrainzId", "")
+            .attr("lastFmUrl", "")
+            .attr("smallImageUrl", "")
+            .attr("mediumImageUrl", "")
+            .attr("largeImageUrl", ""),
+    };
+    ok_response(format, Some(payload))
+}
+
+fn empty_songs(format: ResponseFormat, root: &'static str) -> Response {
+    let payload = SubsonicPayload {
+        json_key: root,
+        json_value: json!({ "song": [] }),
+        xml: XmlElement::new(root),
     };
     ok_response(format, Some(payload))
 }
@@ -979,11 +1045,12 @@ async fn get_song(
     Ok(ok_response(format, Some(payload)))
 }
 
-async fn search3(
+async fn search_result(
     state: &AppState,
     user: &User,
     params: &ParamMap,
     format: ResponseFormat,
+    root: &'static str,
 ) -> std::result::Result<Response, SubsonicError> {
     let query = normalise_search_query(params.first("query").unwrap_or(""));
     let artist_count = params.i64_param("artistCount", 20, MAX_PAGE_SIZE) as usize;
@@ -1052,13 +1119,13 @@ async fn search3(
     }
 
     let payload = SubsonicPayload {
-        json_key: "searchResult3",
+        json_key: root,
         json_value: json!({
             "artist": json_artists,
             "album": json_albums,
             "song": json_songs,
         }),
-        xml: XmlElement::new("searchResult3")
+        xml: XmlElement::new(root)
             .children(xml_artists)
             .children(xml_albums)
             .children(xml_songs),
@@ -1075,11 +1142,12 @@ fn normalise_search_query(query: &str) -> String {
     }
 }
 
-async fn get_album_list2(
+async fn get_album_list(
     state: &AppState,
     user: &User,
     params: &ParamMap,
     format: ResponseFormat,
+    root: &'static str,
 ) -> std::result::Result<Response, SubsonicError> {
     let list_type = params.required("type")?.to_ascii_lowercase();
     let size = params.i64_param("size", 10, MAX_PAGE_SIZE) as usize;
@@ -1123,9 +1191,9 @@ async fn get_album_list2(
     }
 
     let payload = SubsonicPayload {
-        json_key: "albumList2",
+        json_key: root,
         json_value: json!({ "album": json_albums }),
-        xml: XmlElement::new("albumList2").children(xml_albums),
+        xml: XmlElement::new(root).children(xml_albums),
     };
     Ok(ok_response(format, Some(payload)))
 }
