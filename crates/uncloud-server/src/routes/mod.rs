@@ -19,6 +19,7 @@ pub mod search;
 pub mod shares;
 pub mod shopping;
 pub mod storages;
+pub mod subsonic;
 pub mod sync_events;
 pub mod task_items;
 pub mod tasks;
@@ -29,19 +30,19 @@ pub mod vault_recents;
 pub mod versions;
 
 use axum::{
+    Router,
     extract::DefaultBodyLimit,
     middleware,
     routing::{any, delete, get, post, put},
-    Router,
 };
 use std::sync::Arc;
 
+use crate::AppState;
 use crate::middleware::{
     admin_meta_middleware, admin_middleware, auth_middleware, request_meta_middleware,
     require_files_delete, require_files_write, require_music_feature, require_tasks_feature,
     sigv4_middleware,
 };
-use crate::AppState;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     // -- Public routes (no auth) defined once, nested under /api and /api/v1 --
@@ -198,6 +199,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/playlists/{id}/tracks/reorder",
             put(playlists::reorder_tracks),
+        )
+        .route(
+            "/subsonic/credentials",
+            get(subsonic::list_credentials).post(subsonic::create_credential),
+        )
+        .route(
+            "/subsonic/credentials/{id}",
+            delete(subsonic::delete_credential),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -731,6 +740,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             auth_middleware,
         ));
 
+    let subsonic_routes = Router::new().route("/rest/{method}", any(subsonic::handle_rest));
+
     Router::new()
         .merge(public_routes)
         .merge(auth_routes)
@@ -738,6 +749,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .merge(s3_routes)
         .merge(app_proxy_routes)
         .merge(mcp_routes)
+        .merge(subsonic_routes)
         .with_state(state)
 }
 

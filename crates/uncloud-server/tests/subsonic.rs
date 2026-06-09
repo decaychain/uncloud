@@ -1,0 +1,385 @@
+mod common;
+
+use axum::http::StatusCode;
+use bson::doc;
+use md5::{Digest as Md5Digest, Md5};
+use mongodb::bson::oid::ObjectId;
+use serde_json::Value;
+use uncloud_server::models::{File, Folder};
+
+use common::TestApp;
+
+const TEST_KEY: &str = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
+
+#[tokio::test]
+async fn subsonic_app_password_browses_and_streams_music() {
+    let app = TestApp::with_config(|config| {
+        config.secrets.master_key = Some(TEST_KEY.to_string());
+    })
+    .await;
+    let me: Value = app.register_and_login("alice").await;
+    let owner_id = ObjectId::parse_str(me["id"].as_str().expect("user id")).expect("valid user id");
+
+    let mut folder = Folder::new(owner_id, None, "Music".to_string());
+    folder.music_include = uncloud_common::MusicInclude::Include;
+    app.db
+        .collection::<Folder>("folders")
+        .insert_one(&folder)
+        .await
+        .expect("insert music folder");
+    let child_folder = Folder::new(owner_id, Some(folder.id), "Demo Artist".to_string());
+    app.db
+        .collection::<Folder>("folders")
+        .insert_one(&child_folder)
+        .await
+        .expect("insert child music folder");
+
+    let bytes = b"not really mp3 but good enough for the stream endpoint";
+    let uploaded = app
+        .upload_to_folder("track.mp3", bytes, "audio/mpeg", &folder.id.to_hex())
+        .await;
+    let file_id = ObjectId::parse_str(uploaded["id"].as_str().unwrap()).unwrap();
+    app.db
+        .collection::<File>("files")
+        .update_one(
+            doc! { "_id": file_id },
+            doc! { "$set": { "metadata.audio": {
+                "title": "Demo Track",
+                "artist": "Demo Artist",
+                "album": "Demo Album",
+                "duration_secs": 12.0,
+                "track_number": 1_i32,
+                "year": 2026_i32,
+                "has_cover_art": true,
+            }}},
+        )
+        .await
+        .expect("update audio metadata");
+    let nested_bytes = b"nested audio bytes";
+    let nested = app
+        .upload_to_folder(
+            "nested.mp3",
+            nested_bytes,
+            "audio/mpeg",
+            &child_folder.id.to_hex(),
+        )
+        .await;
+    let nested_file_id = ObjectId::parse_str(nested["id"].as_str().unwrap()).unwrap();
+    app.db
+        .collection::<File>("files")
+        .update_one(
+            doc! { "_id": nested_file_id },
+            doc! { "$set": { "metadata.audio": {
+                "title": "ZZZ Nested Track",
+                "artist": "ZZZ Folder Artist",
+                "album": "ZZZ Folder Album",
+                "duration_secs": 9.0,
+                "track_number": 1_i32,
+                "year": 2026_i32,
+            }}},
+        )
+        .await
+        .expect("update nested audio metadata");
+
+    let created: Value = app
+        .server
+        .post("/api/subsonic/credentials")
+        .json(&serde_json::json!({ "label": "test client" }))
+        .await
+        .json();
+    let password = created["app_password"].as_str().expect("app password");
+
+    let salt = "abcdef";
+    let mut hasher = Md5::new();
+    hasher.update(password.as_bytes());
+    hasher.update(salt.as_bytes());
+    let token = hex::encode(hasher.finalize());
+
+    let base = format!("u=alice&t={token}&s={salt}&v=1.16.1&c=test&f=json");
+    let extensions: Value = app
+        .server
+        .get("/rest/getOpenSubsonicExtensions.view?f=json")
+        .await
+        .json();
+    assert_eq!(extensions["subsonic-response"]["status"], "ok");
+    assert_eq!(extensions["subsonic-response"]["openSubsonic"], true);
+    assert_eq!(
+        extensions["subsonic-response"]["openSubsonicExtensions"][0]["name"],
+        "formPost"
+    );
+
+    let ping: Value = app
+        .server
+        .get(&format!("/rest/ping.view?{base}"))
+        .await
+        .json();
+    assert_eq!(ping["subsonic-response"]["status"], "ok");
+
+    let starred: Value = app
+        .server
+        .get(&format!("/rest/getStarred2.view?{base}"))
+        .await
+        .json();
+    assert_eq!(starred["subsonic-response"]["status"], "ok");
+    assert_eq!(
+        starred["subsonic-response"]["starred2"]["song"]
+            .as_array()
+            .expect("starred songs")
+            .len(),
+        0
+    );
+
+    let bookmarks: Value = app
+        .server
+        .get(&format!("/rest/getBookmarks.view?{base}"))
+        .await
+        .json();
+    assert_eq!(bookmarks["subsonic-response"]["status"], "ok");
+    assert_eq!(
+        bookmarks["subsonic-response"]["bookmarks"]["bookmark"]
+            .as_array()
+            .expect("bookmarks")
+            .len(),
+        0
+    );
+
+    let genres: Value = app
+        .server
+        .get(&format!("/rest/getGenres.view?{base}"))
+        .await
+        .json();
+    assert_eq!(genres["subsonic-response"]["status"], "ok");
+    assert_eq!(
+        genres["subsonic-response"]["genres"]["genre"]
+            .as_array()
+            .expect("genres")
+            .len(),
+        0
+    );
+
+    for (method, root, child) in [
+        ("getArtistInfo", "artistInfo", "similarArtist"),
+        ("getArtistInfo2", "artistInfo2", "similarArtist"),
+        ("getAlbumInfo", "albumInfo", "notes"),
+        ("getAlbumInfo2", "albumInfo2", "notes"),
+        ("getTopSongs", "topSongs", "song"),
+        ("getSimilarSongs", "similarSongs", "song"),
+        ("getSimilarSongs2", "similarSongs2", "song"),
+    ] {
+        let response: Value = app
+            .server
+            .get(&format!("/rest/{method}.view?{base}&id=1&artist=Demo"))
+            .await
+            .json();
+        assert_eq!(response["subsonic-response"]["status"], "ok");
+        assert!(
+            response["subsonic-response"][root].get(child).is_some(),
+            "{method} returned expected compatibility payload"
+        );
+    }
+
+    for method in ["star", "unstar", "setRating", "createBookmark", "deleteBookmark"] {
+        let response: Value = app
+            .server
+            .get(&format!("/rest/{method}.view?{base}&id=1"))
+            .await
+            .json();
+        assert_eq!(response["subsonic-response"]["status"], "ok");
+    }
+
+    let folders: Value = app
+        .server
+        .get(&format!("/rest/getMusicFolders.view?{base}"))
+        .await
+        .json();
+    let folder_id = folders["subsonic-response"]["musicFolders"]["musicFolder"][0]["id"]
+        .as_str()
+        .expect("numeric folder id");
+    assert!(folder_id.parse::<i64>().is_ok(), "folder id is numeric");
+
+    let indexes: Value = app
+        .server
+        .get(&format!(
+            "/rest/getIndexes.view?{base}&musicFolderId={folder_id}"
+        ))
+        .await
+        .json();
+    let indexed_folder_id = indexes["subsonic-response"]["indexes"]["index"][0]["artist"][0]
+        ["id"]
+        .as_str()
+        .expect("indexed folder id");
+    let indexed_directory: Value = app
+        .server
+        .get(&format!(
+            "/rest/getMusicDirectory.view?{base}&id={indexed_folder_id}"
+        ))
+        .await
+        .json();
+    assert_eq!(indexed_directory["subsonic-response"]["status"], "ok");
+    assert_eq!(
+        indexed_directory["subsonic-response"]["directory"]["child"][0]["title"],
+        "ZZZ Nested Track"
+    );
+
+    let directory: Value = app
+        .server
+        .get(&format!(
+            "/rest/getMusicDirectory.view?{base}&id={folder_id}"
+        ))
+        .await
+        .json();
+    let child = directory["subsonic-response"]["directory"]["child"]
+        .as_array()
+        .expect("directory children")
+        .iter()
+        .find(|child| child["title"] == "Demo Track")
+        .expect("demo track in root directory");
+    assert_eq!(child["title"], "Demo Track");
+    let song_id = child["id"].as_str().expect("song id");
+    assert!(song_id.parse::<i64>().is_ok(), "song id is numeric");
+    assert_eq!(child["coverArt"], song_id);
+
+    let empty_search: Value = app
+        .server
+        .get(&format!(
+            "/rest/search3.view?{base}&query=&artistCount=10&albumCount=10&songCount=10"
+        ))
+        .await
+        .json();
+    let search = &empty_search["subsonic-response"]["searchResult3"];
+    assert_eq!(search["artist"][0]["name"], "Demo Artist");
+    assert_eq!(search["artist"][0]["coverArt"], song_id);
+    assert_eq!(search["album"][0]["name"], "Demo Album");
+    assert_eq!(search["album"][0]["coverArt"], song_id);
+    assert_eq!(search["song"][0]["title"], "Demo Track");
+    assert_eq!(search["song"][0]["coverArt"], song_id);
+
+    let legacy_search: Value = app
+        .server
+        .get(&format!(
+            "/rest/search2.view?{base}&query=&artistCount=10&albumCount=10&songCount=10"
+        ))
+        .await
+        .json();
+    assert_eq!(
+        legacy_search["subsonic-response"]["searchResult2"]["song"][0]["title"],
+        "Demo Track"
+    );
+
+    let symfonium_artist_search: Value = app
+        .server
+        .get(&format!(
+            "/rest/search3.view?{base}&query=%22%22&artistCount=10&albumCount=0&songCount=0"
+        ))
+        .await
+        .json();
+    let symfonium_artist_search = &symfonium_artist_search["subsonic-response"]["searchResult3"];
+    assert_eq!(symfonium_artist_search["artist"][0]["name"], "Demo Artist");
+    assert_eq!(symfonium_artist_search["artist"][0]["coverArt"], song_id);
+    assert_eq!(
+        symfonium_artist_search["album"]
+            .as_array()
+            .expect("no albums requested")
+            .len(),
+        0
+    );
+    assert_eq!(
+        symfonium_artist_search["song"]
+            .as_array()
+            .expect("no songs requested")
+            .len(),
+        0
+    );
+
+    let symfonium_album_search: Value = app
+        .server
+        .get(&format!(
+            "/rest/search3.view?{base}&query=%22%22&artistCount=0&albumCount=10&songCount=0"
+        ))
+        .await
+        .json();
+    let symfonium_album_search = &symfonium_album_search["subsonic-response"]["searchResult3"];
+    assert_eq!(symfonium_album_search["album"][0]["name"], "Demo Album");
+    assert_eq!(symfonium_album_search["album"][0]["coverArt"], song_id);
+
+    let symfonium_song_search: Value = app
+        .server
+        .get(&format!(
+            "/rest/search3.view?{base}&query=%22%22&artistCount=0&albumCount=0&songCount=10"
+        ))
+        .await
+        .json();
+    let symfonium_song_search = &symfonium_song_search["subsonic-response"]["searchResult3"];
+    assert_eq!(symfonium_song_search["song"][0]["title"], "Demo Track");
+    assert_eq!(symfonium_song_search["song"][0]["coverArt"], song_id);
+
+    let empty_search_page_2: Value = app
+        .server
+        .get(&format!(
+            "/rest/search3.view?{base}&query=&artistCount=10&albumCount=10&songCount=10&songOffset=2"
+        ))
+        .await
+        .json();
+    assert_eq!(
+        empty_search_page_2["subsonic-response"]["searchResult3"]["song"]
+            .as_array()
+            .expect("second search page songs")
+            .len(),
+        0
+    );
+
+    let album_list: Value = app
+        .server
+        .get(&format!(
+            "/rest/getAlbumList2.view?{base}&type=alphabeticalByName&size=10"
+        ))
+        .await
+        .json();
+    let album = album_list["subsonic-response"]["albumList2"]["album"]
+        .as_array()
+        .expect("album list")
+        .iter()
+        .find(|album| album["name"] == "Demo Album")
+        .expect("demo album");
+    assert_eq!(album["name"], "Demo Album");
+    assert_eq!(album["coverArt"], song_id);
+    let album_id = album["id"].as_str().expect("album id");
+    let artist_id = album["artistId"].as_str().expect("album artist id");
+    assert!(
+        artist_id.parse::<i64>().is_ok(),
+        "album artist id is numeric"
+    );
+
+    let legacy_album_list: Value = app
+        .server
+        .get(&format!(
+            "/rest/getAlbumList.view?{base}&type=alphabeticalByName&size=10"
+        ))
+        .await
+        .json();
+    assert_eq!(
+        legacy_album_list["subsonic-response"]["albumList"]["album"][0]["name"],
+        "Demo Album"
+    );
+
+    let album_detail: Value = app
+        .server
+        .get(&format!("/rest/getAlbum.view?{base}&id={album_id}"))
+        .await
+        .json();
+    let album_detail = &album_detail["subsonic-response"]["album"];
+    assert_eq!(album_detail["name"], "Demo Album");
+    assert_eq!(album_detail["artistId"], artist_id);
+    assert_eq!(album_detail["coverArt"], song_id);
+    assert_eq!(album_detail["song"][0]["coverArt"], song_id);
+
+    let stream = app
+        .server
+        .get(&format!("/rest/stream.view?{base}&id={song_id}"))
+        .add_header("Range", "bytes=0-6")
+        .await;
+    stream.assert_status(StatusCode::PARTIAL_CONTENT);
+    assert_eq!(stream.as_bytes(), &bytes[..7]);
+
+    app.cleanup().await;
+}

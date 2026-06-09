@@ -98,6 +98,32 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
                 .build(),
         )
         .await?;
+    files
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! {
+                    "parent_id": 1,
+                    "deleted_at": 1,
+                    "mime_type": 1,
+                    "metadata.audio.title": 1,
+                    "created_at": -1,
+                })
+                .build(),
+        )
+        .await?;
+    files
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! {
+                    "parent_id": 1,
+                    "deleted_at": 1,
+                    "mime_type": 1,
+                    "metadata.audio.artist": 1,
+                    "metadata.audio.album": 1,
+                })
+                .build(),
+        )
+        .await?;
     // Accelerates the duplicate-detection aggregation (one-pass `$group` on
     // checksum). Partial-filtered to live, non-empty files — the duplicate
     // pipeline ignores trash, soft-deletes, and empty-file hashes anyway.
@@ -303,6 +329,34 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         .create_index(
             IndexModel::builder()
                 .keys(mongodb::bson::doc! { "user_id": 1 })
+                .build(),
+        )
+        .await?;
+
+    // Subsonic app passwords and numeric compatibility IDs.
+    let subsonic_creds = db.collection::<mongodb::bson::Document>("subsonic_credentials");
+    subsonic_creds
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+
+    let subsonic_ids = db.collection::<mongodb::bson::Document>("subsonic_ids");
+    subsonic_ids
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "numeric_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    subsonic_ids
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "kind": 1, "internal_key": 1 })
+                .options(IndexOptions::builder().unique(true).build())
                 .build(),
         )
         .await?;

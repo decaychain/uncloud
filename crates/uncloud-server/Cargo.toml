@@ -35,6 +35,7 @@ async-trait.workspace = true
 mime_guess.workspace = true
 sha2.workspace = true
 hex.workspace = true
+md-5 = "0.10"
 serde_yaml.workspace = true
 futures.workspace = true
 async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }

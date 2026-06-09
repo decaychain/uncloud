@@ -9,9 +9,11 @@ use crate::hooks::use_processing;
 use crate::hooks::use_s3;
 use crate::hooks::use_search;
 use crate::hooks::use_storages;
+use crate::hooks::use_subsonic;
 use crate::state::{AuthState, FontScale, RescanState, ThemeState};
 use uncloud_common::{
-    CreateInviteRequest, UpdateFeaturesRequest, UpdatePreferencesRequest, UserRole, UserStatus,
+    CreateInviteRequest, SubsonicCredentialResponse, UpdateFeaturesRequest,
+    UpdatePreferencesRequest, UserRole, UserStatus,
 };
 
 #[component]
@@ -39,6 +41,7 @@ pub fn SettingsPage(tab: String) -> Element {
                     ChangePasswordSection {}
                     TotpSection {}
                     S3AccessKeysSection {}
+                    SubsonicAppPasswordsSection {}
                     ConnectedAppsSection {}
                 },
                 "sync" if is_desktop => rsx! {
@@ -580,6 +583,226 @@ fn S3AccessKeysSection() -> Element {
                             class: "btn btn-sm btn-outline",
                             onclick: move |_| show_create.set(true),
                             "Generate new key"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Subsonic app passwords section
+// ---------------------------------------------------------------------------
+
+#[component]
+fn SubsonicAppPasswordsSection() -> Element {
+    let mut credentials = use_signal(Vec::<SubsonicCredentialResponse>::new);
+    let mut loading = use_signal(|| true);
+    let mut error = use_signal(|| None::<String>);
+    let mut show_create = use_signal(|| false);
+    let mut new_label = use_signal(String::new);
+    let mut creating = use_signal(|| false);
+    let mut created_secret =
+        use_signal(|| None::<uncloud_common::CreateSubsonicCredentialResponse>);
+    let mut copied = use_signal(|| false);
+
+    use_effect(move || {
+        spawn(async move {
+            loading.set(true);
+            match use_subsonic::list_credentials().await {
+                Ok(creds) => credentials.set(creds),
+                Err(e) => error.set(Some(e)),
+            }
+            loading.set(false);
+        });
+    });
+
+    let refresh = use_callback(move |()| {
+        spawn(async move {
+            match use_subsonic::list_credentials().await {
+                Ok(creds) => credentials.set(creds),
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    });
+
+    let on_create = move |_| {
+        let label = new_label().trim().to_string();
+        if label.is_empty() {
+            return;
+        }
+        spawn(async move {
+            creating.set(true);
+            error.set(None);
+            match use_subsonic::create_credential(&label).await {
+                Ok(resp) => {
+                    created_secret.set(Some(resp));
+                    new_label.set(String::new());
+                    show_create.set(false);
+                    copied.set(false);
+                    refresh.call(());
+                }
+                Err(e) => error.set(Some(e)),
+            }
+            creating.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "card bg-base-100 shadow",
+            div { class: "card-body gap-4",
+                h2 { class: "card-title text-lg", "Subsonic app passwords" }
+                p { class: "text-base-content/60 text-xs",
+                    "Use these credentials with Subsonic-compatible music clients. The server URL is your Uncloud address."
+                }
+
+                if let Some(err) = error() {
+                    div { class: "alert alert-error text-sm", span { "{err}" } }
+                }
+
+                if let Some(secret) = created_secret() {
+                    div { class: "alert alert-warning",
+                        div { class: "flex flex-col gap-2 w-full",
+                            p { class: "font-bold text-sm", "Save this app password now. It will not be shown again." }
+                            div { class: "bg-base-300 text-base-content rounded p-3 font-mono text-xs space-y-1",
+                                div { class: "flex gap-2",
+                                    span { class: "font-semibold w-32 shrink-0", "Username:" }
+                                    span { "Your Uncloud username" }
+                                }
+                                div { class: "flex gap-2",
+                                    span { class: "font-semibold w-32 shrink-0", "Password:" }
+                                    span { "{secret.app_password}" }
+                                }
+                            }
+                            div { class: "flex gap-2 mt-1",
+                                {
+                                    let password = secret.app_password.clone();
+                                    rsx! {
+                                        button {
+                                            class: "btn btn-sm btn-outline",
+                                            onclick: move |_| {
+                                                if let Some(window) = web_sys::window() {
+                                                    let clipboard = window.navigator().clipboard();
+                                                    let _ = clipboard.write_text(&password);
+                                                    copied.set(true);
+                                                }
+                                            },
+                                            if copied() { "Copied!" } else { "Copy password" }
+                                        }
+                                        button {
+                                            class: "btn btn-sm btn-ghost",
+                                            onclick: move |_| {
+                                                created_secret.set(None);
+                                                copied.set(false);
+                                            },
+                                            "Dismiss"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if loading() {
+                    div { class: "flex justify-center py-4",
+                        span { class: "loading loading-spinner loading-sm" }
+                    }
+                } else if credentials().is_empty() {
+                    p { class: "text-base-content/50 text-sm py-2",
+                        "No Subsonic app passwords yet."
+                    }
+                } else {
+                    div { class: "overflow-x-auto",
+                        table { class: "table table-sm",
+                            thead {
+                                tr {
+                                    th { "Label" }
+                                    th { "Created" }
+                                    th { "Last used" }
+                                    th {}
+                                }
+                            }
+                            tbody {
+                                for credential in credentials() {
+                                    {
+                                        let credential_id = credential.id.clone();
+                                        let refresh = refresh.clone();
+                                        rsx! {
+                                            tr {
+                                                td { class: "font-medium", "{credential.label}" }
+                                                td { class: "text-xs text-base-content/60",
+                                                    "{credential.created_at.split('T').next().unwrap_or(&credential.created_at)}"
+                                                }
+                                                td { class: "text-xs text-base-content/60",
+                                                    {
+                                                        credential.last_used_at
+                                                            .as_deref()
+                                                            .and_then(|value| value.split('T').next())
+                                                            .unwrap_or("Never")
+                                                    }
+                                                }
+                                                td {
+                                                    button {
+                                                        class: "btn btn-ghost btn-xs text-error",
+                                                        onclick: move |_| {
+                                                            let id = credential_id.clone();
+                                                            let refresh = refresh.clone();
+                                                            spawn(async move {
+                                                                if let Err(e) = use_subsonic::delete_credential(&id).await {
+                                                                    error.set(Some(e));
+                                                                    return;
+                                                                }
+                                                                refresh.call(());
+                                                            });
+                                                        },
+                                                        "Revoke"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if show_create() {
+                    div { class: "flex items-end gap-2",
+                        div { class: "form-control flex-1",
+                            label { class: "label",
+                                span { class: "label-text text-sm", "Label" }
+                            }
+                            input {
+                                class: "input input-bordered input-sm",
+                                placeholder: "e.g. Symfonium, desktop player",
+                                value: "{new_label()}",
+                                oninput: move |evt| new_label.set(evt.value()),
+                            }
+                        }
+                        button {
+                            class: "btn btn-primary btn-sm",
+                            disabled: creating() || new_label().trim().is_empty(),
+                            onclick: on_create,
+                            if creating() {
+                                span { class: "loading loading-spinner loading-xs" }
+                            }
+                            "Generate"
+                        }
+                        button {
+                            class: "btn btn-ghost btn-sm",
+                            onclick: move |_| show_create.set(false),
+                            "Cancel"
+                        }
+                    }
+                } else {
+                    div { class: "card-actions",
+                        button {
+                            class: "btn btn-sm btn-outline",
+                            onclick: move |_| show_create.set(true),
+                            "Generate app password"
                         }
                     }
                 }
@@ -1713,11 +1936,7 @@ fn InviteManagementSection() -> Element {
         evt.prevent_default();
         let comment = {
             let c = invite_comment().trim().to_string();
-            if c.is_empty() {
-                None
-            } else {
-                Some(c)
-            }
+            if c.is_empty() { None } else { Some(c) }
         };
         let role = match invite_role().as_str() {
             "admin" => Some(UserRole::Admin),

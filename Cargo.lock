@@ -11402,6 +11402,7 @@ dependencies = [
  "libc",
  "lofty",
  "mail-parser",
+ "md-5",
  "meilisearch-sdk",
  "mime_guess",
  "mongodb",
