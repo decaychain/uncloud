@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::Json;
 use axum::body::{Body, to_bytes};
@@ -774,7 +775,7 @@ async fn get_artists(
     params: &ParamMap,
     format: ResponseFormat,
 ) -> std::result::Result<Response, SubsonicError> {
-    let artists = artist_rows(state, user, params.first("musicFolderId")).await?;
+    let artists = artist_rows(state, user, params.first("musicFolderId"), 0, None).await?;
     let groups = group_artists(artists);
 
     let mut json_indexes = Vec::new();
@@ -1052,6 +1053,7 @@ async fn search_result(
     format: ResponseFormat,
     root: &'static str,
 ) -> std::result::Result<Response, SubsonicError> {
+    let started = Instant::now();
     let query = normalise_search_query(params.first("query").unwrap_or(""));
     let artist_count = params.i64_param("artistCount", 20, MAX_PAGE_SIZE) as usize;
     let album_count = params.i64_param("albumCount", 20, MAX_PAGE_SIZE) as usize;
@@ -1064,13 +1066,19 @@ async fn search_result(
     let mut json_artists = Vec::new();
     let mut xml_artists = Vec::new();
     if artist_count > 0 {
-        let artists = artist_rows(state, user, music_folder_id).await?;
-        for artist in artists
-            .into_iter()
-            .filter(|artist| query.is_empty() || artist.name.to_lowercase().contains(&query))
-            .skip(artist_offset)
-            .take(artist_count)
-        {
+        let artists: Vec<_> = if query.is_empty() {
+            artist_rows(state, user, music_folder_id, artist_offset as u64, Some(artist_count))
+                .await?
+        } else {
+            artist_rows(state, user, music_folder_id, 0, None)
+                .await?
+                .into_iter()
+                .filter(|artist| artist.name.to_lowercase().contains(&query))
+                .skip(artist_offset)
+                .take(artist_count)
+                .collect()
+        };
+        for artist in artists {
             json_artists.push(json!({
                 "id": artist.id,
                 "name": artist.name,
@@ -1090,17 +1098,32 @@ async fn search_result(
     let mut json_albums = Vec::new();
     let mut xml_albums = Vec::new();
     if album_count > 0 {
-        let albums = album_rows(state, user, music_folder_id, None).await?;
-        for album in albums
-            .into_iter()
-            .filter(|album| {
-                query.is_empty()
-                    || album.name.to_lowercase().contains(&query)
+        let albums: Vec<_> = if query.is_empty() {
+            album_rows(
+                state,
+                user,
+                music_folder_id,
+                None,
+                Some(AlbumPage {
+                    offset: album_offset as u64,
+                    limit: album_count,
+                    sort: AlbumSort::Name,
+                }),
+            )
+            .await?
+        } else {
+            album_rows(state, user, music_folder_id, None, None)
+                .await?
+                .into_iter()
+                .filter(|album| {
+                    album.name.to_lowercase().contains(&query)
                     || album.artist.to_lowercase().contains(&query)
-            })
-            .skip(album_offset)
-            .take(album_count)
-        {
+                })
+                .skip(album_offset)
+                .take(album_count)
+                .collect()
+        };
+        for album in albums {
             json_albums.push(album.json);
             xml_albums.push(album.xml);
         }
@@ -1117,6 +1140,22 @@ async fn search_result(
             xml_songs.push(xml);
         }
     }
+
+    debug!(
+        root,
+        query_empty = query.is_empty(),
+        requested_artists = artist_count,
+        requested_albums = album_count,
+        requested_songs = song_count,
+        artist_offset,
+        album_offset,
+        song_offset,
+        returned_artists = json_artists.len(),
+        returned_albums = json_albums.len(),
+        returned_songs = json_songs.len(),
+        elapsed_ms = started.elapsed().as_millis(),
+        "subsonic search result built",
+    );
 
     let payload = SubsonicPayload {
         json_key: root,
@@ -1151,19 +1190,54 @@ async fn get_album_list(
 ) -> std::result::Result<Response, SubsonicError> {
     let list_type = params.required("type")?.to_ascii_lowercase();
     let size = params.i64_param("size", 10, MAX_PAGE_SIZE) as usize;
-    let offset = params.i64_param("offset", 0, i64::MAX) as usize;
+    let offset = params.i64_param("offset", 0, i64::MAX) as u64;
     let music_folder_id = params.first("musicFolderId");
 
-    let mut albums = match list_type.as_str() {
-        "random" | "newest" | "alphabeticalbyname" | "alphabeticalbyartist" => {
-            album_rows(state, user, music_folder_id, None).await?
+    let albums = match list_type.as_str() {
+        "newest" => {
+            album_rows(
+                state,
+                user,
+                music_folder_id,
+                None,
+                Some(AlbumPage {
+                    offset,
+                    limit: size,
+                    sort: AlbumSort::Newest,
+                }),
+            )
+            .await?
         }
-        "frequent" | "recent" | "starred" | "byyear" | "bygenre" => Vec::new(),
-        _ => Vec::new(),
-    };
-
-    match list_type.as_str() {
+        "alphabeticalbyartist" => {
+            album_rows(
+                state,
+                user,
+                music_folder_id,
+                None,
+                Some(AlbumPage {
+                    offset,
+                    limit: size,
+                    sort: AlbumSort::Artist,
+                }),
+            )
+            .await?
+        }
+        "alphabeticalbyname" => {
+            album_rows(
+                state,
+                user,
+                music_folder_id,
+                None,
+                Some(AlbumPage {
+                    offset,
+                    limit: size,
+                    sort: AlbumSort::Name,
+                }),
+            )
+            .await?
+        }
         "random" => {
+            let mut albums = album_rows(state, user, music_folder_id, None, None).await?;
             // Deterministic enough for one request; avoid adding a RNG trait
             // dependency just for a compatibility endpoint.
             albums.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1171,21 +1245,15 @@ async fn get_album_list(
             let offset =
                 (Utc::now().timestamp_nanos_opt().unwrap_or_default() as usize).wrapping_rem(len);
             albums.rotate_left(offset);
+            albums.into_iter().take(size).collect()
         }
-        "newest" => albums.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
-        "alphabeticalbyartist" => albums.sort_by(|a, b| {
-            a.artist
-                .to_lowercase()
-                .cmp(&b.artist.to_lowercase())
-                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-        }),
-        _ => albums.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
-    }
+        "frequent" | "recent" | "starred" | "byyear" | "bygenre" => Vec::new(),
+        _ => Vec::new(),
+    };
 
-    let page = albums.into_iter().skip(offset).take(size);
     let mut json_albums = Vec::new();
     let mut xml_albums = Vec::new();
-    for album in page {
+    for album in albums {
         json_albums.push(album.json);
         xml_albums.push(album.xml);
     }
@@ -1778,9 +1846,14 @@ async fn artist_rows(
     state: &AppState,
     user: &User,
     music_folder_id: Option<&str>,
+    offset: u64,
+    limit: Option<usize>,
 ) -> std::result::Result<Vec<ArtistRow>, SubsonicError> {
     let parent_ids = scoped_parent_ids(state, user, music_folder_id).await?;
     if parent_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    if matches!(limit, Some(0)) {
         return Ok(Vec::new());
     }
     let normalise = |field: &str, default: &str| {
@@ -1791,7 +1864,7 @@ async fn artist_rows(
             }
         }
     };
-    let pipeline = vec![
+    let mut pipeline = vec![
         doc! { "$match": {
             "parent_id": { "$in": &parent_ids },
             "mime_type": { "$regex": "^audio/" },
@@ -1819,7 +1892,14 @@ async fn artist_rows(
             ]}},
         }},
         doc! { "$addFields": { "cover_file_id": { "$arrayElemAt": ["$cover_candidates", 0] } } },
+        doc! { "$sort": { "_id": 1 } },
     ];
+    if offset > 0 {
+        pipeline.push(doc! { "$skip": offset as i64 });
+    }
+    if let Some(limit) = limit {
+        pipeline.push(doc! { "$limit": limit as i64 });
+    }
     let mut cursor = state
         .db
         .collection::<File>("files")
@@ -1844,7 +1924,6 @@ async fn artist_rows(
             cover_art,
         });
     }
-    rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(rows)
 }
 
@@ -1883,7 +1962,6 @@ struct AlbumRow {
     id: String,
     name: String,
     artist: String,
-    created_at: String,
     cover_art: Option<String>,
     json: Value,
     xml: XmlElement,
@@ -1895,7 +1973,21 @@ async fn album_rows_for_artist(
     artist: &str,
     music_folder_id: Option<&str>,
 ) -> std::result::Result<Vec<AlbumRow>, SubsonicError> {
-    album_rows(state, user, music_folder_id, Some(artist)).await
+    album_rows(state, user, music_folder_id, Some(artist), None).await
+}
+
+#[derive(Clone, Copy)]
+enum AlbumSort {
+    Name,
+    Artist,
+    Newest,
+}
+
+#[derive(Clone, Copy)]
+struct AlbumPage {
+    offset: u64,
+    limit: usize,
+    sort: AlbumSort,
 }
 
 async fn album_rows(
@@ -1903,9 +1995,13 @@ async fn album_rows(
     user: &User,
     music_folder_id: Option<&str>,
     artist_filter: Option<&str>,
+    page: Option<AlbumPage>,
 ) -> std::result::Result<Vec<AlbumRow>, SubsonicError> {
     let parent_ids = scoped_parent_ids(state, user, music_folder_id).await?;
     if parent_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    if matches!(page, Some(AlbumPage { limit: 0, .. })) {
         return Ok(Vec::new());
     }
     let normalise = |field: &str, default: &str| {
@@ -1940,7 +2036,7 @@ async fn album_rows(
             );
         }
     }
-    let pipeline = vec![
+    let mut pipeline = vec![
         doc! { "$match": match_doc },
         doc! { "$sort": { "created_at": -1 } },
         doc! { "$group": {
@@ -1960,6 +2056,18 @@ async fn album_rows(
         }},
         doc! { "$addFields": { "cover_file_id": { "$arrayElemAt": ["$cover_candidates", 0] } } },
     ];
+    if let Some(page) = page {
+        let sort = match page.sort {
+            AlbumSort::Name => doc! { "_id.album": 1, "_id.artist": 1 },
+            AlbumSort::Artist => doc! { "_id.artist": 1, "_id.album": 1 },
+            AlbumSort::Newest => doc! { "created_at": -1, "_id.album": 1, "_id.artist": 1 },
+        };
+        pipeline.push(doc! { "$sort": sort });
+        if page.offset > 0 {
+            pipeline.push(doc! { "$skip": page.offset as i64 });
+        }
+        pipeline.push(doc! { "$limit": page.limit as i64 });
+    }
 
     let mut cursor = state
         .db
@@ -2036,13 +2144,14 @@ async fn album_rows(
             id,
             name,
             artist,
-            created_at,
             cover_art: cover_art_alias,
             json,
             xml,
         });
     }
-    rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    if page.is_none() {
+        rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    }
     Ok(rows)
 }
 
