@@ -721,12 +721,14 @@ async fn get_artists(
                 "id": artist.id,
                 "name": artist.name,
                 "albumCount": artist.album_count,
+                "coverArt": artist.cover_art,
             }));
             xml_artists.push(
                 XmlElement::new("artist")
                     .attr("id", artist.id)
                     .attr("name", artist.name)
-                    .attr("albumCount", artist.album_count),
+                    .attr("albumCount", artist.album_count)
+                    .opt_attr("coverArt", artist.cover_art),
             );
         }
         json_indexes.push(json!({ "name": letter, "artist": json_artists }));
@@ -863,6 +865,7 @@ async fn get_artist(
         parse_artist_key(&alias.internal_key).ok_or_else(|| SubsonicError::not_found("Artist"))?;
     let albums = album_rows_for_artist(state, user, &artist, None).await?;
     let album_count = albums.len();
+    let cover_art = albums.iter().find_map(|album| album.cover_art.clone());
     let mut json_albums = Vec::new();
     let mut xml_albums = Vec::new();
     for album in albums {
@@ -876,12 +879,14 @@ async fn get_artist(
             "id": alias.numeric_id.to_string(),
             "name": artist,
             "albumCount": album_count,
+            "coverArt": cover_art,
             "album": json_albums,
         }),
         xml: XmlElement::new("artist")
             .attr("id", alias.numeric_id)
             .attr("name", artist)
             .attr("albumCount", album_count)
+            .opt_attr("coverArt", cover_art)
             .children(xml_albums),
     };
     Ok(ok_response(format, Some(payload)))
@@ -1003,12 +1008,14 @@ async fn search3(
                 "id": artist.id,
                 "name": artist.name,
                 "albumCount": artist.album_count,
+                "coverArt": artist.cover_art,
             }));
             xml_artists.push(
                 XmlElement::new("artist")
                     .attr("id", artist.id)
                     .attr("name", artist.name)
-                    .attr("albumCount", artist.album_count),
+                    .attr("albumCount", artist.album_count)
+                    .opt_attr("coverArt", artist.cover_art),
             );
         }
     }
@@ -1696,6 +1703,7 @@ struct ArtistRow {
     id: String,
     name: String,
     album_count: i64,
+    cover_art: Option<String>,
 }
 
 async fn artist_rows(
@@ -1726,11 +1734,23 @@ async fn artist_rows(
                 "artist": normalise("$metadata.audio.artist", "Unknown Artist"),
                 "album": normalise("$metadata.audio.album", "Unknown Album"),
             },
+            "cover_candidates": { "$push": { "$cond": [
+                { "$eq": ["$metadata.audio.has_cover_art", true] },
+                "$_id",
+                "$$REMOVE",
+            ]}},
         }},
+        doc! { "$addFields": { "cover_file_id": { "$arrayElemAt": ["$cover_candidates", 0] } } },
         doc! { "$group": {
             "_id": "$_id.artist",
             "album_count": { "$sum": 1 },
+            "cover_candidates": { "$push": { "$cond": [
+                { "$ne": ["$cover_file_id", Bson::Null] },
+                "$cover_file_id",
+                "$$REMOVE",
+            ]}},
         }},
+        doc! { "$addFields": { "cover_file_id": { "$arrayElemAt": ["$cover_candidates", 0] } } },
     ];
     let mut cursor = state
         .db
@@ -1743,10 +1763,17 @@ async fn artist_rows(
         let doc = doc.map_err(to_subsonic_error)?;
         let name = doc.get_str("_id").unwrap_or("Unknown Artist").to_string();
         let id = subsonic_id_for(state, user.id, SubsonicIdKind::Artist, artist_key(&name)).await?;
+        let cover_art = match doc.get_object_id("cover_file_id").ok() {
+            Some(file_id) => Some(
+                subsonic_id_for(state, user.id, SubsonicIdKind::Song, file_id.to_hex()).await?,
+            ),
+            None => None,
+        };
         rows.push(ArtistRow {
             id,
             name,
             album_count: get_i64(&doc, "album_count"),
+            cover_art,
         });
     }
     rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -1789,6 +1816,7 @@ struct AlbumRow {
     name: String,
     artist: String,
     created_at: String,
+    cover_art: Option<String>,
     json: Value,
     xml: XmlElement,
 }
@@ -1933,7 +1961,7 @@ async fn album_rows(
             .attr("artistId", &artist_id)
             .attr("songCount", song_count)
             .attr("duration", duration)
-            .opt_attr("coverArt", cover_art_alias)
+            .opt_attr("coverArt", cover_art_alias.clone())
             .opt_attr("year", year)
             .attr("created", &created_at);
         rows.push(AlbumRow {
@@ -1941,6 +1969,7 @@ async fn album_rows(
             name,
             artist,
             created_at,
+            cover_art: cover_art_alias,
             json,
             xml,
         });

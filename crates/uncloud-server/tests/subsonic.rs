@@ -50,6 +50,7 @@ async fn subsonic_app_password_browses_and_streams_music() {
                 "duration_secs": 12.0,
                 "track_number": 1_i32,
                 "year": 2026_i32,
+                "has_cover_art": true,
             }}},
         )
         .await
@@ -204,9 +205,9 @@ async fn subsonic_app_password_browses_and_streams_music() {
         .find(|child| child["title"] == "Demo Track")
         .expect("demo track in root directory");
     assert_eq!(child["title"], "Demo Track");
-    assert!(child.get("coverArt").is_none());
     let song_id = child["id"].as_str().expect("song id");
     assert!(song_id.parse::<i64>().is_ok(), "song id is numeric");
+    assert_eq!(child["coverArt"], song_id);
 
     let empty_search: Value = app
         .server
@@ -217,8 +218,11 @@ async fn subsonic_app_password_browses_and_streams_music() {
         .json();
     let search = &empty_search["subsonic-response"]["searchResult3"];
     assert_eq!(search["artist"][0]["name"], "Demo Artist");
+    assert_eq!(search["artist"][0]["coverArt"], song_id);
     assert_eq!(search["album"][0]["name"], "Demo Album");
+    assert_eq!(search["album"][0]["coverArt"], song_id);
     assert_eq!(search["song"][0]["title"], "Demo Track");
+    assert_eq!(search["song"][0]["coverArt"], song_id);
 
     let symfonium_artist_search: Value = app
         .server
@@ -229,6 +233,7 @@ async fn subsonic_app_password_browses_and_streams_music() {
         .json();
     let symfonium_artist_search = &symfonium_artist_search["subsonic-response"]["searchResult3"];
     assert_eq!(symfonium_artist_search["artist"][0]["name"], "Demo Artist");
+    assert_eq!(symfonium_artist_search["artist"][0]["coverArt"], song_id);
     assert_eq!(
         symfonium_artist_search["album"]
             .as_array()
@@ -253,6 +258,7 @@ async fn subsonic_app_password_browses_and_streams_music() {
         .json();
     let symfonium_album_search = &symfonium_album_search["subsonic-response"]["searchResult3"];
     assert_eq!(symfonium_album_search["album"][0]["name"], "Demo Album");
+    assert_eq!(symfonium_album_search["album"][0]["coverArt"], song_id);
 
     let symfonium_song_search: Value = app
         .server
@@ -263,6 +269,7 @@ async fn subsonic_app_password_browses_and_streams_music() {
         .json();
     let symfonium_song_search = &symfonium_song_search["subsonic-response"]["searchResult3"];
     assert_eq!(symfonium_song_search["song"][0]["title"], "Demo Track");
+    assert_eq!(symfonium_song_search["song"][0]["coverArt"], song_id);
 
     let empty_search_page_2: Value = app
         .server
@@ -293,7 +300,7 @@ async fn subsonic_app_password_browses_and_streams_music() {
         .find(|album| album["name"] == "Demo Album")
         .expect("demo album");
     assert_eq!(album["name"], "Demo Album");
-    assert!(album.get("coverArt").is_none());
+    assert_eq!(album["coverArt"], song_id);
     let album_id = album["id"].as_str().expect("album id");
     let artist_id = album["artistId"].as_str().expect("album artist id");
     assert!(
@@ -309,8 +316,8 @@ async fn subsonic_app_password_browses_and_streams_music() {
     let album_detail = &album_detail["subsonic-response"]["album"];
     assert_eq!(album_detail["name"], "Demo Album");
     assert_eq!(album_detail["artistId"], artist_id);
-    assert!(album_detail.get("coverArt").is_none());
-    assert!(album_detail["song"][0].get("coverArt").is_none());
+    assert_eq!(album_detail["coverArt"], song_id);
+    assert_eq!(album_detail["song"][0]["coverArt"], song_id);
 
     let stream = app
         .server
