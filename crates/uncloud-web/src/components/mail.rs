@@ -268,6 +268,43 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
         });
     });
 
+    use_effect(use_reactive!(|(account_dirty)| {
+        let _ = account_dirty().0;
+        let account_id = selected_account.peek().clone();
+        if account_id.is_empty() {
+            return;
+        }
+        spawn(async move {
+            if let Ok(rows) = use_mail::list_accounts().await {
+                accounts.set(rows);
+            }
+            if let Ok(rows) = use_mail::list_folders(&account_id).await {
+                folders.set(rows);
+            }
+            if *loading_more_messages.peek() || *backfilling_messages.peek() {
+                return;
+            }
+            let folder_id = selected_folder.peek().clone();
+            if folder_id.is_empty() {
+                return;
+            }
+            if let Ok(page) =
+                use_mail::list_messages(&account_id, &folder_id, MAIL_MESSAGE_PAGE_SIZE, None).await
+            {
+                let selected = selected_message.peek().clone();
+                let still_selected = page.messages.iter().any(|message| message.id == selected);
+                messages.set(page.messages);
+                message_next_cursor.set(page.next_cursor);
+                message_has_more.set(page.has_more);
+                if !selected.is_empty() && !still_selected {
+                    selected_message.set(String::new());
+                    detail.set(None);
+                    mobile_mail_pane.set(MailMobilePane::Messages);
+                }
+            }
+        });
+    }));
+
     use_effect(move || {
         if saving_attachment().is_none() {
             return;
@@ -978,9 +1015,9 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                         "{label}"
                                                     }
                                                 }
-                                                if let Some(unseen) = folder.unseen {
-                                                    if unseen > 0 {
-                                                        span { class: "badge badge-sm", "{unseen}" }
+                                                if folder.unread_count > 0 {
+                                                    span { class: "inline-flex min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-2 py-0.5 text-[11px] font-semibold leading-none text-primary-content",
+                                                        "{folder.unread_count}"
                                                     }
                                                 }
                                             }

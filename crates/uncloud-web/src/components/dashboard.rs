@@ -11,7 +11,7 @@ use crate::components::icons::{
 };
 use crate::hooks::{api, use_files, use_mail, use_playlists, use_shopping, use_tasks};
 use crate::router::Route;
-use crate::state::AuthState;
+use crate::state::{AuthState, MailAccountDirtyTick};
 
 /// Static list of tiles the dashboard knows how to render. Order here is the
 /// order tiles appear in the picker; enabled order is preserved from the user's
@@ -142,6 +142,15 @@ fn DashboardTile(tile_id: String) -> Element {
                         TileCount::Loading => rsx! { span { class: "opacity-40", "…" } },
                         TileCount::None => rsx! { span { "" } },
                         TileCount::Value(v, suffix) => rsx! { span { "{v} {suffix}" } },
+                        TileCount::Unread(v) => rsx! {
+                            if v > 0 {
+                                span { class: "inline-flex min-w-5 items-center justify-center rounded-full bg-primary px-2 py-0.5 text-[11px] font-semibold leading-none text-primary-content",
+                                    "{v}"
+                                }
+                            } else {
+                                span { class: "text-base-content/60", "0 unread" }
+                            }
+                        },
                         TileCount::Text(s) => rsx! { span { "{s}" } },
                     }
                 }
@@ -170,6 +179,7 @@ enum TileCount {
     Loading,
     None,
     Value(usize, &'static str),
+    Unread(u64),
     Text(String),
 }
 
@@ -177,6 +187,7 @@ enum TileCount {
 /// without a meaningful cheap summary.
 fn use_tile_count(tile_id: &str) -> Signal<TileCount> {
     let auth_state = use_context::<Signal<AuthState>>();
+    let mail_dirty = use_context::<Signal<MailAccountDirtyTick>>();
     let mut state = use_signal(|| TileCount::Loading);
     let tid = tile_id.to_string();
 
@@ -192,6 +203,9 @@ fn use_tile_count(tile_id: &str) -> Signal<TileCount> {
     }
 
     use_effect(move || {
+        if tid == "mail" {
+            let _ = mail_dirty().0;
+        }
         let tid = tid.clone();
         spawn(async move {
             let result = match tid.as_str() {
@@ -205,7 +219,9 @@ fn use_tile_count(tile_id: &str) -> Signal<TileCount> {
                     .unwrap_or(TileCount::None),
                 "mail" => use_mail::list_accounts()
                     .await
-                    .map(|v| TileCount::Value(v.len(), "accounts"))
+                    .map(|v| {
+                        TileCount::Unread(v.iter().map(|account| account.unread_count).sum())
+                    })
                     .unwrap_or(TileCount::None),
                 "gallery" => use_files::list_gallery_albums()
                     .await

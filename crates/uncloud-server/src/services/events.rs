@@ -86,6 +86,10 @@ pub enum Event {
         project_id: String,
         task_id: Option<String>,
     },
+    MailChanged {
+        account_id: Option<String>,
+        folder_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -363,6 +367,22 @@ impl EventService {
                 self.emit(m.user_id, event.clone()).await;
             }
         }
+    }
+
+    pub async fn emit_mail_changed(
+        &self,
+        user_id: ObjectId,
+        account_id: Option<ObjectId>,
+        folder_id: Option<ObjectId>,
+    ) {
+        self.emit(
+            user_id,
+            Event::MailChanged {
+                account_id: account_id.map(|id| id.to_hex()),
+                folder_id: folder_id.map(|id| id.to_hex()),
+            },
+        )
+        .await;
     }
 
     pub async fn emit_rescan_progress(&self, job: &RescanJob) {

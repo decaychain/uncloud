@@ -880,6 +880,13 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
     mail_messages
         .create_index(
             IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "account_id": 1, "folder_id": 1, "flags": 1 })
+                .build(),
+        )
+        .await?;
+    mail_messages
+        .create_index(
+            IndexModel::builder()
                 .keys(mongodb::bson::doc! { "mail_storage_id": 1 })
                 .build(),
         )

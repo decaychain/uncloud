@@ -53,6 +53,8 @@ pub struct MailAccountResponse {
     pub id: String,
     pub display_name: String,
     pub email_address: String,
+    #[serde(default)]
+    pub unread_count: u64,
     pub imap: MailServerSettings,
     pub smtp: MailServerSettings,
     pub sync_enabled: bool,
@@ -139,6 +141,8 @@ pub struct MailFolderResponse {
     pub uid_next: Option<u32>,
     pub exists: Option<u32>,
     pub unseen: Option<u32>,
+    #[serde(default)]
+    pub unread_count: u64,
     pub highest_synced_uid: Option<u32>,
     pub lowest_synced_uid: Option<u32>,
     pub sync_completed: bool,

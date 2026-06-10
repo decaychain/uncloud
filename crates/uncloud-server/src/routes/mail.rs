@@ -180,11 +180,16 @@ fn server_to_response(input: &MailServerConfig) -> MailServerSettings {
     }
 }
 
-fn account_to_response(account: &MailAccount, sync_in_progress: bool) -> MailAccountResponse {
+fn account_to_response(
+    account: &MailAccount,
+    sync_in_progress: bool,
+    unread_count: u64,
+) -> MailAccountResponse {
     MailAccountResponse {
         id: account.id.to_hex(),
         display_name: account.display_name.clone(),
         email_address: account.email_address.clone(),
+        unread_count,
         imap: server_to_response(&account.imap),
         smtp: server_to_response(&account.smtp),
         sync_enabled: account.sync_enabled,
@@ -265,7 +270,11 @@ fn folder_sync_completed(folder: &MailFolder) -> bool {
     lowest <= 1 && highest.saturating_add(1) >= uid_next
 }
 
-fn folder_to_response(folder: &MailFolder, sync_in_progress: bool) -> MailFolderResponse {
+fn folder_to_response(
+    folder: &MailFolder,
+    sync_in_progress: bool,
+    unread_count: u64,
+) -> MailFolderResponse {
     MailFolderResponse {
         id: folder.id.to_hex(),
         account_id: folder.account_id.to_hex(),
@@ -283,6 +292,7 @@ fn folder_to_response(folder: &MailFolder, sync_in_progress: bool) -> MailFolder
         uid_next: folder.uid_next,
         exists: folder.exists,
         unseen: folder.unseen,
+        unread_count,
         highest_synced_uid: folder.highest_synced_uid,
         lowest_synced_uid: folder.lowest_synced_uid,
         sync_completed: folder_sync_completed(folder),
@@ -292,6 +302,75 @@ fn folder_to_response(folder: &MailFolder, sync_in_progress: bool) -> MailFolder
         created_at: folder.created_at.to_rfc3339(),
         updated_at: folder.updated_at.to_rfc3339(),
     }
+}
+
+fn unread_message_filter(owner_id: ObjectId) -> bson::Document {
+    doc! {
+        "owner_id": owner_id,
+        "flags": {
+            "$not": {
+                "$elemMatch": {
+                    "$regex": "^\\\\?seen$",
+                    "$options": "i",
+                }
+            }
+        }
+    }
+}
+
+fn aggregate_count(doc: &bson::Document, key: &str) -> u64 {
+    doc.get_i32(key)
+        .map(|n| n.max(0) as u64)
+        .or_else(|_| doc.get_i64(key).map(|n| n.max(0) as u64))
+        .unwrap_or(0)
+}
+
+async fn unread_counts_by_account(
+    state: &AppState,
+    owner_id: ObjectId,
+) -> Result<HashMap<ObjectId, u64>> {
+    let filter = unread_message_filter(owner_id);
+    let pipeline = vec![
+        doc! { "$match": filter },
+        doc! { "$group": { "_id": "$account_id", "count": { "$sum": 1 } } },
+    ];
+    let mut cursor = state
+        .db
+        .collection::<bson::Document>(MESSAGES)
+        .aggregate(pipeline)
+        .await?;
+    let mut counts = HashMap::new();
+    while let Some(row) = cursor.try_next().await? {
+        if let Ok(id) = row.get_object_id("_id") {
+            counts.insert(id, aggregate_count(&row, "count"));
+        }
+    }
+    Ok(counts)
+}
+
+async fn unread_counts_by_folder(
+    state: &AppState,
+    owner_id: ObjectId,
+    account_id: ObjectId,
+) -> Result<HashMap<ObjectId, u64>> {
+    let mut filter = unread_message_filter(owner_id);
+    filter.insert("account_id", account_id);
+    let pipeline = vec![
+        doc! { "$match": filter },
+        doc! { "$group": { "_id": "$folder_id", "count": { "$sum": 1 } } },
+    ];
+    let mut cursor = state
+        .db
+        .collection::<bson::Document>(MESSAGES)
+        .aggregate(pipeline)
+        .await?;
+    let mut counts = HashMap::new();
+    while let Some(row) = cursor.try_next().await? {
+        if let Ok(id) = row.get_object_id("_id") {
+            counts.insert(id, aggregate_count(&row, "count"));
+        }
+    }
+    Ok(counts)
 }
 
 fn address_to_response(address: &MailAddress) -> MailAddressDto {
@@ -1104,6 +1183,7 @@ pub async fn list_accounts(
     user: AuthUser,
 ) -> Result<Json<Vec<MailAccountResponse>>> {
     require_mail(&state, &user)?;
+    let unread_counts = unread_counts_by_account(&state, user.id).await?;
     let mut cursor = state
         .db
         .collection::<MailAccount>(ACCOUNTS)
@@ -1115,6 +1195,7 @@ pub async fn list_accounts(
         out.push(account_to_response(
             &account,
             state.mail.is_account_syncing(account.id),
+            unread_counts.get(&account.id).copied().unwrap_or(0),
         ));
     }
     Ok(Json(out))
@@ -1175,11 +1256,16 @@ pub async fn create_account(
         .collection::<MailIdentity>(IDENTITIES)
         .insert_one(&identity)
         .await?;
+    state
+        .events
+        .emit_mail_changed(user.id, Some(account.id), None)
+        .await;
     Ok((
         StatusCode::CREATED,
         Json(account_to_response(
             &account,
             state.mail.is_account_syncing(account.id),
+            0,
         )),
     ))
 }
@@ -1242,9 +1328,19 @@ pub async fn update_account(
         .await?;
 
     let account = find_account(&state, user.id, id).await?;
+    let unread_count = unread_counts_by_account(&state, user.id)
+        .await?
+        .get(&account.id)
+        .copied()
+        .unwrap_or(0);
+    state
+        .events
+        .emit_mail_changed(user.id, Some(account.id), None)
+        .await;
     Ok(Json(account_to_response(
         &account,
         state.mail.is_account_syncing(account.id),
+        unread_count,
     )))
 }
 
@@ -1283,6 +1379,10 @@ pub async fn delete_account(
         .collection::<mongodb::bson::Document>(ATTACHMENTS)
         .delete_many(doc! { "account_id": id, "owner_id": user.id })
         .await?;
+    state
+        .events
+        .emit_mail_changed(user.id, Some(id), None)
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2456,11 +2556,18 @@ pub async fn list_folders(
     let account_id = parse_oid(&account_id, "mail account id")?;
     let _ = find_account(&state, user.id, account_id).await?;
     let sync_in_progress = state.mail.is_account_syncing(account_id);
+    let unread_counts = unread_counts_by_folder(&state, user.id, account_id).await?;
     Ok(Json(
         load_account_folders(&state, user.id, account_id)
             .await?
             .iter()
-            .map(|folder| folder_to_response(folder, sync_in_progress))
+            .map(|folder| {
+                folder_to_response(
+                    folder,
+                    sync_in_progress,
+                    unread_counts.get(&folder.id).copied().unwrap_or(0),
+                )
+            })
             .collect(),
     ))
 }
@@ -2497,9 +2604,15 @@ pub async fn update_folder(
     }
 
     if set.is_empty() {
+        let unread_count = unread_counts_by_folder(&state, user.id, account_id)
+            .await?
+            .get(&folder.id)
+            .copied()
+            .unwrap_or(0);
         return Ok(Json(folder_to_response(
             &folder,
             state.mail.is_account_syncing(folder.account_id),
+            unread_count,
         )));
     }
 
@@ -2515,9 +2628,15 @@ pub async fn update_folder(
         .await?;
 
     let updated = find_folder(&state, user.id, account_id, folder.id).await?;
+    let unread_count = unread_counts_by_folder(&state, user.id, account_id)
+        .await?
+        .get(&updated.id)
+        .copied()
+        .unwrap_or(0);
     Ok(Json(folder_to_response(
         &updated,
         state.mail.is_account_syncing(updated.account_id),
+        unread_count,
     )))
 }
 
@@ -2640,10 +2759,21 @@ pub async fn refresh_folders(
 
     let folders = upsert_remote_folders(&state, user.id, account_id, remote).await?;
     let sync_in_progress = state.mail.is_account_syncing(account_id);
+    let unread_counts = unread_counts_by_folder(&state, user.id, account_id).await?;
+    state
+        .events
+        .emit_mail_changed(user.id, Some(account_id), None)
+        .await;
     Ok(Json(
         folders
             .iter()
-            .map(|folder| folder_to_response(folder, sync_in_progress))
+            .map(|folder| {
+                folder_to_response(
+                    folder,
+                    sync_in_progress,
+                    unread_counts.get(&folder.id).copied().unwrap_or(0),
+                )
+            })
             .collect(),
     ))
 }
@@ -3062,6 +3192,11 @@ async fn sync_account_inner(
             .await?;
     }
 
+    state
+        .events
+        .emit_mail_changed(owner_id, Some(account.id), None)
+        .await;
+
     Ok(MailAccountSyncResponse {
         account_id: account.id.to_hex(),
         fetched_messages,
@@ -3094,17 +3229,20 @@ pub async fn sync_folder(
         .mail
         .try_begin_account_sync(account.id)
         .ok_or_else(account_sync_conflict)?;
-    Ok(Json(
-        sync_one_folder(
-            &state,
-            user.id,
-            &account,
-            &folder,
-            &password,
-            sync_limit(req.limit_per_folder),
-        )
-        .await?,
-    ))
+    let result = sync_one_folder(
+        &state,
+        user.id,
+        &account,
+        &folder,
+        &password,
+        sync_limit(req.limit_per_folder),
+    )
+    .await?;
+    state
+        .events
+        .emit_mail_changed(user.id, Some(account.id), Some(folder.id))
+        .await;
+    Ok(Json(result))
 }
 
 pub async fn sync_account(
@@ -4169,6 +4307,11 @@ pub async fn mark_folder_read(
     }
     let folders = list_account_mail_folders(&state, user.id, account_id).await?;
     let sync_in_progress = state.mail.is_account_syncing(account_id);
+    let unread_counts = unread_counts_by_folder(&state, user.id, account_id).await?;
+    state
+        .events
+        .emit_mail_changed(user.id, Some(account_id), Some(folder_id))
+        .await;
     let failed = errors.len();
     Ok(Json(MailFolderMarkReadResponse {
         account_id: account_id.to_hex(),
@@ -4178,7 +4321,13 @@ pub async fn mark_folder_read(
         updated_cached_messages,
         folders: folders
             .iter()
-            .map(|folder| folder_to_response(folder, sync_in_progress))
+            .map(|folder| {
+                folder_to_response(
+                    folder,
+                    sync_in_progress,
+                    unread_counts.get(&folder.id).copied().unwrap_or(0),
+                )
+            })
             .collect(),
         errors,
     }))
@@ -4216,6 +4365,11 @@ pub async fn mark_account_read(
 
     let folders = list_account_mail_folders(&state, user.id, account_id).await?;
     let sync_in_progress = state.mail.is_account_syncing(account_id);
+    let unread_counts = unread_counts_by_folder(&state, user.id, account_id).await?;
+    state
+        .events
+        .emit_mail_changed(user.id, Some(account_id), None)
+        .await;
     let requested = target_folders.len();
     let failed = errors.len();
     Ok(Json(MailFolderMarkReadResponse {
@@ -4226,7 +4380,13 @@ pub async fn mark_account_read(
         updated_cached_messages,
         folders: folders
             .iter()
-            .map(|folder| folder_to_response(folder, sync_in_progress))
+            .map(|folder| {
+                folder_to_response(
+                    folder,
+                    sync_in_progress,
+                    unread_counts.get(&folder.id).copied().unwrap_or(0),
+                )
+            })
             .collect(),
         errors,
     }))
@@ -4270,6 +4430,10 @@ pub async fn mutate_message(
                 .await?;
             let updated =
                 update_cached_message_flags(&state, user.id, &folder, &message, flags).await?;
+            state
+                .events
+                .emit_mail_changed(user.id, Some(account.id), Some(folder.id))
+                .await;
 
             Ok(Json(MailMessageMutationResponse {
                 message: Some(message_to_response(&updated)),
@@ -4304,6 +4468,10 @@ pub async fn mutate_message(
                 .await?;
             remove_cached_message_after_move(&state, user.id, &folder, &destination, &message)
                 .await?;
+            state
+                .events
+                .emit_mail_changed(user.id, Some(account.id), Some(folder.id))
+                .await;
 
             Ok(Json(MailMessageMutationResponse {
                 message: None,
@@ -4441,6 +4609,10 @@ pub async fn bulk_mutate_messages(
                 }
             }
             let failed = errors.len();
+            state
+                .events
+                .emit_mail_changed(user.id, Some(account.id), Some(folder.id))
+                .await;
             Ok(Json(MailMessageBulkMutationResponse {
                 requested,
                 succeeded: updated.len(),
@@ -4488,6 +4660,10 @@ pub async fn bulk_mutate_messages(
             remove_cached_messages_after_move(&state, user.id, &folder, &destination, &messages)
                 .await?;
             let failed = errors.len();
+            state
+                .events
+                .emit_mail_changed(user.id, Some(account.id), Some(folder.id))
+                .await;
             Ok(Json(MailMessageBulkMutationResponse {
                 requested,
                 succeeded: messages.len(),
@@ -4652,7 +4828,7 @@ mod tests {
         let folder = test_folder("INBOX", MailFolderRoleSource::Inferred, None);
 
         assert_eq!(
-            folder_to_response(&folder, false).role,
+            folder_to_response(&folder, false, 0).role,
             Some(MailFolderRole::Inbox)
         );
     }
@@ -4661,7 +4837,7 @@ mod tests {
     fn folder_response_preserves_user_cleared_role() {
         let folder = test_folder("INBOX", MailFolderRoleSource::User, None);
 
-        assert_eq!(folder_to_response(&folder, false).role, None);
+        assert_eq!(folder_to_response(&folder, false, 0).role, None);
     }
 
     #[test]
@@ -4671,7 +4847,7 @@ mod tests {
         folder.lowest_synced_uid = Some(1);
         folder.highest_synced_uid = Some(11);
 
-        assert!(folder_to_response(&folder, false).sync_completed);
+        assert!(folder_to_response(&folder, false, 0).sync_completed);
     }
 
     #[test]
@@ -4682,7 +4858,7 @@ mod tests {
         folder.lowest_synced_uid = None;
         folder.highest_synced_uid = None;
 
-        assert!(folder_to_response(&folder, false).sync_completed);
+        assert!(folder_to_response(&folder, false, 0).sync_completed);
     }
 
     #[test]

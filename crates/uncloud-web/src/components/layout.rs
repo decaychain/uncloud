@@ -15,7 +15,9 @@ fn parse_rescan_status(status: &str) -> RescanStatus {
     }
 }
 use crate::router::Route;
-use crate::state::{AuthState, PinnedPlaylistState, PlayerState, RescanState, ThemeState};
+use crate::state::{
+    AuthState, MailAccountDirtyTick, PinnedPlaylistState, PlayerState, RescanState, ThemeState,
+};
 
 fn set_main_sidebar_open(open: bool) {
     if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
@@ -34,6 +36,7 @@ pub fn Layout() -> Element {
 
     let mut sse_event: Signal<Option<ServerEvent>> = use_context_provider(|| Signal::new(None));
     let mut rescan_state = use_context::<Signal<RescanState>>();
+    let mut mail_dirty = use_context::<Signal<MailAccountDirtyTick>>();
     use_events(move |event| {
         // Update the app-level rescan state directly — the panel in Settings
         // reads this signal, and we want the state to persist even when the
@@ -110,6 +113,10 @@ pub fn Layout() -> Element {
                 });
                 current.error = None;
                 current.starting = false;
+            }
+            ServerEvent::MailChanged { .. } => {
+                let next = mail_dirty.peek().0.saturating_add(1);
+                mail_dirty.set(MailAccountDirtyTick(next));
             }
             _ => {}
         }

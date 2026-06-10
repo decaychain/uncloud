@@ -180,7 +180,8 @@ pub fn Sidebar() -> Element {
                             class: if section == "mail" { "active" } else { "" },
                             onclick: move |_| close_drawer(),
                             IconMail {}
-                            span { "Mail" }
+                            span { class: "min-w-0 flex-1", "Mail" }
+                            MailTotalUnreadBadge {}
                         }
                     }
                 }
@@ -515,6 +516,38 @@ fn SidebarApps() -> Element {
 }
 
 #[component]
+fn MailUnreadBadge(count: u64) -> Element {
+    if count == 0 {
+        return rsx! {};
+    }
+
+    rsx! {
+        span { class: "ml-auto inline-flex min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-2 py-0.5 text-[11px] font-semibold leading-none text-primary-content",
+            "{count}"
+        }
+    }
+}
+
+#[component]
+fn MailTotalUnreadBadge() -> Element {
+    let mut unread = use_signal(|| 0u64);
+    let dirty = use_context::<Signal<MailAccountDirtyTick>>();
+
+    use_effect(use_reactive!(|(dirty)| {
+        let _ = dirty().0;
+        spawn(async move {
+            if let Ok(rows) = use_mail::list_accounts().await {
+                unread.set(rows.iter().map(|account| account.unread_count).sum());
+            }
+        });
+    }));
+
+    rsx! {
+        MailUnreadBadge { count: unread() }
+    }
+}
+
+#[component]
 fn MailSidebarAccounts() -> Element {
     let mut accounts: Signal<Vec<MailAccountResponse>> = use_signal(Vec::new);
     let mut loading = use_signal(|| true);
@@ -576,6 +609,7 @@ fn MailSidebarAccounts() -> Element {
                                         }
                                     }
                                 }
+                                MailUnreadBadge { count: account.unread_count }
                             }
                         }
                     }

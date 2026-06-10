@@ -73,6 +73,12 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         task_id: Option<String>,
     },
+    MailChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
