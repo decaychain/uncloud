@@ -1,6 +1,6 @@
 use crate::config::{DatabaseConfig, SyncAuditConfig};
 use crate::error::{AppError, Result};
-use mongodb::{options::IndexOptions, Client, Database, IndexModel};
+use mongodb::{Client, Database, IndexModel, options::IndexOptions};
 
 pub async fn connect(config: &DatabaseConfig) -> Result<Database> {
     let client = Client::with_uri_str(&config.uri)
@@ -764,6 +764,36 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         .create_index(
             IndexModel::builder()
                 .keys(mongodb::bson::doc! { "owner_id": 1, "account_id": 1, "on_date": -1 })
+                .build(),
+        )
+        .await?;
+
+    let finance_settlements = db.collection::<mongodb::bson::Document>("finance_settlements");
+    finance_settlements
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "status": 1, "opened_at": -1 })
+                .build(),
+        )
+        .await?;
+    finance_settlements
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "counterparty": 1, "currency": 1, "status": 1 })
+                .build(),
+        )
+        .await?;
+    finance_settlements
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "source_transaction_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(mongodb::bson::doc! {
+                            "source_transaction_id": { "$type": "objectId" }
+                        })
+                        .build(),
+                )
                 .build(),
         )
         .await?;

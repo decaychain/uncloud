@@ -61,6 +61,7 @@ pub fn Sidebar() -> Element {
         Route::Finance {}
             | Route::FinanceAccounts {}
             | Route::FinanceCategories {}
+            | Route::FinanceSettlements {}
             | Route::FinanceSchemas {}
             | Route::FinanceImports {}
             | Route::FinanceRules {},
@@ -298,6 +299,15 @@ pub fn Sidebar() -> Element {
                                     onclick: move |_| close_drawer(),
                                     IconLayoutGrid {}
                                     span { "Categories" }
+                                }
+                            }
+                            li {
+                                Link {
+                                    to: Route::FinanceSettlements {},
+                                    class: if matches!(route, Route::FinanceSettlements {}) { "active" } else { "" },
+                                    onclick: move |_| close_drawer(),
+                                    IconUsers {}
+                                    span { "Settlements" }
                                 }
                             }
                             li {

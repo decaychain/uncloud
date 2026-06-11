@@ -197,6 +197,72 @@ pub struct BalanceSnapshot {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum SettlementDirection {
+    OwedToMe,
+    OwedByMe,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SettlementStatus {
+    Open,
+    Settled,
+    Forgiven,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SettlementEntryKind {
+    Payment,
+    Forgiveness,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettlementEntry {
+    pub id: ObjectId,
+    pub kind: SettlementEntryKind,
+    #[serde(default)]
+    pub counterparty: Option<String>,
+    pub amount_minor: i64,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
+    pub date: DateTime<Utc>,
+    #[serde(default)]
+    pub linked_transaction_id: Option<ObjectId>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FinanceSettlement {
+    #[serde(rename = "_id")]
+    pub id: ObjectId,
+    pub owner_id: ObjectId,
+    pub counterparty: String,
+    pub direction: SettlementDirection,
+    pub amount_minor: i64,
+    pub currency: String,
+    #[serde(default)]
+    pub category_id: Option<ObjectId>,
+    pub description: String,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
+    pub opened_at: DateTime<Utc>,
+    #[serde(default)]
+    pub source_transaction_id: Option<ObjectId>,
+    pub status: SettlementStatus,
+    #[serde(default)]
+    pub entries: Vec<SettlementEntry>,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+    #[serde(with = "chrono_datetime_as_bson_datetime")]
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, with = "crate::models::opt_dt")]
+    pub closed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum RulePatternKind {
     Substring,
     StartsWith,

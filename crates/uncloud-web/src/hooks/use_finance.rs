@@ -3,11 +3,13 @@
 use uncloud_common::{
     AccountBalanceResponse, AccountResponse, ApplyRulesResponse, BalanceSnapshotResponse,
     CategorySummaryResponse, CreateAccountRequest, CreateFinanceCategoryRequest,
-    CreateTransactionRequest, FinanceCategoryResponse, FinanceRuleRequest, FinanceRuleResponse,
-    ImportCsvResponse, ImportRunResponse, ImportSchemaRequest, ImportSchemaResponse,
-    ReconcilePreviewResponse, ReconcileRequest, ReorderRulesRequest, TestRuleRequest,
-    TestRuleResponse, TransactionListResponse, TransactionResponse, UpdateAccountRequest,
-    UpdateFinanceCategoryRequest, UpdateTransactionRequest,
+    CreateFinanceSettlementRequest, CreateSettlementEntryRequest, CreateTransactionRequest,
+    FinanceCategoryResponse, FinanceRuleRequest, FinanceRuleResponse,
+    FinanceSettlementListResponse, FinanceSettlementResponse, ImportCsvResponse, ImportRunResponse,
+    ImportSchemaRequest, ImportSchemaResponse, ReconcilePreviewResponse, ReconcileRequest,
+    ReorderRulesRequest, TestRuleRequest, TestRuleResponse, TransactionListResponse,
+    TransactionResponse, UpdateAccountRequest, UpdateFinanceCategoryRequest,
+    UpdateFinanceSettlementRequest, UpdateTransactionRequest,
 };
 
 use super::api;
@@ -269,6 +271,117 @@ pub async fn delete_transaction(id: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     if r.ok() || r.status() == 204 {
         Ok(())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+// ── Settlements / IOUs ─────────────────────────────────────────────────
+
+pub async fn list_settlements(
+    status: Option<&str>,
+    limit: u32,
+    skip: u32,
+) -> Result<FinanceSettlementListResponse, String> {
+    let mut url = format!("/finance/settlements?limit={}&skip={}", limit, skip);
+    if let Some(s) = status {
+        if !s.is_empty() {
+            url.push_str(&format!("&status={}", s));
+        }
+    }
+    let r = api::get(&url).send().await.map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<FinanceSettlementListResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn create_settlement(
+    req: &CreateFinanceSettlementRequest,
+) -> Result<FinanceSettlementResponse, String> {
+    let r = api::post("/finance/settlements")
+        .json(req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() || r.status() == 201 {
+        r.json::<FinanceSettlementResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn update_settlement(
+    id: &str,
+    req: &UpdateFinanceSettlementRequest,
+) -> Result<FinanceSettlementResponse, String> {
+    let r = api::put(&format!("/finance/settlements/{}", id))
+        .json(req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<FinanceSettlementResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn delete_settlement(id: &str) -> Result<(), String> {
+    let r = api::delete(&format!("/finance/settlements/{}", id))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() || r.status() == 204 {
+        Ok(())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn create_settlement_entry(
+    settlement_id: &str,
+    req: &CreateSettlementEntryRequest,
+) -> Result<FinanceSettlementResponse, String> {
+    let r = api::post(&format!("/finance/settlements/{}/entries", settlement_id))
+        .json(req)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() || r.status() == 201 {
+        r.json::<FinanceSettlementResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
+pub async fn delete_settlement_entry(
+    settlement_id: &str,
+    entry_id: &str,
+) -> Result<FinanceSettlementResponse, String> {
+    let r = api::delete(&format!(
+        "/finance/settlements/{}/entries/{}",
+        settlement_id, entry_id
+    ))
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<FinanceSettlementResponse>()
+            .await
+            .map_err(|e| e.to_string())
     } else {
         Err(extract_error(r).await)
     }

@@ -7,38 +7,42 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use bson::doc;
 use chrono::{DateTime, TimeZone, Utc};
 use futures::TryStreamExt;
-use mongodb::bson::oid::ObjectId;
 use mongodb::bson::Bson;
+use mongodb::bson::oid::ObjectId;
 use mongodb::options::FindOptions;
+use serde::Deserialize;
 
 use sha2::{Digest, Sha256};
 
+use crate::AppState;
 use crate::error::{AppError, Result};
-use crate::finance_import::{self, sparkasse_camt_v8, ParseError, ParsedRow};
+use crate::finance_import::{self, ParseError, ParsedRow, sparkasse_camt_v8};
 use crate::finance_rules::{self, RuleEngine};
 use crate::middleware::AuthUser;
 use crate::models::{
     AmountSignConvention, BalanceSnapshot, CategorySource, CurrencySource, DecimalSeparator,
-    FinanceAccount, FinanceCategory, FinanceRule, FinanceTransaction, ImportRun,
+    FinanceAccount, FinanceCategory, FinanceRule, FinanceSettlement, FinanceTransaction, ImportRun,
     ImportRunError as ModelImportRunError, ImportRunStatus, ImportRunSummary, ImportSchema,
-    ImportSource, ImportSourceKind, RulePatternKind, TransactionLeg,
+    ImportSource, ImportSourceKind, RulePatternKind, SettlementDirection, SettlementEntry,
+    SettlementEntryKind, SettlementStatus, TransactionLeg,
 };
-use crate::AppState;
 use uncloud_common::{
     AccountBalanceResponse, AccountResponse, ApplyRulesResponse, BalanceSnapshotResponse,
     CategorySummaryItem, CategorySummaryResponse, CreateAccountRequest,
-    CreateFinanceCategoryRequest, CreateTransactionRequest, FinanceCategoryResponse,
-    FinanceRuleRequest, FinanceRuleResponse, ImportCsvResponse, ImportRowError, ImportRunResponse,
-    ImportRunSourceDto, ImportRunSummaryDto, ImportSchemaRequest, ImportSchemaResponse,
-    ListTransactionsQuery, ReconcilePreviewResponse, ReconcileRequest, ReorderRulesRequest,
-    TestRuleMatch, TestRuleRequest, TestRuleResponse, TransactionListResponse, TransactionResponse,
-    UpdateAccountRequest, UpdateFinanceCategoryRequest, UpdateTransactionRequest,
+    CreateFinanceCategoryRequest, CreateFinanceSettlementRequest, CreateSettlementEntryRequest,
+    CreateTransactionRequest, FinanceCategoryResponse, FinanceRuleRequest, FinanceRuleResponse,
+    FinanceSettlementListResponse, FinanceSettlementResponse, ImportCsvResponse, ImportRowError,
+    ImportRunResponse, ImportRunSourceDto, ImportRunSummaryDto, ImportSchemaRequest,
+    ImportSchemaResponse, ListTransactionsQuery, ReconcilePreviewResponse, ReconcileRequest,
+    ReorderRulesRequest, SettlementEntryResponse, TestRuleMatch, TestRuleRequest, TestRuleResponse,
+    TransactionListResponse, TransactionResponse, UpdateAccountRequest,
+    UpdateFinanceCategoryRequest, UpdateFinanceSettlementRequest, UpdateTransactionRequest,
 };
 
 const ACCOUNTS: &str = "finance_accounts";
@@ -47,6 +51,7 @@ const TRANSACTIONS: &str = "finance_transactions";
 const IMPORT_SCHEMAS: &str = "finance_import_schemas";
 const IMPORT_RUNS: &str = "finance_import_runs";
 const BALANCE_SNAPSHOTS: &str = "finance_balance_snapshots";
+const SETTLEMENTS: &str = "finance_settlements";
 const RULES: &str = "finance_rules";
 const RECONCILIATION_CATEGORY: &str = "Reconciliation";
 
@@ -152,6 +157,187 @@ fn transaction_to_response(t: &FinanceTransaction) -> TransactionResponse {
         created_at: t.created_at.to_rfc3339(),
         updated_at: t.updated_at.to_rfc3339(),
     }
+}
+
+fn direction_to_api(direction: SettlementDirection) -> &'static str {
+    match direction {
+        SettlementDirection::OwedToMe => "owed_to_me",
+        SettlementDirection::OwedByMe => "owed_by_me",
+    }
+}
+
+fn parse_settlement_direction(raw: &str) -> Result<SettlementDirection> {
+    match raw.trim() {
+        "owed_to_me" => Ok(SettlementDirection::OwedToMe),
+        "owed_by_me" => Ok(SettlementDirection::OwedByMe),
+        other => Err(AppError::BadRequest(format!(
+            "Invalid settlement direction `{other}`"
+        ))),
+    }
+}
+
+fn settlement_status_to_api(status: SettlementStatus) -> &'static str {
+    match status {
+        SettlementStatus::Open => "open",
+        SettlementStatus::Settled => "settled",
+        SettlementStatus::Forgiven => "forgiven",
+    }
+}
+
+fn parse_settlement_status(raw: &str) -> Result<SettlementStatus> {
+    match raw.trim() {
+        "open" => Ok(SettlementStatus::Open),
+        "settled" => Ok(SettlementStatus::Settled),
+        "forgiven" => Ok(SettlementStatus::Forgiven),
+        other => Err(AppError::BadRequest(format!(
+            "Invalid settlement status `{other}`"
+        ))),
+    }
+}
+
+fn settlement_entry_kind_to_api(kind: SettlementEntryKind) -> &'static str {
+    match kind {
+        SettlementEntryKind::Payment => "payment",
+        SettlementEntryKind::Forgiveness => "forgiveness",
+    }
+}
+
+fn parse_settlement_entry_kind(raw: &str) -> Result<SettlementEntryKind> {
+    match raw.trim() {
+        "payment" => Ok(SettlementEntryKind::Payment),
+        "forgiveness" => Ok(SettlementEntryKind::Forgiveness),
+        other => Err(AppError::BadRequest(format!(
+            "Invalid settlement entry kind `{other}`"
+        ))),
+    }
+}
+
+fn settlement_totals(s: &FinanceSettlement) -> (i64, i64, i64) {
+    let paid_minor = s
+        .entries
+        .iter()
+        .filter(|e| e.kind == SettlementEntryKind::Payment)
+        .map(|e| e.amount_minor)
+        .sum::<i64>();
+    let forgiven_minor = s
+        .entries
+        .iter()
+        .filter(|e| e.kind == SettlementEntryKind::Forgiveness)
+        .map(|e| e.amount_minor)
+        .sum::<i64>();
+    (
+        paid_minor,
+        forgiven_minor,
+        s.amount_minor - paid_minor - forgiven_minor,
+    )
+}
+
+fn recompute_settlement_status(s: &mut FinanceSettlement, now: DateTime<Utc>) -> Result<()> {
+    let (paid_minor, forgiven_minor, outstanding_minor) = settlement_totals(s);
+    if outstanding_minor < 0 {
+        return Err(AppError::BadRequest(
+            "Settlement entries cannot exceed the settlement amount".into(),
+        ));
+    }
+    if outstanding_minor == 0 {
+        s.status = if paid_minor == 0 && forgiven_minor > 0 {
+            SettlementStatus::Forgiven
+        } else {
+            SettlementStatus::Settled
+        };
+        if s.closed_at.is_none() {
+            s.closed_at = Some(now);
+        }
+    } else {
+        s.status = SettlementStatus::Open;
+        s.closed_at = None;
+    }
+    Ok(())
+}
+
+fn settlement_entry_to_response(e: &SettlementEntry) -> SettlementEntryResponse {
+    SettlementEntryResponse {
+        id: e.id.to_hex(),
+        kind: settlement_entry_kind_to_api(e.kind).into(),
+        counterparty: e.counterparty.clone(),
+        amount_minor: e.amount_minor,
+        date: e.date.to_rfc3339(),
+        linked_transaction_id: e.linked_transaction_id.map(|id| id.to_hex()),
+        note: e.note.clone(),
+        created_at: e.created_at.to_rfc3339(),
+    }
+}
+
+fn settlement_to_response(s: &FinanceSettlement) -> FinanceSettlementResponse {
+    let (paid_minor, forgiven_minor, outstanding_minor) = settlement_totals(s);
+    FinanceSettlementResponse {
+        id: s.id.to_hex(),
+        counterparty: s.counterparty.clone(),
+        direction: direction_to_api(s.direction).into(),
+        amount_minor: s.amount_minor,
+        currency: s.currency.clone(),
+        category_id: s.category_id.map(|id| id.to_hex()),
+        description: s.description.clone(),
+        opened_at: s.opened_at.to_rfc3339(),
+        source_transaction_id: s.source_transaction_id.map(|id| id.to_hex()),
+        status: settlement_status_to_api(s.status).into(),
+        paid_minor,
+        forgiven_minor,
+        outstanding_minor,
+        entries: s.entries.iter().map(settlement_entry_to_response).collect(),
+        created_at: s.created_at.to_rfc3339(),
+        updated_at: s.updated_at.to_rfc3339(),
+        closed_at: s.closed_at.map(|d| d.to_rfc3339()),
+    }
+}
+
+async fn validate_optional_category_id(
+    state: &AppState,
+    owner_id: ObjectId,
+    raw: Option<&str>,
+) -> Result<Option<ObjectId>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let oid = parse_oid(trimmed, "category_id")?;
+    let cat = state
+        .db
+        .collection::<FinanceCategory>(CATEGORIES)
+        .find_one(doc! { "_id": oid, "owner_id": owner_id })
+        .await?;
+    if cat.is_none() {
+        return Err(AppError::BadRequest("Category not found".into()));
+    }
+    Ok(Some(oid))
+}
+
+async fn validate_optional_transaction_link(
+    state: &AppState,
+    owner_id: ObjectId,
+    raw: Option<&str>,
+    field_name: &str,
+) -> Result<Option<ObjectId>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let oid = parse_oid(trimmed, field_name)?;
+    let tx = state
+        .db
+        .collection::<FinanceTransaction>(TRANSACTIONS)
+        .find_one(doc! { "_id": oid, "owner_id": owner_id })
+        .await?;
+    if tx.is_none() {
+        return Err(AppError::BadRequest("Linked transaction not found".into()));
+    }
+    Ok(Some(oid))
 }
 
 async fn find_account(
@@ -732,11 +918,7 @@ pub async fn create_transaction(
         raw_bank_category: None,
         notes: req.notes.and_then(|n| {
             let t = n.trim().to_string();
-            if t.is_empty() {
-                None
-            } else {
-                Some(t)
-            }
+            if t.is_empty() { None } else { Some(t) }
         }),
         tags: vec![],
         legs: vec![leg],
@@ -852,6 +1034,285 @@ pub async fn delete_transaction(
         return Err(AppError::NotFound("Transaction not found".into()));
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Settlements / IOUs ──────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ListSettlementsQuery {
+    pub status: Option<String>,
+    pub limit: Option<u32>,
+    pub skip: Option<u32>,
+}
+
+pub async fn list_settlements(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Query(q): Query<ListSettlementsQuery>,
+) -> Result<Json<FinanceSettlementListResponse>> {
+    require_finance(&state, &user)?;
+    let mut filter = doc! { "owner_id": user.id };
+    if let Some(status) = q.status.as_deref() {
+        let trimmed = status.trim();
+        if !trimmed.is_empty() && trimmed != "all" {
+            filter.insert(
+                "status",
+                settlement_status_to_api(parse_settlement_status(trimmed)?),
+            );
+        }
+    }
+
+    let coll = state.db.collection::<FinanceSettlement>(SETTLEMENTS);
+    let total = coll.count_documents(filter.clone()).await?;
+    let opts = FindOptions::builder()
+        .sort(doc! { "status": 1, "opened_at": -1, "_id": -1 })
+        .skip(q.skip.unwrap_or(0) as u64)
+        .limit(q.limit.unwrap_or(100).clamp(1, 500) as i64)
+        .build();
+    let mut cursor = coll.find(filter).with_options(opts).await?;
+    let mut items = Vec::new();
+    while let Some(s) = cursor.try_next().await? {
+        items.push(settlement_to_response(&s));
+    }
+    Ok(Json(FinanceSettlementListResponse { items, total }))
+}
+
+pub async fn create_settlement(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(req): Json<CreateFinanceSettlementRequest>,
+) -> Result<(StatusCode, Json<FinanceSettlementResponse>)> {
+    require_finance(&state, &user)?;
+    let counterparty = req.counterparty.trim().to_string();
+    if counterparty.is_empty() {
+        return Err(AppError::BadRequest("Counterparty is required".into()));
+    }
+    if req.amount_minor <= 0 {
+        return Err(AppError::BadRequest(
+            "Settlement amount must be greater than zero".into(),
+        ));
+    }
+    let description = req.description.trim().to_string();
+    if description.is_empty() {
+        return Err(AppError::BadRequest("Description is required".into()));
+    }
+    let currency = validate_currency(&req.currency)?;
+    let category_id =
+        validate_optional_category_id(&state, user.id, req.category_id.as_deref()).await?;
+    let source_transaction_id = validate_optional_transaction_link(
+        &state,
+        user.id,
+        req.source_transaction_id.as_deref(),
+        "source_transaction_id",
+    )
+    .await?;
+    let now = Utc::now();
+    let settlement = FinanceSettlement {
+        id: ObjectId::new(),
+        owner_id: user.id,
+        counterparty,
+        direction: parse_settlement_direction(&req.direction)?,
+        amount_minor: req.amount_minor,
+        currency,
+        category_id,
+        description,
+        opened_at: parse_date(&req.opened_at)?,
+        source_transaction_id,
+        status: SettlementStatus::Open,
+        entries: Vec::new(),
+        created_at: now,
+        updated_at: now,
+        closed_at: None,
+    };
+    state
+        .db
+        .collection::<FinanceSettlement>(SETTLEMENTS)
+        .insert_one(&settlement)
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(settlement_to_response(&settlement)),
+    ))
+}
+
+pub async fn update_settlement(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateFinanceSettlementRequest>,
+) -> Result<Json<FinanceSettlementResponse>> {
+    require_finance(&state, &user)?;
+    let oid = parse_oid(&id, "settlement id")?;
+    let coll = state.db.collection::<FinanceSettlement>(SETTLEMENTS);
+    let mut settlement = coll
+        .find_one(doc! { "_id": oid, "owner_id": user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Settlement not found".into()))?;
+
+    if let Some(counterparty) = req.counterparty {
+        let trimmed = counterparty.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(AppError::BadRequest("Counterparty cannot be empty".into()));
+        }
+        settlement.counterparty = trimmed;
+    }
+    if let Some(direction) = req.direction {
+        settlement.direction = parse_settlement_direction(&direction)?;
+    }
+    if let Some(amount) = req.amount_minor {
+        if amount <= 0 {
+            return Err(AppError::BadRequest(
+                "Settlement amount must be greater than zero".into(),
+            ));
+        }
+        settlement.amount_minor = amount;
+    }
+    if let Some(currency) = req.currency {
+        settlement.currency = validate_currency(&currency)?;
+    }
+    if let Some(category) = req.category_id {
+        settlement.category_id =
+            validate_optional_category_id(&state, user.id, category.as_deref()).await?;
+    }
+    if let Some(description) = req.description {
+        let trimmed = description.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(AppError::BadRequest("Description cannot be empty".into()));
+        }
+        settlement.description = trimmed;
+    }
+    if let Some(opened_at) = req.opened_at {
+        settlement.opened_at = parse_date(&opened_at)?;
+    }
+    if let Some(source_transaction_id) = req.source_transaction_id {
+        settlement.source_transaction_id = validate_optional_transaction_link(
+            &state,
+            user.id,
+            source_transaction_id.as_deref(),
+            "source_transaction_id",
+        )
+        .await?;
+    }
+
+    let now = Utc::now();
+    settlement.updated_at = now;
+    recompute_settlement_status(&mut settlement, now)?;
+    coll.replace_one(doc! { "_id": oid, "owner_id": user.id }, &settlement)
+        .await?;
+    Ok(Json(settlement_to_response(&settlement)))
+}
+
+pub async fn delete_settlement(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode> {
+    require_finance(&state, &user)?;
+    let oid = parse_oid(&id, "settlement id")?;
+    let result = state
+        .db
+        .collection::<FinanceSettlement>(SETTLEMENTS)
+        .delete_one(doc! { "_id": oid, "owner_id": user.id })
+        .await?;
+    if result.deleted_count == 0 {
+        return Err(AppError::NotFound("Settlement not found".into()));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn create_settlement_entry(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    Json(req): Json<CreateSettlementEntryRequest>,
+) -> Result<(StatusCode, Json<FinanceSettlementResponse>)> {
+    require_finance(&state, &user)?;
+    let oid = parse_oid(&id, "settlement id")?;
+    let coll = state.db.collection::<FinanceSettlement>(SETTLEMENTS);
+    let mut settlement = coll
+        .find_one(doc! { "_id": oid, "owner_id": user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Settlement not found".into()))?;
+    if settlement.status != SettlementStatus::Open {
+        return Err(AppError::BadRequest("Settlement is already closed".into()));
+    }
+    if req.amount_minor <= 0 {
+        return Err(AppError::BadRequest(
+            "Settlement entry amount must be greater than zero".into(),
+        ));
+    }
+    let (_, _, outstanding_minor) = settlement_totals(&settlement);
+    if req.amount_minor > outstanding_minor {
+        return Err(AppError::BadRequest(
+            "Settlement entry cannot exceed the outstanding amount".into(),
+        ));
+    }
+
+    let counterparty = req
+        .counterparty
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let note = req
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let linked_transaction_id = validate_optional_transaction_link(
+        &state,
+        user.id,
+        req.linked_transaction_id.as_deref(),
+        "linked_transaction_id",
+    )
+    .await?;
+
+    let now = Utc::now();
+    settlement.entries.push(SettlementEntry {
+        id: ObjectId::new(),
+        kind: parse_settlement_entry_kind(&req.kind)?,
+        counterparty,
+        amount_minor: req.amount_minor,
+        date: parse_date(&req.date)?,
+        linked_transaction_id,
+        note,
+        created_at: now,
+    });
+    settlement.updated_at = now;
+    recompute_settlement_status(&mut settlement, now)?;
+    coll.replace_one(doc! { "_id": oid, "owner_id": user.id }, &settlement)
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(settlement_to_response(&settlement)),
+    ))
+}
+
+pub async fn delete_settlement_entry(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((id, entry_id)): Path<(String, String)>,
+) -> Result<Json<FinanceSettlementResponse>> {
+    require_finance(&state, &user)?;
+    let oid = parse_oid(&id, "settlement id")?;
+    let entry_oid = parse_oid(&entry_id, "settlement entry id")?;
+    let coll = state.db.collection::<FinanceSettlement>(SETTLEMENTS);
+    let mut settlement = coll
+        .find_one(doc! { "_id": oid, "owner_id": user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Settlement not found".into()))?;
+    let before = settlement.entries.len();
+    settlement.entries.retain(|entry| entry.id != entry_oid);
+    if settlement.entries.len() == before {
+        return Err(AppError::NotFound("Settlement entry not found".into()));
+    }
+    let now = Utc::now();
+    settlement.updated_at = now;
+    recompute_settlement_status(&mut settlement, now)?;
+    coll.replace_one(doc! { "_id": oid, "owner_id": user.id }, &settlement)
+        .await?;
+    Ok(Json(settlement_to_response(&settlement)))
 }
 
 // ── CSV import ───────────────────────────────────────────────────────────

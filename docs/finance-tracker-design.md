@@ -58,13 +58,20 @@ PendingSettlement:
   id, owner_id, counterparty (free-text name), amount, currency
   direction: owed_to_me | owed_by_me
   category_id (reuses transaction categories — "beer", "garage repair", etc.)
-  description, opened_at
+  description, opened_at, source_transaction_id (optional FK to the original
+    real transaction that created the obligation)
   status: open | settled | forgiven
-  settled_at, settlement_transaction_id (optional FK to a real transaction
-    once the money actually moves)
+  closed_at
+
+SettlementEntry:
+  id, kind: payment | forgiveness
+  counterparty (optional override — e.g. settlement is "Friends", entries are
+    "Bob", "Gary")
+  amount, date, linked_transaction_id (optional FK to a real transaction once
+    the money actually moves), note, created_at
 ```
 
-The list view groups by counterparty and currency: "Alice owes you EUR 30, USD 15"; "Bob owes you EUR 10"; "You owe Carol EUR 12". Closing a settlement as `settled` optionally links to the transaction that received (or made) the payment, so you can audit later. `forgiven` covers the case where you write off the obligation without money moving — small amounts, lost contact, etc.
+The list view groups by counterparty and currency: "Alice owes you EUR 30, USD 15"; "Bob owes you EUR 10"; "You owe Carol EUR 12". A settlement contains one or more entries that reduce the outstanding amount. Entries may link to a normal bank transaction, but usually won't — many small repayments happen in cash or outside the imported bank accounts. Group settlements are represented by a broad settlement counterparty ("Friends") plus per-entry counterparties ("Bob paid EUR 20", "Gary paid EUR 30"). `forgiveness` entries cover the case where you write off all or part of the obligation without money moving — small amounts, lost contact, etc.
 
 ## Import Workflow — The Critical Part
 
@@ -146,7 +153,10 @@ TransactionLeg     transaction_id, amount, category_id NULLABLE, category_source
 ImportProfile      owner_id, name, account_id, ...mapping fields...
 ImportBatch       owner_id, account_id, profile_id, source_filename, source_hash, imported_at, summary
 PendingSettlement  owner_id, counterparty, direction, amount, currency, category_id,
-                   description, opened_at, status, settled_at, settlement_transaction_id
+                   description, opened_at, source_transaction_id, status, closed_at,
+                   entries[]
+SettlementEntry    embedded in PendingSettlement: id, kind, counterparty,
+                   amount, date, linked_transaction_id, note, created_at
 ```
 
 ## API Sketch
@@ -164,7 +174,8 @@ All under `/api/finance/...`:
 - `POST /imports/preview` — multipart CSV upload + profile_id, returns diff (no DB writes)
 - `POST /imports/apply` — confirms a previewed diff, returns ImportBatch
 - `GET /import-batches`, `DELETE /import-batches/{id}` — undo a batch (preserving manual edits to the affected transactions where possible)
-- `GET/POST /settlements`, `PUT /settlements/{id}/settle`, `PUT /settlements/{id}/forgive`, `DELETE /settlements/{id}`
+- `GET/POST /settlements`, `PUT/DELETE /settlements/{id}`
+- `POST /settlements/{id}/entries`, `DELETE /settlements/{id}/entries/{entry_id}` — partial payments/forgiveness; status derives from remaining balance
 
 ## Frontend Structure
 

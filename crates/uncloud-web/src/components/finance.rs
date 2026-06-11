@@ -9,11 +9,12 @@ use std::collections::HashMap;
 use dioxus::prelude::*;
 use uncloud_common::{
     AccountResponse, BalanceSnapshotResponse, CategorySummaryResponse, CreateAccountRequest,
-    CreateFinanceCategoryRequest, CreateTransactionRequest, FinanceCategoryResponse,
-    FinanceRuleRequest, FinanceRuleResponse, ImportCsvResponse, ImportRunResponse,
-    ImportSchemaResponse, ReconcilePreviewResponse, ReconcileRequest, TestRuleMatch,
+    CreateFinanceCategoryRequest, CreateFinanceSettlementRequest, CreateSettlementEntryRequest,
+    CreateTransactionRequest, FinanceCategoryResponse, FinanceRuleRequest, FinanceRuleResponse,
+    FinanceSettlementResponse, ImportCsvResponse, ImportRunResponse, ImportSchemaResponse,
+    ReconcilePreviewResponse, ReconcileRequest, SettlementEntryResponse, TestRuleMatch,
     TestRuleRequest, TestRuleResponse, TransactionResponse, UpdateAccountRequest,
-    UpdateFinanceCategoryRequest, UpdateTransactionRequest,
+    UpdateFinanceCategoryRequest, UpdateFinanceSettlementRequest, UpdateTransactionRequest,
 };
 
 use crate::components::icons::{IconGripVertical, IconMoreVertical, IconPlus};
@@ -51,6 +52,11 @@ pub fn FinanceCategoriesPage() -> Element {
 }
 
 #[component]
+pub fn FinanceSettlementsPage() -> Element {
+    finance_shell(rsx! { SettlementsTab {} })
+}
+
+#[component]
 pub fn FinanceSchemasPage() -> Element {
     finance_shell(rsx! { SchemasTab {} })
 }
@@ -79,6 +85,18 @@ fn format_money(minor: i64, currency: &str) -> String {
         format!("-{}.{:02} {}", major, cents, currency)
     } else {
         format!("{}.{:02} {}", major, cents, currency)
+    }
+}
+
+fn format_money_input(minor: i64) -> String {
+    let neg = minor < 0;
+    let abs = minor.unsigned_abs();
+    let major = abs / 100;
+    let cents = abs % 100;
+    if neg {
+        format!("-{}.{:02}", major, cents)
+    } else {
+        format!("{}.{:02}", major, cents)
     }
 }
 
@@ -136,11 +154,7 @@ fn last_day_of_month(year: i32, m_zero_based: u32) -> u32 {
         3 | 5 | 8 | 10 => 30,
         1 => {
             let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-            if leap {
-                29
-            } else {
-                28
-            }
+            if leap { 29 } else { 28 }
         }
         _ => 30,
     }
@@ -974,6 +988,679 @@ fn CategoryFormModal(
                                 match result {
                                     Ok(_) => on_saved.call(()),
                                     Err(e) => { error.set(Some(e)); saving.set(false); }
+                                }
+                            });
+                        },
+                        if saving() { "Saving…" } else { "Save" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Settlements tab
+// ─────────────────────────────────────────────────────────────────────────
+
+fn short_date(date: &str) -> String {
+    date.split('T').next().unwrap_or(date).to_string()
+}
+
+fn settlement_direction_label(direction: &str) -> &'static str {
+    match direction {
+        "owed_by_me" => "You owe",
+        _ => "Owed to you",
+    }
+}
+
+fn settlement_direction_phrase(direction: &str, counterparty: &str) -> String {
+    match direction {
+        "owed_by_me" => format!("You owe {counterparty}"),
+        _ => format!("{counterparty} owes you"),
+    }
+}
+
+fn settlement_status_class(status: &str) -> &'static str {
+    match status {
+        "settled" => "badge badge-success badge-sm",
+        "forgiven" => "badge badge-warning badge-sm",
+        _ => "badge badge-primary badge-sm",
+    }
+}
+
+fn settlement_group_summary(
+    settlements: &[FinanceSettlementResponse],
+) -> Vec<(String, String, String, i64)> {
+    let mut grouped: HashMap<(String, String, String), i64> = HashMap::new();
+    for settlement in settlements.iter().filter(|s| s.status == "open") {
+        *grouped
+            .entry((
+                settlement.counterparty.clone(),
+                settlement.direction.clone(),
+                settlement.currency.clone(),
+            ))
+            .or_default() += settlement.outstanding_minor;
+    }
+    let mut items: Vec<_> = grouped
+        .into_iter()
+        .map(|((counterparty, direction, currency), amount)| {
+            (counterparty, direction, currency, amount)
+        })
+        .collect();
+    items.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)).then(a.1.cmp(&b.1)));
+    items
+}
+
+#[component]
+fn SettlementsTab() -> Element {
+    let mut settlements: Signal<Vec<FinanceSettlementResponse>> = use_signal(Vec::new);
+    let mut total: Signal<u64> = use_signal(|| 0);
+    let mut categories: Signal<Vec<FinanceCategoryResponse>> = use_signal(Vec::new);
+    let mut loading = use_signal(|| true);
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+    let mut refresh = use_signal(|| 0u32);
+    let mut status_filter: Signal<String> = use_signal(|| "open".to_string());
+    let mut show_create = use_signal(|| false);
+    let mut edit_target: Signal<Option<FinanceSettlementResponse>> = use_signal(|| None);
+    let mut entry_target: Signal<Option<(FinanceSettlementResponse, String, i64)>> =
+        use_signal(|| None);
+    let page_size = 200u32;
+
+    use_effect(move || {
+        let _ = refresh();
+        let _ = status_filter();
+        spawn(async move {
+            loading.set(true);
+            if let Ok(c) = use_finance::list_categories().await {
+                categories.set(c);
+            }
+            let status = status_filter();
+            match use_finance::list_settlements(Some(status.as_str()), page_size, 0).await {
+                Ok(resp) => {
+                    settlements.set(resp.items);
+                    total.set(resp.total);
+                    error.set(None);
+                }
+                Err(e) => error.set(Some(e)),
+            }
+            loading.set(false);
+        });
+    });
+
+    let summary_items = settlement_group_summary(&settlements());
+    let categories_for_forms = categories();
+    let visible_count = settlements().len();
+
+    rsx! {
+        div { class: "space-y-4",
+            div { class: "flex flex-wrap items-center justify-between gap-3",
+                div {
+                    h2 { class: "text-xl font-semibold", "Settlements" }
+                    p { class: "text-sm opacity-70", "Track informal IOUs, cash repayments, and forgiven balances." }
+                }
+                button {
+                    class: "btn btn-primary btn-sm",
+                    onclick: move |_| show_create.set(true),
+                    IconPlus {}
+                    span { "Add settlement" }
+                }
+            }
+
+            if let Some(e) = error() {
+                div { class: "alert alert-error text-sm", "{e}" }
+            }
+
+            div { class: "tabs tabs-boxed w-fit",
+                button {
+                    class: if status_filter() == "open" { "tab tab-active" } else { "tab" },
+                    onclick: move |_| status_filter.set("open".into()),
+                    "Open"
+                }
+                button {
+                    class: if status_filter() == "settled" { "tab tab-active" } else { "tab" },
+                    onclick: move |_| status_filter.set("settled".into()),
+                    "Settled"
+                }
+                button {
+                    class: if status_filter() == "forgiven" { "tab tab-active" } else { "tab" },
+                    onclick: move |_| status_filter.set("forgiven".into()),
+                    "Forgiven"
+                }
+                button {
+                    class: if status_filter() == "all" { "tab tab-active" } else { "tab" },
+                    onclick: move |_| status_filter.set("all".into()),
+                    "All"
+                }
+            }
+
+            if !summary_items.is_empty() {
+                div { class: "grid gap-2 sm:grid-cols-2 lg:grid-cols-3",
+                    {summary_items.iter().map(|(counterparty, direction, currency, amount)| {
+                        let label = settlement_direction_label(direction);
+                        let amount_class = if direction == "owed_by_me" {
+                            "font-mono font-semibold text-error"
+                        } else {
+                            "font-mono font-semibold text-success"
+                        };
+                        rsx! {
+                            div { class: "rounded-lg border border-base-300 bg-base-100 p-3 shadow-sm",
+                                div { class: "text-xs uppercase tracking-wide opacity-60", "{label}" }
+                                div { class: "mt-1 flex items-center justify-between gap-3",
+                                    span { class: "font-medium truncate", "{counterparty}" }
+                                    span { class: "{amount_class}", "{format_money(*amount, currency)}" }
+                                }
+                            }
+                        }
+                    })}
+                }
+            }
+
+            if loading() && settlements().is_empty() {
+                div { class: "py-12 text-center opacity-60", "Loading settlements…" }
+            } else if settlements().is_empty() {
+                div { class: "rounded-lg border border-dashed border-base-300 bg-base-100 p-8 text-center",
+                    p { class: "font-medium", "No settlements in this view." }
+                    p { class: "mt-1 text-sm opacity-70", "Add an IOU when money is owed outside normal account balances." }
+                }
+            } else {
+                div { class: "space-y-3",
+                    div { class: "text-xs opacity-60", "Showing {visible_count} of {total()} settlement(s)" }
+                    {settlements().iter().map(|settlement| {
+                        let status_class = settlement_status_class(&settlement.status);
+                        let category_name = settlement
+                            .category_id
+                            .as_deref()
+                            .and_then(|id| category_label(&categories(), id));
+                        let paid = settlement.paid_minor + settlement.forgiven_minor;
+                        let progress = if settlement.amount_minor > 0 {
+                            (paid * 100 / settlement.amount_minor).clamp(0, 100)
+                        } else {
+                            0
+                        };
+                        let edit = settlement.clone();
+                        let delete_id = settlement.id.clone();
+                        let add_payment = settlement.clone();
+                        let forgive = settlement.clone();
+                        rsx! {
+                            div {
+                                key: "{settlement.id}",
+                                class: "rounded-lg border border-base-300 bg-base-100 p-4 shadow-sm",
+                                div { class: "flex flex-wrap items-start justify-between gap-3",
+                                    div { class: "min-w-0",
+                                        div { class: "flex flex-wrap items-center gap-2",
+                                            h3 { class: "font-semibold break-words", "{settlement.description}" }
+                                            span { class: "{status_class}", "{settlement.status}" }
+                                        }
+                                        div { class: "mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm opacity-70",
+                                            span { "{settlement_direction_phrase(&settlement.direction, &settlement.counterparty)}" }
+                                            span { "Opened {short_date(&settlement.opened_at)}" }
+                                            if let Some(name) = category_name {
+                                                span { class: "badge badge-outline badge-sm", "{name}" }
+                                            }
+                                        }
+                                    }
+                                    div { class: "text-right",
+                                        div { class: "font-mono font-semibold", "{format_money(settlement.outstanding_minor, &settlement.currency)}" }
+                                        div { class: "text-xs opacity-60", "remaining of {format_money(settlement.amount_minor, &settlement.currency)}" }
+                                    }
+                                }
+
+                                progress {
+                                    class: "progress progress-primary w-full mt-3",
+                                    value: "{progress}",
+                                    max: "100",
+                                }
+
+                                div { class: "mt-3 grid gap-2 sm:grid-cols-3",
+                                    div {
+                                        div { class: "text-xs opacity-60", "Paid" }
+                                        div { class: "font-mono text-success", "{format_money(settlement.paid_minor, &settlement.currency)}" }
+                                    }
+                                    div {
+                                        div { class: "text-xs opacity-60", "Forgiven" }
+                                        div { class: "font-mono text-warning", "{format_money(settlement.forgiven_minor, &settlement.currency)}" }
+                                    }
+                                    div {
+                                        div { class: "text-xs opacity-60", "Outstanding" }
+                                        div { class: "font-mono", "{format_money(settlement.outstanding_minor, &settlement.currency)}" }
+                                    }
+                                }
+
+                                if !settlement.entries.is_empty() {
+                                    div { class: "mt-4 divide-y divide-base-300 rounded-lg border border-base-300",
+                                        {settlement.entries.iter().map(|entry| {
+                                            let settlement_id = settlement.id.clone();
+                                            let entry_id = entry.id.clone();
+                                            rsx! {
+                                                SettlementEntryRow {
+                                                    key: "{entry.id}",
+                                                    entry: entry.clone(),
+                                                    currency: settlement.currency.clone(),
+                                                    on_delete: move |_| {
+                                                        let sid = settlement_id.clone();
+                                                        let eid = entry_id.clone();
+                                                        spawn(async move {
+                                                            match use_finance::delete_settlement_entry(&sid, &eid).await {
+                                                                Ok(_) => refresh += 1,
+                                                                Err(e) => error.set(Some(e)),
+                                                            }
+                                                        });
+                                                    },
+                                                }
+                                            }
+                                        })}
+                                    }
+                                }
+
+                                div { class: "mt-4 flex flex-wrap justify-end gap-2",
+                                    if settlement.status == "open" {
+                                        button {
+                                            class: "btn btn-sm btn-outline",
+                                            onclick: move |_| entry_target.set(Some((add_payment.clone(), "payment".into(), add_payment.outstanding_minor))),
+                                            "Add payment"
+                                        }
+                                        button {
+                                            class: "btn btn-sm btn-outline",
+                                            onclick: move |_| entry_target.set(Some((forgive.clone(), "forgiveness".into(), forgive.outstanding_minor))),
+                                            "Forgive"
+                                        }
+                                    }
+                                    button {
+                                        class: "btn btn-sm btn-ghost",
+                                        onclick: move |_| edit_target.set(Some(edit.clone())),
+                                        "Edit"
+                                    }
+                                    button {
+                                        class: "btn btn-sm btn-ghost text-error",
+                                        onclick: move |_| {
+                                            let id = delete_id.clone();
+                                            spawn(async move {
+                                                match use_finance::delete_settlement(&id).await {
+                                                    Ok(_) => refresh += 1,
+                                                    Err(e) => error.set(Some(e)),
+                                                }
+                                            });
+                                        },
+                                        "Delete"
+                                    }
+                                }
+                            }
+                        }
+                    })}
+                }
+            }
+
+            if show_create() {
+                SettlementFormModal {
+                    initial: None,
+                    categories: categories_for_forms.clone(),
+                    on_close: move |_| show_create.set(false),
+                    on_saved: move |_| { show_create.set(false); refresh += 1; },
+                }
+            }
+            if let Some(s) = edit_target() {
+                SettlementFormModal {
+                    key: "{s.id}",
+                    initial: Some(s.clone()),
+                    categories: categories_for_forms.clone(),
+                    on_close: move |_| edit_target.set(None),
+                    on_saved: move |_| { edit_target.set(None); refresh += 1; },
+                }
+            }
+            if let Some((settlement, kind, amount)) = entry_target() {
+                SettlementEntryModal {
+                    key: "{settlement.id}-{kind}",
+                    settlement: settlement.clone(),
+                    default_kind: kind.clone(),
+                    default_amount_minor: amount,
+                    on_close: move |_| entry_target.set(None),
+                    on_saved: move |_| { entry_target.set(None); refresh += 1; },
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SettlementEntryRow(
+    entry: SettlementEntryResponse,
+    currency: String,
+    on_delete: EventHandler<()>,
+) -> Element {
+    let label = if entry.kind == "forgiveness" {
+        "Forgiven"
+    } else {
+        "Paid"
+    };
+    let amount_class = if entry.kind == "forgiveness" {
+        "font-mono text-warning"
+    } else {
+        "font-mono text-success"
+    };
+    rsx! {
+        div { class: "flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-sm",
+            div { class: "min-w-0",
+                div { class: "flex flex-wrap items-center gap-2",
+                    span { class: "font-medium", "{label}" }
+                    span { class: "opacity-60", "{short_date(&entry.date)}" }
+                    if let Some(cp) = entry.counterparty.as_ref() {
+                        span { class: "opacity-80", "{cp}" }
+                    }
+                }
+                if let Some(note) = entry.note.as_ref() {
+                    div { class: "mt-0.5 break-words opacity-70", "{note}" }
+                }
+                if entry.linked_transaction_id.is_some() {
+                    div { class: "mt-0.5 text-xs opacity-60", "Linked transaction" }
+                }
+            }
+            div { class: "flex items-center gap-2",
+                span { class: "{amount_class}", "{format_money(entry.amount_minor, &currency)}" }
+                button {
+                    class: "btn btn-ghost btn-xs text-error",
+                    onclick: move |_| on_delete.call(()),
+                    "Delete"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SettlementFormModal(
+    initial: Option<FinanceSettlementResponse>,
+    categories: Vec<FinanceCategoryResponse>,
+    on_close: EventHandler<()>,
+    on_saved: EventHandler<()>,
+) -> Element {
+    let editing = initial.is_some();
+    let initial_id = initial.as_ref().map(|s| s.id.clone());
+    let mut counterparty = use_signal(|| {
+        initial
+            .as_ref()
+            .map(|s| s.counterparty.clone())
+            .unwrap_or_default()
+    });
+    let mut direction = use_signal(|| {
+        initial
+            .as_ref()
+            .map(|s| s.direction.clone())
+            .unwrap_or_else(|| "owed_to_me".to_string())
+    });
+    let mut amount = use_signal(|| {
+        initial
+            .as_ref()
+            .map(|s| format_money_input(s.amount_minor))
+            .unwrap_or_default()
+    });
+    let mut currency = use_signal(|| {
+        initial
+            .as_ref()
+            .map(|s| s.currency.clone())
+            .unwrap_or_else(|| "EUR".to_string())
+    });
+    let mut category_id = use_signal(|| {
+        initial
+            .as_ref()
+            .and_then(|s| s.category_id.clone())
+            .unwrap_or_default()
+    });
+    let mut description = use_signal(|| {
+        initial
+            .as_ref()
+            .map(|s| s.description.clone())
+            .unwrap_or_default()
+    });
+    let mut opened_at = use_signal(|| {
+        initial
+            .as_ref()
+            .map(|s| short_date(&s.opened_at))
+            .unwrap_or_else(today_iso)
+    });
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+    let mut saving = use_signal(|| false);
+
+    rsx! {
+        div { class: "modal modal-open",
+            div { class: "modal-box max-w-2xl",
+                h3 { class: "font-bold text-lg mb-3",
+                    if editing { "Edit settlement" } else { "New settlement" }
+                }
+                if let Some(e) = error() {
+                    div { class: "alert alert-error mb-3 text-sm", "{e}" }
+                }
+                div { class: "grid gap-3 sm:grid-cols-2",
+                    label { class: "form-control sm:col-span-2",
+                        span { class: "label-text pb-1", "Description" }
+                        input {
+                            class: "input input-bordered",
+                            value: "{description}",
+                            oninput: move |e| description.set(e.value()),
+                        }
+                    }
+                    label { class: "form-control",
+                        span { class: "label-text pb-1", "Counterparty" }
+                        input {
+                            class: "input input-bordered",
+                            value: "{counterparty}",
+                            oninput: move |e| counterparty.set(e.value()),
+                        }
+                    }
+                    label { class: "form-control",
+                        span { class: "label-text pb-1", "Direction" }
+                        select {
+                            class: "select select-bordered",
+                            value: "{direction}",
+                            onchange: move |e| direction.set(e.value()),
+                            option { value: "owed_to_me", "Owed to me" }
+                            option { value: "owed_by_me", "Owed by me" }
+                        }
+                    }
+                    label { class: "form-control",
+                        span { class: "label-text pb-1", "Amount" }
+                        input {
+                            class: "input input-bordered",
+                            value: "{amount}",
+                            oninput: move |e| amount.set(e.value()),
+                        }
+                    }
+                    label { class: "form-control",
+                        span { class: "label-text pb-1", "Currency" }
+                        input {
+                            class: "input input-bordered uppercase",
+                            maxlength: "3",
+                            value: "{currency}",
+                            oninput: move |e| currency.set(e.value()),
+                        }
+                    }
+                    label { class: "form-control",
+                        span { class: "label-text pb-1", "Opened" }
+                        input {
+                            r#type: "date",
+                            class: "input input-bordered",
+                            value: "{opened_at}",
+                            oninput: move |e| opened_at.set(e.value()),
+                        }
+                    }
+                    label { class: "form-control",
+                        span { class: "label-text pb-1", "Category" }
+                        select {
+                            class: "select select-bordered",
+                            value: "{category_id}",
+                            onchange: move |e| category_id.set(e.value()),
+                            option { value: "", "Uncategorized" }
+                            {categories.iter().map(|c| rsx! {
+                                option { key: "{c.id}", value: "{c.id}", "{category_label(&categories, &c.id).unwrap_or_else(|| c.name.clone())}" }
+                            })}
+                        }
+                    }
+                }
+                div { class: "modal-action",
+                    button { class: "btn btn-ghost", onclick: move |_| on_close.call(()), "Cancel" }
+                    button {
+                        class: "btn btn-primary",
+                        disabled: saving(),
+                        onclick: move |_| {
+                            let id_opt = initial_id.clone();
+                            spawn(async move {
+                                error.set(None);
+                                saving.set(true);
+                                let amount_minor = match parse_money(&amount()) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        error.set(Some(e));
+                                        saving.set(false);
+                                        return;
+                                    }
+                                };
+                                let result = if let Some(id) = id_opt {
+                                    let req = UpdateFinanceSettlementRequest {
+                                        counterparty: Some(counterparty()),
+                                        direction: Some(direction()),
+                                        amount_minor: Some(amount_minor),
+                                        currency: Some(currency()),
+                                        category_id: Some(if category_id().is_empty() { None } else { Some(category_id()) }),
+                                        description: Some(description()),
+                                        opened_at: Some(opened_at()),
+                                        source_transaction_id: None,
+                                    };
+                                    use_finance::update_settlement(&id, &req).await
+                                } else {
+                                    let req = CreateFinanceSettlementRequest {
+                                        counterparty: counterparty(),
+                                        direction: direction(),
+                                        amount_minor,
+                                        currency: currency(),
+                                        category_id: if category_id().is_empty() { None } else { Some(category_id()) },
+                                        description: description(),
+                                        opened_at: opened_at(),
+                                        source_transaction_id: None,
+                                    };
+                                    use_finance::create_settlement(&req).await
+                                };
+                                match result {
+                                    Ok(_) => on_saved.call(()),
+                                    Err(e) => {
+                                        error.set(Some(e));
+                                        saving.set(false);
+                                    }
+                                }
+                            });
+                        },
+                        if saving() { "Saving…" } else { "Save" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SettlementEntryModal(
+    settlement: FinanceSettlementResponse,
+    default_kind: String,
+    default_amount_minor: i64,
+    on_close: EventHandler<()>,
+    on_saved: EventHandler<()>,
+) -> Element {
+    let mut kind = use_signal(|| default_kind);
+    let mut amount = use_signal(|| format_money_input(default_amount_minor));
+    let mut counterparty = use_signal(String::new);
+    let mut date = use_signal(today_iso);
+    let mut note = use_signal(String::new);
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+    let mut saving = use_signal(|| false);
+    let settlement_id = settlement.id.clone();
+
+    rsx! {
+        div { class: "modal modal-open",
+            div { class: "modal-box max-w-md",
+                h3 { class: "font-bold text-lg mb-3", "Add settlement entry" }
+                p { class: "mb-3 text-sm opacity-70",
+                    "Remaining: {format_money(settlement.outstanding_minor, &settlement.currency)}"
+                }
+                if let Some(e) = error() {
+                    div { class: "alert alert-error mb-3 text-sm", "{e}" }
+                }
+                div { class: "space-y-3",
+                    label { class: "form-control",
+                        span { class: "label-text pb-1", "Type" }
+                        select {
+                            class: "select select-bordered",
+                            value: "{kind}",
+                            onchange: move |e| kind.set(e.value()),
+                            option { value: "payment", "Payment" }
+                            option { value: "forgiveness", "Forgiveness" }
+                        }
+                    }
+                    label { class: "form-control",
+                        span { class: "label-text pb-1", "Amount" }
+                        input {
+                            class: "input input-bordered",
+                            value: "{amount}",
+                            oninput: move |e| amount.set(e.value()),
+                        }
+                    }
+                    label { class: "form-control",
+                        span { class: "label-text pb-1", "Counterparty override" }
+                        input {
+                            class: "input input-bordered",
+                            placeholder: "{settlement.counterparty}",
+                            value: "{counterparty}",
+                            oninput: move |e| counterparty.set(e.value()),
+                        }
+                    }
+                    label { class: "form-control",
+                        span { class: "label-text pb-1", "Date" }
+                        input {
+                            r#type: "date",
+                            class: "input input-bordered",
+                            value: "{date}",
+                            oninput: move |e| date.set(e.value()),
+                        }
+                    }
+                    label { class: "form-control",
+                        span { class: "label-text pb-1", "Note" }
+                        textarea {
+                            class: "textarea textarea-bordered min-h-20",
+                            value: "{note}",
+                            oninput: move |e| note.set(e.value()),
+                        }
+                    }
+                }
+                div { class: "modal-action",
+                    button { class: "btn btn-ghost", onclick: move |_| on_close.call(()), "Cancel" }
+                    button {
+                        class: "btn btn-primary",
+                        disabled: saving(),
+                        onclick: move |_| {
+                            let sid = settlement_id.clone();
+                            spawn(async move {
+                                error.set(None);
+                                saving.set(true);
+                                let amount_minor = match parse_money(&amount()) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        error.set(Some(e));
+                                        saving.set(false);
+                                        return;
+                                    }
+                                };
+                                let req = CreateSettlementEntryRequest {
+                                    kind: kind(),
+                                    counterparty: if counterparty().trim().is_empty() { None } else { Some(counterparty()) },
+                                    amount_minor,
+                                    date: date(),
+                                    linked_transaction_id: None,
+                                    note: if note().trim().is_empty() { None } else { Some(note()) },
+                                };
+                                match use_finance::create_settlement_entry(&sid, &req).await {
+                                    Ok(_) => on_saved.call(()),
+                                    Err(e) => {
+                                        error.set(Some(e));
+                                        saving.set(false);
+                                    }
                                 }
                             });
                         },

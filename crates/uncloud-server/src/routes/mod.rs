@@ -474,6 +474,22 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             put(finance::update_transaction).delete(finance::delete_transaction),
         )
         .route(
+            "/finance/settlements",
+            get(finance::list_settlements).post(finance::create_settlement),
+        )
+        .route(
+            "/finance/settlements/{id}",
+            put(finance::update_settlement).delete(finance::delete_settlement),
+        )
+        .route(
+            "/finance/settlements/{id}/entries",
+            post(finance::create_settlement_entry),
+        )
+        .route(
+            "/finance/settlements/{id}/entries/{entry_id}",
+            delete(finance::delete_settlement_entry),
+        )
+        .route(
             "/finance/import-schemas",
             get(finance::list_import_schemas).post(finance::create_import_schema),
         )
