@@ -4,25 +4,24 @@
 //! the transaction model around `source_ref` upserts; existing fields are
 //! preserved through that work.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use axum::Json;
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
+use axum::Json;
 use bson::doc;
 use chrono::{DateTime, TimeZone, Utc};
 use futures::TryStreamExt;
-use mongodb::bson::Bson;
 use mongodb::bson::oid::ObjectId;
+use mongodb::bson::Bson;
 use mongodb::options::FindOptions;
 use serde::Deserialize;
 
 use sha2::{Digest, Sha256};
 
-use crate::AppState;
 use crate::error::{AppError, Result};
-use crate::finance_import::{self, ParseError, ParsedRow, sparkasse_camt_v8};
+use crate::finance_import::{self, sparkasse_camt_v8, ParseError, ParsedRow};
 use crate::finance_rules::{self, RuleEngine};
 use crate::middleware::AuthUser;
 use crate::models::{
@@ -32,16 +31,17 @@ use crate::models::{
     ImportSource, ImportSourceKind, RulePatternKind, SettlementDirection, SettlementEntry,
     SettlementEntryKind, SettlementStatus, TransactionLeg,
 };
+use crate::AppState;
 use uncloud_common::{
     AccountBalanceResponse, AccountResponse, ApplyRulesResponse, BalanceSnapshotResponse,
     CategorySummaryItem, CategorySummaryResponse, CreateAccountRequest,
     CreateFinanceCategoryRequest, CreateFinanceSettlementRequest, CreateSettlementEntryRequest,
     CreateTransactionRequest, FinanceCategoryResponse, FinanceRuleRequest, FinanceRuleResponse,
-    FinanceSettlementListResponse, FinanceSettlementResponse, ImportCsvResponse, ImportRowError,
-    ImportRunResponse, ImportRunSourceDto, ImportRunSummaryDto, ImportSchemaRequest,
-    ImportSchemaResponse, ListTransactionsQuery, ReconcilePreviewResponse, ReconcileRequest,
-    ReorderRulesRequest, SettlementEntryResponse, TestRuleMatch, TestRuleRequest, TestRuleResponse,
-    TransactionListResponse, TransactionResponse, UpdateAccountRequest,
+    FinanceSettlementDetailResponse, FinanceSettlementListResponse, FinanceSettlementResponse,
+    ImportCsvResponse, ImportRowError, ImportRunResponse, ImportRunSourceDto, ImportRunSummaryDto,
+    ImportSchemaRequest, ImportSchemaResponse, ListTransactionsQuery, ReconcilePreviewResponse,
+    ReconcileRequest, ReorderRulesRequest, SettlementEntryResponse, TestRuleMatch, TestRuleRequest,
+    TestRuleResponse, TransactionListResponse, TransactionResponse, UpdateAccountRequest,
     UpdateFinanceCategoryRequest, UpdateFinanceSettlementRequest, UpdateTransactionRequest,
 };
 
@@ -52,6 +52,7 @@ const IMPORT_SCHEMAS: &str = "finance_import_schemas";
 const IMPORT_RUNS: &str = "finance_import_runs";
 const BALANCE_SNAPSHOTS: &str = "finance_balance_snapshots";
 const SETTLEMENTS: &str = "finance_settlements";
+const SETTLEMENT_ENTRIES: &str = "finance_settlement_entries";
 const RULES: &str = "finance_rules";
 const RECONCILIATION_CATEGORY: &str = "Reconciliation";
 
@@ -199,6 +200,7 @@ fn settlement_entry_kind_to_api(kind: SettlementEntryKind) -> &'static str {
     match kind {
         SettlementEntryKind::Payment => "payment",
         SettlementEntryKind::Forgiveness => "forgiveness",
+        SettlementEntryKind::Charge => "charge",
     }
 }
 
@@ -206,51 +208,135 @@ fn parse_settlement_entry_kind(raw: &str) -> Result<SettlementEntryKind> {
     match raw.trim() {
         "payment" => Ok(SettlementEntryKind::Payment),
         "forgiveness" => Ok(SettlementEntryKind::Forgiveness),
+        "charge" => Ok(SettlementEntryKind::Charge),
         other => Err(AppError::BadRequest(format!(
             "Invalid settlement entry kind `{other}`"
         ))),
     }
 }
 
-fn settlement_totals(s: &FinanceSettlement) -> (i64, i64, i64) {
-    let paid_minor = s
-        .entries
-        .iter()
-        .filter(|e| e.kind == SettlementEntryKind::Payment)
-        .map(|e| e.amount_minor)
-        .sum::<i64>();
-    let forgiven_minor = s
-        .entries
-        .iter()
-        .filter(|e| e.kind == SettlementEntryKind::Forgiveness)
-        .map(|e| e.amount_minor)
-        .sum::<i64>();
-    (
-        paid_minor,
-        forgiven_minor,
-        s.amount_minor - paid_minor - forgiven_minor,
-    )
+fn trim_to_option(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
-fn recompute_settlement_status(s: &mut FinanceSettlement, now: DateTime<Utc>) -> Result<()> {
-    let (paid_minor, forgiven_minor, outstanding_minor) = settlement_totals(s);
+fn parse_optional_date(raw: Option<&str>) -> Result<Option<DateTime<Utc>>> {
+    match raw.map(str::trim) {
+        Some(s) if !s.is_empty() => Ok(Some(parse_date(s)?)),
+        _ => Ok(None),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SettlementTotals {
+    paid_minor: i64,
+    forgiven_minor: i64,
+    charged_minor: i64,
+}
+
+impl SettlementTotals {
+    fn outstanding(&self, settlement: &FinanceSettlement) -> i64 {
+        settlement.amount_minor + self.charged_minor - self.paid_minor - self.forgiven_minor
+    }
+
+    fn apply(&mut self, kind: SettlementEntryKind, amount_minor: i64) {
+        match kind {
+            SettlementEntryKind::Payment => self.paid_minor += amount_minor,
+            SettlementEntryKind::Forgiveness => self.forgiven_minor += amount_minor,
+            SettlementEntryKind::Charge => self.charged_minor += amount_minor,
+        }
+    }
+}
+
+/// Entries are the source of truth for settlement balances — totals are
+/// aggregated from the entries collection rather than denormalised onto the
+/// settlement document, so entry writes can never drift out of sync.
+async fn load_settlement_totals(
+    state: &AppState,
+    owner_id: ObjectId,
+    settlement_ids: &[ObjectId],
+) -> Result<HashMap<ObjectId, SettlementTotals>> {
+    let mut totals: HashMap<ObjectId, SettlementTotals> = HashMap::new();
+    if settlement_ids.is_empty() {
+        return Ok(totals);
+    }
+    let pipeline = vec![
+        doc! { "$match": { "owner_id": owner_id, "settlement_id": { "$in": settlement_ids } } },
+        doc! { "$group": {
+            "_id": { "settlement": "$settlement_id", "kind": "$kind" },
+            "total": { "$sum": "$amount_minor" },
+        } },
+    ];
+    let mut cursor = state
+        .db
+        .collection::<bson::Document>(SETTLEMENT_ENTRIES)
+        .aggregate(pipeline)
+        .await?;
+    while let Some(row) = cursor.try_next().await? {
+        let Ok(key) = row.get_document("_id") else {
+            continue;
+        };
+        let Ok(settlement_id) = key.get_object_id("settlement") else {
+            continue;
+        };
+        let total = match row.get("total") {
+            Some(Bson::Int64(v)) => *v,
+            Some(Bson::Int32(v)) => *v as i64,
+            Some(Bson::Double(v)) => *v as i64,
+            _ => 0,
+        };
+        if let Ok(kind) = parse_settlement_entry_kind(key.get_str("kind").unwrap_or_default()) {
+            totals.entry(settlement_id).or_default().apply(kind, total);
+        }
+    }
+    Ok(totals)
+}
+
+async fn load_settlement_entries(
+    state: &AppState,
+    owner_id: ObjectId,
+    settlement_id: ObjectId,
+) -> Result<Vec<SettlementEntry>> {
+    let opts = FindOptions::builder()
+        .sort(doc! { "date": 1, "created_at": 1, "_id": 1 })
+        .build();
+    let mut cursor = state
+        .db
+        .collection::<SettlementEntry>(SETTLEMENT_ENTRIES)
+        .find(doc! { "owner_id": owner_id, "settlement_id": settlement_id })
+        .with_options(opts)
+        .await?;
+    let mut entries = Vec::new();
+    while let Some(entry) = cursor.try_next().await? {
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
+fn recompute_settlement_status(
+    settlement: &mut FinanceSettlement,
+    totals: &SettlementTotals,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let outstanding_minor = totals.outstanding(settlement);
     if outstanding_minor < 0 {
         return Err(AppError::BadRequest(
             "Settlement entries cannot exceed the settlement amount".into(),
         ));
     }
     if outstanding_minor == 0 {
-        s.status = if paid_minor == 0 && forgiven_minor > 0 {
+        settlement.status = if totals.paid_minor == 0 && totals.forgiven_minor > 0 {
             SettlementStatus::Forgiven
         } else {
             SettlementStatus::Settled
         };
-        if s.closed_at.is_none() {
-            s.closed_at = Some(now);
+        if settlement.closed_at.is_none() {
+            settlement.closed_at = Some(now);
         }
     } else {
-        s.status = SettlementStatus::Open;
-        s.closed_at = None;
+        settlement.status = SettlementStatus::Open;
+        settlement.closed_at = None;
     }
     Ok(())
 }
@@ -268,8 +354,10 @@ fn settlement_entry_to_response(e: &SettlementEntry) -> SettlementEntryResponse 
     }
 }
 
-fn settlement_to_response(s: &FinanceSettlement) -> FinanceSettlementResponse {
-    let (paid_minor, forgiven_minor, outstanding_minor) = settlement_totals(s);
+fn settlement_to_response(
+    s: &FinanceSettlement,
+    totals: SettlementTotals,
+) -> FinanceSettlementResponse {
     FinanceSettlementResponse {
         id: s.id.to_hex(),
         counterparty: s.counterparty.clone(),
@@ -278,17 +366,32 @@ fn settlement_to_response(s: &FinanceSettlement) -> FinanceSettlementResponse {
         currency: s.currency.clone(),
         category_id: s.category_id.map(|id| id.to_hex()),
         description: s.description.clone(),
+        notes: s.notes.clone(),
         opened_at: s.opened_at.to_rfc3339(),
+        next_payment_at: s.next_payment_at.map(|d| d.to_rfc3339()),
         source_transaction_id: s.source_transaction_id.map(|id| id.to_hex()),
         status: settlement_status_to_api(s.status).into(),
-        paid_minor,
-        forgiven_minor,
-        outstanding_minor,
-        entries: s.entries.iter().map(settlement_entry_to_response).collect(),
+        paid_minor: totals.paid_minor,
+        forgiven_minor: totals.forgiven_minor,
+        charged_minor: totals.charged_minor,
+        outstanding_minor: totals.outstanding(s),
         created_at: s.created_at.to_rfc3339(),
         updated_at: s.updated_at.to_rfc3339(),
         closed_at: s.closed_at.map(|d| d.to_rfc3339()),
     }
+}
+
+async fn settlement_detail(
+    state: &AppState,
+    owner_id: ObjectId,
+    settlement: &FinanceSettlement,
+    totals: SettlementTotals,
+) -> Result<FinanceSettlementDetailResponse> {
+    let entries = load_settlement_entries(state, owner_id, settlement.id).await?;
+    Ok(FinanceSettlementDetailResponse {
+        settlement: settlement_to_response(settlement, totals),
+        entries: entries.iter().map(settlement_entry_to_response).collect(),
+    })
 }
 
 async fn validate_optional_category_id(
@@ -918,7 +1021,11 @@ pub async fn create_transaction(
         raw_bank_category: None,
         notes: req.notes.and_then(|n| {
             let t = n.trim().to_string();
-            if t.is_empty() { None } else { Some(t) }
+            if t.is_empty() {
+                None
+            } else {
+                Some(t)
+            }
         }),
         tags: vec![],
         legs: vec![leg],
@@ -1070,11 +1177,39 @@ pub async fn list_settlements(
         .limit(q.limit.unwrap_or(100).clamp(1, 500) as i64)
         .build();
     let mut cursor = coll.find(filter).with_options(opts).await?;
-    let mut items = Vec::new();
+    let mut settlements = Vec::new();
     while let Some(s) = cursor.try_next().await? {
-        items.push(settlement_to_response(&s));
+        settlements.push(s);
     }
+    let ids: Vec<ObjectId> = settlements.iter().map(|s| s.id).collect();
+    let mut totals = load_settlement_totals(&state, user.id, &ids).await?;
+    let items = settlements
+        .iter()
+        .map(|s| settlement_to_response(s, totals.remove(&s.id).unwrap_or_default()))
+        .collect();
     Ok(Json(FinanceSettlementListResponse { items, total }))
+}
+
+pub async fn get_settlement(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<FinanceSettlementDetailResponse>> {
+    require_finance(&state, &user)?;
+    let oid = parse_oid(&id, "settlement id")?;
+    let settlement = state
+        .db
+        .collection::<FinanceSettlement>(SETTLEMENTS)
+        .find_one(doc! { "_id": oid, "owner_id": user.id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Settlement not found".into()))?;
+    let totals = load_settlement_totals(&state, user.id, &[oid])
+        .await?
+        .remove(&oid)
+        .unwrap_or_default();
+    Ok(Json(
+        settlement_detail(&state, user.id, &settlement, totals).await?,
+    ))
 }
 
 pub async fn create_settlement(
@@ -1116,10 +1251,11 @@ pub async fn create_settlement(
         currency,
         category_id,
         description,
+        notes: trim_to_option(req.notes.as_deref()),
         opened_at: parse_date(&req.opened_at)?,
+        next_payment_at: parse_optional_date(req.next_payment_at.as_deref())?,
         source_transaction_id,
         status: SettlementStatus::Open,
-        entries: Vec::new(),
         created_at: now,
         updated_at: now,
         closed_at: None,
@@ -1131,7 +1267,10 @@ pub async fn create_settlement(
         .await?;
     Ok((
         StatusCode::CREATED,
-        Json(settlement_to_response(&settlement)),
+        Json(settlement_to_response(
+            &settlement,
+            SettlementTotals::default(),
+        )),
     ))
 }
 
@@ -1181,8 +1320,14 @@ pub async fn update_settlement(
         }
         settlement.description = trimmed;
     }
+    if let Some(notes) = req.notes {
+        settlement.notes = trim_to_option(notes.as_deref());
+    }
     if let Some(opened_at) = req.opened_at {
         settlement.opened_at = parse_date(&opened_at)?;
+    }
+    if let Some(next_payment_at) = req.next_payment_at {
+        settlement.next_payment_at = parse_optional_date(next_payment_at.as_deref())?;
     }
     if let Some(source_transaction_id) = req.source_transaction_id {
         settlement.source_transaction_id = validate_optional_transaction_link(
@@ -1196,10 +1341,14 @@ pub async fn update_settlement(
 
     let now = Utc::now();
     settlement.updated_at = now;
-    recompute_settlement_status(&mut settlement, now)?;
+    let totals = load_settlement_totals(&state, user.id, &[oid])
+        .await?
+        .remove(&oid)
+        .unwrap_or_default();
+    recompute_settlement_status(&mut settlement, &totals, now)?;
     coll.replace_one(doc! { "_id": oid, "owner_id": user.id }, &settlement)
         .await?;
-    Ok(Json(settlement_to_response(&settlement)))
+    Ok(Json(settlement_to_response(&settlement, totals)))
 }
 
 pub async fn delete_settlement(
@@ -1217,6 +1366,11 @@ pub async fn delete_settlement(
     if result.deleted_count == 0 {
         return Err(AppError::NotFound("Settlement not found".into()));
     }
+    state
+        .db
+        .collection::<SettlementEntry>(SETTLEMENT_ENTRIES)
+        .delete_many(doc! { "owner_id": user.id, "settlement_id": oid })
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1225,7 +1379,7 @@ pub async fn create_settlement_entry(
     user: AuthUser,
     Path(id): Path<String>,
     Json(req): Json<CreateSettlementEntryRequest>,
-) -> Result<(StatusCode, Json<FinanceSettlementResponse>)> {
+) -> Result<(StatusCode, Json<FinanceSettlementDetailResponse>)> {
     require_finance(&state, &user)?;
     let oid = parse_oid(&id, "settlement id")?;
     let coll = state.db.collection::<FinanceSettlement>(SETTLEMENTS);
@@ -1233,33 +1387,29 @@ pub async fn create_settlement_entry(
         .find_one(doc! { "_id": oid, "owner_id": user.id })
         .await?
         .ok_or_else(|| AppError::NotFound("Settlement not found".into()))?;
-    if settlement.status != SettlementStatus::Open {
-        return Err(AppError::BadRequest("Settlement is already closed".into()));
-    }
+    let kind = parse_settlement_entry_kind(&req.kind)?;
     if req.amount_minor <= 0 {
         return Err(AppError::BadRequest(
             "Settlement entry amount must be greater than zero".into(),
         ));
     }
-    let (_, _, outstanding_minor) = settlement_totals(&settlement);
-    if req.amount_minor > outstanding_minor {
-        return Err(AppError::BadRequest(
-            "Settlement entry cannot exceed the outstanding amount".into(),
-        ));
+    let mut totals = load_settlement_totals(&state, user.id, &[oid])
+        .await?
+        .remove(&oid)
+        .unwrap_or_default();
+    // Charges may land on a closed settlement — they reopen it ("you also
+    // owe me for the door"). Payments and forgiveness require an open one.
+    if kind != SettlementEntryKind::Charge {
+        if settlement.status != SettlementStatus::Open {
+            return Err(AppError::BadRequest("Settlement is already closed".into()));
+        }
+        if req.amount_minor > totals.outstanding(&settlement) {
+            return Err(AppError::BadRequest(
+                "Settlement entry cannot exceed the outstanding amount".into(),
+            ));
+        }
     }
 
-    let counterparty = req
-        .counterparty
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    let note = req
-        .note
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
     let linked_transaction_id = validate_optional_transaction_link(
         &state,
         user.id,
@@ -1269,23 +1419,32 @@ pub async fn create_settlement_entry(
     .await?;
 
     let now = Utc::now();
-    settlement.entries.push(SettlementEntry {
+    let entry = SettlementEntry {
         id: ObjectId::new(),
-        kind: parse_settlement_entry_kind(&req.kind)?,
-        counterparty,
+        owner_id: user.id,
+        settlement_id: oid,
+        kind,
+        counterparty: trim_to_option(req.counterparty.as_deref()),
         amount_minor: req.amount_minor,
         date: parse_date(&req.date)?,
         linked_transaction_id,
-        note,
+        note: trim_to_option(req.note.as_deref()),
         created_at: now,
-    });
+    };
+    state
+        .db
+        .collection::<SettlementEntry>(SETTLEMENT_ENTRIES)
+        .insert_one(&entry)
+        .await?;
+
+    totals.apply(kind, entry.amount_minor);
     settlement.updated_at = now;
-    recompute_settlement_status(&mut settlement, now)?;
+    recompute_settlement_status(&mut settlement, &totals, now)?;
     coll.replace_one(doc! { "_id": oid, "owner_id": user.id }, &settlement)
         .await?;
     Ok((
         StatusCode::CREATED,
-        Json(settlement_to_response(&settlement)),
+        Json(settlement_detail(&state, user.id, &settlement, totals).await?),
     ))
 }
 
@@ -1293,7 +1452,7 @@ pub async fn delete_settlement_entry(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path((id, entry_id)): Path<(String, String)>,
-) -> Result<Json<FinanceSettlementResponse>> {
+) -> Result<Json<FinanceSettlementDetailResponse>> {
     require_finance(&state, &user)?;
     let oid = parse_oid(&id, "settlement id")?;
     let entry_oid = parse_oid(&entry_id, "settlement entry id")?;
@@ -1302,17 +1461,31 @@ pub async fn delete_settlement_entry(
         .find_one(doc! { "_id": oid, "owner_id": user.id })
         .await?
         .ok_or_else(|| AppError::NotFound("Settlement not found".into()))?;
-    let before = settlement.entries.len();
-    settlement.entries.retain(|entry| entry.id != entry_oid);
-    if settlement.entries.len() == before {
-        return Err(AppError::NotFound("Settlement entry not found".into()));
-    }
+    let entries_coll = state.db.collection::<SettlementEntry>(SETTLEMENT_ENTRIES);
+    let entry = entries_coll
+        .find_one(doc! { "_id": entry_oid, "owner_id": user.id, "settlement_id": oid })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Settlement entry not found".into()))?;
+
+    let mut totals = load_settlement_totals(&state, user.id, &[oid])
+        .await?
+        .remove(&oid)
+        .unwrap_or_default();
+    totals.apply(entry.kind, -entry.amount_minor);
     let now = Utc::now();
+    // Validate before deleting — removing a charge that payments already
+    // cover would push the outstanding amount negative.
+    recompute_settlement_status(&mut settlement, &totals, now)?;
+
+    entries_coll
+        .delete_one(doc! { "_id": entry_oid, "owner_id": user.id })
+        .await?;
     settlement.updated_at = now;
-    recompute_settlement_status(&mut settlement, now)?;
     coll.replace_one(doc! { "_id": oid, "owner_id": user.id }, &settlement)
         .await?;
-    Ok(Json(settlement_to_response(&settlement)))
+    Ok(Json(
+        settlement_detail(&state, user.id, &settlement, totals).await?,
+    ))
 }
 
 // ── CSV import ───────────────────────────────────────────────────────────

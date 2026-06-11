@@ -215,11 +215,19 @@ pub enum SettlementStatus {
 pub enum SettlementEntryKind {
     Payment,
     Forgiveness,
+    /// Adds to the outstanding amount instead of reducing it — a new
+    /// obligation tracked under the same settlement ("you also owe me
+    /// 50 for the door").
+    Charge,
 }
 
+/// Stored in its own `finance_settlement_entries` collection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettlementEntry {
+    #[serde(rename = "_id")]
     pub id: ObjectId,
+    pub owner_id: ObjectId,
+    pub settlement_id: ObjectId,
     pub kind: SettlementEntryKind,
     #[serde(default)]
     pub counterparty: Option<String>,
@@ -241,18 +249,21 @@ pub struct FinanceSettlement {
     pub owner_id: ObjectId,
     pub counterparty: String,
     pub direction: SettlementDirection,
+    /// Opening amount; the live balance also counts `charge` entries.
     pub amount_minor: i64,
     pub currency: String,
     #[serde(default)]
     pub category_id: Option<ObjectId>,
     pub description: String,
+    #[serde(default)]
+    pub notes: Option<String>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]
     pub opened_at: DateTime<Utc>,
+    #[serde(default, with = "crate::models::opt_dt")]
+    pub next_payment_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub source_transaction_id: Option<ObjectId>,
     pub status: SettlementStatus,
-    #[serde(default)]
-    pub entries: Vec<SettlementEntry>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "chrono_datetime_as_bson_datetime")]

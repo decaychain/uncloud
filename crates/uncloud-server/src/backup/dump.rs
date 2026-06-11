@@ -64,6 +64,8 @@ pub const COLLECTION_ALLOWLIST: &[&str] = &[
     "finance_import_runs",
     "finance_balance_snapshots",
     "finance_rules",
+    "finance_settlements",
+    "finance_settlement_entries",
     "mail_accounts",
     "mail_identities",
     "mail_folders",

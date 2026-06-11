@@ -196,6 +196,7 @@ pub fn Layout() -> Element {
         | Route::FinanceAccounts {}
         | Route::FinanceCategories {}
         | Route::FinanceSettlements {}
+        | Route::FinanceSettlementDetail { .. }
         | Route::FinanceSchemas {}
         | Route::FinanceImports {}
         | Route::FinanceRules {} => "Uncloud - Finance",
@@ -285,6 +286,7 @@ fn route_feature_id(route: &Route) -> Option<&'static str> {
         | Route::FinanceAccounts {}
         | Route::FinanceCategories {}
         | Route::FinanceSettlements {}
+        | Route::FinanceSettlementDetail { .. }
         | Route::FinanceSchemas {}
         | Route::FinanceImports {}
         | Route::FinanceRules {} => Some("finance"),
@@ -367,6 +369,7 @@ fn Navbar() -> Element {
             | Route::FinanceAccounts {}
             | Route::FinanceCategories {}
             | Route::FinanceSettlements {}
+            | Route::FinanceSettlementDetail { .. }
             | Route::FinanceSchemas {}
             | Route::FinanceImports {}
             | Route::FinanceRules {},

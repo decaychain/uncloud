@@ -5,11 +5,11 @@ use uncloud_common::{
     CategorySummaryResponse, CreateAccountRequest, CreateFinanceCategoryRequest,
     CreateFinanceSettlementRequest, CreateSettlementEntryRequest, CreateTransactionRequest,
     FinanceCategoryResponse, FinanceRuleRequest, FinanceRuleResponse,
-    FinanceSettlementListResponse, FinanceSettlementResponse, ImportCsvResponse, ImportRunResponse,
-    ImportSchemaRequest, ImportSchemaResponse, ReconcilePreviewResponse, ReconcileRequest,
-    ReorderRulesRequest, TestRuleRequest, TestRuleResponse, TransactionListResponse,
-    TransactionResponse, UpdateAccountRequest, UpdateFinanceCategoryRequest,
-    UpdateFinanceSettlementRequest, UpdateTransactionRequest,
+    FinanceSettlementDetailResponse, FinanceSettlementListResponse, FinanceSettlementResponse,
+    ImportCsvResponse, ImportRunResponse, ImportSchemaRequest, ImportSchemaResponse,
+    ReconcilePreviewResponse, ReconcileRequest, ReorderRulesRequest, TestRuleRequest,
+    TestRuleResponse, TransactionListResponse, TransactionResponse, UpdateAccountRequest,
+    UpdateFinanceCategoryRequest, UpdateFinanceSettlementRequest, UpdateTransactionRequest,
 };
 
 use super::api;
@@ -299,6 +299,20 @@ pub async fn list_settlements(
     }
 }
 
+pub async fn get_settlement(id: &str) -> Result<FinanceSettlementDetailResponse, String> {
+    let r = api::get(&format!("/finance/settlements/{}", id))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if r.ok() {
+        r.json::<FinanceSettlementDetailResponse>()
+            .await
+            .map_err(|e| e.to_string())
+    } else {
+        Err(extract_error(r).await)
+    }
+}
+
 pub async fn create_settlement(
     req: &CreateFinanceSettlementRequest,
 ) -> Result<FinanceSettlementResponse, String> {
@@ -351,7 +365,7 @@ pub async fn delete_settlement(id: &str) -> Result<(), String> {
 pub async fn create_settlement_entry(
     settlement_id: &str,
     req: &CreateSettlementEntryRequest,
-) -> Result<FinanceSettlementResponse, String> {
+) -> Result<FinanceSettlementDetailResponse, String> {
     let r = api::post(&format!("/finance/settlements/{}/entries", settlement_id))
         .json(req)
         .map_err(|e| e.to_string())?
@@ -359,7 +373,7 @@ pub async fn create_settlement_entry(
         .await
         .map_err(|e| e.to_string())?;
     if r.ok() || r.status() == 201 {
-        r.json::<FinanceSettlementResponse>()
+        r.json::<FinanceSettlementDetailResponse>()
             .await
             .map_err(|e| e.to_string())
     } else {
@@ -370,7 +384,7 @@ pub async fn create_settlement_entry(
 pub async fn delete_settlement_entry(
     settlement_id: &str,
     entry_id: &str,
-) -> Result<FinanceSettlementResponse, String> {
+) -> Result<FinanceSettlementDetailResponse, String> {
     let r = api::delete(&format!(
         "/finance/settlements/{}/entries/{}",
         settlement_id, entry_id
@@ -379,7 +393,7 @@ pub async fn delete_settlement_entry(
     .await
     .map_err(|e| e.to_string())?;
     if r.ok() {
-        r.json::<FinanceSettlementResponse>()
+        r.json::<FinanceSettlementDetailResponse>()
             .await
             .map_err(|e| e.to_string())
     } else {

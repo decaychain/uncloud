@@ -117,6 +117,9 @@ pub enum Route {
         #[route("/finance/settlements")]
         FinanceSettlements {},
 
+        #[route("/finance/settlements/:id")]
+        FinanceSettlementDetail { id: String },
+
         #[route("/finance/schemas")]
         FinanceSchemas {},
 
@@ -345,7 +348,12 @@ fn FinanceCategories() -> Element {
 
 #[component]
 fn FinanceSettlements() -> Element {
-    rsx! { FinanceSettlementsPage {} }
+    rsx! { FinanceSettlementsPage { selected_id: None::<String> } }
+}
+
+#[component]
+fn FinanceSettlementDetail(id: String) -> Element {
+    rsx! { FinanceSettlementsPage { selected_id: Some(id) } }
 }
 
 #[component]
