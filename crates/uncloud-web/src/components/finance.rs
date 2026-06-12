@@ -1141,9 +1141,9 @@ fn SettlementsView(selected_id: Option<String>) -> Element {
         div { class: "flex flex-col gap-4 lg:flex-row lg:items-start",
             div {
                 class: if has_selection {
-                    "hidden w-full flex-col gap-3 lg:flex lg:w-96 lg:shrink-0"
+                    "hidden w-full flex-col gap-3 lg:flex lg:w-[26rem] lg:shrink-0"
                 } else {
-                    "flex w-full flex-col gap-3 lg:w-96 lg:shrink-0"
+                    "flex w-full flex-col gap-3 lg:w-[26rem] lg:shrink-0"
                 },
                 div { class: "flex items-start justify-between gap-3",
                     div {
@@ -1772,15 +1772,22 @@ fn SettlementFormModal(
                     label { class: "form-control",
                         span { class: "label-text pb-1", "Category" }
                         select {
+                            key: "category-select-{category_options().len()}",
                             class: "select select-bordered",
                             value: "{category_id}",
                             onchange: move |e| category_id.set(e.value()),
-                            option { value: "", "Uncategorized" }
+                            option { value: "", selected: category_id().is_empty(), "Uncategorized" }
                             {
                                 let opts = category_options();
+                                let selected_id = category_id();
                                 opts.iter()
                                     .map(|c| rsx! {
-                                        option { key: "{c.id}", value: "{c.id}", "{category_label(&opts, &c.id).unwrap_or_else(|| c.name.clone())}" }
+                                        option {
+                                            key: "{c.id}",
+                                            value: "{c.id}",
+                                            selected: c.id == selected_id,
+                                            "{category_label(&opts, &c.id).unwrap_or_else(|| c.name.clone())}"
+                                        }
                                     })
                                     .collect::<Vec<_>>()
                                     .into_iter()
