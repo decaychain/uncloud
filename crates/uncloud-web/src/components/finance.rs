@@ -1141,9 +1141,9 @@ fn SettlementsView(selected_id: Option<String>) -> Element {
         div { class: "flex flex-col gap-4 lg:flex-row lg:items-start",
             div {
                 class: if has_selection {
-                    "hidden w-full flex-col gap-3 lg:flex lg:w-[26rem] lg:shrink-0"
+                    "hidden w-full flex-col gap-3 lg:flex lg:w-[28rem] lg:shrink-0"
                 } else {
-                    "flex w-full flex-col gap-3 lg:w-[26rem] lg:shrink-0"
+                    "flex w-full flex-col gap-3 lg:w-[28rem] lg:shrink-0"
                 },
                 div { class: "flex items-start justify-between gap-3",
                     div {
