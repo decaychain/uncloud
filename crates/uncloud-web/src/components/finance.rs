@@ -1225,6 +1225,18 @@ fn SettlementsView(selected_id: Option<String>) -> Element {
                             } else {
                                 "block rounded-lg border border-base-300 bg-base-100 p-3 transition-colors hover:bg-base-200"
                             };
+                            let category_name = settlement
+                                .category_id
+                                .as_deref()
+                                .and_then(|cid| category_label(&categories_for_forms, cid));
+                            let next_due = if settlement.status == "open" {
+                                settlement
+                                    .next_payment_at
+                                    .as_deref()
+                                    .map(|d| (short_date(d), is_overdue(d)))
+                            } else {
+                                None
+                            };
                             rsx! {
                                 Link {
                                     key: "{settlement.id}",
@@ -1240,12 +1252,15 @@ fn SettlementsView(selected_id: Option<String>) -> Element {
                                             span { class: "{status_class}", "{settlement.status}" }
                                         }
                                     }
-                                    if settlement.status == "open" {
-                                        if let Some(due) = settlement.next_payment_at.as_ref() {
-                                            div { class: "mt-1.5",
+                                    if category_name.is_some() || next_due.is_some() {
+                                        div { class: "mt-1.5 flex flex-wrap items-center gap-1.5",
+                                            if let Some(name) = category_name {
+                                                span { class: "badge badge-outline badge-sm", "{name}" }
+                                            }
+                                            if let Some((due, overdue)) = next_due {
                                                 span {
-                                                    class: if is_overdue(due) { "badge badge-error badge-sm" } else { "badge badge-ghost badge-sm" },
-                                                    "Next payment {short_date(due)}"
+                                                    class: if overdue { "badge badge-error badge-sm" } else { "badge badge-ghost badge-sm" },
+                                                    "Next payment {due}"
                                                 }
                                             }
                                         }
@@ -1666,6 +1681,12 @@ fn SettlementFormModal(
     });
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut saving = use_signal(|| false);
+    // Local copy so a category created inline is selectable immediately;
+    // the parent's list refreshes when the settlement is saved.
+    let mut category_options = use_signal(|| categories.clone());
+    let mut new_category_open = use_signal(|| false);
+    let mut new_category_name = use_signal(String::new);
+    let mut creating_category = use_signal(|| false);
 
     rsx! {
         div { class: "modal modal-open",
@@ -1755,9 +1776,71 @@ fn SettlementFormModal(
                             value: "{category_id}",
                             onchange: move |e| category_id.set(e.value()),
                             option { value: "", "Uncategorized" }
-                            {categories.iter().map(|c| rsx! {
-                                option { key: "{c.id}", value: "{c.id}", "{category_label(&categories, &c.id).unwrap_or_else(|| c.name.clone())}" }
-                            })}
+                            {
+                                let opts = category_options();
+                                opts.iter()
+                                    .map(|c| rsx! {
+                                        option { key: "{c.id}", value: "{c.id}", "{category_label(&opts, &c.id).unwrap_or_else(|| c.name.clone())}" }
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .into_iter()
+                            }
+                        }
+                    }
+                    div { class: "sm:col-span-2",
+                        if new_category_open() {
+                            div { class: "flex items-center gap-2",
+                                input {
+                                    class: "input input-bordered input-sm min-w-0 flex-1",
+                                    placeholder: "New category name",
+                                    value: "{new_category_name}",
+                                    oninput: move |e| new_category_name.set(e.value()),
+                                }
+                                button {
+                                    r#type: "button",
+                                    class: "btn btn-primary btn-sm",
+                                    disabled: creating_category() || new_category_name().trim().is_empty(),
+                                    onclick: move |_| {
+                                        spawn(async move {
+                                            creating_category.set(true);
+                                            let req = CreateFinanceCategoryRequest {
+                                                name: new_category_name().trim().to_string(),
+                                                parent_id: None,
+                                                colour: None,
+                                            };
+                                            match use_finance::create_category(&req).await {
+                                                Ok(c) => {
+                                                    category_id.set(c.id.clone());
+                                                    category_options.with_mut(|list| list.push(c));
+                                                    new_category_name.set(String::new());
+                                                    new_category_open.set(false);
+                                                    error.set(None);
+                                                }
+                                                Err(e) => error.set(Some(e)),
+                                            }
+                                            creating_category.set(false);
+                                        });
+                                    },
+                                    if creating_category() { "Adding…" } else { "Add" }
+                                }
+                                button {
+                                    r#type: "button",
+                                    class: "btn btn-ghost btn-sm",
+                                    onclick: move |_| {
+                                        new_category_open.set(false);
+                                        new_category_name.set(String::new());
+                                    },
+                                    "Cancel"
+                                }
+                            }
+                        } else {
+                            button {
+                                r#type: "button",
+                                class: "btn btn-ghost btn-sm",
+                                onclick: move |_| new_category_open.set(true),
+                                IconPlus {}
+                                span { "New category" }
+                            }
                         }
                     }
                     label { class: "form-control sm:col-span-2",
