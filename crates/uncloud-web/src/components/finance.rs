@@ -1237,6 +1237,13 @@ fn SettlementsView(selected_id: Option<String>) -> Element {
                             } else {
                                 None
                             };
+                            let total_minor = settlement.amount_minor + settlement.charged_minor;
+                            let progress = if total_minor > 0 {
+                                ((settlement.paid_minor + settlement.forgiven_minor) * 100 / total_minor)
+                                    .clamp(0, 100)
+                            } else {
+                                0
+                            };
                             rsx! {
                                 Link {
                                     key: "{settlement.id}",
@@ -1264,6 +1271,11 @@ fn SettlementsView(selected_id: Option<String>) -> Element {
                                                 }
                                             }
                                         }
+                                    }
+                                    progress {
+                                        class: "progress progress-primary mt-2 h-1.5 w-full",
+                                        value: "{progress}",
+                                        max: "100",
                                     }
                                 }
                             }
