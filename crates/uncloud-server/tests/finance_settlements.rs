@@ -217,10 +217,12 @@ async fn notes_and_next_payment_roundtrip() {
     res.assert_status(StatusCode::CREATED);
     let settlement: Value = res.json();
     assert_eq!(settlement["notes"], "Materials included");
-    assert!(settlement["next_payment_at"]
-        .as_str()
-        .unwrap()
-        .starts_with("2026-06-19"));
+    assert!(
+        settlement["next_payment_at"]
+            .as_str()
+            .unwrap()
+            .starts_with("2026-06-19")
+    );
     let settlement_id = settlement["id"].as_str().unwrap().to_string();
 
     // Empty strings clear the optional fields (JSON null cannot express
@@ -283,6 +285,78 @@ async fn deleting_settlement_cascades_entries() {
         .await
         .unwrap();
     assert_eq!(orphans, 0);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn list_filters_by_category_including_descendants() {
+    let app = TestApp::new().await;
+    app.register_and_login("ivan").await;
+
+    let parent: Value = app
+        .server
+        .post("/api/finance/categories")
+        .json(&serde_json::json!({ "name": "Repairs" }))
+        .await
+        .json();
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let child: Value = app
+        .server
+        .post("/api/finance/categories")
+        .json(&serde_json::json!({ "name": "Windows", "parent_id": parent_id }))
+        .await
+        .json();
+    let child_id = child["id"].as_str().unwrap().to_string();
+
+    for (desc, cat) in [
+        ("Window job", Some(child_id.as_str())),
+        ("Roof job", Some(parent_id.as_str())),
+        ("Beer", None),
+    ] {
+        let mut body = serde_json::json!({
+            "counterparty": "Bob",
+            "direction": "owed_to_me",
+            "amount_minor": 10_00,
+            "currency": "EUR",
+            "description": desc,
+            "opened_at": "2026-06-01",
+        });
+        if let Some(cat) = cat {
+            body["category_id"] = serde_json::json!(cat);
+        }
+        app.server
+            .post("/api/finance/settlements")
+            .json(&body)
+            .await
+            .assert_status(StatusCode::CREATED);
+    }
+
+    let by_parent: Value = app
+        .server
+        .get("/api/finance/settlements")
+        .add_query_param("category_id", &parent_id)
+        .await
+        .json();
+    assert_eq!(by_parent["total"], 2);
+
+    let by_child: Value = app
+        .server
+        .get("/api/finance/settlements")
+        .add_query_param("category_id", &child_id)
+        .await
+        .json();
+    assert_eq!(by_child["total"], 1);
+    assert_eq!(by_child["items"][0]["description"], "Window job");
+
+    let uncategorized: Value = app
+        .server
+        .get("/api/finance/settlements")
+        .add_query_param("uncategorized", "true")
+        .await
+        .json();
+    assert_eq!(uncategorized["total"], 1);
+    assert_eq!(uncategorized["items"][0]["description"], "Beer");
 
     app.cleanup().await;
 }

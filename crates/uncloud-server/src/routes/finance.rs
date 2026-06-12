@@ -7,21 +7,22 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use bson::doc;
 use chrono::{DateTime, TimeZone, Utc};
 use futures::TryStreamExt;
-use mongodb::bson::oid::ObjectId;
 use mongodb::bson::Bson;
+use mongodb::bson::oid::ObjectId;
 use mongodb::options::FindOptions;
 use serde::Deserialize;
 
 use sha2::{Digest, Sha256};
 
+use crate::AppState;
 use crate::error::{AppError, Result};
-use crate::finance_import::{self, sparkasse_camt_v8, ParseError, ParsedRow};
+use crate::finance_import::{self, ParseError, ParsedRow, sparkasse_camt_v8};
 use crate::finance_rules::{self, RuleEngine};
 use crate::middleware::AuthUser;
 use crate::models::{
@@ -31,7 +32,6 @@ use crate::models::{
     ImportSource, ImportSourceKind, RulePatternKind, SettlementDirection, SettlementEntry,
     SettlementEntryKind, SettlementStatus, TransactionLeg,
 };
-use crate::AppState;
 use uncloud_common::{
     AccountBalanceResponse, AccountResponse, ApplyRulesResponse, BalanceSnapshotResponse,
     CategorySummaryItem, CategorySummaryResponse, CreateAccountRequest,
@@ -1021,11 +1021,7 @@ pub async fn create_transaction(
         raw_bank_category: None,
         notes: req.notes.and_then(|n| {
             let t = n.trim().to_string();
-            if t.is_empty() {
-                None
-            } else {
-                Some(t)
-            }
+            if t.is_empty() { None } else { Some(t) }
         }),
         tags: vec![],
         legs: vec![leg],
@@ -1148,6 +1144,9 @@ pub async fn delete_transaction(
 #[derive(Debug, Deserialize, Default)]
 pub struct ListSettlementsQuery {
     pub status: Option<String>,
+    /// Matches the category and its descendants, like the transaction list.
+    pub category_id: Option<String>,
+    pub uncategorized: Option<bool>,
     pub limit: Option<u32>,
     pub skip: Option<u32>,
 }
@@ -1166,6 +1165,21 @@ pub async fn list_settlements(
                 "status",
                 settlement_status_to_api(parse_settlement_status(trimmed)?),
             );
+        }
+    }
+    if q.uncategorized.unwrap_or(false) {
+        filter.insert("category_id", Bson::Null);
+    } else if let Some(cat) = q
+        .category_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let ids = category_filter_ids(&state, user.id, cat).await?;
+        if ids.len() == 1 {
+            filter.insert("category_id", ids[0]);
+        } else {
+            filter.insert("category_id", doc! { "$in": ids });
         }
     }
 

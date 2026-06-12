@@ -280,6 +280,8 @@ pub async fn delete_transaction(id: &str) -> Result<(), String> {
 
 pub async fn list_settlements(
     status: Option<&str>,
+    category_id: Option<&str>,
+    uncategorized: bool,
     limit: u32,
     skip: u32,
 ) -> Result<FinanceSettlementListResponse, String> {
@@ -288,6 +290,14 @@ pub async fn list_settlements(
         if !s.is_empty() {
             url.push_str(&format!("&status={}", s));
         }
+    }
+    if let Some(c) = category_id {
+        if !c.is_empty() {
+            url.push_str(&format!("&category_id={}", c));
+        }
+    }
+    if uncategorized {
+        url.push_str("&uncategorized=true");
     }
     let r = api::get(&url).send().await.map_err(|e| e.to_string())?;
     if r.ok() {

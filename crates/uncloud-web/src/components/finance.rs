@@ -55,7 +55,13 @@ pub fn FinanceCategoriesPage() -> Element {
 
 #[component]
 pub fn FinanceSettlementsPage(selected_id: Option<String>) -> Element {
-    finance_shell(rsx! { SettlementsView { selected_id } })
+    // Full width like the transactions view — the two-pane layout benefits
+    // from the horizontal real estate.
+    rsx! {
+        div { class: "w-full min-w-0",
+            SettlementsView { selected_id }
+        }
+    }
 }
 
 #[component]
@@ -156,11 +162,7 @@ fn last_day_of_month(year: i32, m_zero_based: u32) -> u32 {
         3 | 5 | 8 | 10 => 30,
         1 => {
             let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-            if leap {
-                29
-            } else {
-                28
-            }
+            if leap { 29 } else { 28 }
         }
         _ => 30,
     }
@@ -1090,19 +1092,36 @@ fn SettlementsView(selected_id: Option<String>) -> Element {
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut refresh = use_signal(|| 0u32);
     let mut status_filter: Signal<String> = use_signal(|| "open".to_string());
+    let mut category_filter: Signal<String> = use_signal(String::new);
     let mut show_create = use_signal(|| false);
     let page_size = 200u32;
 
     use_effect(move || {
         let _ = refresh();
         let _ = status_filter();
+        let _ = category_filter();
         spawn(async move {
             loading.set(true);
             if let Ok(c) = use_finance::list_categories().await {
                 categories.set(c);
             }
             let status = status_filter();
-            match use_finance::list_settlements(Some(status.as_str()), page_size, 0).await {
+            let cat = category_filter();
+            let cat_opt = if cat.is_empty() || cat == UNCATEGORIZED_FILTER {
+                None
+            } else {
+                Some(cat.as_str())
+            };
+            let uncategorized = cat == UNCATEGORIZED_FILTER;
+            match use_finance::list_settlements(
+                Some(status.as_str()),
+                cat_opt,
+                uncategorized,
+                page_size,
+                0,
+            )
+            .await
+            {
                 Ok(resp) => {
                     settlements.set(resp.items);
                     total.set(resp.total);
@@ -1166,6 +1185,21 @@ fn SettlementsView(selected_id: Option<String>) -> Element {
                     }
                 }
 
+                select {
+                    class: "select select-bordered select-sm w-full",
+                    value: "{category_filter}",
+                    onchange: move |e| category_filter.set(e.value()),
+                    option { value: "", "All categories" }
+                    option { value: UNCATEGORIZED_FILTER, "Uncategorized" }
+                    {categories_for_forms.iter().map(|c| rsx! {
+                        option {
+                            key: "{c.id}",
+                            value: "{c.id}",
+                            "{category_label(&categories_for_forms, &c.id).unwrap_or_else(|| c.name.clone())}"
+                        }
+                    })}
+                }
+
                 if loading() && settlements().is_empty() {
                     div { class: "py-12 text-center opacity-60", "Loading settlements…" }
                 } else if settlements().is_empty() {
@@ -1178,8 +1212,16 @@ fn SettlementsView(selected_id: Option<String>) -> Element {
                         {settlements().iter().map(|settlement| {
                             let is_selected = selected_id.as_deref() == Some(settlement.id.as_str());
                             let status_class = settlement_status_class(&settlement.status);
+                            let overdue = settlement.status == "open"
+                                && settlement
+                                    .next_payment_at
+                                    .as_deref()
+                                    .map(is_overdue)
+                                    .unwrap_or(false);
                             let row_class = if is_selected {
                                 "block rounded-lg border border-primary bg-base-200 p-3"
+                            } else if overdue {
+                                "block rounded-lg border border-warning bg-warning/10 p-3 transition-colors hover:bg-warning/20"
                             } else {
                                 "block rounded-lg border border-base-300 bg-base-100 p-3 transition-colors hover:bg-base-200"
                             };
@@ -1687,13 +1729,23 @@ fn SettlementFormModal(
                             oninput: move |e| opened_at.set(e.value()),
                         }
                     }
-                    label { class: "form-control",
+                    div { class: "form-control",
                         span { class: "label-text pb-1", "Next payment (optional)" }
-                        input {
-                            r#type: "date",
-                            class: "input input-bordered",
-                            value: "{next_payment_at}",
-                            oninput: move |e| next_payment_at.set(e.value()),
+                        div { class: "flex items-center gap-2",
+                            input {
+                                r#type: "date",
+                                class: "input input-bordered min-w-0 flex-1",
+                                value: "{next_payment_at}",
+                                oninput: move |e| next_payment_at.set(e.value()),
+                            }
+                            if !next_payment_at().is_empty() {
+                                button {
+                                    r#type: "button",
+                                    class: "btn btn-ghost btn-sm",
+                                    onclick: move |_| next_payment_at.set(String::new()),
+                                    "Clear"
+                                }
+                            }
                         }
                     }
                     label { class: "form-control",
