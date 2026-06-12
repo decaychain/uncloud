@@ -151,6 +151,116 @@ pub struct TransactionListResponse {
     pub total: u64,
 }
 
+// ── Settlements / IOUs ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SettlementEntryResponse {
+    pub id: String,
+    /// "payment", "forgiveness", or "charge".
+    pub kind: String,
+    /// Optional per-entry override; useful for group settlements.
+    pub counterparty: Option<String>,
+    pub amount_minor: i64,
+    pub date: String,
+    pub linked_transaction_id: Option<String>,
+    pub note: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FinanceSettlementResponse {
+    pub id: String,
+    pub counterparty: String,
+    /// "owed_to_me" or "owed_by_me".
+    pub direction: String,
+    /// The opening amount; `charge` entries add on top of it.
+    pub amount_minor: i64,
+    pub currency: String,
+    pub category_id: Option<String>,
+    pub description: String,
+    pub notes: Option<String>,
+    pub opened_at: String,
+    pub next_payment_at: Option<String>,
+    pub source_transaction_id: Option<String>,
+    /// "open", "settled", or "forgiven".
+    pub status: String,
+    pub paid_minor: i64,
+    pub forgiven_minor: i64,
+    pub charged_minor: i64,
+    /// `amount_minor + charged_minor - paid_minor - forgiven_minor`.
+    pub outstanding_minor: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub closed_at: Option<String>,
+}
+
+/// Returned by the single-settlement endpoint and by entry mutations.
+/// Entries live in their own collection, so the list endpoint omits them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FinanceSettlementDetailResponse {
+    #[serde(flatten)]
+    pub settlement: FinanceSettlementResponse,
+    pub entries: Vec<SettlementEntryResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CreateFinanceSettlementRequest {
+    pub counterparty: String,
+    pub direction: String,
+    pub amount_minor: i64,
+    pub currency: String,
+    #[serde(default)]
+    pub category_id: Option<String>,
+    pub description: String,
+    #[serde(default)]
+    pub notes: Option<String>,
+    pub opened_at: String,
+    #[serde(default)]
+    pub next_payment_at: Option<String>,
+    #[serde(default)]
+    pub source_transaction_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct UpdateFinanceSettlementRequest {
+    pub counterparty: Option<String>,
+    pub direction: Option<String>,
+    pub amount_minor: Option<i64>,
+    pub currency: Option<String>,
+    /// Two-level Option so PATCH can leave the field alone (omit it) or
+    /// replace it. Clients clear a field by sending an empty string —
+    /// plain JSON `null` deserializes to the outer `None` ("leave alone"),
+    /// so it cannot express "clear".
+    pub category_id: Option<Option<String>>,
+    pub description: Option<String>,
+    /// Same two-level shape; empty string clears.
+    pub notes: Option<Option<String>>,
+    pub opened_at: Option<String>,
+    /// Same two-level shape; empty string clears.
+    pub next_payment_at: Option<Option<String>>,
+    /// Same two-level shape; empty string clears.
+    pub source_transaction_id: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FinanceSettlementListResponse {
+    pub items: Vec<FinanceSettlementResponse>,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CreateSettlementEntryRequest {
+    pub kind: String,
+    #[serde(default)]
+    pub counterparty: Option<String>,
+    pub amount_minor: i64,
+    pub date: String,
+    #[serde(default)]
+    pub linked_transaction_id: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
 // ── CSV import ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

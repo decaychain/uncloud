@@ -768,6 +768,46 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         )
         .await?;
 
+    let finance_settlements = db.collection::<mongodb::bson::Document>("finance_settlements");
+    finance_settlements
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "status": 1, "opened_at": -1 })
+                .build(),
+        )
+        .await?;
+    finance_settlements
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "counterparty": 1, "currency": 1, "status": 1 })
+                .build(),
+        )
+        .await?;
+    finance_settlements
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "source_transaction_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(mongodb::bson::doc! {
+                            "source_transaction_id": { "$type": "objectId" }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    let finance_settlement_entries =
+        db.collection::<mongodb::bson::Document>("finance_settlement_entries");
+    finance_settlement_entries
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "owner_id": 1, "settlement_id": 1, "date": 1 })
+                .build(),
+        )
+        .await?;
+
     let finance_import_runs = db.collection::<mongodb::bson::Document>("finance_import_runs");
     finance_import_runs
         .create_index(

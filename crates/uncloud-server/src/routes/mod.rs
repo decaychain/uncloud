@@ -30,19 +30,19 @@ pub mod vault_recents;
 pub mod versions;
 
 use axum::{
-    Router,
     extract::DefaultBodyLimit,
     middleware,
     routing::{any, delete, get, post, put},
+    Router,
 };
 use std::sync::Arc;
 
-use crate::AppState;
 use crate::middleware::{
     admin_meta_middleware, admin_middleware, auth_middleware, request_meta_middleware,
     require_files_delete, require_files_write, require_music_feature, require_tasks_feature,
     sigv4_middleware,
 };
+use crate::AppState;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     // -- Public routes (no auth) defined once, nested under /api and /api/v1 --
@@ -472,6 +472,24 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/finance/transactions/{id}",
             put(finance::update_transaction).delete(finance::delete_transaction),
+        )
+        .route(
+            "/finance/settlements",
+            get(finance::list_settlements).post(finance::create_settlement),
+        )
+        .route(
+            "/finance/settlements/{id}",
+            get(finance::get_settlement)
+                .put(finance::update_settlement)
+                .delete(finance::delete_settlement),
+        )
+        .route(
+            "/finance/settlements/{id}/entries",
+            post(finance::create_settlement_entry),
+        )
+        .route(
+            "/finance/settlements/{id}/entries/{entry_id}",
+            delete(finance::delete_settlement_entry),
         )
         .route(
             "/finance/import-schemas",

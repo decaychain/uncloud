@@ -318,6 +318,13 @@ lucide_icon!(IconMoreVertical,
     circle { cx: "12", cy: "19", r: "1" }
 );
 
+lucide_icon!(
+    IconChevronLeft,
+    path {
+        d: "m15 18-6-6 6-6"
+    }
+);
+
 lucide_icon!(IconChevronRight, path { d: "m9 18 6-6-6-6" });
 
 lucide_icon!(IconChevronDown, path { d: "m6 9 6 6 6-6" });
