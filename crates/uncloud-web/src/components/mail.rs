@@ -1089,8 +1089,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                                 }
                                                             }
                                                         }
-                                                        selected_message_ids.set(Vec::new());
-                                                        selecting_messages.set(false);
+                                                        selected_message_ids.set(retain_loaded_selection(selected_message_ids(), &messages()));
                                                         let account_id_for_refresh = selected_account.peek().clone();
                                                         if let Ok(rows) = use_mail::list_folders(&account_id_for_refresh).await {
                                                             folders.set(rows);
@@ -1132,8 +1131,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                                 }
                                                             }
                                                         }
-                                                        selected_message_ids.set(Vec::new());
-                                                        selecting_messages.set(false);
+                                                        selected_message_ids.set(retain_loaded_selection(selected_message_ids(), &messages()));
                                                         let account_id_for_refresh = selected_account.peek().clone();
                                                         if let Ok(rows) = use_mail::list_folders(&account_id_for_refresh).await {
                                                             folders.set(rows);
@@ -1172,8 +1170,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                                 mobile_mail_pane.set(MailMobilePane::Messages);
                                                             }
                                                         }
-                                                        selected_message_ids.set(Vec::new());
-                                                        selecting_messages.set(false);
+                                                        selected_message_ids.set(retain_loaded_selection(selected_message_ids(), &messages()));
                                                         let account_id_for_refresh = selected_account.peek().clone();
                                                         if let Ok(rows) = use_mail::list_folders(&account_id_for_refresh).await {
                                                             folders.set(rows);
@@ -1214,8 +1211,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                                 mobile_mail_pane.set(MailMobilePane::Messages);
                                                             }
                                                         }
-                                                        selected_message_ids.set(Vec::new());
-                                                        selecting_messages.set(false);
+                                                        selected_message_ids.set(retain_loaded_selection(selected_message_ids(), &messages()));
                                                         let account_id_for_refresh = selected_account.peek().clone();
                                                         if let Ok(rows) = use_mail::list_folders(&account_id_for_refresh).await {
                                                             folders.set(rows);
@@ -4670,6 +4666,20 @@ fn toggle_message_id(mut selected: Vec<String>, id: &str) -> Vec<String> {
 
 fn loaded_message_ids(messages: &[MailMessageSummaryResponse]) -> Vec<String> {
     messages.iter().map(|message| message.id.clone()).collect()
+}
+
+/// Keep a multi-select intact across a bulk action, dropping only the ids whose
+/// messages left the folder (archive/trash). Read/unread leave every message in
+/// place, so the whole selection survives; archive/trash that partially fails
+/// keeps the still-present rows selected for a follow-up action.
+fn retain_loaded_selection(
+    selected: Vec<String>,
+    messages: &[MailMessageSummaryResponse],
+) -> Vec<String> {
+    selected
+        .into_iter()
+        .filter(|id| messages.iter().any(|message| &message.id == id))
+        .collect()
 }
 
 fn replace_messages(
