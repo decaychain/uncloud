@@ -31,6 +31,10 @@ pub fn ShoppingPage() -> Element {
     // Inline inlet: which item's inlet is open
     let open_inlet: Signal<Option<String>> = use_signal(|| None);
 
+    // Target list for the always-visible add bar shown when no list filter is
+    // active. Defaults to the first list when unset.
+    let mut add_target_list: Signal<Option<String>> = use_signal(|| None);
+
     // Create inline state
     let mut creating = use_signal(|| false);
     let mut new_name: Signal<String> = use_signal(String::new);
@@ -537,6 +541,51 @@ pub fn ShoppingPage() -> Element {
                                             }
                                         }
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Always-visible add bar when no list filter is active. A list
+                // picker accompanies the input so adding stays possible and
+                // discoverable from the "all lists" view. A selected list is
+                // handled by the per-list inputs above.
+                if sel_list.is_none() && !list_data.is_empty() {
+                    {
+                        let effective = add_target_list()
+                            .or_else(|| list_data.first().map(|l| l.id.clone()));
+                        rsx! {
+                            div { class: "flex items-center gap-2 mt-4",
+                                span { class: "text-sm text-base-content/60 shrink-0", "Add to" }
+                                select {
+                                    class: "select select-bordered select-sm",
+                                    oninput: move |e| {
+                                        let v = e.value();
+                                        add_target_list.set(if v.is_empty() { None } else { Some(v) });
+                                    },
+                                    for list in list_data.iter() {
+                                        {
+                                            let lid = list.id.clone();
+                                            let lname = list.name.clone();
+                                            let is_sel = effective.as_ref() == Some(&lid);
+                                            rsx! {
+                                                option { value: "{lid}", selected: is_sel, "{lname}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(lid) = effective.clone() {
+                                AddItemInput {
+                                    list_id: lid,
+                                    selected_category: sel_category.clone(),
+                                    selected_shop: sel_shop.clone(),
+                                    open_inlet: open_inlet,
+                                    on_added: move |_| {
+                                        let next = *refresh.peek() + 1;
+                                        refresh.set(next);
+                                    },
                                 }
                             }
                         }
@@ -1066,6 +1115,26 @@ fn ShoppingListItemRow(
 
     let is_inlet_open = open_inlet() == Some(item.id.clone());
 
+    // The inlet renders at the item's position in the (possibly long) list, so
+    // a freshly added item's inlet can open off-screen. Scroll it into view
+    // whenever this item's inlet becomes the open one.
+    let item_id_scroll = item.id.clone();
+    use_effect(move || {
+        if open_inlet().as_deref() == Some(item_id_scroll.as_str()) {
+            let dom_id = format!("shopping-inlet-{item_id_scroll}");
+            spawn(async move {
+                // Let the inlet mount before scrolling to it.
+                gloo_timers::future::TimeoutFuture::new(60).await;
+                if let Some(el) = web_sys::window()
+                    .and_then(|w| w.document())
+                    .and_then(|d| d.get_element_by_id(&dom_id))
+                {
+                    el.scroll_into_view();
+                }
+            });
+        }
+    });
+
     rsx! {
         div {
             div { class: "flex items-center gap-3 px-4 py-2 hover:bg-base-200 transition-colors group",
@@ -1191,14 +1260,16 @@ fn ShoppingListItemRow(
 
             // Inline inlet beneath the item row
             if is_inlet_open {
-                ItemInlet {
-                    item: item.clone(),
-                    categories: categories.clone(),
-                    shops: shops.clone(),
-                    on_dismiss: move |_| open_inlet.set(None),
-                    on_updated: move |_| {
-                        on_changed.call(());
-                    },
+                div { id: "shopping-inlet-{item.id}",
+                    ItemInlet {
+                        item: item.clone(),
+                        categories: categories.clone(),
+                        shops: shops.clone(),
+                        on_dismiss: move |_| open_inlet.set(None),
+                        on_updated: move |_| {
+                            on_changed.call(());
+                        },
+                    }
                 }
             }
         }
