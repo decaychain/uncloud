@@ -15,7 +15,14 @@ work well enough for prototype validation.
 
 The foundation supports:
 
-- Multiple mail accounts per Uncloud user.
+- Multiple mail accounts per Uncloud user. The active account is driven by the
+  route (`/mail/:account_id`); switching accounts in the sidebar updates the
+  view reactively (the `MailPage` account-load effect keys off the route param,
+  not a one-shot mount).
+- Manual account ordering via a `sort_order` integer on each account (lower
+  sorts first; ties fall back to email address, so legacy accounts at 0 keep
+  alphabetical order). Editable under Account settings → List order. New
+  accounts append to the end.
 - Multiple send identities per account.
 - IMAP folders and subfolders, stored by remote path plus hierarchy delimiter.
 - Message and attachment metadata models for a cached mailbox.

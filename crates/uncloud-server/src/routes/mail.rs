@@ -191,6 +191,7 @@ fn account_to_response(
         display_name: account.display_name.clone(),
         email_address: account.email_address.clone(),
         unread_count,
+        sort_order: account.sort_order,
         imap: server_to_response(&account.imap),
         smtp: server_to_response(&account.smtp),
         sync_enabled: account.sync_enabled,
@@ -1190,7 +1191,7 @@ pub async fn list_accounts(
         .db
         .collection::<MailAccount>(ACCOUNTS)
         .find(doc! { "owner_id": user.id })
-        .sort(doc! { "email_address": 1 })
+        .sort(doc! { "sort_order": 1, "email_address": 1 })
         .await?;
     let mut out = Vec::new();
     while let Some(account) = cursor.try_next().await? {
@@ -1212,6 +1213,11 @@ pub async fn create_account(
     let now = Utc::now();
     let display_name = validate_label(&req.display_name, "display name")?;
     let email_address = validate_email(&req.email_address, "email address")?;
+    let existing_accounts = state
+        .db
+        .collection::<MailAccount>(ACCOUNTS)
+        .count_documents(doc! { "owner_id": user.id })
+        .await?;
     let account = MailAccount {
         id: ObjectId::new(),
         owner_id: user.id,
@@ -1219,6 +1225,7 @@ pub async fn create_account(
         email_address: email_address.clone(),
         imap: validate_server(req.imap)?,
         smtp: validate_server(req.smtp)?,
+        sort_order: existing_accounts as i32,
         sync_enabled: req.sync_enabled,
         sync_interval_secs: validate_account_sync_interval(req.sync_interval_secs)?,
         credential_configured: false,
@@ -1303,6 +1310,9 @@ pub async fn update_account(
             "smtp",
             bson::to_bson(&server).map_err(|e| AppError::Internal(e.to_string()))?,
         );
+    }
+    if let Some(value) = req.sort_order {
+        set.insert("sort_order", value);
     }
     if let Some(value) = req.sync_enabled {
         set.insert("sync_enabled", value);
