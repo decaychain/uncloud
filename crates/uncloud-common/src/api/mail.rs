@@ -55,6 +55,10 @@ pub struct MailAccountResponse {
     pub email_address: String,
     #[serde(default)]
     pub unread_count: u64,
+    /// Manual ordering for the account list; lower sorts first. Ties fall back
+    /// to email address, so legacy accounts (all 0) keep alphabetical order.
+    #[serde(default)]
+    pub sort_order: i32,
     pub imap: MailServerSettings,
     pub smtp: MailServerSettings,
     pub sync_enabled: bool,
@@ -84,6 +88,7 @@ pub struct UpdateMailAccountRequest {
     pub email_address: Option<String>,
     pub imap: Option<MailServerSettings>,
     pub smtp: Option<MailServerSettings>,
+    pub sort_order: Option<i32>,
     pub sync_enabled: Option<bool>,
     pub sync_interval_secs: Option<Option<u64>>,
 }

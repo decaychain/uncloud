@@ -30,6 +30,8 @@ pub struct MailAccount {
     pub imap: MailServerConfig,
     pub smtp: MailServerConfig,
     #[serde(default)]
+    pub sort_order: i32,
+    #[serde(default)]
     pub sync_enabled: bool,
     #[serde(default)]
     pub sync_interval_secs: Option<u64>,

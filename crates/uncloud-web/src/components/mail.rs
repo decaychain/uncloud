@@ -123,6 +123,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
     let mut account_password = use_signal(String::new);
     let mut account_sync_enabled = use_signal(|| false);
     let mut account_sync_interval_minutes = use_signal(String::new);
+    let mut account_sort_order = use_signal(String::new);
     let mut saving_account_settings = use_signal(|| false);
     let mut confirming_account_delete = use_signal(|| false);
     let mut deleting_account = use_signal(|| false);
@@ -217,9 +218,18 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
         });
     });
 
-    use_effect(move || {
+    use_effect(use_reactive!(|(route_account_id)| {
         let requested_account_id = route_account_id.clone().unwrap_or_default();
         spawn(async move {
+            // The route param is the source of truth for the active account. Skip
+            // reloading when this run is merely the echo of our own nav.replace
+            // (the account is already selected and its data is loaded).
+            if !requested_account_id.is_empty()
+                && selected_account.peek().as_str() == requested_account_id
+                && !accounts.peek().is_empty()
+            {
+                return;
+            }
             loading.set(true);
             match use_mail::list_accounts().await {
                 Ok(list) => {
@@ -233,11 +243,20 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                     } else {
                         first.clone()
                     };
+                    let account_changed = selected_account.peek().as_str() != selected;
                     accounts.set(list);
                     selected_account.set(selected.clone());
                     selecting_messages.set(false);
                     selected_message_ids.set(Vec::new());
                     mobile_mail_pane.set(MailMobilePane::Folders);
+                    if account_changed {
+                        selected_folder.set(String::new());
+                        selected_message.set(String::new());
+                        messages.set(Vec::new());
+                        message_next_cursor.set(None);
+                        message_has_more.set(false);
+                        detail.set(None);
+                    }
                     if requested_account_id != selected {
                         if selected.is_empty() {
                             nav.replace(Route::Mail {});
@@ -266,7 +285,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
             }
             loading.set(false);
         });
-    });
+    }));
 
     use_effect(use_reactive!(|(account_dirty)| {
         let _ = account_dirty().0;
@@ -681,6 +700,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                 .map(sync_interval_minutes_value)
                                                 .unwrap_or_default(),
                                         );
+                                        account_sort_order.set(account.sort_order.to_string());
                                         confirming_account_delete.set(false);
                                         provider_diagnostics.set(None);
                                         loading_provider_diagnostics.set(false);
@@ -2997,6 +3017,17 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                         }
                                         span { class: "label-text-alt text-base-content/60", "Minutes; blank uses the server default." }
                                     }
+                                    label { class: "form-control",
+                                        span { class: "label-text", "List order" }
+                                        input {
+                                            class: "input input-bordered",
+                                            r#type: "number",
+                                            value: "{account_sort_order()}",
+                                            placeholder: "0",
+                                            oninput: move |e| account_sort_order.set(e.value()),
+                                        }
+                                        span { class: "label-text-alt text-base-content/60", "Lower numbers appear first in the account list." }
+                                    }
                                 }
 
                                 div { class: "mt-6 border-t border-base-300 pt-5",
@@ -3613,6 +3644,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                     let smtp_sec = security_from_value(&account_smtp_security());
                                                     let pass = account_password();
                                                     let sync_enabled = account_sync_enabled();
+                                                    let sort_order = account_sort_order().trim().parse::<i32>().unwrap_or(0);
                                                     let sync_interval_secs = match sync_interval_secs_from_minutes(
                                                         &account_sync_interval_minutes(),
                                                     ) {
@@ -3641,6 +3673,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                                 security: smtp_sec,
                                                                 username: smtp_user,
                                                             }),
+                                                            sort_order: Some(sort_order),
                                                             sync_enabled: Some(sync_enabled),
                                                             sync_interval_secs: Some(sync_interval_secs),
                                                         };
@@ -3660,6 +3693,11 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                                         break;
                                                                     }
                                                                 }
+                                                                current.sort_by(|a, b| {
+                                                                    a.sort_order
+                                                                        .cmp(&b.sort_order)
+                                                                        .then_with(|| a.email_address.cmp(&b.email_address))
+                                                                });
                                                                 accounts.set(current);
                                                                 let next = account_dirty.peek().0 + 1;
                                                                 account_dirty.set(MailAccountDirtyTick(next));

@@ -395,7 +395,7 @@ fn Mail() -> Element {
 #[component]
 fn MailAccount(account_id: String) -> Element {
     rsx! {
-        MailPage { key: "{account_id}", route_account_id: Some(account_id) }
+        MailPage { route_account_id: Some(account_id) }
     }
 }
 
