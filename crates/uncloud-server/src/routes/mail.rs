@@ -50,7 +50,8 @@ use crate::models::{
 use crate::routes::apps::{deliver_webhooks, EVENT_FILE_CREATED};
 use crate::routes::files::{check_name_conflict, file_to_response, resolve_storage_path};
 use crate::services::mail::{
-    decode_mail_header_text, RemoteMailAddress, RemoteMailbox, RemoteMessageBody,
+    decode_imap_utf7_path, decode_mail_header_text, RemoteMailAddress, RemoteMailbox,
+    RemoteMessageBody,
     RemoteMessageFlag, RemoteMessageFlags, RemoteMessageSummary, RemoteOutgoingAttachment,
     RemoteOutgoingMessage, RemoteUidRange,
 };
@@ -279,6 +280,7 @@ fn folder_to_response(
         id: folder.id.to_hex(),
         account_id: folder.account_id.to_hex(),
         path: folder.path.clone(),
+        display_path: decode_imap_utf7_path(&folder.path, folder.delimiter.as_deref()),
         name: folder.name.clone(),
         delimiter: folder.delimiter.clone(),
         parent_path: folder.parent_path.clone(),

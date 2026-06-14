@@ -113,6 +113,12 @@ the account's SMTP settings.
   path, attributes, selectable state, role mapping, and account-sync inclusion.
 - Folder refresh upserts by `(owner_id, account_id, path)`, preserving stable
   folder ids across refreshes.
+- Folder names are decoded from IMAP modified UTF-7 (RFC 3501 §5.1.3) for
+  display, so non-Latin mailboxes show as e.g. `Спам` rather than
+  `&BCEEPwQwBDw-`. The stored `path` stays in the raw wire form (it is the IMAP
+  identifier for `SELECT`/`EXAMINE`); the response carries a decoded
+  `display_path` alongside it for UI labels. Existing folders pick up decoded
+  names on the next folder refresh.
 - Folder role inference marks common Inbox, Sent, Drafts, Archive, Trash, Spam,
   and All Mail folders from IMAP attributes and common folder names. Manual role
   overrides are preserved across folder refreshes.
