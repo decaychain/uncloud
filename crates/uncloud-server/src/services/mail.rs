@@ -10,6 +10,7 @@ use std::{
 use async_imap::error::Error as ImapError;
 use async_imap::types::{Capability, Flag};
 use async_imap::{Client, Session};
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use imap_proto::types::{BodyContentCommon, BodyParams, BodyStructure};
@@ -1501,11 +1502,84 @@ fn flag_store_query(flag: RemoteMessageFlag, enabled: bool) -> &'static str {
 }
 
 fn display_name(path: &str, delimiter: Option<&str>) -> String {
-    delimiter
+    let leaf = delimiter
         .and_then(|d| path.rsplit(d).next())
         .filter(|s| !s.is_empty())
-        .unwrap_or(path)
-        .to_string()
+        .unwrap_or(path);
+    decode_imap_utf7(leaf)
+}
+
+/// Decode every segment of an IMAP mailbox path from modified UTF-7 for
+/// display, leaving the hierarchy delimiter untouched. The result is for the UI
+/// only; the raw `path` remains the identifier used for IMAP commands.
+pub(crate) fn decode_imap_utf7_path(path: &str, delimiter: Option<&str>) -> String {
+    match delimiter {
+        Some(d) if !d.is_empty() => path
+            .split(d)
+            .map(decode_imap_utf7)
+            .collect::<Vec<_>>()
+            .join(d),
+        _ => decode_imap_utf7(path),
+    }
+}
+
+/// Decode an IMAP mailbox name from modified UTF-7 (RFC 3501 §5.1.3) into its
+/// Unicode form for display. The wire form encodes non-ASCII via `&...-` shift
+/// sequences (e.g. `&BCEEPwQwBDw-` -> `Спам`); ASCII passes through unchanged
+/// and `&-` is a literal `&`. A malformed sequence is preserved verbatim so no
+/// information is silently lost. Folder paths are NOT decoded — they remain the
+/// IMAP wire identifier used for SELECT/EXAMINE.
+fn decode_imap_utf7(input: &str) -> String {
+    if !input.contains('&') {
+        return input.to_string();
+    }
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'&' {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        let mut j = start;
+        while j < bytes.len() && bytes[j] != b'-' {
+            j += 1;
+        }
+        let chunk = &input[start..j];
+        if chunk.is_empty() {
+            out.push('&');
+        } else if let Some(decoded) = decode_modified_base64_utf16(chunk) {
+            out.push_str(&decoded);
+        } else {
+            out.push('&');
+            out.push_str(chunk);
+            if j < bytes.len() {
+                out.push('-');
+            }
+        }
+        i = j + 1;
+    }
+    out
+}
+
+fn decode_modified_base64_utf16(chunk: &str) -> Option<String> {
+    let standard: String = chunk
+        .chars()
+        .map(|c| if c == ',' { '/' } else { c })
+        .collect();
+    let raw = base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(standard.as_bytes())
+        .ok()?;
+    if raw.len() % 2 != 0 {
+        return None;
+    }
+    let units: Vec<u16> = raw
+        .chunks_exact(2)
+        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+        .collect();
+    String::from_utf16(&units).ok()
 }
 
 fn parent_path(path: &str, delimiter: Option<&str>) -> Option<String> {
@@ -2039,7 +2113,8 @@ fn normalize_plain_text(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        bodystructure_has_attachment, build_smtp_message, decode_mail_header_text, display_name,
+        bodystructure_has_attachment, build_smtp_message, decode_imap_utf7,
+        decode_mail_header_text, display_name,
         flag_store_query, imap_uid_set, latest_cached_refresh_plan, mail_move_unsupported_message,
         mail_tls_connector, mailbox_from_address, map_imap_command_error, map_imap_login_error,
         next_uid_sync_plan, parent_path, parse_message_body, quoted_imap_search_string,
@@ -2081,6 +2156,26 @@ mod tests {
         assert_eq!(display_name("Archive.2026", Some(".")), "2026");
         assert_eq!(display_name("INBOX", Some("/")), "INBOX");
         assert_eq!(display_name("Flat", None), "Flat");
+    }
+
+    #[test]
+    fn folder_display_name_decodes_modified_utf7() {
+        assert_eq!(display_name("&BCEEPwQwBDw-", Some("/")), "Спам");
+        assert_eq!(
+            display_name("INBOX/&BCEEPwQwBDw-", Some("/")),
+            "Спам"
+        );
+        assert_eq!(display_name("Drafts", Some("/")), "Drafts");
+    }
+
+    #[test]
+    fn decode_imap_utf7_handles_ascii_literals_and_edge_cases() {
+        assert_eq!(decode_imap_utf7("INBOX"), "INBOX");
+        assert_eq!(decode_imap_utf7("Maps &- More"), "Maps & More");
+        assert_eq!(decode_imap_utf7("&BCEEPwQwBDw-"), "Спам");
+        assert_eq!(decode_imap_utf7("&AOk-tude"), "étude");
+        // A malformed shift sequence is preserved rather than dropped.
+        assert_eq!(decode_imap_utf7("&notbase64!-x"), "&notbase64!-x");
     }
 
     #[test]

@@ -1046,7 +1046,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                     div { class: "text-xs font-semibold uppercase text-base-content/60", "Messages" }
                                     div { class: "truncate text-sm",
                                         if let Some(folder) = active_folder.as_ref() {
-                                            "{folder.path}"
+                                            "{folder.display_path}"
                                         } else {
                                             "Select a folder"
                                         }
@@ -2435,7 +2435,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                                                         onchange: move |e| move_target_folder.set(e.value()),
                                                         option { value: "", "Move to..." }
                                                         for folder in folders_snapshot.clone().into_iter().filter(|folder| folder.selectable && folder.id != row.message.folder_id) {
-                                                            option { value: "{folder.id}", "{folder.path}" }
+                                                            option { value: "{folder.id}", "{folder.display_path}" }
                                                         }
                                                     }
                                                     button {
@@ -3699,7 +3699,7 @@ pub fn MailPage(#[props(default)] route_account_id: Option<String>) -> Element {
                         div { class: "modal modal-open",
                             div { class: "modal-box max-w-xl",
                                 h2 { class: "text-xl font-semibold", "Folder settings" }
-                                div { class: "mt-1 truncate text-sm text-base-content/60", "{folder.path}" }
+                                div { class: "mt-1 truncate text-sm text-base-content/60", "{folder.display_path}" }
 
                                 div { class: "mt-5 grid gap-4",
                                     label { class: "form-control",

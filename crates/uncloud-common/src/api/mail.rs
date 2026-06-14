@@ -128,6 +128,10 @@ pub struct MailFolderResponse {
     pub id: String,
     pub account_id: String,
     pub path: String,
+    /// `path` with each segment decoded from IMAP modified UTF-7 for display.
+    /// Use `path` for API calls; use `display_path` only for UI labels.
+    #[serde(default)]
+    pub display_path: String,
     pub name: String,
     pub delimiter: Option<String>,
     pub parent_path: Option<String>,
