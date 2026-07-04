@@ -232,6 +232,14 @@ fn build_description(rec: &csv::StringRecord, cols: &[u32]) -> String {
 /// `i64` minor units (cents); rejects inputs without exactly two
 /// decimal places. Sign comes from a leading `-` or `+`.
 pub fn parse_amount_minor(s: &str, sep: DecimalSeparator) -> Option<i64> {
+    // Banks embed a currency symbol and/or spacing in the amount cell
+    // (e.g. `-12,99€`, `$1,234.56`, `1 234,56`). Strip those first so only
+    // the sign, digits, and separators remain for the logic below.
+    let cleaned: String = s
+        .chars()
+        .filter(|&c| !c.is_whitespace() && !is_currency_symbol(c))
+        .collect();
+    let s = cleaned.as_str();
     if s.is_empty() {
         return None;
     }
@@ -261,6 +269,13 @@ pub fn parse_amount_minor(s: &str, sep: DecimalSeparator) -> Option<i64> {
     let int: i64 = int_part.parse().ok()?;
     let frac: i64 = frac_part.parse().ok()?;
     Some(sign * (int * 100 + frac))
+}
+
+/// True for currency symbols banks embed in amount cells. Covers ASCII `$`,
+/// the Latin-1 currency symbols (¢ £ ¤ ¥), and the whole Unicode Currency
+/// Symbols block (U+20A0..=U+20BF, which includes `€`).
+fn is_currency_symbol(c: char) -> bool {
+    matches!(c, '$' | '\u{00a2}'..='\u{00a5}' | '\u{20a0}'..='\u{20bf}')
 }
 
 /// Parse a date string with one of the supported format directives.
@@ -383,7 +398,52 @@ fn stable_hash(parts: &[&[u8]]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_date;
+    use super::{parse_amount_minor, parse_date};
+    use crate::models::DecimalSeparator;
+
+    #[test]
+    fn amount_strips_trailing_currency_symbol() {
+        // Revolut-style German export: comma decimal, trailing euro sign.
+        assert_eq!(
+            parse_amount_minor("-12,99€", DecimalSeparator::Comma),
+            Some(-1299)
+        );
+        assert_eq!(
+            parse_amount_minor("327,54€", DecimalSeparator::Comma),
+            Some(32754)
+        );
+        assert_eq!(
+            parse_amount_minor("0,00€", DecimalSeparator::Comma),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn amount_strips_symbol_and_spacing_across_locales() {
+        // Space between value and symbol, plus grouping separator.
+        assert_eq!(
+            parse_amount_minor("1.234,56 €", DecimalSeparator::Comma),
+            Some(123456)
+        );
+        // US locale with leading dollar sign and grouping comma.
+        assert_eq!(
+            parse_amount_minor("$1,234.56", DecimalSeparator::Dot),
+            Some(123456)
+        );
+        // Non-breaking space used as a thousands separator.
+        assert_eq!(
+            parse_amount_minor("1\u{00a0}234,56\u{00a0}€", DecimalSeparator::Comma),
+            Some(123456)
+        );
+    }
+
+    #[test]
+    fn amount_without_symbol_still_parses() {
+        assert_eq!(
+            parse_amount_minor("-9,99", DecimalSeparator::Comma),
+            Some(-999)
+        );
+    }
 
     #[test]
     fn parse_date_accepts_iso_datetime_and_ignores_time() {

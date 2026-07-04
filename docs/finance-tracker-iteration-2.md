@@ -30,6 +30,8 @@ ImportSchema:
 
 **Parser**: one generic `parse(bytes, &ImportSchema) -> Vec<Result<ParsedRow, ParseError>>` that walks columns by index using the schema. The current Sparkasse module becomes the *seed* of one `ImportSchema` row (cloned per user on first import, marked `is_builtin: true`).
 
+`parse_amount_minor` strips any currency symbol (ASCII `$`, Latin-1 `¢£¤¥`, and the whole Unicode Currency Symbols block incl. `€`) and all whitespace (incl. non-breaking spaces used as grouping) from the amount cell before applying the schema's decimal separator, so exports that embed the symbol in the value column (e.g. Revolut `-12,99€`, `$1,234.56`) parse correctly. Row-level parse failures are non-fatal — junk/preamble rows in multi-section statements are simply skipped and counted as errors.
+
 **API**:
 - `GET/POST /finance/import-schemas`, `PUT/DELETE /finance/import-schemas/{id}`
 - `POST /finance/import-schemas/{id}/clone` — server-side clone (builtin → owned editable copy)
