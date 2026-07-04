@@ -151,6 +151,15 @@ fn DashboardTile(tile_id: String) -> Element {
                                 span { class: "text-base-content/60", "0 unread" }
                             }
                         },
+                        TileCount::Overdue(v) => rsx! {
+                            if v > 0 {
+                                span { class: "inline-flex min-w-5 items-center justify-center rounded-full bg-error px-2 py-0.5 text-[11px] font-semibold leading-none text-error-content",
+                                    "{v} overdue"
+                                }
+                            } else {
+                                span { class: "text-base-content/60", "0 overdue" }
+                            }
+                        },
                         TileCount::Text(s) => rsx! { span { "{s}" } },
                     }
                 }
@@ -180,6 +189,7 @@ enum TileCount {
     None,
     Value(usize, &'static str),
     Unread(u64),
+    Overdue(u64),
     Text(String),
 }
 
@@ -209,9 +219,9 @@ fn use_tile_count(tile_id: &str) -> Signal<TileCount> {
         let tid = tid.clone();
         spawn(async move {
             let result = match tid.as_str() {
-                "tasks" => use_tasks::list_projects()
+                "tasks" => use_tasks::get_schedule()
                     .await
-                    .map(|v| TileCount::Value(v.len(), "projects"))
+                    .map(|s| TileCount::Overdue(s.overdue.len() as u64))
                     .unwrap_or(TileCount::None),
                 "shopping" => use_shopping::list_lists()
                     .await

@@ -387,6 +387,8 @@ New "Tasks" section in the sidebar:
 - List of projects (with color dot), clicking opens board/list
 - "+ New Project" button at bottom
 
+The top-level "Tasks" nav item carries a **past-due badge** (`TasksOverdueBadge` in `sidebar.rs`) — a red (`bg-error`) count pill mirroring Mail's unread badge, showing `GET /tasks/schedule` → `overdue.len()`. The persistent sidebar has no task-mutation broadcast, so the badge refetches on every route change (subscribes to `use_route`). The dashboard Tasks tile shows the same count via `TileCount::Overdue`.
+
 ### Components
 
 ```

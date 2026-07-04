@@ -149,7 +149,8 @@ pub fn Sidebar() -> Element {
                             class: if section == "tasks" { "active" } else { "" },
                             onclick: move |_| close_drawer(),
                             IconCheckSquare {}
-                            span { "Tasks" }
+                            span { class: "min-w-0 flex-1", "Tasks" }
+                            TasksOverdueBadge {}
                         }
                     }
                 }
@@ -555,6 +556,34 @@ fn MailTotalUnreadBadge() -> Element {
 
     rsx! {
         MailUnreadBadge { count: unread() }
+    }
+}
+
+#[component]
+fn TasksOverdueBadge() -> Element {
+    let mut overdue = use_signal(|| 0u64);
+    // The sidebar is persistent, so re-read the current route to refetch the
+    // count on every navigation — there is no task-mutation broadcast to
+    // subscribe to the way Mail has `MailAccountDirtyTick`.
+    let route = use_route::<Route>();
+
+    use_effect(use_reactive!(|(route)| {
+        let _ = route;
+        spawn(async move {
+            if let Ok(schedule) = use_tasks::get_schedule().await {
+                overdue.set(schedule.overdue.len() as u64);
+            }
+        });
+    }));
+
+    if overdue() == 0 {
+        return rsx! {};
+    }
+
+    rsx! {
+        span { class: "ml-auto inline-flex min-w-5 shrink-0 items-center justify-center rounded-full bg-error px-2 py-0.5 text-[11px] font-semibold leading-none text-error-content",
+            "{overdue}"
+        }
     }
 }
 
