@@ -1,16 +1,16 @@
 Package: uncloud
-Version: 0.1.4
+Version: 0.1.5
 Architecture: amd64
-Installed-Size: 26154
+Installed-Size: 26152
 Maintainer: lunarstream
 Depends: libwebkit2gtk-4.1-0, libgtk-3-0, libayatana-appindicator3-1, libayatana-appindicator3-1, libwebkit2gtk-4.1-0, libgtk-3-0
 Priority: optional
 Section: utils
-Filename: pool/main/u/uncloud/uncloud_0.1.4_amd64.deb
-Size: 8018488
-SHA256: ac0e481be03d681049a4f3266d444dc7c2d26102e52157bc086aa99c255d65c0
-SHA1: 66c83c9c092620075df57503243ab4cee1b4174d
-MD5sum: 28d8e1d10c4b91c8dcd2247f5309d4a4
+Filename: pool/main/u/uncloud/uncloud_0.1.5_amd64.deb
+Size: 8021168
+SHA256: 31f0f6ee0aceaca7c9e83f24903b1b869e44240a4bd7674a22face79a34a89dd
+SHA1: 2683fac27b12633208bb99a57f16a1070e0dd8f9
+MD5sum: d303eb3c8ca4053dd0d9ba76a3450f0e
 Description: Self-hosted personal cloud storage
  Uncloud is a self-hosted personal cloud storage system for files, photos, and music with file sync, sharing, and in-browser playback.
 
