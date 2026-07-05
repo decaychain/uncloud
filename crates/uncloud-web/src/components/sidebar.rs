@@ -6,12 +6,14 @@ use crate::components::icons::{
 };
 use crate::hooks::tauri as tauri_hook;
 use crate::hooks::use_apps::AppEntry;
+use crate::hooks::use_events::use_events;
 use crate::hooks::{use_apps, use_files, use_mail, use_music, use_playlists, use_tasks};
 use crate::router::Route;
 use crate::state::{AuthState, MailAccountDirtyTick, PlaylistDirtyTick};
 use dioxus::prelude::*;
 use uncloud_common::{
-    AlbumResponse, MailAccountResponse, MusicFolderResponse, PlaylistSummary, TaskProjectResponse,
+    AlbumResponse, MailAccountResponse, MusicFolderResponse, PlaylistSummary, ServerEvent,
+    TaskProjectResponse,
 };
 use wasm_bindgen::JsCast;
 
@@ -562,19 +564,31 @@ fn MailTotalUnreadBadge() -> Element {
 #[component]
 fn TasksOverdueBadge() -> Element {
     let mut overdue = use_signal(|| 0u64);
-    // The sidebar is persistent, so re-read the current route to refetch the
-    // count on every navigation — there is no task-mutation broadcast to
-    // subscribe to the way Mail has `MailAccountDirtyTick`.
-    let route = use_route::<Route>();
 
-    use_effect(use_reactive!(|(route)| {
-        let _ = route;
+    let load = move || {
         spawn(async move {
             if let Ok(schedule) = use_tasks::get_schedule().await {
                 overdue.set(schedule.overdue.len() as u64);
             }
         });
+    };
+
+    // The sidebar is persistent, so re-read the current route to refetch the
+    // count on mount and on every navigation.
+    let route = use_route::<Route>();
+    use_effect(use_reactive!(|(route)| {
+        let _ = route;
+        load();
     }));
+
+    // Live in-place updates: any task change (e.g. completing an overdue task
+    // without navigating) refetches the count. Spawn from the SSE callback so
+    // the signal write happens outside the event-handler borrow.
+    use_events(move |evt| {
+        if matches!(evt, ServerEvent::TaskChanged { .. }) {
+            load();
+        }
+    });
 
     if overdue() == 0 {
         return rsx! {};
