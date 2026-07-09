@@ -2,6 +2,7 @@ mod common;
 
 use axum::http::StatusCode;
 use common::TestApp;
+use mongodb::bson::{doc, DateTime};
 
 // ── Registration ─────────────────────────────────────────────────────────────
 
@@ -221,6 +222,59 @@ async fn session_list_includes_current() {
     let body: serde_json::Value = res.json();
     let sessions = body.as_array().expect("sessions array");
     assert!(!sessions.is_empty());
+}
+
+#[tokio::test]
+async fn active_session_near_expiry_is_renewed() {
+    let app = TestApp::new().await;
+    app.register("alice", "alice@example.com", "password123!")
+        .await;
+
+    let sessions = app.db.collection::<mongodb::bson::Document>("sessions");
+    let fresh_session = sessions
+        .find_one(doc! {})
+        .await
+        .expect("query fresh session")
+        .expect("session exists");
+    let session_id = fresh_session.get_object_id("_id").expect("session ID");
+    let fresh_expiry = *fresh_session
+        .get_datetime("expires_at")
+        .expect("fresh session expiry");
+
+    app.server.get("/api/auth/me").await.assert_status_ok();
+
+    let unchanged_expiry = *sessions
+        .find_one(doc! { "_id": session_id })
+        .await
+        .expect("query fresh session after activity")
+        .expect("session exists")
+        .get_datetime("expires_at")
+        .expect("fresh session expiry");
+    assert_eq!(fresh_expiry, unchanged_expiry);
+
+    let near_expiry = DateTime::from_chrono(chrono::Utc::now() + chrono::Duration::minutes(5));
+    sessions
+        .update_one(
+            doc! { "_id": session_id },
+            doc! { "$set": { "expires_at": near_expiry } },
+        )
+        .await
+        .expect("move session near expiry");
+
+    app.server.get("/api/auth/me").await.assert_status_ok();
+
+    let renewed = sessions
+        .find_one(doc! { "_id": session_id })
+        .await
+        .expect("query renewed session")
+        .expect("session exists")
+        .get_datetime("expires_at")
+        .expect("session expiry")
+        .to_chrono();
+    assert!(
+        renewed > chrono::Utc::now() + chrono::Duration::minutes(50),
+        "expected authenticated activity to renew the session, got {renewed}"
+    );
 }
 
 #[tokio::test]

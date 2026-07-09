@@ -50,7 +50,7 @@ storage:
   # default_path: "/data/uncloud"
 
 auth:
-  # Session duration in hours
+  # Session inactivity timeout in hours. Active sessions renew automatically.
   session_duration_hours: 168  # 7 days
   # Registration mode: open | approval | invite_only | disabled | demo
   #   open         - anyone can register (default)

@@ -600,7 +600,7 @@ backup:
       max_delay_ms: 5000
 
 auth:
-  session_duration_hours: 168      # 7 days
+  session_duration_hours: 168      # 7-day rolling inactivity timeout
   # registration mode: open | approval | invite_only | disabled | demo
   registration: open
   # demo_quota_bytes: 52428800     # 50MB quota for demo accounts

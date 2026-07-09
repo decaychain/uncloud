@@ -360,7 +360,7 @@ impl AuthService {
     }
 
     pub async fn validate_session(&self, token: &str) -> Result<(User, Session)> {
-        let session = self
+        let mut session = self
             .sessions
             .find_one(doc! { "token": token })
             .await?
@@ -380,6 +380,37 @@ impl AuthService {
         // Reject disabled/pending users even if they have a valid session
         if user.status != UserStatus::Active {
             return Err(AppError::Unauthorized);
+        }
+
+        // Treat session_duration_hours as an inactivity timeout. Renew only
+        // in the latter half of the lifetime to keep active native clients
+        // signed in without writing to MongoDB on every authenticated request.
+        let session_duration = chrono::Duration::hours(self.config.session_duration_hours as i64);
+        let now = Utc::now();
+        if session.expires_at <= now + session_duration / 2 {
+            let expires_at = now + session_duration;
+            let update = self
+                .sessions
+                .update_one(
+                    doc! { "_id": session.id },
+                    doc! {
+                        "$max": {
+                            "expires_at": mongodb::bson::DateTime::from_chrono(expires_at),
+                        }
+                    },
+                )
+                .await;
+
+            match update {
+                Ok(_) => session.expires_at = expires_at,
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %session.id,
+                        %error,
+                        "failed to renew active session"
+                    );
+                }
+            }
         }
 
         Ok((user, session))
