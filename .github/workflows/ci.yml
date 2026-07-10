@@ -48,6 +48,10 @@ jobs:
 
   android:
     runs-on: ubuntu-latest
+    env:
+      ANDROID_NDK_VERSION: 29.0.14206865
+      BUNDLETOOL_VERSION: 1.18.1
+      BUNDLETOOL_SHA256: 675786493983787ffa11550bdb7c0715679a44e1643f3ff980a529e9c822595c
     steps:
       - uses: actions/checkout@v4
 
@@ -69,7 +73,7 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install Android NDK
-        run: sdkmanager "ndk;27.0.12077973"
+        run: sdkmanager "ndk;${ANDROID_NDK_VERSION}"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -89,10 +93,23 @@ jobs:
 
       - name: Build Android debug
         env:
-          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
         run: |
           cd crates/uncloud-desktop
           cargo tauri android build --debug
+
+      - name: Verify 16 KB page alignment
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+          BUNDLETOOL_JAR: /tmp/bundletool.jar
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://github.com/google/bundletool/releases/download/${BUNDLETOOL_VERSION}/bundletool-all-${BUNDLETOOL_VERSION}.jar" \
+            --output "$BUNDLETOOL_JAR"
+          echo "${BUNDLETOOL_SHA256}  ${BUNDLETOOL_JAR}" | sha256sum --check --strict
+          bash scripts/check-android-page-alignment.sh \
+            crates/uncloud-desktop/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk \
+            crates/uncloud-desktop/gen/android/app/build/outputs/bundle/universalDebug/app-universal-debug.aab
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
