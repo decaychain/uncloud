@@ -6,22 +6,40 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::Utc;
 use mongodb::{
     bson::{doc, oid::ObjectId},
+    options::{FindOneAndUpdateOptions, ReturnDocument},
     Collection, Database,
 };
 use rand::RngCore;
+use sha2::{Digest, Sha256};
 use totp_rs::{Algorithm, Secret, TOTP};
+use uncloud_common::DeviceInfo;
 
 use crate::config::{AuthConfig, RegistrationMode};
 use crate::error::{AppError, Result};
-use crate::models::{Invite, Session, TotpChallenge, User, UserRole, UserStatus};
+use crate::models::{
+    DeviceRefreshToken, Invite, Session, TotpChallenge, User, UserRole, UserStatus,
+};
+
+const REFRESH_TOKEN_GRACE_MINUTES: i64 = 5;
 
 // ── Return types for login ───────────────────────────────────────────────────
 
 pub enum LoginOutcome {
     /// Login complete — session issued.
-    Success(User, Session),
+    Success(User, Session, Option<IssuedDeviceToken>),
     /// Password correct but TOTP required — client must verify.
     TotpRequired { totp_token: String },
+}
+
+pub struct IssuedDeviceToken {
+    pub token: String,
+    pub expires_at: chrono::DateTime<Utc>,
+}
+
+pub struct RefreshedDeviceSession {
+    pub session: Session,
+    pub refresh_token: String,
+    pub refresh_expires_at: chrono::DateTime<Utc>,
 }
 
 // ── TOTP setup data ──────────────────────────────────────────────────────────
@@ -36,6 +54,7 @@ pub struct TotpSetupData {
 pub struct AuthService {
     users: Collection<User>,
     sessions: Collection<Session>,
+    device_refresh_tokens: Collection<DeviceRefreshToken>,
     invites: Collection<Invite>,
     totp_challenges: Collection<TotpChallenge>,
     config: AuthConfig,
@@ -46,6 +65,7 @@ impl AuthService {
         Self {
             users: db.collection("users"),
             sessions: db.collection("sessions"),
+            device_refresh_tokens: db.collection("device_refresh_tokens"),
             invites: db.collection("invites"),
             totp_challenges: db.collection("totp_challenges"),
             config,
@@ -203,6 +223,7 @@ impl AuthService {
         password: &str,
         user_agent: Option<String>,
         ip_address: Option<String>,
+        device: Option<DeviceInfo>,
     ) -> Result<LoginOutcome> {
         // Find user by username or email
         let user = self
@@ -235,7 +256,7 @@ impl AuthService {
         // If TOTP is enabled, issue a challenge instead of a session
         if user.totp_enabled {
             let token = self.generate_token();
-            let challenge = TotpChallenge::new(token.clone(), user.id);
+            let challenge = TotpChallenge::new(token.clone(), user.id, device.as_ref());
             self.totp_challenges.insert_one(&challenge).await?;
             return Ok(LoginOutcome::TotpRequired { totp_token: token });
         }
@@ -246,12 +267,22 @@ impl AuthService {
             token,
             user.id,
             self.config.session_duration_hours,
-            user_agent,
-            ip_address,
+            user_agent.clone(),
+            ip_address.clone(),
         );
         self.sessions.insert_one(&session).await?;
 
-        Ok(LoginOutcome::Success(user, session))
+        let device_token = match device {
+            Some(device) => Some(
+                self.issue_device_refresh_token(
+                    user.id, session.id, &device, user_agent, ip_address,
+                )
+                .await?,
+            ),
+            None => None,
+        };
+
+        Ok(LoginOutcome::Success(user, session, device_token))
     }
 
     // ── Demo login ───────────────────────────────────────────────────────────
@@ -326,6 +357,9 @@ impl AuthService {
         db.collection::<mongodb::bson::Document>("sessions")
             .delete_many(doc! { "user_id": { "$in": &ids_bson } })
             .await?;
+        db.collection::<mongodb::bson::Document>("device_refresh_tokens")
+            .delete_many(doc! { "user_id": { "$in": &ids_bson } })
+            .await?;
         db.collection::<mongodb::bson::Document>("shares")
             .delete_many(doc! { "owner_id": { "$in": &ids_bson } })
             .await?;
@@ -355,8 +389,189 @@ impl AuthService {
     }
 
     pub async fn logout(&self, token: &str) -> Result<()> {
-        self.sessions.delete_one(doc! { "token": token }).await?;
+        if let Some(session) = self.sessions.find_one(doc! { "token": token }).await? {
+            self.device_refresh_tokens
+                .delete_many(doc! { "session_id": session.id })
+                .await?;
+            self.sessions.delete_one(doc! { "_id": session.id }).await?;
+        }
         Ok(())
+    }
+
+    pub async fn issue_device_refresh_token(
+        &self,
+        user_id: ObjectId,
+        session_id: ObjectId,
+        device: &DeviceInfo,
+        user_agent: Option<String>,
+        ip_address: Option<String>,
+    ) -> Result<IssuedDeviceToken> {
+        if device.id.trim().is_empty() || device.id.len() > 128 {
+            return Err(AppError::Validation(
+                "Device ID must be between 1 and 128 characters".to_string(),
+            ));
+        }
+        if device.name.trim().is_empty() || device.name.len() > 128 {
+            return Err(AppError::Validation(
+                "Device name must be between 1 and 128 characters".to_string(),
+            ));
+        }
+        let now = Utc::now();
+        let expires_at =
+            now + chrono::Duration::days(self.config.device_refresh_duration_days as i64);
+        let existing = self
+            .device_refresh_tokens
+            .find_one(doc! {
+                "user_id": user_id,
+                "device_id": &device.id,
+            })
+            .await?;
+        let id = existing
+            .as_ref()
+            .map(|token| token.id)
+            .unwrap_or_else(ObjectId::new);
+        let secret = self.generate_token();
+        let token = format!("{}.{}", id.to_hex(), secret);
+        let record = DeviceRefreshToken {
+            id,
+            user_id,
+            session_id,
+            device_id: device.id.clone(),
+            device_name: device.name.clone(),
+            token_hash: Self::hash_refresh_secret(&secret),
+            previous_token_hash: None,
+            previous_valid_until: None,
+            user_agent,
+            ip_address,
+            created_at: existing
+                .as_ref()
+                .map(|value| value.created_at)
+                .unwrap_or(now),
+            last_used_at: now,
+            expires_at,
+        };
+
+        self.device_refresh_tokens
+            .replace_one(
+                doc! { "user_id": user_id, "device_id": &device.id },
+                &record,
+            )
+            .upsert(true)
+            .await?;
+
+        if let Some(old_session_id) = existing.map(|value| value.session_id) {
+            if old_session_id != session_id {
+                self.sessions
+                    .delete_one(doc! { "_id": old_session_id })
+                    .await?;
+            }
+        }
+
+        Ok(IssuedDeviceToken { token, expires_at })
+    }
+
+    pub async fn refresh_device_session(
+        &self,
+        refresh_token: &str,
+        user_agent: Option<String>,
+        ip_address: Option<String>,
+    ) -> Result<RefreshedDeviceSession> {
+        let (id, secret_hash) = Self::parse_refresh_token(refresh_token)?;
+        let now = Utc::now();
+        let record = self
+            .device_refresh_tokens
+            .find_one(doc! { "_id": id })
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+
+        if record.expires_at <= now {
+            self.device_refresh_tokens
+                .delete_one(doc! { "_id": id })
+                .await?;
+            return Err(AppError::Unauthorized);
+        }
+
+        let user = self
+            .users
+            .find_one(doc! { "_id": record.user_id })
+            .await?
+            .filter(|user| user.status == UserStatus::Active)
+            .ok_or(AppError::Unauthorized)?;
+
+        let new_session = self
+            .create_session(user.id, user_agent.clone(), ip_address.clone())
+            .await?;
+        let new_secret = self.generate_token();
+        let new_refresh_token = format!("{}.{}", id.to_hex(), new_secret);
+        let refresh_expires_at =
+            now + chrono::Duration::days(self.config.device_refresh_duration_days as i64);
+        let grace_until = now + chrono::Duration::minutes(REFRESH_TOKEN_GRACE_MINUTES);
+
+        let filter = doc! {
+            "_id": id,
+            "expires_at": { "$gt": mongodb::bson::DateTime::from_chrono(now) },
+            "$or": [
+                { "token_hash": &secret_hash },
+                {
+                    "previous_token_hash": &secret_hash,
+                    "previous_valid_until": {
+                        "$gt": mongodb::bson::DateTime::from_chrono(now)
+                    }
+                }
+            ]
+        };
+        let update = doc! {
+            "$set": {
+                "session_id": new_session.id,
+                "token_hash": Self::hash_refresh_secret(&new_secret),
+                "previous_token_hash": &record.token_hash,
+                "previous_valid_until": mongodb::bson::DateTime::from_chrono(grace_until),
+                "user_agent": &user_agent,
+                "ip_address": &ip_address,
+                "last_used_at": mongodb::bson::DateTime::from_chrono(now),
+                "expires_at": mongodb::bson::DateTime::from_chrono(refresh_expires_at),
+            }
+        };
+        let options = FindOneAndUpdateOptions::builder()
+            .return_document(ReturnDocument::Before)
+            .build();
+        let previous = self
+            .device_refresh_tokens
+            .find_one_and_update(filter, update)
+            .with_options(options)
+            .await?;
+
+        let Some(previous) = previous else {
+            self.sessions
+                .delete_one(doc! { "_id": new_session.id })
+                .await?;
+            return Err(AppError::Unauthorized);
+        };
+
+        if previous.session_id != new_session.id {
+            self.sessions
+                .delete_one(doc! { "_id": previous.session_id })
+                .await?;
+        }
+
+        Ok(RefreshedDeviceSession {
+            session: new_session,
+            refresh_token: new_refresh_token,
+            refresh_expires_at,
+        })
+    }
+
+    fn parse_refresh_token(token: &str) -> Result<(ObjectId, String)> {
+        let (id, secret) = token.split_once('.').ok_or(AppError::Unauthorized)?;
+        let id = ObjectId::parse_str(id).map_err(|_| AppError::Unauthorized)?;
+        if secret.is_empty() {
+            return Err(AppError::Unauthorized);
+        }
+        Ok((id, Self::hash_refresh_secret(secret)))
+    }
+
+    fn hash_refresh_secret(secret: &str) -> String {
+        hex::encode(Sha256::digest(secret.as_bytes()))
     }
 
     pub async fn validate_session(&self, token: &str) -> Result<(User, Session)> {
@@ -425,15 +640,50 @@ impl AuthService {
         Ok(sessions)
     }
 
+    pub async fn get_user_device_tokens(
+        &self,
+        user_id: ObjectId,
+    ) -> Result<Vec<DeviceRefreshToken>> {
+        let mut cursor = self
+            .device_refresh_tokens
+            .find(doc! { "user_id": user_id })
+            .await?;
+        let mut tokens = Vec::new();
+        while cursor.advance().await? {
+            tokens.push(cursor.deserialize_current()?);
+        }
+        Ok(tokens)
+    }
+
     pub async fn revoke_session(&self, user_id: ObjectId, session_id: ObjectId) -> Result<()> {
         let result = self
             .sessions
             .delete_one(doc! { "_id": session_id, "user_id": user_id })
             .await?;
 
-        if result.deleted_count == 0 {
+        let refresh_result = self
+            .device_refresh_tokens
+            .delete_many(doc! { "user_id": user_id, "session_id": session_id })
+            .await?;
+
+        if result.deleted_count == 0 && refresh_result.deleted_count == 0 {
             return Err(AppError::NotFound("Session not found".to_string()));
         }
+        Ok(())
+    }
+
+    pub async fn revoke_device_token(&self, user_id: ObjectId, token_id: ObjectId) -> Result<()> {
+        let token = self
+            .device_refresh_tokens
+            .find_one(doc! { "_id": token_id, "user_id": user_id })
+            .await?
+            .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
+        self.device_refresh_tokens
+            .delete_one(doc! { "_id": token.id })
+            .await?;
+        self.sessions
+            .delete_one(doc! { "_id": token.session_id, "user_id": user_id })
+            .await?;
         Ok(())
     }
 
@@ -794,7 +1044,7 @@ impl AuthService {
         code: &str,
         user_agent: Option<String>,
         ip_address: Option<String>,
-    ) -> Result<(User, Session)> {
+    ) -> Result<(User, Session, Option<IssuedDeviceToken>)> {
         let challenge = self
             .totp_challenges
             .find_one(doc! { "token": totp_token })
@@ -842,12 +1092,26 @@ impl AuthService {
             token,
             user.id,
             self.config.session_duration_hours,
-            user_agent,
-            ip_address,
+            user_agent.clone(),
+            ip_address.clone(),
         );
         self.sessions.insert_one(&session).await?;
 
-        Ok((user, session))
+        let device = match (challenge.device_id, challenge.device_name) {
+            (Some(id), Some(name)) => Some(DeviceInfo { id, name }),
+            _ => None,
+        };
+        let device_token = match device {
+            Some(device) => Some(
+                self.issue_device_refresh_token(
+                    user.id, session.id, &device, user_agent, ip_address,
+                )
+                .await?,
+            ),
+            None => None,
+        };
+
+        Ok((user, session, device_token))
     }
 
     fn verify_totp_code(&self, secret_b32: &str, code: &str) -> Result<bool> {

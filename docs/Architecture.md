@@ -43,7 +43,7 @@ Uncloud/
                                  s3_credentials, api_tokens, apps, etc.)
         error.rs               ← AppError → HTTP status mapping
         routes/                ← Axum handlers
-          auth.rs              ← register/login/logout/me/sessions, change-password,
+          auth.rs              ← register/login/refresh/logout/me/sessions, change-password,
                                  demo-login, server-info, TOTP setup/enable/disable/verify,
                                  invite validation, update_my_features, update_my_preferences
           files.rs             ← CRUD, upload (simple + chunked), download, thumb, gallery
@@ -78,8 +78,8 @@ Uncloud/
           mail.rs              ← experimental mail accounts, identities, IMAP folder refresh,
                                  latest-first read-only summary sync, MIME body fetch
         services/
-          auth.rs              ← AuthService (sessions, password hashing, TOTP, invites,
-                                 demo accounts, user bytes)
+          auth.rs              ← AuthService (sessions, native-device refresh credentials,
+                                 password hashing, TOTP, invites, demo accounts, user bytes)
           storage.rs           ← StorageService (config-driven backend registry, parent-chain resolution)
           events.rs            ← EventService (per-user SSE broadcast channels)
           search.rs            ← SearchService (Meilisearch SDK wrapper)
@@ -95,6 +95,7 @@ Uncloud/
         models/
           user.rs              ← User, UserRole, totp_enabled, disabled_features, status
           session.rs           ← Session
+          device_refresh_token.rs ← Hashed, rotating native-device credentials
           file.rs              ← File, FileVersion, ProcessingTask, TaskType, ProcessingStatus
           folder.rs            ← Folder, SyncStrategy
           folder_share.rs      ← FolderShare, SharePermissionModel
@@ -202,6 +203,7 @@ Uncloud/
           api.rs               ← API base URL helpers (seed_api_base for desktop)
           tauri.rs             ← Tauri JS bridge (invoke, get_config, autostart)
           biometric.rs         ← Biometric unlock bridge (desktop / Android)
+          device_auth.rs       ← Android Keystore-backed session refresh bridge
           use_auth.rs          ← login/logout/register, TOTP, change-password, server-info
           use_files.rs         ← fetch/upload/delete/move/copy file API calls
           use_file_opener.rs   ← native open-with handoff (desktop / Android)
@@ -259,7 +261,7 @@ Uncloud/
 ## Key Conventions
 
 - **Error handling**: `AppError` in `error.rs` maps to HTTP status codes. `AppError::NotFound` -> 404, `AppError::BadRequest` -> 400, etc.
-- **Auth**: cookie-based sessions via `AuthUser` extractor; `Authorization: Bearer <token>` is also accepted (used by the desktop app and by sidecar app integrations). Public routes: `/api/auth/*` (login, register, totp/verify, invite/validate, server-info, demo) and `/api/public/*` (public share links). All other API routes require auth.
+- **Auth**: cookie-based sessions via `AuthUser` extractor; `Authorization: Bearer <token>` is also accepted (used by native apps and sidecar integrations). Android additionally receives a rotating device credential after login. Its raw value is encrypted by Android Keystore and only a SHA-256 hash is stored in MongoDB; it can mint a new short-lived session after inactivity without storing the user's password. Public auth routes are login, register, refresh, TOTP verify, invite validation, server info, and demo login. All other API routes require auth.
 - **Versioned API**: every authenticated route is mounted under both `/api/...` and `/api/v1/...`. The unversioned form is the legacy/internal surface; `/api/v1/` is the long-term stability contract for sidecar apps. A small set of routes are **v1-only**: `auth/tokens`, `s3/credentials`, `apps`, `auth/me/features`, `auth/me/preferences`. Public-only-on-v1: `apps/register`, `apps/webhooks`.
 - **Admin routes**: guarded by `admin_middleware` (`user.role == Admin`). Mounted under `/api/admin/*` and `/api/v1/admin/*`.
 - **App reverse proxy**: requests to `/apps/{name}/*` are authenticated via cookies and proxied to the registered app's `base_url`. This gives sidecar apps single-origin auth for free.
@@ -373,6 +375,7 @@ All authenticated routes are mounted under both `/api/...` and `/api/v1/...`. Th
 | `/api/auth/server-info` | GET | Public server info (registration mode, version) |
 | `/api/auth/register` | POST | User registration |
 | `/api/auth/login` | POST | Login (returns session cookie or two-step challenge) |
+| `/api/auth/refresh` | POST | Rotate a native-device credential and issue a session |
 | `/api/auth/demo` | POST | Create ephemeral demo account (when `registration: demo`) |
 | `/api/auth/totp/verify` | POST | Complete two-step login with TOTP code |
 | `/api/auth/invite/{token}` | GET | Validate an invite token |
@@ -389,6 +392,7 @@ All authenticated routes are mounted under both `/api/...` and `/api/v1/...`. Th
 | `/api/auth/me` | GET | Current user info |
 | `/api/auth/sessions` | GET | List active sessions |
 | `/api/auth/sessions/{id}` | DELETE | Revoke session |
+| `/api/auth/device` | POST | Upgrade the current native session with a device credential |
 | `/api/auth/change-password` | POST | Change own password |
 | `/api/auth/totp/setup` | POST | Begin TOTP setup (returns otpauth_uri) |
 | `/api/auth/totp/enable` | POST | Activate TOTP after verifying a code |
@@ -601,6 +605,7 @@ backup:
 
 auth:
   session_duration_hours: 168      # 7-day rolling inactivity timeout
+  device_refresh_duration_days: 180 # native-device inactivity timeout
   # registration mode: open | approval | invite_only | disabled | demo
   registration: open
   # demo_quota_bytes: 52428800     # 50MB quota for demo accounts

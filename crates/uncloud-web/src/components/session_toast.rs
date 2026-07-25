@@ -63,6 +63,7 @@ pub fn SessionExpiredToast() -> Element {
                     button {
                         class: "btn btn-sm btn-primary",
                         onclick: move |_| {
+                            crate::hooks::device_auth::clear_refresh_token();
                             api::clear_stored_session();
                             api::clear_auth_token();
                             auth_state.set(AuthState::default());

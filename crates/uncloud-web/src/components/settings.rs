@@ -1226,8 +1226,10 @@ fn ConnectionSection() -> Element {
         spawn(async move {
             disconnect_loading.set(true);
             error.set(None);
+            let _ = use_auth::logout().await;
             match tauri::disconnect().await {
                 Ok(()) => {
+                    crate::hooks::api::clear_stored_session();
                     auth_state.write().user = None;
                     tauri::mark_needs_setup();
                     nav.push("/setup");

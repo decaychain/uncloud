@@ -50,6 +50,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/auth/server-info", get(auth::server_info))
         .route("/auth/register", post(auth::register))
         .route("/auth/login", post(auth::login))
+        .route("/auth/refresh", post(auth::refresh_session))
         .route("/auth/demo", post(auth::demo_login))
         .route("/auth/totp/verify", post(auth::totp_verify))
         .route("/auth/invite/{token}", get(auth::validate_invite))
@@ -220,6 +221,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/auth/me", get(auth::me))
         .route("/auth/sessions", get(auth::list_sessions))
         .route("/auth/sessions/{id}", delete(auth::revoke_session))
+        .route("/auth/device", post(auth::create_device_token))
         // Password
         .route("/auth/change-password", post(auth::change_password))
         // TOTP

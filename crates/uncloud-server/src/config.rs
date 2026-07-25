@@ -204,6 +204,7 @@ pub struct ResolvedStorages {
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
     pub session_duration_hours: u64,
+    pub device_refresh_duration_days: u64,
     pub registration: RegistrationMode,
     pub demo_quota_bytes: i64,
     pub demo_ttl_hours: u64,
@@ -214,6 +215,8 @@ pub struct AuthConfig {
 #[derive(Deserialize)]
 struct AuthConfigRaw {
     session_duration_hours: u64,
+    #[serde(default = "default_device_refresh_duration_days")]
+    device_refresh_duration_days: u64,
     #[serde(default)]
     registration: Option<RegistrationMode>,
     #[serde(default)]
@@ -238,6 +241,7 @@ impl<'de> serde::Deserialize<'de> for AuthConfig {
         };
         Ok(AuthConfig {
             session_duration_hours: raw.session_duration_hours,
+            device_refresh_duration_days: raw.device_refresh_duration_days,
             registration,
             demo_quota_bytes: raw.demo_quota_bytes,
             demo_ttl_hours: raw.demo_ttl_hours,
@@ -513,6 +517,10 @@ fn default_demo_quota() -> i64 {
     50 * 1024 * 1024 // 50MB
 }
 
+fn default_device_refresh_duration_days() -> u64 {
+    180
+}
+
 fn default_demo_ttl_hours() -> u64 {
     24
 }
@@ -627,6 +635,7 @@ impl Default for Config {
             },
             auth: AuthConfig {
                 session_duration_hours: 168,
+                device_refresh_duration_days: default_device_refresh_duration_days(),
                 registration: RegistrationMode::Open,
                 demo_quota_bytes: default_demo_quota(),
                 demo_ttl_hours: default_demo_ttl_hours(),

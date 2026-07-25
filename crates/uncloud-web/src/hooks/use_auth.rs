@@ -28,6 +28,7 @@ pub async fn login(username: &str, password: &str) -> Result<LoginResponse, Stri
     let req = LoginRequest {
         username: username.to_string(),
         password: password.to_string(),
+        device: super::device_auth::device_info(),
     };
 
     let response = api::post("/auth/login")
@@ -48,6 +49,7 @@ pub async fn login(username: &str, password: &str) -> Result<LoginResponse, Stri
                 api::seed_auth_token(token.clone());
             }
         }
+        super::device_auth::persist_login_response(&login_resp);
 
         Ok(login_resp)
     } else {
@@ -80,6 +82,7 @@ pub async fn totp_verify(totp_token: &str, code: &str) -> Result<LoginResponse, 
                 api::seed_auth_token(token.clone());
             }
         }
+        super::device_auth::persist_login_response(&login_resp);
 
         Ok(login_resp)
     } else {
@@ -136,10 +139,15 @@ pub async fn register(
         .map_err(|e| e.to_string())?;
 
     if response.ok() {
-        response
+        let user = response
             .json::<UserResponse>()
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        if let Some(token) = &user.session_token {
+            api::seed_auth_token(token.clone());
+            let _ = super::device_auth::create_device_token().await;
+        }
+        Ok(user)
     } else {
         let text = response.text().await.unwrap_or_default();
         Err(extract_error(&text))
@@ -147,17 +155,15 @@ pub async fn register(
 }
 
 pub async fn logout() -> Result<(), String> {
-    let response = api::post("/auth/logout")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let response = api::post("/auth/logout").send().await;
 
     api::clear_auth_token();
+    super::device_auth::clear_refresh_token();
 
-    if response.ok() {
-        Ok(())
-    } else {
-        Err("Failed to logout".to_string())
+    match response {
+        Ok(response) if response.ok() => Ok(()),
+        Ok(_) => Err("Failed to logout".to_string()),
+        Err(error) => Err(error.to_string()),
     }
 }
 

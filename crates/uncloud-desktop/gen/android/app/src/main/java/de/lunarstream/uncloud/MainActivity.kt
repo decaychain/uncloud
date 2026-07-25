@@ -8,8 +8,12 @@ import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -25,7 +29,109 @@ import androidx.core.view.WindowInsetsControllerCompat
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.KeyStore
+import java.security.MessageDigest
+import java.util.UUID
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 import kotlin.concurrent.thread
+
+private class DeviceAuthStore(context: Context) {
+  private val prefs =
+    context.applicationContext.getSharedPreferences("uncloud_device_auth", Context.MODE_PRIVATE)
+
+  fun deviceInfo(): String {
+    val id = prefs.getString("installation_id", null) ?: UUID.randomUUID().toString().also {
+      prefs.edit().putString("installation_id", it).apply()
+    }
+    val manufacturer = Build.MANUFACTURER.trim()
+    val model = Build.MODEL.trim()
+    val name = listOf(manufacturer, model)
+      .filter { it.isNotBlank() }
+      .distinct()
+      .joinToString(" ")
+      .ifBlank { "Android device" }
+    return "$id\t$name"
+  }
+
+  fun store(serverUrl: String, refreshToken: String): Boolean = runCatching {
+    val key = serverKey(serverUrl)
+    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+    cipher.init(Cipher.ENCRYPT_MODE, loadOrCreateKey(alias(key)))
+    val ciphertext = cipher.doFinal(refreshToken.toByteArray(Charsets.UTF_8))
+    val blob = ByteArray(cipher.iv.size + ciphertext.size)
+    System.arraycopy(cipher.iv, 0, blob, 0, cipher.iv.size)
+    System.arraycopy(ciphertext, 0, blob, cipher.iv.size, ciphertext.size)
+    prefs.edit()
+      .putInt("$key.iv_len", cipher.iv.size)
+      .putString(key, Base64.encodeToString(blob, Base64.NO_WRAP))
+      .apply()
+    true
+  }.getOrDefault(false)
+
+  fun load(serverUrl: String): String? = runCatching {
+    val key = serverKey(serverUrl)
+    val encoded = prefs.getString(key, null) ?: return null
+    val blob = Base64.decode(encoded, Base64.NO_WRAP)
+    val ivLength = prefs.getInt("$key.iv_len", 12)
+    if (blob.size <= ivLength) {
+      clear(serverUrl)
+      return null
+    }
+    val secretKey = loadKey(alias(key)) ?: run {
+      clear(serverUrl)
+      return null
+    }
+    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+    cipher.init(
+      Cipher.DECRYPT_MODE,
+      secretKey,
+      GCMParameterSpec(128, blob.copyOfRange(0, ivLength)),
+    )
+    String(cipher.doFinal(blob.copyOfRange(ivLength, blob.size)), Charsets.UTF_8)
+  }.getOrNull()
+
+  fun clear(serverUrl: String): Boolean = runCatching {
+    val key = serverKey(serverUrl)
+    prefs.edit().remove(key).remove("$key.iv_len").apply()
+    KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.let { store ->
+      if (store.containsAlias(alias(key))) store.deleteEntry(alias(key))
+    }
+    true
+  }.getOrDefault(false)
+
+  private fun serverKey(serverUrl: String): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+      .digest(serverUrl.trimEnd('/').toByteArray(Charsets.UTF_8))
+    return digest.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+  }
+
+  private fun alias(key: String) = "uncloud.device-auth.$key"
+
+  private fun loadKey(alias: String): SecretKey? = runCatching {
+    KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.getKey(alias, null) as? SecretKey
+  }.getOrNull()
+
+  private fun loadOrCreateKey(alias: String): SecretKey {
+    loadKey(alias)?.let { return it }
+    val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+    generator.init(
+      KeyGenParameterSpec.Builder(
+        alias,
+        KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+      )
+        .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+        .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+        .setKeySize(256)
+        .setRandomizedEncryptionRequired(true)
+        .setUserAuthenticationRequired(false)
+        .build()
+    )
+    return generator.generateKey()
+  }
+}
 
 class MainActivity : TauriActivity() {
   private var webViewConfigured = false
@@ -196,6 +302,8 @@ class MainActivity : TauriActivity() {
 
   /** Bridge exposed as `window.UncloudAndroid` inside the WebView. */
   class AndroidBridge(private val activity: MainActivity) {
+    private val deviceAuth = DeviceAuthStore(activity)
+
     @JavascriptInterface
     fun setTheme(dark: Boolean) {
       activity.runOnUiThread { activity.applyTheme(dark) }
@@ -210,5 +318,18 @@ class MainActivity : TauriActivity() {
     fun downloadFile(url: String, filename: String, mimeType: String) {
       activity.runOnUiThread { activity.downloadRemoteFile(url, filename, mimeType) }
     }
+
+    @JavascriptInterface
+    fun getDeviceInfo(): String = deviceAuth.deviceInfo()
+
+    @JavascriptInterface
+    fun storeRefreshToken(serverUrl: String, refreshToken: String): Boolean =
+      deviceAuth.store(serverUrl, refreshToken)
+
+    @JavascriptInterface
+    fun loadRefreshToken(serverUrl: String): String? = deviceAuth.load(serverUrl)
+
+    @JavascriptInterface
+    fun clearRefreshToken(serverUrl: String): Boolean = deviceAuth.clear(serverUrl)
   }
 }

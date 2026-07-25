@@ -53,6 +53,14 @@ pub struct RegisterRequest {
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<DeviceInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +72,33 @@ pub struct LoginResponse {
     pub totp_required: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub totp_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub refresh_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub refresh_expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceTokenRequest {
+    pub device: DeviceInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceTokenResponse {
+    pub refresh_token: String,
+    pub refresh_expires_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshSessionRequest {
+    pub refresh_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshSessionResponse {
+    pub session_token: String,
+    pub refresh_token: String,
+    pub refresh_expires_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

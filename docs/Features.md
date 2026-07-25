@@ -147,6 +147,7 @@ Time-based one-time-password 2FA, opt-in per user.
 - **DB**: `User.totp_enabled: bool` + `User.totp_secret: Option<String>` (encrypted at rest); `totp_challenges` collection holds short-lived two-step-login tokens
 - **Setup flow**: `POST /api/auth/totp/setup` returns `{ otpauth_uri, secret }` for the QR code; `POST /api/auth/totp/enable` with a verifying code activates it; `POST /api/auth/totp/disable` removes it (requires a code)
 - **Login flow**: `POST /api/auth/login` returns `LoginResponse { totp_required: true, totp_token: <challenge> }` if TOTP is enabled; client then `POST /api/auth/totp/verify` with `{ totp_token, code }` and gets a session
+- **Android device sessions**: Android requests a rotating refresh credential after password/TOTP login. The server stores only its SHA-256 hash in `device_refresh_tokens`; Android encrypts the raw credential with a non-exportable Keystore key. App startup, foregrounding, and the first authenticated `401` can renew and retry without prompting for the password. Existing installations upgrade their still-valid session through `POST /api/auth/device`.
 - **Admin override**: `POST /api/admin/users/{id}/reset-totp` clears `totp_secret` (lockout recovery)
 - **Frontend**: TOTP setup/disable in `settings.rs` Profile tab; two-step login form in `auth/login.rs`
 

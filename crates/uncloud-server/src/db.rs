@@ -82,6 +82,37 @@ pub async fn setup_indexes(db: &Database) -> Result<()> {
         )
         .await?;
 
+    // Long-lived native-device credentials. The raw refresh secret never
+    // reaches MongoDB; only its SHA-256 hash is stored.
+    let device_tokens = db.collection::<mongodb::bson::Document>("device_refresh_tokens");
+    device_tokens
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "user_id": 1, "device_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    device_tokens
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "session_id": 1 })
+                .build(),
+        )
+        .await?;
+    device_tokens
+        .create_index(
+            IndexModel::builder()
+                .keys(mongodb::bson::doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(std::time::Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     // Files indexes
     let files = db.collection::<mongodb::bson::Document>("files");
     files

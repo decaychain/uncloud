@@ -27,6 +27,14 @@ fn samesite_for(headers: &HeaderMap) -> &'static str {
     "SameSite=Lax"
 }
 
+fn request_ip(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("X-Forwarded-For")
+        .or_else(|| headers.get("X-Real-IP"))
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(',').next().unwrap_or(value).trim().to_string())
+}
+
 fn compute_features_enabled(config: &crate::config::Config, disabled: &[String]) -> Vec<String> {
     crate::config::OPTIONAL_FEATURES
         .iter()
@@ -70,6 +78,8 @@ pub struct RegisterRequest {
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
+    #[serde(default)]
+    pub device: Option<uncloud_common::DeviceInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,6 +107,10 @@ pub struct LoginResponse {
     pub totp_required: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub totp_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_expires_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -191,7 +205,13 @@ pub async fn login(
 
     let outcome = state
         .auth
-        .login(&req.username, &req.password, user_agent, ip_address)
+        .login(
+            &req.username,
+            &req.password,
+            user_agent,
+            ip_address,
+            req.device,
+        )
         .await?;
 
     match outcome {
@@ -200,10 +220,12 @@ pub async fn login(
                 user: None,
                 totp_required: true,
                 totp_token: Some(totp_token),
+                refresh_token: None,
+                refresh_expires_at: None,
             };
             Ok((HeaderMap::new(), Json(resp)))
         }
-        LoginOutcome::Success(user, session) => {
+        LoginOutcome::Success(user, session, device_token) => {
             let samesite = samesite_for(&headers);
             let cookie = format!(
                 "{}={}; HttpOnly; {}; Path=/; Max-Age={}",
@@ -223,6 +245,8 @@ pub async fn login(
                 user: Some(user_resp),
                 totp_required: false,
                 totp_token: None,
+                refresh_token: device_token.as_ref().map(|value| value.token.clone()),
+                refresh_expires_at: device_token.map(|value| value.expires_at.to_rfc3339()),
             };
 
             Ok((resp_headers, Json(resp)))
@@ -268,6 +292,8 @@ pub async fn demo_login(
         user: Some(user_resp),
         totp_required: false,
         totp_token: None,
+        refresh_token: None,
+        refresh_expires_at: None,
     };
 
     Ok((resp_headers, Json(resp)))
@@ -291,7 +317,7 @@ pub async fn totp_verify(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.split(',').next().unwrap_or(s).trim().to_string());
 
-    let (user, session) = state
+    let (user, session, device_token) = state
         .auth
         .verify_totp_login(&req.totp_token, &req.code, user_agent, ip_address)
         .await?;
@@ -315,6 +341,8 @@ pub async fn totp_verify(
         user: Some(user_resp),
         totp_required: false,
         totp_token: None,
+        refresh_token: device_token.as_ref().map(|value| value.token.clone()),
+        refresh_expires_at: device_token.map(|value| value.expires_at.to_rfc3339()),
     };
 
     Ok((resp_headers, Json(resp)))
@@ -349,6 +377,13 @@ pub async fn logout(
             }
         }
     }
+    if let Some(token) = headers
+        .get("Authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    {
+        state.auth.logout(token).await?;
+    }
 
     let clear_cookie = format!(
         "{}=; HttpOnly; {}; Path=/; Max-Age=0",
@@ -370,20 +405,32 @@ pub async fn list_sessions(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<Json<Vec<SessionResponse>>> {
-    let sessions = state.auth.get_user_sessions(user.id).await?;
+    let device_tokens = state.auth.get_user_device_tokens(user.id).await?;
+    let linked_session_ids: std::collections::HashSet<ObjectId> =
+        device_tokens.iter().map(|token| token.session_id).collect();
+    let sessions = state
+        .auth
+        .get_user_sessions(user.id)
+        .await?
+        .into_iter()
+        .filter(|session| !linked_session_ids.contains(&session.id))
+        .map(|s| SessionResponse {
+            id: s.id.to_hex(),
+            user_agent: s.user_agent,
+            ip_address: s.ip_address,
+            created_at: s.created_at.to_rfc3339(),
+            expires_at: s.expires_at.to_rfc3339(),
+        })
+        .chain(device_tokens.into_iter().map(|token| SessionResponse {
+            id: format!("device:{}", token.id.to_hex()),
+            user_agent: Some(token.device_name),
+            ip_address: token.ip_address,
+            created_at: token.created_at.to_rfc3339(),
+            expires_at: token.expires_at.to_rfc3339(),
+        }))
+        .collect();
 
-    Ok(Json(
-        sessions
-            .into_iter()
-            .map(|s| SessionResponse {
-                id: s.id.to_hex(),
-                user_agent: s.user_agent,
-                ip_address: s.ip_address,
-                created_at: s.created_at.to_rfc3339(),
-                expires_at: s.expires_at.to_rfc3339(),
-            })
-            .collect(),
-    ))
+    Ok(Json(sessions))
 }
 
 pub async fn revoke_session(
@@ -391,12 +438,81 @@ pub async fn revoke_session(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
+    if let Some(id) = id.strip_prefix("device:") {
+        let token_id = ObjectId::parse_str(id)
+            .map_err(|_| AppError::BadRequest("Invalid session ID".to_string()))?;
+        state.auth.revoke_device_token(user.id, token_id).await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
     let session_id = ObjectId::parse_str(&id)
         .map_err(|_| AppError::BadRequest("Invalid session ID".to_string()))?;
 
     state.auth.revoke_session(user.id, session_id).await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn create_device_token(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    headers: HeaderMap,
+    Json(req): Json<uncloud_common::DeviceTokenRequest>,
+) -> Result<Json<uncloud_common::DeviceTokenResponse>> {
+    let session_token = headers
+        .get("Authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or(AppError::Unauthorized)?;
+    let (_, session) = state.auth.validate_session(session_token).await?;
+    if session.user_id != user.id {
+        return Err(AppError::Unauthorized);
+    }
+    let user_agent = headers
+        .get("User-Agent")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let ip_address = request_ip(&headers);
+    let token = state
+        .auth
+        .issue_device_refresh_token(user.id, session.id, &req.device, user_agent, ip_address)
+        .await?;
+    Ok(Json(uncloud_common::DeviceTokenResponse {
+        refresh_token: token.token,
+        refresh_expires_at: token.expires_at.to_rfc3339(),
+    }))
+}
+
+pub async fn refresh_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<uncloud_common::RefreshSessionRequest>,
+) -> Result<impl IntoResponse> {
+    let user_agent = headers
+        .get("User-Agent")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let refreshed = state
+        .auth
+        .refresh_device_session(&req.refresh_token, user_agent, request_ip(&headers))
+        .await?;
+    let cookie = format!(
+        "{}={}; HttpOnly; {}; Path=/; Max-Age={}",
+        SESSION_COOKIE,
+        refreshed.session.token,
+        samesite_for(&headers),
+        state.config.auth.session_duration_hours * 3600
+    );
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(SET_COOKIE, cookie.parse().unwrap());
+    Ok((
+        response_headers,
+        Json(uncloud_common::RefreshSessionResponse {
+            session_token: refreshed.session.token,
+            refresh_token: refreshed.refresh_token,
+            refresh_expires_at: refreshed.refresh_expires_at.to_rfc3339(),
+        }),
+    ))
 }
 
 // ── Authenticated: change password ───────────────────────────────────────────
