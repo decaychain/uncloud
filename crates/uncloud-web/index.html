@@ -9,19 +9,94 @@
         if (!window.fetch || window.__uncloud_fetch_wrapped) return;
         window.__uncloud_fetch_wrapped = true;
         var orig = window.fetch.bind(window);
+        var refreshInFlight = null;
+
+        function isAndroid() {
+            return /Android/i.test(navigator.userAgent || '');
+        }
+
+        function isCredentialRequest(url) {
+            return [
+                '/auth/login',
+                '/auth/register',
+                '/auth/demo',
+                '/auth/totp/verify',
+                '/auth/refresh'
+            ].some(function (path) {
+                return url.indexOf('/api' + path) !== -1 ||
+                    url.indexOf('/api/v1' + path) !== -1;
+            });
+        }
+
+        function refreshAuth() {
+            if (!refreshInFlight) {
+                refreshInFlight = Promise.resolve()
+                    .then(function () { return window.__uncloud_refresh_auth(); })
+                    .finally(function () { refreshInFlight = null; });
+            }
+            return refreshInFlight;
+        }
+
         window.fetch = function (input, init) {
+            var retryInput = input;
+            if (typeof Request !== 'undefined' && input instanceof Request) {
+                try { retryInput = input.clone(); } catch (_) {}
+            }
             return orig(input, init).then(function (resp) {
                 if (resp && resp.status === 401) {
                     var url = typeof input === 'string' ? input : (input && input.url) || '';
-                    // /api/auth/* covers login/register/etc. — those 401s are
-                    // "wrong password", not "session expired".
-                    if (url.indexOf('/api/auth/') === -1) {
-                        try { window.dispatchEvent(new CustomEvent('uncloud:session-expired')); } catch (_) {}
+                    // Credential endpoint 401s mean invalid user input or an
+                    // invalid refresh credential. Protected auth endpoints
+                    // such as /auth/me still need transparent recovery.
+                    if (!isCredentialRequest(url)) {
+                        if (isAndroid() && typeof window.__uncloud_refresh_auth === 'function') {
+                            return refreshAuth().then(function (token) {
+                                var retryInit = Object.assign({}, init || {});
+                                var sourceHeaders = retryInit.headers ||
+                                    (typeof Request !== 'undefined' && input instanceof Request
+                                        ? input.headers
+                                        : undefined);
+                                var headers = new Headers(sourceHeaders || {});
+                                headers.set('Authorization', 'Bearer ' + token);
+                                retryInit.headers = headers;
+                                return orig(retryInput, retryInit).then(function (retryResp) {
+                                    if (retryResp && retryResp.status === 401) {
+                                        try {
+                                            window.dispatchEvent(
+                                                new CustomEvent('uncloud:session-expired')
+                                            );
+                                        } catch (_) {}
+                                    }
+                                    return retryResp;
+                                });
+                            }).catch(function () {
+                                try {
+                                    window.dispatchEvent(
+                                        new CustomEvent('uncloud:session-expired')
+                                    );
+                                } catch (_) {}
+                                return resp;
+                            });
+                        }
+                        try {
+                            window.dispatchEvent(new CustomEvent('uncloud:session-expired'));
+                        } catch (_) {}
                     }
                 }
                 return resp;
             });
         };
+
+        // Android may resume the same WebView after days of suspension. Refresh
+        // proactively at most once per day instead of waiting for a request to
+        // fail. The Rust bridge stores the completion timestamp.
+        document.addEventListener('visibilitychange', function () {
+            if (!isAndroid() || document.visibilityState !== 'visible') return;
+            var last = Number(localStorage.getItem('uncloud_auth_refreshed_at') || 0);
+            if (Date.now() - last < 24 * 60 * 60 * 1000) return;
+            if (typeof window.__uncloud_refresh_auth !== 'function') return;
+            refreshAuth().catch(function () {});
+        });
     })();
     </script>
 </head>

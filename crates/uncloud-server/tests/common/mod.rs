@@ -113,6 +113,7 @@ impl TestApp {
             },
             auth: AuthConfig {
                 session_duration_hours: 1,
+                device_refresh_duration_days: 180,
                 registration: uncloud_server::config::RegistrationMode::Open,
                 demo_quota_bytes: 50 * 1024 * 1024,
                 demo_ttl_hours: 24,
@@ -280,6 +281,7 @@ impl TestApp {
         // Hash password using the same argon2 logic as the server
         let auth_config = uncloud_server::config::AuthConfig {
             session_duration_hours: 1,
+            device_refresh_duration_days: 180,
             registration: uncloud_server::config::RegistrationMode::Open,
             demo_quota_bytes: 0,
             demo_ttl_hours: 24,
@@ -349,6 +351,7 @@ impl BoundTestApp {
             },
             auth: AuthConfig {
                 session_duration_hours: 1,
+                device_refresh_duration_days: 180,
                 registration: uncloud_server::config::RegistrationMode::Open,
                 demo_quota_bytes: 50 * 1024 * 1024,
                 demo_ttl_hours: 24,

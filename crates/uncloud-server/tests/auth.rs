@@ -305,3 +305,165 @@ async fn revoke_session_invalidates_access() {
         .await
         .assert_status(StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn device_login_issues_hashed_refresh_token_and_replaces_same_device() {
+    let app = TestApp::new().await;
+    app.register("alice", "alice@example.com", "password123!")
+        .await;
+
+    let login = app
+        .server
+        .post("/api/auth/login")
+        .json(&serde_json::json!({
+            "username": "alice",
+            "password": "password123!",
+            "device": {
+                "id": "android-installation-1",
+                "name": "Test phone"
+            }
+        }))
+        .await;
+    login.assert_status_ok();
+    let first: serde_json::Value = login.json();
+    let first_refresh = first["refresh_token"]
+        .as_str()
+        .expect("device login refresh token")
+        .to_string();
+
+    let tokens = app
+        .db
+        .collection::<mongodb::bson::Document>("device_refresh_tokens");
+    let stored = tokens
+        .find_one(doc! {})
+        .await
+        .expect("query device token")
+        .expect("stored device token");
+    assert_ne!(
+        stored.get_str("token_hash").expect("stored token hash"),
+        first_refresh
+    );
+    assert_eq!(
+        tokens
+            .count_documents(doc! {})
+            .await
+            .expect("count device tokens"),
+        1
+    );
+
+    let second: serde_json::Value = app
+        .server
+        .post("/api/auth/login")
+        .json(&serde_json::json!({
+            "username": "alice",
+            "password": "password123!",
+            "device": {
+                "id": "android-installation-1",
+                "name": "Renamed test phone"
+            }
+        }))
+        .await
+        .json();
+    assert_ne!(second["refresh_token"], first["refresh_token"]);
+    assert_eq!(
+        tokens
+            .count_documents(doc! {})
+            .await
+            .expect("count replaced device tokens"),
+        1
+    );
+
+    app.server
+        .post("/api/auth/refresh")
+        .json(&serde_json::json!({ "refresh_token": first_refresh }))
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn existing_android_session_can_upgrade_refresh_rotate_and_revoke() {
+    let app = TestApp::new().await;
+    let registered = app
+        .register("alice", "alice@example.com", "password123!")
+        .await;
+    let access_token = registered["session_token"]
+        .as_str()
+        .expect("registration session token");
+
+    let issued = app
+        .server
+        .post("/api/auth/device")
+        .add_header("Authorization", format!("Bearer {access_token}"))
+        .json(&serde_json::json!({
+            "device": {
+                "id": "existing-android-installation",
+                "name": "Existing phone"
+            }
+        }))
+        .await;
+    issued.assert_status_ok();
+    let issued: serde_json::Value = issued.json();
+    let initial_refresh = issued["refresh_token"]
+        .as_str()
+        .expect("upgraded refresh token")
+        .to_string();
+
+    // A device refresh remains usable after its ordinary access session has
+    // expired, which is the recovery path Android previously lacked.
+    app.db
+        .collection::<mongodb::bson::Document>("sessions")
+        .update_one(
+            doc! { "token": access_token },
+            doc! { "$set": {
+                "expires_at": DateTime::from_chrono(
+                    chrono::Utc::now() - chrono::Duration::minutes(1)
+                )
+            }},
+        )
+        .await
+        .expect("expire access session");
+
+    let refreshed = app
+        .server
+        .post("/api/auth/refresh")
+        .json(&serde_json::json!({ "refresh_token": initial_refresh }))
+        .await;
+    refreshed.assert_status_ok();
+    let refreshed: serde_json::Value = refreshed.json();
+    let rotated_refresh = refreshed["refresh_token"]
+        .as_str()
+        .expect("rotated refresh token")
+        .to_string();
+    assert_ne!(rotated_refresh, initial_refresh);
+    app.server.get("/api/auth/me").await.assert_status_ok();
+
+    // The immediately previous credential is accepted briefly so a process
+    // interruption between server rotation and Keystore persistence recovers.
+    app.server
+        .post("/api/auth/refresh")
+        .json(&serde_json::json!({ "refresh_token": initial_refresh }))
+        .await
+        .assert_status_ok();
+
+    let sessions: serde_json::Value = app.server.get("/api/auth/sessions").await.json();
+    let device_session_id = sessions
+        .as_array()
+        .expect("sessions array")
+        .iter()
+        .find_map(|session| {
+            session["id"]
+                .as_str()
+                .filter(|id| id.starts_with("device:"))
+        })
+        .expect("visible device session");
+    app.server
+        .delete(&format!("/api/auth/sessions/{device_session_id}"))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    app.server
+        .post("/api/auth/refresh")
+        .json(&serde_json::json!({ "refresh_token": rotated_refresh }))
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+}

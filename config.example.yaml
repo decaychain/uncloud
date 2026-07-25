@@ -52,6 +52,9 @@ storage:
 auth:
   # Session inactivity timeout in hours. Active sessions renew automatically.
   session_duration_hours: 168  # 7 days
+  # Native-device credential inactivity timeout. Android stores the rotating
+  # credential encrypted by Android Keystore and uses it to renew sessions.
+  device_refresh_duration_days: 180
   # Registration mode: open | approval | invite_only | disabled | demo
   #   open         - anyone can register (default)
   #   approval     - anyone can register, but account is pending until admin approves

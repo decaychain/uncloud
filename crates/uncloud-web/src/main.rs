@@ -11,6 +11,7 @@ fn main() {
     // query during its first pushState — stashing it here lets the consent
     // component read it later via `hooks::api::initial_search()`.
     hooks::api::snapshot_initial_url();
+    hooks::device_auth::install_refresh_bridge();
     // In Tauri mode we must get the server URL from the native config before
     // launching Dioxus, because the Router's first pushState would otherwise
     // clear any hash fragment we could have used. We spawn an async task so
@@ -23,6 +24,8 @@ fn main() {
                 // and auth token from localStorage (survives force-stop).
                 if !hooks::api::restore_from_storage() {
                     hooks::tauri::mark_needs_setup();
+                } else {
+                    hooks::device_auth::prepare_android_auth().await;
                 }
             } else {
                 match hooks::tauri::get_config().await {

@@ -1,6 +1,7 @@
 pub mod api_token;
 pub mod app;
 pub mod backup_lock;
+pub mod device_refresh_token;
 pub mod file;
 pub mod finance;
 pub mod folder;
@@ -29,6 +30,7 @@ pub mod webhook;
 pub use api_token::*;
 pub use app::*;
 pub use backup_lock::*;
+pub use device_refresh_token::*;
 pub use file::*;
 pub use finance::*;
 pub use folder::*;
