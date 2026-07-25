@@ -257,8 +257,9 @@ link time.
 Three Linux-only knobs are set in `main()` before any GTK/WebKit code
 runs. Don't drop them without understanding what each closes:
 
-* `WEBKIT_DISABLE_COMPOSITING_MODE=1` — long-standing, dodges Wayland
-  protocol errors on some driver/mesa stacks.
+* `__NV_DISABLE_EXPLICIT_SYNC=1` — set by default in Wayland sessions
+  unless already configured by the user. This avoids NVIDIA explicit-sync
+  protocol errors while preserving WebKitGTK accelerated compositing.
 * `NO_AT_BRIDGE=1` — skips GTK's AT-SPI accessibility bridge. Tauri
   renders inside WebKit, so the bridge wasn't carrying useful
   screen-reader content; meanwhile, on Fedora 43 it consistently

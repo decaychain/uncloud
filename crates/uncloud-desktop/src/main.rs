@@ -1,9 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    // Disable WebKit GPU compositing to avoid Wayland protocol errors on some
-    // driver/mesa configurations.
-    std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+    // NVIDIA's Wayland explicit-sync path can make WebKitGTK commit a surface
+    // without an acquire point, causing the compositor to disconnect us with
+    // Error 71. Falling back to implicit sync keeps accelerated compositing
+    // enabled, unlike WEBKIT_DISABLE_COMPOSITING_MODE.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        && std::env::var_os("__NV_DISABLE_EXPLICIT_SYNC").is_none()
+    {
+        std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "1");
+    }
 
     // Skip GTK's AT-SPI accessibility bridge. Tauri renders through
     // WebKit anyway, so the bridge wasn't doing useful screen-reader
