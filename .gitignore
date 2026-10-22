@@ -19,6 +19,7 @@ Thumbs.db
 
 # Config (keep example, ignore live config with secrets/local paths)
 config.yaml
+config.s3.yaml
 !config.example.yaml
 
 # Data directories

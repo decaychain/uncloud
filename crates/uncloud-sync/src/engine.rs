@@ -705,7 +705,103 @@ impl SyncEngine {
                 .map(|r| ((r.server_id.clone(), r.item_type.clone()), r))
                 .collect();
 
+            let server_files_by_id: std::collections::HashMap<&str, &uncloud_common::FileResponse> =
+                tree.files.iter().map(|f| (f.id.as_str(), f)).collect();
+            let server_folders_by_id: std::collections::HashMap<
+                &str,
+                &uncloud_common::FolderResponse,
+            > = tree.folders.iter().map(|f| (f.id.as_str(), f)).collect();
+
+            // Cache every folder's ancestors. Folder deletion and remote-change
+            // checks need subtree membership, and repeatedly walking parent
+            // pointers made those checks both noisy and quadratic in depth.
+            let mut folder_ancestors: std::collections::HashMap<
+                String,
+                std::collections::HashSet<String>,
+            > = std::collections::HashMap::new();
+            for folder in &tree.folders {
+                let mut ancestors = std::collections::HashSet::new();
+                let mut current = folder.parent_id.as_deref();
+                while let Some(parent_id) = current {
+                    if !ancestors.insert(parent_id.to_owned()) {
+                        break;
+                    }
+                    current = server_folders_by_id
+                        .get(parent_id)
+                        .and_then(|parent| parent.parent_id.as_deref());
+                }
+                folder_ancestors.insert(folder.id.clone(), ancestors);
+            }
+
+            let folder_in_subtree = |folder_id: &str, root_id: &str| {
+                folder_id == root_id
+                    || folder_ancestors
+                        .get(folder_id)
+                        .is_some_and(|ancestors| ancestors.contains(root_id))
+            };
+            let file_in_subtree = |file: &uncloud_common::FileResponse, root_id: &str| {
+                file.parent_id.as_deref().is_some_and(|parent_id| {
+                    parent_id == root_id
+                        || folder_ancestors
+                            .get(parent_id)
+                            .is_some_and(|ancestors| ancestors.contains(root_id))
+                })
+            };
+            let mut server_changed_subtree_ids = std::collections::HashSet::new();
+            for folder in &tree.folders {
+                let changed = journal_map
+                    .get(&(folder.id.clone(), "folder".to_owned()))
+                    .is_none_or(|row| folder.updated_at > row.server_updated_at);
+                if changed {
+                    server_changed_subtree_ids.insert(folder.id.clone());
+                    if let Some(ancestors) = folder_ancestors.get(&folder.id) {
+                        server_changed_subtree_ids.extend(ancestors.iter().cloned());
+                    }
+                }
+            }
+            for file in &tree.files {
+                let changed = journal_map
+                    .get(&(file.id.clone(), "file".to_owned()))
+                    .is_none_or(|row| file.updated_at > row.server_updated_at);
+                if !changed {
+                    continue;
+                }
+                if let Some(parent_id) = file.parent_id.as_deref() {
+                    server_changed_subtree_ids.insert(parent_id.to_owned());
+                    if let Some(ancestors) = folder_ancestors.get(parent_id) {
+                        server_changed_subtree_ids.extend(ancestors.iter().cloned());
+                    }
+                }
+            }
+            let subtree_changed_on_server =
+                |root_id: &str| server_changed_subtree_ids.contains(root_id);
+
             let today = Utc::now().date_naive();
+            let mut restore_server_subtrees = std::collections::HashSet::new();
+            for folder in &tree.folders {
+                let Some(info) = folder_info.get(&folder.id) else {
+                    continue;
+                };
+                let Some(base) = info.base_path.as_ref() else {
+                    continue;
+                };
+                let Some(existing) = journal_map.get(&(folder.id.clone(), "folder".to_owned()))
+                else {
+                    continue;
+                };
+                let local_exists = self.fs.is_dir(base).await.unwrap_or(false);
+                if !local_exists
+                    && existing.local_path == *base
+                    && subtree_changed_on_server(&folder.id)
+                {
+                    restore_server_subtrees.insert(folder.id.clone());
+                }
+            }
+            let restored_from_server = |folder_id: &str| {
+                restore_server_subtrees
+                    .iter()
+                    .any(|root_id| folder_in_subtree(folder_id, root_id))
+            };
 
             // 4. Process server folders first (create local dirs)
             for folder in &tree.folders {
@@ -718,6 +814,37 @@ impl SyncEngine {
                 let Some(base) = info.base_path.as_ref() else {
                     continue;
                 };
+
+                // A journaled folder that disappeared locally is a possible
+                // delete or rename. Do not recreate it before Phase 6a gets a
+                // chance to confirm that absence. First-sight folders and
+                // remotely changed subtrees still take the normal download
+                // path, so a new remote child always wins over a pending local
+                // deletion.
+                let key = (folder.id.clone(), "folder".to_owned());
+                let existing = journal_map.get(&key);
+                let local_exists = self.fs.is_dir(base).await.unwrap_or(false);
+                let can_push_delete = matches!(
+                    info.strategy,
+                    SyncStrategy::TwoWay | SyncStrategy::ClientToServer
+                );
+                let preserve_local_absence = existing.is_some_and(|row| {
+                    !local_exists
+                        && can_push_delete
+                        && row.local_path == *base
+                        && !subtree_changed_on_server(&folder.id)
+                        && !restored_from_server(&folder.id)
+                });
+                if preserve_local_absence {
+                    continue;
+                }
+
+                if local_exists && existing.is_some_and(|row| row.delete_pending_since.is_some()) {
+                    let _ = self
+                        .journal
+                        .clear_delete_pending(&folder.id, "folder")
+                        .await;
+                }
 
                 if let Err(e) = self.fs.create_dir_all(base).await {
                     report.errors.push(SyncError {
@@ -790,7 +917,11 @@ impl SyncEngine {
                 // still fall through to the `None` arm below and download.
                 let local_exists = self.fs.is_file(local_path).await.unwrap_or(false);
                 let in_journal = journal_map.contains_key(&key);
-                if !local_exists && in_journal {
+                let restore_from_server = file
+                    .parent_id
+                    .as_deref()
+                    .is_some_and(|parent_id| restored_from_server(parent_id));
+                if !local_exists && in_journal && !restore_from_server {
                     continue;
                 }
                 let journal_entry = journal_map.get(&key).filter(|_| local_exists);
@@ -1110,13 +1241,6 @@ impl SyncEngine {
             //     instead of N file-deletes. The server cascades the trash
             //     and leaves a single audit entry.
             let now = Utc::now().to_rfc3339();
-            let server_files_by_id: std::collections::HashMap<&str, &uncloud_common::FileResponse> =
-                tree.files.iter().map(|f| (f.id.as_str(), f)).collect();
-            let server_folders_by_id: std::collections::HashMap<
-                &str,
-                &uncloud_common::FolderResponse,
-            > = tree.folders.iter().map(|f| (f.id.as_str(), f)).collect();
-
             // Resolve effective strategy for a journal row by looking up its
             // server record's parent folder. Falls back to TwoWay for root-
             // level items, which is consistent with the rest of the engine.
@@ -1170,59 +1294,134 @@ impl SyncEngine {
                 }
             }
 
-            // Folder collapse: if a parent folder's local directory is gone
-            // AND every file the server has under it is also missing, push
-            // one folder-delete and mark the children touched so the
-            // file-level pass below skips them.
+            // Folder collapse: a tracked directory that remains absent for
+            // two scans is deleted as one server-side subtree. This includes
+            // empty folders; the previous implementation only considered a
+            // folder reached through `missing_files_by_parent`, so Phase 4
+            // recreated empty folders before they could ever be deleted.
+            //
+            // A folder is not collapsed when the server changed anywhere in
+            // its subtree or a locally mapped descendant still exists (for
+            // example through a per-folder path override). In those cases we
+            // preserve data and let normal item-level reconciliation run.
             let mut collapsed_file_ids: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
-            for (parent_id, missing) in &missing_files_by_parent {
-                let folder_journal =
-                    match journal_map.get(&(parent_id.clone(), "folder".to_owned())) {
-                        Some(row) => row,
-                        None => continue, // Folder isn't journaled — bail to file-by-file.
-                    };
-                let server_count = tree
-                    .files
-                    .iter()
-                    .filter(|f| f.parent_id.as_deref() == Some(parent_id.as_str()))
-                    .count();
-                if missing.len() != server_count {
-                    continue; // Some children still present locally — partial delete.
-                }
-                // Every child gone — confirm the directory itself is gone.
+            let mut missing_folder_candidates: Vec<&crate::journal::SyncStateRow> = Vec::new();
+            for folder in &tree.folders {
+                let Some(folder_journal) =
+                    journal_map.get(&(folder.id.clone(), "folder".to_owned()))
+                else {
+                    continue;
+                };
+
+                let expected_path_matches = folder_info
+                    .get(&folder.id)
+                    .and_then(|info| info.base_path.as_deref())
+                    == Some(folder_journal.local_path.as_str());
+                let strategy = strategy_for_folder(&folder.id);
                 let dir_exists = self
                     .fs
                     .is_dir(&folder_journal.local_path)
                     .await
                     .unwrap_or(false);
-                if dir_exists {
+                if dir_exists
+                    || !expected_path_matches
+                    || !allows_delete_push(strategy)
+                    || subtree_changed_on_server(&folder.id)
+                {
+                    if folder_journal.delete_pending_since.is_some() {
+                        let _ = self
+                            .journal
+                            .clear_delete_pending(&folder.id, "folder")
+                            .await;
+                    }
                     continue;
                 }
-                let strategy = strategy_for_folder(parent_id);
-                if !allows_delete_push(strategy) {
+
+                let mut local_descendant_survives = false;
+                for descendant in tree
+                    .folders
+                    .iter()
+                    .filter(|candidate| candidate.id != folder.id)
+                    .filter(|candidate| folder_in_subtree(&candidate.id, &folder.id))
+                {
+                    if let Some(row) =
+                        journal_map.get(&(descendant.id.clone(), "folder".to_owned()))
+                    {
+                        if self.fs.is_dir(&row.local_path).await.unwrap_or(false) {
+                            local_descendant_survives = true;
+                            break;
+                        }
+                    }
+                }
+                if !local_descendant_survives {
+                    for file in tree
+                        .files
+                        .iter()
+                        .filter(|file| file_in_subtree(file, &folder.id))
+                    {
+                        if let Some(row) = journal_map.get(&(file.id.clone(), "file".to_owned())) {
+                            if self.fs.is_file(&row.local_path).await.unwrap_or(false) {
+                                local_descendant_survives = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if local_descendant_survives {
+                    if folder_journal.delete_pending_since.is_some() {
+                        let _ = self
+                            .journal
+                            .clear_delete_pending(&folder.id, "folder")
+                            .await;
+                    }
                     continue;
                 }
+                missing_folder_candidates.push(folder_journal);
+            }
+
+            // Parent deletes cascade on the server, so process shallow server
+            // folders first and suppress nested candidates already covered by
+            // one. Local path length is not a valid depth proxy because a
+            // per-folder override can place a child at a shorter path.
+            missing_folder_candidates.sort_by_key(|row| {
+                folder_ancestors
+                    .get(&row.server_id)
+                    .map_or(usize::MAX, std::collections::HashSet::len)
+            });
+            let mut collapsed_folder_ids = std::collections::HashSet::new();
+            for folder_journal in missing_folder_candidates {
+                let folder_id = folder_journal.server_id.as_str();
+                let covered_by_parent = folder_ancestors.get(folder_id).is_some_and(|ancestors| {
+                    ancestors
+                        .iter()
+                        .any(|ancestor| collapsed_folder_ids.contains(ancestor))
+                });
+                if covered_by_parent {
+                    continue;
+                }
+                collapsed_folder_ids.insert(folder_id.to_owned());
+
+                let subtree_file_rows: Vec<&crate::journal::SyncStateRow> = tree
+                    .files
+                    .iter()
+                    .filter(|file| file_in_subtree(file, folder_id))
+                    .filter_map(|file| journal_map.get(&(file.id.clone(), "file".to_owned())))
+                    .collect();
+                for row in &subtree_file_rows {
+                    collapsed_file_ids.insert(row.server_id.clone());
+                }
+
                 // Two-phase on the folder row.
                 match folder_journal.delete_pending_since.as_deref() {
                     None => {
                         let _ = self
                             .journal
-                            .set_delete_pending(parent_id, "folder", &now)
+                            .set_delete_pending(folder_id, "folder", &now)
                             .await;
-                        // Also pre-mark the children so the file pass below
-                        // doesn't double-mark and produce a stale pending
-                        // delete after the folder is gone.
-                        for j in missing {
-                            let _ = self
-                                .journal
-                                .set_delete_pending(&j.server_id, "file", &now)
-                                .await;
-                            collapsed_file_ids.insert(j.server_id.clone());
-                        }
                     }
                     Some(since) => {
-                        let server_folder = server_folders_by_id.get(parent_id.as_str()).copied();
+                        let server_folder = server_folders_by_id.get(folder_id).copied();
                         let folder_changed = server_folder
                             .map(|f| f.updated_at.as_str() > since)
                             .unwrap_or(false);
@@ -1230,27 +1429,31 @@ impl SyncEngine {
                             // Server moved/renamed the folder while we were
                             // pending — server wins, drop the pending state
                             // and let the next scan re-download.
-                            let _ = self.journal.clear_delete_pending(parent_id, "folder").await;
-                            for j in missing {
-                                let _ = self
-                                    .journal
-                                    .clear_delete_pending(&j.server_id, "file")
-                                    .await;
-                            }
+                            let _ = self.journal.clear_delete_pending(folder_id, "folder").await;
                             continue;
                         }
-                        match self.client.delete_folder(parent_id).await {
+                        match self.client.delete_folder(folder_id).await {
                             Ok(()) => {
                                 self.log_delete_remote(&folder_journal.local_path, "Folder")
                                     .await;
                                 report
                                     .deleted_local
                                     .push(folder_journal.server_path.clone());
-                                let _ = self.journal.delete(parent_id, "folder").await;
-                                for j in missing {
-                                    let _ = self.journal.delete(&j.server_id, "file").await;
-                                    collapsed_file_ids.insert(j.server_id.clone());
-                                    touched_paths.insert(j.local_path.clone());
+                                for descendant in tree
+                                    .folders
+                                    .iter()
+                                    .filter(|folder| folder_in_subtree(&folder.id, folder_id))
+                                {
+                                    if let Some(row) = journal_map
+                                        .get(&(descendant.id.clone(), "folder".to_owned()))
+                                    {
+                                        touched_paths.insert(row.local_path.clone());
+                                    }
+                                    let _ = self.journal.delete(&descendant.id, "folder").await;
+                                }
+                                for row in subtree_file_rows {
+                                    let _ = self.journal.delete(&row.server_id, "file").await;
+                                    touched_paths.insert(row.local_path.clone());
                                 }
                                 touched_paths.insert(folder_journal.local_path.clone());
                             }
