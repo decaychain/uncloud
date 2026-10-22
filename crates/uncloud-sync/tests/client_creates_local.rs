@@ -18,10 +18,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::{
-    extract::{Json as AxJson, State},
+    extract::{Json as AxJson, Path as AxPath, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use tempfile::TempDir;
@@ -49,6 +49,7 @@ struct FakeServer {
     folders: Arc<Mutex<HashMap<String, CreatedFolder>>>,
     files: Arc<Mutex<HashMap<String, UploadedFile>>>,
     create_folder_calls: Arc<AtomicUsize>,
+    delete_folder_calls: Arc<AtomicUsize>,
     upload_calls: Arc<AtomicUsize>,
 }
 
@@ -128,6 +129,19 @@ async fn create_folder(
     (StatusCode::OK, Json(resp))
 }
 
+async fn delete_folder(
+    AxPath(id): AxPath<String>,
+    State(s): State<FakeServer>,
+) -> impl IntoResponse {
+    s.delete_folder_calls.fetch_add(1, Ordering::SeqCst);
+    s.folders.lock().await.remove(&id);
+    s.files
+        .lock()
+        .await
+        .retain(|_, file| file.parent_id.as_deref() != Some(id.as_str()));
+    StatusCode::NO_CONTENT
+}
+
 async fn upload_simple(
     State(s): State<FakeServer>,
     mut multipart: axum::extract::Multipart,
@@ -174,6 +188,7 @@ async fn spawn_server(state: FakeServer) -> (String, oneshot::Sender<()>) {
     let app = Router::new()
         .route("/api/sync/tree", get(sync_tree))
         .route("/api/folders", post(create_folder))
+        .route("/api/folders/{id}", delete(delete_folder))
         .route("/api/uploads/simple", post(upload_simple))
         .with_state(state);
 
@@ -351,6 +366,43 @@ async fn second_sync_is_a_noop() {
     );
     assert!(report.created_remote_folders.is_empty());
     assert!(report.uploaded.is_empty());
+}
+
+#[tokio::test]
+async fn local_folder_rename_does_not_resurrect_the_old_name() {
+    let server = FakeServer::default();
+    let folders = server.folders.clone();
+    let create_calls = server.create_folder_calls.clone();
+    let delete_calls = server.delete_folder_calls.clone();
+
+    let rig = new_rig(server).await;
+    let old_path = rig.root.join("Old name");
+    let new_path = rig.root.join("New name");
+    std::fs::create_dir(&old_path).unwrap();
+    std::fs::write(old_path.join("note.txt"), b"hello").unwrap();
+
+    let engine = build_engine(&rig).await;
+    engine.incremental_sync().await.unwrap();
+    assert_eq!(create_calls.load(Ordering::SeqCst), 1);
+
+    std::fs::rename(&old_path, &new_path).unwrap();
+
+    // First scan preserves the old path's absence, marks its server folder
+    // pending, and creates the renamed local folder as a new remote subtree.
+    engine.incremental_sync().await.unwrap();
+    assert!(!old_path.exists(), "the old folder name must stay absent");
+    assert!(new_path.join("note.txt").is_file());
+    assert_eq!(create_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(delete_calls.load(Ordering::SeqCst), 0);
+
+    // The confirmation scan removes the old remote subtree in one operation.
+    engine.incremental_sync().await.unwrap();
+    assert_eq!(delete_calls.load(Ordering::SeqCst), 1);
+    assert!(!old_path.exists());
+
+    let folders = folders.lock().await;
+    assert_eq!(folders.len(), 1);
+    assert_eq!(folders.values().next().unwrap().name, "New name");
 }
 
 /// The engine's `state()` watch broadcasts the connection/activity state
