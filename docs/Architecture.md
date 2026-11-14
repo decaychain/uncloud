@@ -244,7 +244,7 @@ Uncloud/
         engine.rs              ← Two-way sync algorithm + activity broadcast (Idle/Polling/
                                  Transferring) via tokio::sync::watch
         journal.rs             ← SQLite journal (tracks local state)
-        fs.rs                  ← LocalFs / NativeFs trait + WalkEntry (testing seam)
+        fs.rs                  ← LocalFs / NativeFs trait + WalkEntry (testing seam); chunked read/write/hash/copy
     uncloud-desktop/
       src/
         main.rs                ← Tauri entry point (env vars, tray icon, event handler)

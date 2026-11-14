@@ -52,6 +52,9 @@ struct FakeServer {
     delete_folder_calls: Arc<AtomicUsize>,
     update_folder_calls: Arc<AtomicUsize>,
     upload_calls: Arc<AtomicUsize>,
+    /// Content checksums the tree reports, by file id. Empty by default,
+    /// like a server that predates the field.
+    checksums: Arc<Mutex<HashMap<String, String>>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -69,6 +72,7 @@ struct CreateFolderBody {
 async fn sync_tree(State(s): State<FakeServer>) -> impl IntoResponse {
     let folders = s.folders.lock().await;
     let files = s.files.lock().await;
+    let checksums = s.checksums.lock().await;
     let folders: Vec<_> = folders
         .values()
         .map(|f| {
@@ -99,6 +103,7 @@ async fn sync_tree(State(s): State<FakeServer>) -> impl IntoResponse {
                 "parent_id": f.parent_id,
                 "created_at": "2026-01-01T00:00:00Z",
                 "updated_at": "2026-01-01T00:00:00Z",
+                "checksum_sha256": checksums.get(&f.id),
             })
         })
         .collect();
@@ -348,6 +353,42 @@ async fn legacy_journal_without_checksums_falls_back_to_upload() {
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert!(report.renamed_remote_folders.is_empty());
     assert_eq!(uploads.load(Ordering::SeqCst), 2);
+}
+
+/// Rows written before checksums were recorded take theirs from the server
+/// tree, so a folder synced by an older build is still renamed in place.
+#[tokio::test]
+async fn legacy_journal_takes_checksums_from_the_server_and_renames() {
+    let server = FakeServer::default();
+    let uploads = server.upload_calls.clone();
+    let updates = server.update_folder_calls.clone();
+    let checksums = server.checksums.clone();
+    let files = server.files.clone();
+    let rig = new_rig(server).await;
+    std::fs::create_dir(rig.root.join("Old")).unwrap();
+    std::fs::write(rig.root.join("Old/note.txt"), b"content").unwrap();
+    let engine = build_engine(&rig).await;
+    engine.incremental_sync().await.unwrap();
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", rig.db_path.display()))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sync_state SET checksum = NULL")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    let file_id = files.lock().await.keys().next().unwrap().clone();
+    checksums.lock().await.insert(
+        file_id,
+        uncloud_sync::sha256_hex_reader(&b"content"[..]).unwrap(),
+    );
+
+    std::fs::rename(rig.root.join("Old"), rig.root.join("New")).unwrap();
+    let report = engine.incremental_sync().await.unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.renamed_remote_folders.len(), 1, "{:?}", report);
+    assert_eq!(updates.load(Ordering::SeqCst), 1);
+    assert_eq!(uploads.load(Ordering::SeqCst), 1, "nothing is re-uploaded");
 }
 
 /// Local-only folder + file → server gets the folder created and the file

@@ -168,34 +168,85 @@ same mtime. If exactly one such pairing exists, the folder was renamed or
 moved: the engine sends `PUT /api/folders/{id}` with the new name and/or
 parent and repoints the journal rows. Matching requires the stored SHA-256
 checksum of every tracked file as well as its relative path and mtime;
-timestamps alone are not proof of identity. Checksums are recorded from the
-actual bytes of successful uploads and downloads, using the existing journal
-column. An older row without a checksum falls back to ordinary creation and
-upload, never a speculative rename. File and folder ids, and with them
-shares and version history, survive; nothing is re-uploaded. Known gaps,
-which fall back to delete-and-create:
+timestamps alone are not proof of identity. File and folder ids, and with
+them shares and version history, survive; nothing is re-uploaded. Known
+gaps, which fall back to delete-and-create:
 
 - an empty folder (nothing to recognise it by),
 - a folder moved into a directory that is itself new,
 - a rename combined with edits to the files inside before the next scan,
 - two candidates that match equally well,
-- single-file renames, which were always delete-and-upload.
+- single-file renames, which were always delete-and-upload,
+- a file whose checksum is not on record (see below).
+
+**Checksums.** The journal records the SHA-256 of the bytes of every
+successful upload and download. Rows written by older builds have none;
+they are filled in from the server, which reports each file's checksum in
+the sync tree (`checksum_sha256`): while a row still names the server's
+current version, the bytes last transferred are the bytes the server
+holds, so no local file has to be read. Against a server that predates
+the field such rows stay without a checksum and a rename of their folder
+falls back to create-and-upload, never a speculative rename.
+
+Local files are hashed in fixed-size chunks (`LocalFs::sha256`), so a
+large file costs no more memory than a small one. Results are remembered
+per path and mtime for as long as successive runs keep asking for them, so
+a rename that stays pending does not re-read the folder on every poll.
 
 **Receiving a rename or move.** Before materializing the new server layout,
 the client relocates a tracked folder from its previous local path and rebases
 its descendants' journal paths in one transaction. This preserves local edits,
 unsynced contents and empty folders, without re-uploading or re-downloading
-unchanged files. A move intent is persisted before the filesystem operation;
-after interruption, an already-moved directory is only adopted when that intent
-matches. Completing the journal transaction also clears the intent. An unrelated
-existing destination is never overwritten or adopted.
+unchanged files. A move intent is persisted before the filesystem operation
+and cleared with the journal transaction, or as soon as a rename fails
+(a failed rename moved nothing). Intents that no longer describe the
+journal and the server layout are dropped at the start of the next run.
 
-Unreadable paths, destination collisions, configured sync-base boundaries and
-unsupported moves defer the affected subtree with an error, while unrelated
-sync continues. Desktop moves use the filesystem rename operation (cross-volume
-moves may fail). Android SAF supports renames within one parent directory;
-cross-directory moves are safely deferred because the provider wrapper has no
-directory-move primitive.
+What happens depends on what is found at the old and the new path:
+
+| Old path | New path | Outcome |
+|---|---|---|
+| present | absent | The directory is renamed. |
+| present | the same directory (case-only rename on a case-insensitive filesystem) | Renamed in place; `LocalFs::same_entry` tells this apart from a collision. |
+| present | another tracked folder that is itself about to move | The folder waits for it. Chains resolve in one run in dependency order; a ring (two folders swapping names) is broken by parking one folder as `<name>.uncloud-moving`, with the journal following it. |
+| present | the folder of a server-deleted item | The deletion echo clears it later in the same run and the rename lands on the next one. |
+| present | anything else | Error: "a different folder already exists". Nothing is overwritten or merged. |
+| absent | present, recorded intent matches | An interrupted move; the journal is completed. |
+| absent | present, holds every tracked file with the same mtime and checksum | The same rename was made by hand; the directory is adopted. |
+| absent | present, anything else | Error, as above. |
+| absent | absent | The journal follows; the missing folder is then an ordinary local deletion. |
+
+**Moves the backend cannot do in one step.** A move to another volume on
+desktop, or to another directory through Android SAF, fails with
+`LocalFsError::MoveUnsupported` and is done by copying: every file is
+copied (`LocalFs::copy_file`, streamed), a file edited while the copy ran
+is copied again, and only then is the original removed. The intent records
+that a copy is under way, so an interrupted one is resumed instead of
+being mistaken for a collision with its own partial result. Where the
+backend cannot carry mtimes across (SAF), files that were unchanged before
+the move are recorded with their new mtime so they are not read as local
+edits.
+
+**Strategies.** Only strategies that apply server changes locally
+(`TwoWay`, `ServerToClient`) follow an incoming rename. Under
+`ClientToServer` and `UploadOnly` the local directory keeps its name and
+the folder stays linked by id: for as long as the names differ, the folder
+and everything beneath it resolve to the journal's path. Switching to a
+strategy that takes server changes applies the rename then.
+
+**Mapping changes.** Giving an already-synced folder its own local path
+(or changing it) is not a server rename and moves nothing. What the
+journal tracked at the old location is forgotten and the folder syncs at
+the new one as if seen for the first time. The old directory is left
+alone: it sits where the folder would live by default, so it is neither
+re-created on the server as a new folder nor read as a deletion.
+
+Unreadable paths, genuine collisions and a directory that contains a
+folder with its own local path defer the affected subtree with an error
+that names the cause, while unrelated sync continues. On Android the
+rename is verified: a provider that would store the folder under a
+sanitised or suffixed name has the rename undone and reported, so the
+journal never points at a path that does not exist.
 
 **Delete.** Otherwise the folder goes through the same two-phase commit
 as a file and is removed with a single `DELETE /api/folders/{id}`. The
@@ -233,10 +284,19 @@ denied, I/O error) is skipped for the run: nothing under it is
 overwritten, uploaded or deleted, and a folder containing it is never
 removed as a whole. Directory probes run before descendant mutations, and a
 failed path blocks all paths beneath it for the rest of the run, including
-new-file discovery, incoming renames and server-deletion echoes. The failure is counted in the run's errors every time
-and written to the activity log once when it starts, not once per poll.
-Runs that do abort (journal or server errors) log their reason the same
-way.
+new-file discovery, incoming renames and server-deletion echoes. The
+failure is counted in the run's errors every time and written to the
+activity log once when it starts, not once per poll. Runs that do abort
+(journal or server errors) log their reason the same way.
+
+SAF errors carry no kind, so on Android a failed lookup alone cannot tell
+"not there" from "the provider failed". When the quick probe fails,
+`AndroidSafFs` consults the directory listings on the way down from the
+tree root: a name missing from a listing that succeeded is absent, a name
+that is listed but could not be read is an error, and a listing that fails
+is an error. Listings are cached for one run (`LocalFs::begin_run` clears
+them) and dropped for a directory the engine removes from or renames in.
+Deletions are still confirmed against fresh listings, never the cache.
 
 ## Migration
 

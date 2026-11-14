@@ -8,9 +8,26 @@
 //! Paths are plain `String`s — native filesystem paths on desktop, opaque SAF
 //! tree/document URIs on Android.
 
+use std::io::Read;
 use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures::stream::BoxStream;
+use futures::StreamExt;
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// File content as a sequence of chunks, so a transfer costs one chunk of
+/// memory whatever the file size.
+pub type ByteStream<'a> = BoxStream<'a, Result<Bytes, LocalFsError>>;
+
+const STREAM_CHUNK: usize = 256 * 1024;
+
+/// Suffix of the temporary file a download is written to before it replaces
+/// its destination. Walkers skip these: an interrupted download is not a
+/// new local file.
+pub const PARTIAL_SUFFIX: &str = ".uncloud-part";
 
 /// Error type returned by [`LocalFs`] operations.
 #[derive(Debug, thiserror::Error)]
@@ -21,6 +38,11 @@ pub enum LocalFsError {
         #[source]
         source: std::io::Error,
     },
+    /// The backend cannot perform this move as a single rename (another
+    /// directory on SAF, another volume on desktop). Nothing was changed;
+    /// the caller may fall back to copying.
+    #[error("{0}")]
+    MoveUnsupported(String),
     #[error("{0}")]
     Other(String),
 }
@@ -35,6 +57,55 @@ impl LocalFsError {
     pub fn other(msg: impl Into<String>) -> Self {
         Self::Other(msg.into())
     }
+}
+
+/// Lowercase hex SHA-256 of everything `reader` yields, read in fixed-size
+/// chunks so the cost in memory does not depend on the file size.
+pub fn sha256_hex_reader(mut reader: impl Read) -> std::io::Result<String> {
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let read = reader.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// The content of an open file as a [`ByteStream`].
+pub fn file_chunks(file: std::fs::File) -> ByteStream<'static> {
+    futures::stream::unfold(Some(tokio::fs::File::from_std(file)), |state| async move {
+        let mut file = state?;
+        let mut buf = vec![0u8; STREAM_CHUNK];
+        match file.read(&mut buf).await {
+            Ok(0) => None,
+            Ok(read) => {
+                buf.truncate(read);
+                Some((Ok(Bytes::from(buf)), Some(file)))
+            }
+            Err(e) => Some((Err(LocalFsError::other(format!("read failed: {e}"))), None)),
+        }
+    })
+    .boxed()
+}
+
+/// Write every chunk of `chunks` to an open file. Stops at the first chunk
+/// that is an error, with whatever was written before it left in the file.
+pub async fn write_chunks(
+    file: std::fs::File,
+    mut chunks: ByteStream<'_>,
+) -> Result<(), LocalFsError> {
+    let mut file = tokio::fs::File::from_std(file);
+    while let Some(chunk) = chunks.next().await {
+        file.write_all(&chunk?)
+            .await
+            .map_err(|e| LocalFsError::other(format!("write failed: {e}")))?;
+    }
+    file.flush()
+        .await
+        .map_err(|e| LocalFsError::other(format!("write failed: {e}")))
 }
 
 /// An entry returned by [`LocalFs::walk`].
@@ -71,6 +142,29 @@ pub trait LocalFs: Send + Sync {
     /// directories are assumed to already exist.
     async fn write(&self, path: &str, data: &[u8]) -> Result<(), LocalFsError>;
 
+    /// The content of the file at `path` in chunks. Backends override this
+    /// to read as they go; the default holds the whole file in memory.
+    async fn read_stream(&self, path: &str) -> Result<ByteStream<'static>, LocalFsError> {
+        let data = self.read(path).await?;
+        Ok(futures::stream::once(async move { Ok(Bytes::from(data)) }).boxed())
+    }
+
+    /// Write `chunks` to `path`, creating or overwriting it. A stream that
+    /// fails part-way must leave whatever was at `path` as it was. Backends
+    /// override this to write as they go; the default collects the stream
+    /// in memory first.
+    async fn write_stream(
+        &self,
+        path: &str,
+        mut chunks: ByteStream<'_>,
+    ) -> Result<(), LocalFsError> {
+        let mut data = Vec::new();
+        while let Some(chunk) = chunks.next().await {
+            data.extend_from_slice(&chunk?);
+        }
+        self.write(path, &data).await
+    }
+
     /// Delete the file at `path`. Returns `Ok(())` even if the file does not
     /// exist (idempotent).
     async fn remove_file(&self, path: &str) -> Result<(), LocalFsError>;
@@ -81,12 +175,41 @@ pub trait LocalFs: Send + Sync {
     /// `Ok(())` if the directory does not exist.
     async fn remove_dir(&self, path: &str) -> Result<(), LocalFsError>;
 
-    /// Move an entry without replacing an existing destination. Callers
-    /// confirm destination absence before invoking this operation.
+    /// Called once at the start of every sync run. Backends that cache
+    /// observations for the length of a run drop them here.
+    fn begin_run(&self) {}
+
+    /// Move an entry without replacing an existing destination. The entry
+    /// must end up at exactly `to`: a backend that would store it under a
+    /// different name has to undo the move and fail. A move the backend
+    /// cannot do as one rename fails with [`LocalFsError::MoveUnsupported`]
+    /// and leaves everything in place.
     async fn rename(&self, _from: &str, _to: &str) -> Result<(), LocalFsError> {
-        Err(LocalFsError::other(
-            "local filesystem does not support renames",
+        Err(LocalFsError::MoveUnsupported(
+            "local filesystem does not support renames".to_owned(),
         ))
+    }
+
+    /// Whether two different path strings name the same entry, as they do
+    /// for a case-only rename on a case-insensitive filesystem. Only called
+    /// for paths the backend reported as existing.
+    async fn same_entry(&self, _a: &str, _b: &str) -> Result<bool, LocalFsError> {
+        Ok(false)
+    }
+
+    /// Copy the file at `from` to `to`, creating or overwriting it. Parent
+    /// directories are assumed to exist. Backends override this to stream
+    /// and to carry the modification time across where they can.
+    async fn copy_file(&self, from: &str, to: &str) -> Result<(), LocalFsError> {
+        let data = self.read(from).await?;
+        self.write(to, &data).await
+    }
+
+    /// Lowercase hex SHA-256 of the file at `path`. Backends override this
+    /// to hash in chunks; the default holds the whole file in memory.
+    async fn sha256(&self, path: &str) -> Result<String, LocalFsError> {
+        let data = self.read(path).await?;
+        Ok(format!("{:x}", Sha256::digest(&data)))
     }
 
     /// Return the mtime of `path` in unix seconds, or `None` if unavailable.
@@ -152,17 +275,80 @@ impl Default for NativeFs {
 /// [`crate::sentinel::SENTINEL_FILENAME`].
 pub const EXCLUDED_NAMES: &[&str] = &[".uncloud-sync.db", ".uncloud-root.json"];
 
+/// Whether a walker must skip a file with this name: one of
+/// [`EXCLUDED_NAMES`], or the leftover of an interrupted download.
+pub fn is_excluded_name(name: &str) -> bool {
+    EXCLUDED_NAMES.contains(&name) || name.ends_with(PARTIAL_SUFFIX)
+}
+
 #[async_trait]
 impl LocalFs for NativeFs {
     async fn rename(&self, from: &str, to: &str) -> Result<(), LocalFsError> {
-        if !self.confirm_absent(to).await? {
+        if !self.confirm_absent(to).await? && !self.same_entry(from, to).await? {
             return Err(LocalFsError::other(format!(
                 "rename destination exists: {to}"
             )));
         }
-        tokio::fs::rename(from, to)
-            .await
-            .map_err(|e| LocalFsError::io(from, e))
+        match tokio::fs::rename(from, to).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => Err(
+                LocalFsError::MoveUnsupported(format!("{from} and {to} are on different volumes")),
+            ),
+            Err(e) => Err(LocalFsError::io(from, e)),
+        }
+    }
+
+    // Two spellings of one directory resolve to the same canonical path. A
+    // symlink pointing at the other path would too, and is not the same
+    // entry, so links are ruled out first.
+    async fn same_entry(&self, a: &str, b: &str) -> Result<bool, LocalFsError> {
+        let (a, b) = (a.to_owned(), b.to_owned());
+        tokio::task::spawn_blocking(move || {
+            for path in [&a, &b] {
+                match std::fs::symlink_metadata(path) {
+                    Ok(meta) if meta.file_type().is_symlink() => return Ok(false),
+                    Ok(_) => {}
+                    Err(e) if is_missing(&e) => return Ok(false),
+                    Err(e) => return Err(LocalFsError::io(path.clone(), e)),
+                }
+            }
+            let canonical = |path: &String| {
+                std::fs::canonicalize(path).map_err(|e| LocalFsError::io(path.clone(), e))
+            };
+            Ok(canonical(&a)? == canonical(&b)?)
+        })
+        .await
+        .map_err(|e| LocalFsError::other(format!("same_entry task panicked: {e}")))?
+    }
+
+    // The engine compares local mtimes with the journal to spot local
+    // edits, so a copy that reset them would make every file look changed.
+    async fn copy_file(&self, from: &str, to: &str) -> Result<(), LocalFsError> {
+        let (from, to) = (from.to_owned(), to.to_owned());
+        tokio::task::spawn_blocking(move || {
+            let modified = std::fs::metadata(&from)
+                .and_then(|meta| meta.modified())
+                .map_err(|e| LocalFsError::io(from.clone(), e))?;
+            std::fs::copy(&from, &to).map_err(|e| LocalFsError::io(from.clone(), e))?;
+            std::fs::File::options()
+                .write(true)
+                .open(&to)
+                .and_then(|file| file.set_modified(modified))
+                .map_err(|e| LocalFsError::io(to.clone(), e))
+        })
+        .await
+        .map_err(|e| LocalFsError::other(format!("copy_file task panicked: {e}")))?
+    }
+
+    async fn sha256(&self, path: &str) -> Result<String, LocalFsError> {
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            std::fs::File::open(&path)
+                .and_then(sha256_hex_reader)
+                .map_err(|e| LocalFsError::io(path.clone(), e))
+        })
+        .await
+        .map_err(|e| LocalFsError::other(format!("sha256 task panicked: {e}")))?
     }
 
     async fn walk(&self, root: &str) -> Result<Vec<WalkEntry>, LocalFsError> {
@@ -177,8 +363,7 @@ impl LocalFs for NativeFs {
                 if !entry.file_type().is_file() {
                     continue;
                 }
-                let file_name = entry.file_name().to_string_lossy();
-                if EXCLUDED_NAMES.iter().any(|&n| file_name == n) {
+                if is_excluded_name(&entry.file_name().to_string_lossy()) {
                     continue;
                 }
                 let rel = entry
@@ -247,6 +432,35 @@ impl LocalFs for NativeFs {
         tokio::fs::write(path, data)
             .await
             .map_err(|e| LocalFsError::io(path, e))
+    }
+
+    async fn read_stream(&self, path: &str) -> Result<ByteStream<'static>, LocalFsError> {
+        let file = tokio::fs::File::open(path)
+            .await
+            .map_err(|e| LocalFsError::io(path, e))?;
+        Ok(file_chunks(file.into_std().await))
+    }
+
+    // The chunks go to a temporary file beside the destination, which then
+    // replaces it in one rename. A download that dies half-way therefore
+    // never leaves a truncated file where a complete one was, to be taken
+    // for a local edit on the next scan.
+    async fn write_stream(&self, path: &str, chunks: ByteStream<'_>) -> Result<(), LocalFsError> {
+        let partial = format!("{path}{PARTIAL_SUFFIX}");
+        let written = async {
+            let file = tokio::fs::File::create(&partial)
+                .await
+                .map_err(|e| LocalFsError::io(partial.clone(), e))?;
+            write_chunks(file.into_std().await, chunks).await?;
+            tokio::fs::rename(&partial, path)
+                .await
+                .map_err(|e| LocalFsError::io(path, e))
+        }
+        .await;
+        if written.is_err() {
+            let _ = tokio::fs::remove_file(&partial).await;
+        }
+        written
     }
 
     async fn remove_file(&self, path: &str) -> Result<(), LocalFsError> {
@@ -323,5 +537,160 @@ impl LocalFs for NativeFs {
             .join(child)
             .to_string_lossy()
             .into_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    #[test]
+    fn sha256_hex_reader_hashes_across_chunk_boundaries() {
+        assert_eq!(sha256_hex_reader(&b"abc"[..]).unwrap(), ABC_SHA256);
+        let large = vec![7u8; (1 << 20) * 2 + 13];
+        assert_eq!(
+            sha256_hex_reader(&large[..]).unwrap(),
+            format!("{:x}", Sha256::digest(&large))
+        );
+    }
+
+    #[tokio::test]
+    async fn native_sha256_matches_the_whole_file_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("abc.txt");
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            NativeFs.sha256(path.to_str().unwrap()).await.unwrap(),
+            ABC_SHA256
+        );
+    }
+
+    fn chunks_of(parts: Vec<Result<&'static [u8], &'static str>>) -> ByteStream<'static> {
+        futures::stream::iter(parts.into_iter().map(|part| {
+            part.map(Bytes::from_static)
+                .map_err(|message| LocalFsError::other(message))
+        }))
+        .boxed()
+    }
+
+    #[tokio::test]
+    async fn native_read_stream_yields_the_file_in_bounded_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.bin");
+        let content: Vec<u8> = (0..STREAM_CHUNK * 2 + 123).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &content).unwrap();
+
+        let mut stream = NativeFs.read_stream(path.to_str().unwrap()).await.unwrap();
+        let mut read = Vec::new();
+        let mut chunks = 0;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.unwrap();
+            assert!(chunk.len() <= STREAM_CHUNK);
+            read.extend_from_slice(&chunk);
+            chunks += 1;
+        }
+        assert!(chunks >= 3);
+        assert_eq!(read, content);
+    }
+
+    #[tokio::test]
+    async fn native_write_stream_replaces_the_file_only_when_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.txt");
+        std::fs::write(&path, b"original").unwrap();
+        let fs = NativeFs;
+        let target = path.to_str().unwrap();
+        let names = || {
+            let mut names: Vec<String> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+
+        let cut_off = chunks_of(vec![Ok(b"new con"), Err("connection lost")]);
+        assert!(fs.write_stream(target, cut_off).await.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(names(), ["note.txt"]);
+
+        let complete = chunks_of(vec![Ok(b"new con"), Ok(b"tent")]);
+        fs.write_stream(target, complete).await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new content");
+        assert_eq!(names(), ["note.txt"]);
+    }
+
+    #[tokio::test]
+    async fn walk_skips_the_leftover_of_an_interrupted_download() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("note.txt"), b"content").unwrap();
+        std::fs::write(
+            dir.path().join(format!("note.txt{PARTIAL_SUFFIX}")),
+            b"half",
+        )
+        .unwrap();
+        let listed: Vec<String> = NativeFs
+            .walk(dir.path().to_str().unwrap())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.rel_path)
+            .collect();
+        assert_eq!(listed, ["note.txt"]);
+    }
+
+    #[tokio::test]
+    async fn native_copy_file_carries_content_and_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("from.txt");
+        let to = dir.path().join("to.txt");
+        std::fs::write(&from, b"content").unwrap();
+        let old = SystemTime::now() - Duration::from_secs(86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(&from)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let fs = NativeFs;
+        fs.copy_file(from.to_str().unwrap(), to.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"content");
+        assert_eq!(
+            fs.mtime(to.to_str().unwrap()).await.unwrap(),
+            fs.mtime(from.to_str().unwrap()).await.unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_rename_refuses_an_existing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("from");
+        let to = dir.path().join("to");
+        std::fs::create_dir(&from).unwrap();
+        std::fs::create_dir(&to).unwrap();
+        let fs = NativeFs;
+        let (from, to) = (from.to_str().unwrap(), to.to_str().unwrap());
+        assert!(!fs.same_entry(from, to).await.unwrap());
+        assert!(fs.rename(from, to).await.is_err());
+        assert!(fs.is_dir(from).await.unwrap());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_to_a_directory_is_not_the_same_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let link = dir.path().join("link");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(!NativeFs
+            .same_entry(real.to_str().unwrap(), link.to_str().unwrap())
+            .await
+            .unwrap());
     }
 }

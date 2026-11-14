@@ -124,6 +124,8 @@ End-to-end coverage of the two-way sync algorithm in `uncloud-sync` against a re
 | `idempotent_sync` | second run is a no-op |
 | `two_clients_share_files` | bidirectional propagation between two engines |
 | `local_folder_rename_renames_server_folder` | local rename → server rename in place, ids kept, nothing re-uploaded |
+| `large_file_round_trips_between_clients` | a multi-megabyte file is uploaded and downloaded as a stream and arrives intact |
+| `sync_tree_reports_content_checksums` | the tree carries each file's SHA-256, used to fill in journal rows that predate checksums |
 | `local_folder_rename_and_move_reach_second_client` | incoming rename/move relocates nested contents and empty folders without recreating the old remote name |
 | `local_folder_delete_removes_server_folder_once_confirmed` | local folder delete → one cascading server delete after confirmation |
 

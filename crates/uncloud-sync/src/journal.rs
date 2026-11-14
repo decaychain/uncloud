@@ -309,6 +309,65 @@ impl Journal {
         Ok(())
     }
 
+    pub async fn delete_config(&self, key: &str) -> sqlx::Result<()> {
+        sqlx::query("DELETE FROM sync_config WHERE key = ?")
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Every `(key, value)` whose key starts with `prefix`.
+    pub async fn configs_with_prefix(&self, prefix: &str) -> sqlx::Result<Vec<(String, String)>> {
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT key, value FROM sync_config WHERE substr(key, 1, ?) = ?")
+                .bind(prefix.len() as i64)
+                .bind(prefix)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows)
+    }
+
+    /// Drop a set of rows together, so a subtree is never half forgotten.
+    pub async fn forget_rows(&self, keys: &[(String, String)]) -> sqlx::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for (server_id, item_type) in keys {
+            sqlx::query("DELETE FROM sync_state WHERE server_id = ? AND item_type = ?")
+                .bind(server_id)
+                .bind(item_type)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await
+    }
+
+    /// Record content checksums for file rows that have none yet.
+    pub async fn fill_missing_checksums(&self, checksums: &[(String, String)]) -> sqlx::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for (server_id, checksum) in checksums {
+            sqlx::query(
+                "UPDATE sync_state SET checksum = ? \
+                 WHERE server_id = ? AND item_type = 'file' AND checksum IS NULL",
+            )
+            .bind(checksum)
+            .bind(server_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await
+    }
+
+    pub async fn set_local_mtime(&self, server_id: &str, mtime: i64) -> sqlx::Result<()> {
+        sqlx::query(
+            "UPDATE sync_state SET local_mtime = ? WHERE server_id = ? AND item_type = 'file'",
+        )
+        .bind(mtime)
+        .bind(server_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// All distinct non-NULL `local_path` overrides across every folder.
     /// Used by sentinel verification to enumerate Android's per-folder SAF
     /// picks (each is its own physical sync base).

@@ -411,6 +411,71 @@ async fn two_clients_share_files() {
 
 // ── Local folder rename / delete ──────────────────────────────────────────────
 
+/// The sync tree carries each file's content checksum, which clients use
+/// to fill in journal rows written before they recorded one.
+#[tokio::test]
+async fn sync_tree_reports_content_checksums() {
+    let app = BoundTestApp::new().await;
+    let client = app.setup_user("checksums").await;
+    let (engine, dir) = app.new_sync_engine(client.clone()).await;
+    tokio::fs::write(dir.path().join("note.txt"), b"content")
+        .await
+        .unwrap();
+    engine.incremental_sync().await.unwrap();
+    let tree = client.sync_tree(None).await.unwrap();
+    assert_eq!(
+        tree.files[0].checksum_sha256.as_deref(),
+        Some(
+            uncloud_sync::sha256_hex_reader(&b"content"[..])
+                .unwrap()
+                .as_str()
+        )
+    );
+}
+
+/// A file several chunks long is uploaded and downloaded as a stream and
+/// arrives intact, with the checksum each side recorded for it agreeing.
+#[tokio::test]
+async fn large_file_round_trips_between_clients() {
+    let app = BoundTestApp::new().await;
+    let client = app.setup_user("large_file").await;
+    let (first, first_dir) = app.new_sync_engine(client.clone()).await;
+    let (second, second_dir) = app.new_sync_engine(client.clone()).await;
+    let content: Vec<u8> = (0..3 * 1024 * 1024 + 17u32)
+        .map(|i| (i.wrapping_mul(31) % 251) as u8)
+        .collect();
+    tokio::fs::write(first_dir.path().join("large.bin"), &content)
+        .await
+        .unwrap();
+
+    let uploaded = first.incremental_sync().await.unwrap();
+    assert!(uploaded.errors.is_empty(), "{:?}", uploaded.errors);
+    let downloaded = second.incremental_sync().await.unwrap();
+    assert!(downloaded.errors.is_empty(), "{:?}", downloaded.errors);
+
+    assert_eq!(
+        tokio::fs::read(second_dir.path().join("large.bin"))
+            .await
+            .unwrap(),
+        content
+    );
+    let tree = client.sync_tree(None).await.unwrap();
+    assert_eq!(tree.files[0].size_bytes as usize, content.len());
+    assert_eq!(
+        tree.files[0].checksum_sha256.as_deref(),
+        Some(
+            uncloud_sync::sha256_hex_reader(&content[..])
+                .unwrap()
+                .as_str()
+        )
+    );
+    // Neither side sees the other's transfer as a change to send back.
+    for engine in [&first, &second] {
+        let settled = engine.incremental_sync().await.unwrap();
+        assert!(settled.uploaded.is_empty() && settled.downloaded.is_empty());
+    }
+}
+
 #[tokio::test]
 async fn local_folder_rename_and_move_reach_second_client() {
     let app = BoundTestApp::new().await;
