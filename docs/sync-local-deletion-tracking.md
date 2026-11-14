@@ -190,8 +190,9 @@ falls back to create-and-upload, never a speculative rename.
 
 Local files are hashed in fixed-size chunks (`LocalFs::sha256`), so a
 large file costs no more memory than a small one. Results are remembered
-per path and mtime for as long as successive runs keep asking for them, so
-a rename that stays pending does not re-read the folder on every poll.
+per path and mtime for rename matching across successive runs. Copy-move
+recovery always hashes both copies afresh before deciding which one may be
+overwritten; matching timestamps do not prove that content is unchanged.
 
 **Receiving a rename or move.** Before materializing the new server layout,
 the client relocates a tracked folder from its previous local path and rebases
@@ -235,13 +236,16 @@ error naming the entry, and no move intent is kept. Without this, a file in an
 unreadable directory would be left behind while its journal row followed the
 folder, and would then be deleted on the server as missing.
 
-The intent records that a copy is under way and which file is being written,
-so an interrupted move is resumed. On recovery, a destination file that
-differs from its source is settled as follows:
+The intent records that a copy is under way and which file is being written.
+That marker is not permission to overwrite its destination: a truncated copy
+and a user edit made after interruption are indistinguishable. Any ambiguous
+in-flight destination is checked before another copy can replace its marker.
+On recovery, a destination file that differs from its source is settled as
+follows, using fresh SHA-256 hashes:
 
 | Destination file | Outcome |
 |---|---|
-| the file that was being written when the copy stopped | Copied again. SAF cannot replace a file in one step, so this one may be truncated. |
+| the file that was being written when the copy stopped | Error; both copies are kept for manual resolution, because it may be truncated or edited. An identical copy can be reused, and a missing destination can be copied again. |
 | matches the journal's checksum, source does not | The source was edited after the copy. It is copied again over the stale destination. |
 | differs, source matches the journal's checksum | The destination was edited after the copy. It is kept and the source removed. |
 | anything else (both edited, or no checksum on record) | Error: "move destination differs from its source". Both are kept for manual resolution. |
@@ -252,7 +256,17 @@ above. Once the move is done, a file known to hold what was last synced is
 recorded with the mtime it has at the new location, so a backend that cannot
 carry mtimes across (SAF) does not make it read as a local edit. A file known
 to differ is recorded so that it does read as one, even if the edit kept the
-mtime, and is uploaded.
+mtime, and is uploaded. The new paths, content-derived mtimes, and removal
+of the move intent commit in one journal transaction. If that transaction
+fails or the process stops before it commits, the old paths and intent
+remain. Recovery rehashes the destination even when the old directory is
+already gone, preserving edited-file detection without re-uploading
+unchanged files.
+
+To resolve an ambiguous interrupted copy, preserve any edited version outside
+the moving directories, remove the incomplete destination, and retry sync.
+Alternatively, make the destination identical to the source. Recovery never
+discards a differing in-flight copy on its own.
 
 **Strategies.** Only strategies that apply server changes locally
 (`TwoWay`, `ServerToClient`) follow an incoming rename. Under

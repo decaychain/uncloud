@@ -874,11 +874,11 @@ async fn resumed_copy_carries_an_edit_made_to_either_copy() {
 }
 
 /// A backend that cannot replace a file in one step leaves a truncated
-/// destination when a copy dies half-way. The file being written is on
-/// record, so the next run copies it again instead of taking the stump for
-/// a local edit or for a conflict.
+/// destination when a copy dies half-way. That partial destination is
+/// indistinguishable from a subsequent user edit, so recovery preserves
+/// both copies until the user resolves it.
 #[tokio::test]
-async fn copy_cut_off_mid_file_is_redone_after_a_restart() {
+async fn copy_cut_off_mid_file_waits_for_manual_resolution_after_a_restart() {
     let server = FakeServer::with_tree(
         vec![
             server_file("first", "a.txt", Some("parent"), b"first file"),
@@ -906,6 +906,16 @@ async fn copy_cut_off_mid_file_is_redone_after_a_restart() {
 
     fs.failures.write().unwrap().clear();
     let engine = build_engine_with_fs(&rig, fs).await;
+    for _ in 0..2 {
+        let report = engine.incremental_sync().await.unwrap();
+        assert_eq!(report.errors.len(), 1, "{report:?}");
+        assert!(report.errors[0].reason.contains("manual resolution"));
+        assert!(report.uploaded.is_empty());
+        assert_eq!(std::fs::read(new.join("b.txt")).unwrap(), b"secon");
+        assert_eq!(std::fs::read(old.join("b.txt")).unwrap(), b"second file");
+        assert_eq!(pending_move_intents(&rig).await, 1);
+    }
+    std::fs::remove_file(new.join("b.txt")).unwrap();
     for _ in 0..3 {
         let report = engine.incremental_sync().await.unwrap();
         assert!(report.errors.is_empty(), "{:?}", report.errors);
@@ -918,6 +928,235 @@ async fn copy_cut_off_mid_file_is_redone_after_a_restart() {
     assert_eq!(handle.delete_file_hits.load(Ordering::SeqCst), 0);
     assert!(handle.content_updates.lock().await.is_empty());
     assert_eq!(pending_move_intents(&rig).await, 0);
+}
+
+#[tokio::test]
+async fn inflight_destination_edits_survive_recovery() {
+    for original_changed in [false, true] {
+        let server = FakeServer::with_tree(
+            vec![server_file("file", "note.txt", Some("parent"), b"original")],
+            vec!["parent"],
+        );
+        let handle = server.clone();
+        let rig = rig(server).await;
+        let fs = Arc::new(FaultyFs::default());
+        let engine = build_engine_with_fs(&rig, fs.clone()).await;
+        engine.incremental_sync().await.unwrap();
+        let source = rig.root.join("parent/note.txt");
+        let dest = rig.root.join("renamed/note.txt");
+        fs.moves_unsupported.store(true, Ordering::SeqCst);
+        fs.fail("partial_copy", &source);
+        rename_on_server(&handle, "parent", "renamed", None).await;
+        assert_eq!(engine.incremental_sync().await.unwrap().errors.len(), 1);
+        drop(engine);
+        std::fs::write(&dest, b"user edit after the interruption").unwrap();
+        if original_changed {
+            std::fs::write(&source, b"source edit").unwrap();
+        }
+        let expected_source = std::fs::read(&source).unwrap();
+        fs.failures.write().unwrap().clear();
+        let engine = build_engine_with_fs(&rig, fs).await;
+        for _ in 0..2 {
+            let report = engine.incremental_sync().await.unwrap();
+            assert_eq!(report.errors.len(), 1, "{report:?}");
+            assert!(report.errors[0].reason.contains("manual resolution"));
+            assert!(report.uploaded.is_empty());
+            assert!(report.downloaded.is_empty());
+            assert!(report.deleted_local.is_empty());
+            assert!(report.created_remote_folders.is_empty());
+            assert_eq!(
+                std::fs::read(&dest).unwrap(),
+                b"user edit after the interruption"
+            );
+            assert_eq!(std::fs::read(&source).unwrap(), expected_source);
+            assert_eq!(pending_move_intents(&rig).await, 1);
+        }
+        assert_eq!(handle.files.lock().await["file"].bytes, b"original");
+    }
+}
+
+#[tokio::test]
+async fn unresolved_inflight_copy_is_checked_before_starting_another_copy() {
+    let server = FakeServer::with_tree(
+        vec![
+            server_file("first", "a.txt", Some("parent"), b"first file"),
+            server_file("second", "b.txt", Some("parent"), b"second file"),
+        ],
+        vec!["parent"],
+    );
+    let handle = server.clone();
+    let rig = rig(server).await;
+    let fs = Arc::new(FaultyFs::default());
+    let engine = build_engine_with_fs(&rig, fs.clone()).await;
+    engine.incremental_sync().await.unwrap();
+    let old = rig.root.join("parent");
+    let new = rig.root.join("renamed");
+    let files = NativeFs.walk(old.to_str().unwrap()).await.unwrap();
+    let earlier = &files[0].rel_path;
+    let unfinished = &files[1].rel_path;
+    fs.moves_unsupported.store(true, Ordering::SeqCst);
+    fs.fail("partial_copy", &old.join(unfinished));
+    rename_on_server(&handle, "parent", "renamed", None).await;
+    assert_eq!(engine.incremental_sync().await.unwrap().errors.len(), 1);
+    drop(engine);
+    let copies = fs.copy_calls.load(Ordering::SeqCst);
+    let before = std::fs::read(new.join(unfinished)).unwrap();
+    std::fs::write(old.join(earlier), b"source edit").unwrap();
+    fs.failures.write().unwrap().clear();
+    fs.fail("partial_copy", &old.join(earlier));
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", rig.db_path.display()))
+        .await
+        .unwrap();
+    let intent: String = sqlx::query_scalar(
+        "SELECT value FROM sync_config WHERE key = 'pending_folder_move:parent'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let engine = build_engine_with_fs(&rig, fs.clone()).await;
+    for _ in 0..2 {
+        let report = engine.incremental_sync().await.unwrap();
+        assert_eq!(report.errors.len(), 1, "{report:?}");
+        assert!(report.errors[0].reason.contains("manual resolution"));
+        assert_eq!(fs.copy_calls.load(Ordering::SeqCst), copies);
+        assert_eq!(std::fs::read(new.join(unfinished)).unwrap(), before);
+        let current: String = sqlx::query_scalar(
+            "SELECT value FROM sync_config WHERE key = 'pending_folder_move:parent'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(current, intent);
+    }
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn cached_checksums_do_not_authorize_overwriting_destination_edits() {
+    let server = FakeServer::with_tree(
+        vec![server_file("file", "note.txt", Some("parent"), b"original")],
+        vec!["parent"],
+    );
+    let handle = server.clone();
+    let rig = rig(server).await;
+    let fs = Arc::new(FaultyFs::default());
+    let engine = build_engine_with_fs(&rig, fs.clone()).await;
+    engine.incremental_sync().await.unwrap();
+    let source = rig.root.join("parent/note.txt");
+    let dest = rig.root.join("renamed/note.txt");
+    fs.moves_unsupported.store(true, Ordering::SeqCst);
+    fs.fail("remove_file", &source);
+    rename_on_server(&handle, "parent", "renamed", None).await;
+    assert_eq!(engine.incremental_sync().await.unwrap().errors.len(), 1);
+    // Before the fix this second attempt retained both checksums across runs.
+    assert_eq!(engine.incremental_sync().await.unwrap().errors.len(), 1);
+    let dest_mtime = std::fs::metadata(&dest).unwrap().modified().unwrap();
+    std::fs::write(&dest, b"destination user edit").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&dest)
+        .unwrap()
+        .set_modified(dest_mtime)
+        .unwrap();
+    std::fs::write(&source, b"source user edit").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + Duration::from_secs(60))
+        .unwrap();
+    fs.failures.write().unwrap().clear();
+    for _ in 0..2 {
+        let report = engine.incremental_sync().await.unwrap();
+        assert_eq!(report.errors.len(), 1, "{report:?}");
+        assert!(report.errors[0].reason.contains("destination differs"));
+        assert!(report.uploaded.is_empty());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"destination user edit");
+        assert_eq!(std::fs::read(&source).unwrap(), b"source user edit");
+    }
+    assert_eq!(handle.files.lock().await["file"].bytes, b"original");
+}
+
+#[tokio::test]
+async fn interrupted_move_commit_preserves_paths_mtimes_and_intent() {
+    for edited in ["none", "source", "destination"] {
+        let server = FakeServer::with_tree(
+            vec![server_file("file", "note.txt", Some("parent"), b"original")],
+            vec!["parent"],
+        );
+        let handle = server.clone();
+        let rig = rig(server).await;
+        let fs = Arc::new(FaultyFs::default());
+        let engine = build_engine_with_fs(&rig, fs.clone()).await;
+        engine.incremental_sync().await.unwrap();
+        let source = rig.root.join("parent/note.txt");
+        let dest = rig.root.join("renamed/note.txt");
+        let original_time = std::time::SystemTime::now() + Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(original_time)
+            .unwrap();
+        assert_eq!(engine.incremental_sync().await.unwrap().uploaded.len(), 1);
+        fs.moves_unsupported.store(true, Ordering::SeqCst);
+        fs.fail("remove_file", &source);
+        rename_on_server(&handle, "parent", "renamed", None).await;
+        assert_eq!(engine.incremental_sync().await.unwrap().errors.len(), 1);
+        drop(engine);
+        let expected: &[u8] = if edited == "none" {
+            b"original"
+        } else {
+            b"edited content"
+        };
+        if edited != "none" {
+            let path = if edited == "source" { &source } else { &dest };
+            std::fs::write(path, expected).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(original_time)
+                .unwrap();
+        }
+        fs.failures.write().unwrap().clear();
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", rig.db_path.display()))
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER fail_mtime BEFORE UPDATE OF local_mtime ON sync_state BEGIN SELECT RAISE(ABORT, 'injected interruption'); END")
+            .execute(&pool).await.unwrap();
+        let engine = build_engine_with_fs(&rig, fs.clone()).await;
+        assert!(engine.incremental_sync().await.is_err(), "{edited}");
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), expected);
+        assert_eq!(pending_move_intents(&rig).await, 1);
+        let recorded_path: String =
+            sqlx::query_scalar("SELECT local_path FROM sync_state WHERE server_id = 'file'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(recorded_path, source.to_str().unwrap());
+        sqlx::query("DROP TRIGGER fail_mtime")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        drop(engine);
+        let engine = build_engine_with_fs(&rig, fs).await;
+        let report = engine.incremental_sync().await.unwrap();
+        assert!(report.errors.is_empty(), "{edited}: {report:?}");
+        assert_eq!(
+            report.uploaded.len(),
+            usize::from(edited != "none"),
+            "{edited}"
+        );
+        assert_eq!(handle.files.lock().await["file"].bytes, expected);
+        assert_eq!(pending_move_intents(&rig).await, 0);
+        let report = engine.incremental_sync().await.unwrap();
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(report.uploaded.is_empty());
+        assert!(report.downloaded.is_empty());
+    }
 }
 
 /// Moving by copy reads each file once to copy it and once more on each

@@ -990,7 +990,31 @@ impl SyncEngine {
         from: &str,
         to: &str,
         rows: &mut HashMap<(String, String), SyncStateRow>,
+        copied: &[MovedFile],
     ) -> sqlx::Result<()> {
+        // Copies can reset mtimes. Save a baseline below verified edits in
+        // the path transaction, or interruption could hide those edits.
+        let copied: HashMap<&str, &MovedFile> = copied
+            .iter()
+            .map(|file| (file.rel.as_str(), file))
+            .collect();
+        let local_mtimes: Vec<(String, i64)> = rows
+            .values()
+            .filter(|row| row.item_type == "file")
+            .filter_map(|row| {
+                let rel = relative_under(&row.local_path, from)?;
+                let file = copied.get(rel.as_str())?;
+                let mtime = match file.content {
+                    MovedContent::Unchanged => file.mtime,
+                    MovedContent::Edited => file.mtime.saturating_sub(1),
+                    MovedContent::Unverified { before } if row.local_mtime == Some(before) => {
+                        file.mtime
+                    }
+                    MovedContent::Unverified { .. } => return None,
+                };
+                (row.local_mtime != Some(mtime)).then(|| (row.server_id.clone(), mtime))
+            })
+            .collect();
         let paths: Vec<_> = rows
             .values()
             .filter_map(|row| {
@@ -1002,11 +1026,18 @@ impl SyncEngine {
                 Some((row.server_id.clone(), row.item_type.clone(), path))
             })
             .collect();
-        self.journal.rebase_folder_paths(folder_id, &paths).await?;
+        self.journal
+            .rebase_folder_paths(folder_id, &paths, &local_mtimes)
+            .await?;
         for (id, item_type, path) in paths {
             if let Some(row) = rows.get_mut(&(id, item_type)) {
                 row.local_path = path;
                 row.delete_pending_since = None;
+            }
+        }
+        for (id, mtime) in local_mtimes {
+            if let Some(row) = rows.get_mut(&(id, "file".to_owned())) {
+                row.local_mtime = Some(mtime);
             }
         }
         Ok(())
@@ -1055,9 +1086,8 @@ impl SyncEngine {
     /// `tracked` maps each file the journal tracks in the folder to the
     /// checksum it last synced. A destination file that differs from its
     /// source is settled by that checksum: whichever side still matches it
-    /// is the stale one. `in_flight` names the file an interrupted run was
-    /// writing, whose destination may be incomplete. Anything else that
-    /// differs is an error and both copies stay.
+    /// is the stale one. `in_flight` names a possibly incomplete destination:
+    /// a differing copy is ambiguous and must be kept for manual resolution.
     async fn move_by_copy(
         &self,
         from: &str,
@@ -1104,6 +1134,26 @@ impl SyncEngine {
             }
         };
 
+        // Resolve the old marker before another copy can replace it: a
+        // later failure must not make this ambiguous destination look edited.
+        if let Some(rel) = in_flight
+            .as_deref()
+            .filter(|rel| existing.contains_key(*rel))
+        {
+            let source = self.join_rel(from, rel);
+            let dest = self.join_rel(to, rel);
+            if !listed.contains(rel)
+                || self.fs.sha256(&dest).await? != self.fs.sha256(&source).await?
+            {
+                return Err(LocalFsError::other(format!(
+                    "move destination differs from its source: {}; the interrupted \
+                     copy may be incomplete or edited; both copies were kept for \
+                     manual resolution",
+                    display(&dest)
+                )));
+            }
+        }
+
         let mut dest_is_newer: HashSet<&str> = HashSet::new();
         let mut marked = in_flight.is_some();
         for file in &files {
@@ -1118,10 +1168,19 @@ impl SyncEngine {
             }
             let copy = match existing.get(&rel) {
                 None => true,
-                Some(_) if in_flight.as_deref() == Some(rel.as_str()) => true,
-                Some(dest_mtime) => {
-                    let found = self.local_checksum(&dest, *dest_mtime).await?;
-                    let wanted = self.local_checksum(&source, file.mtime).await?;
+                Some(_) => {
+                    // These hashes authorize overwrites, so a cached mtime
+                    // is not sufficient evidence that either copy is stale.
+                    let found = self.fs.sha256(&dest).await?;
+                    let wanted = self.fs.sha256(&source).await?;
+                    if found != wanted && in_flight.as_deref() == Some(rel.as_str()) {
+                        return Err(LocalFsError::other(format!(
+                            "move destination differs from its source: {}; the interrupted \
+                             copy may be incomplete or edited; both copies were kept for \
+                             manual resolution",
+                            display(&dest)
+                        )));
+                    }
                     match tracked.get(&rel).and_then(Option::as_deref) {
                         _ if found == wanted => false,
                         Some(synced) if synced == found => true,
@@ -1140,9 +1199,8 @@ impl SyncEngine {
                 }
             };
             if copy {
-                // SAF cannot replace a file in one step, so a copy that dies
-                // half-way leaves a truncated destination. Naming the file
-                // first lets the next run tell that from a local edit.
+                // A marked destination may be truncated or edited. Recovery
+                // must not treat this marker as permission to overwrite it.
                 record(Some(&rel)).await?;
                 marked = true;
                 self.forget_checksums([dest.as_str()]);
@@ -1199,7 +1257,7 @@ impl SyncEngine {
             if listed.contains(rel) {
                 continue;
             }
-            let found = self.local_checksum(&self.join_rel(to, rel), *mtime).await?;
+            let found = self.fs.sha256(&self.join_rel(to, rel)).await?;
             moved.push(MovedFile {
                 rel: rel.clone(),
                 mtime: *mtime,
@@ -1268,7 +1326,7 @@ impl SyncEngine {
                 if self.probe_dir(&from, report).await == Presence::Absent
                     && self.probe_dir(&to, report).await == Presence::Present
                 {
-                    self.rebase_rows(folder_id, &from, &to, rows).await?;
+                    self.rebase_rows(folder_id, &from, &to, rows, &[]).await?;
                 } else {
                     self.journal.delete_config(&key).await?;
                 }
@@ -1439,7 +1497,8 @@ impl SyncEngine {
             .await;
             return Ok(false);
         }
-        self.rebase_rows(&folder.id, &from, &parked, rows).await?;
+        self.rebase_rows(&folder.id, &from, &parked, rows, &[])
+            .await?;
         Ok(true)
     }
 
@@ -1700,7 +1759,36 @@ impl SyncEngine {
                     // The folder is gone from its old path and a directory
                     // sits at the new one: an interrupted move of ours, the
                     // same rename already made by hand, or a stranger.
-                    if recovering || self.is_same_folder(&from, &to, rows, report).await {
+                    if copying {
+                        // The filesystem move may have completed before its
+                        // journal transaction. Rebuild content evidence rather
+                        // than completing it with stale pre-copy mtimes.
+                        for file in self.fs.walk(&to).await? {
+                            let rel = file.rel_path.replace('\\', "/");
+                            let Some(synced) = tracked.get(&rel) else {
+                                continue;
+                            };
+                            let found = self.fs.sha256(&self.join_rel(&to, &rel)).await?;
+                            if in_flight.as_deref() == Some(rel.as_str())
+                                && synced.as_deref() != Some(found.as_str())
+                            {
+                                return Err(LocalFsError::other(format!(
+                                    "interrupted copy at {} needs manual resolution",
+                                    self.relative_display_path(&self.join_rel(&to, &rel))
+                                )));
+                            }
+                            copied.push(MovedFile {
+                                rel,
+                                mtime: file.mtime,
+                                content: if synced.as_deref() == Some(found.as_str()) {
+                                    MovedContent::Unchanged
+                                } else {
+                                    MovedContent::Edited
+                                },
+                            });
+                        }
+                        Ok(())
+                    } else if recovering || self.is_same_folder(&from, &to, rows, report).await {
                         Ok(())
                     } else {
                         Err(LocalFsError::other(format!(
@@ -1734,42 +1822,8 @@ impl SyncEngine {
 
         // Also completes a move interrupted between the filesystem and the
         // journal: the old directory is gone and the new one exists.
-        self.rebase_rows(&folder.id, &from, &to, rows).await?;
-
-        // The engine spots local edits by comparing mtimes with the journal,
-        // and a copy does not always carry them across. A file known to
-        // hold what was last synced is recorded with the mtime it has now;
-        // one known to differ is made to read as edited even if the edit
-        // kept the mtime.
-        if !copied.is_empty() {
-            let by_path: HashMap<String, (String, String)> = rows
-                .iter()
-                .filter(|(_, row)| row.item_type == "file")
-                .map(|(key, row)| (row.local_path.clone(), key.clone()))
-                .collect();
-            for file in copied {
-                let Some(row) = by_path
-                    .get(&self.join_rel(&to, &file.rel))
-                    .and_then(|key| rows.get_mut(key))
-                else {
-                    continue;
-                };
-                let recorded = match file.content {
-                    MovedContent::Unchanged => Some(file.mtime),
-                    MovedContent::Edited => row
-                        .local_mtime
-                        .is_some_and(|seen| seen >= file.mtime)
-                        .then_some(file.mtime - 1),
-                    MovedContent::Unverified { before } => {
-                        (row.local_mtime == Some(before)).then_some(file.mtime)
-                    }
-                };
-                if let Some(mtime) = recorded.filter(|mtime| row.local_mtime != Some(*mtime)) {
-                    self.journal.set_local_mtime(&row.server_id, mtime).await?;
-                    row.local_mtime = Some(mtime);
-                }
-            }
-        }
+        self.rebase_rows(&folder.id, &from, &to, rows, &copied)
+            .await?;
         Ok(Relocation::Progress)
     }
 
@@ -3189,7 +3243,9 @@ impl SyncEngine {
                         };
                         paths.push((file.id.clone(), "file".to_owned(), new_path));
                     }
-                    self.journal.rebase_folder_paths(folder_id, &paths).await?;
+                    self.journal
+                        .rebase_folder_paths(folder_id, &paths, &[])
+                        .await?;
                     self.journal
                         .upsert(
                             folder_id,

@@ -383,17 +383,6 @@ impl Journal {
         tx.commit().await
     }
 
-    pub async fn set_local_mtime(&self, server_id: &str, mtime: i64) -> sqlx::Result<()> {
-        sqlx::query(
-            "UPDATE sync_state SET local_mtime = ? WHERE server_id = ? AND item_type = 'file'",
-        )
-        .bind(mtime)
-        .bind(server_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
     /// All distinct non-NULL `local_path` overrides across every folder.
     /// Used by sentinel verification to enumerate Android's per-folder SAF
     /// picks (each is its own physical sync base).
@@ -551,17 +540,27 @@ impl Journal {
         Ok(())
     }
 
-    /// Commit a subtree's new paths together so interruption cannot leave
-    /// some descendants pointing at vanished locations.
+    /// Commit paths and content-derived mtimes before clearing the intent,
+    /// so interruption cannot hide local edits or leave stale paths.
     pub async fn rebase_folder_paths(
         &self,
         folder_id: &str,
         paths: &[(String, String, String)],
+        local_mtimes: &[(String, i64)],
     ) -> sqlx::Result<()> {
         let mut tx = self.pool.begin().await?;
         for (id, item_type, path) in paths {
             sqlx::query("UPDATE sync_state SET local_path = ?, delete_pending_since = NULL WHERE server_id = ? AND item_type = ?")
                 .bind(path).bind(id).bind(item_type).execute(&mut *tx).await?;
+        }
+        for (id, mtime) in local_mtimes {
+            sqlx::query(
+                "UPDATE sync_state SET local_mtime = ? WHERE server_id = ? AND item_type = 'file'",
+            )
+            .bind(mtime)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         }
         sqlx::query("DELETE FROM sync_config WHERE key = ?")
             .bind(format!("pending_folder_move:{folder_id}"))
@@ -893,6 +892,7 @@ mod tests {
                 "file".to_owned(),
                 "/r/new/foo.txt".to_owned(),
             )],
+            &[],
         )
         .await
         .unwrap();
@@ -930,7 +930,7 @@ mod tests {
                 "/r/new/two.txt".to_owned(),
             ),
         ];
-        assert!(j.rebase_folder_paths("folder", &paths).await.is_err());
+        assert!(j.rebase_folder_paths("folder", &paths, &[]).await.is_err());
         assert_eq!(
             j.get("f-1", "file").await.unwrap().unwrap().local_path,
             "/r/old/one.txt"
@@ -942,6 +942,64 @@ mod tests {
                 .as_deref(),
             Some("intent")
         );
+    }
+
+    #[tokio::test]
+    async fn subtree_rebase_commits_mtimes_paths_and_intent_together() {
+        let (j, _d) = fresh_journal().await;
+        seed_row(&j, "f-1", "/r/old/one.txt").await;
+        seed_row(&j, "f-2", "/r/old/two.txt").await;
+        j.set_delete_pending("f-1", "file", "2026-05-06T00:00:00Z")
+            .await
+            .unwrap();
+        j.set_config("pending_folder_move:folder", "intent")
+            .await
+            .unwrap();
+        let paths = vec![
+            (
+                "f-1".to_owned(),
+                "file".to_owned(),
+                "/r/new/one.txt".to_owned(),
+            ),
+            (
+                "f-2".to_owned(),
+                "file".to_owned(),
+                "/r/new/two.txt".to_owned(),
+            ),
+        ];
+        let mtimes = vec![
+            ("f-1".to_owned(), 1_800_000_000),
+            ("f-2".to_owned(), 1_600_000_000),
+        ];
+        for (trigger, drop_trigger) in [
+            ("CREATE TRIGGER fail_move BEFORE UPDATE OF local_mtime ON sync_state WHEN NEW.server_id = 'f-2' BEGIN SELECT RAISE(ABORT, 'injected failure'); END", "DROP TRIGGER fail_move"),
+            ("CREATE TRIGGER fail_move BEFORE DELETE ON sync_config WHEN OLD.key = 'pending_folder_move:folder' BEGIN SELECT RAISE(ABORT, 'injected failure'); END", "DROP TRIGGER fail_move"),
+        ] {
+            sqlx::query(trigger).execute(&j.pool).await.unwrap();
+            assert!(j.rebase_folder_paths("folder", &paths, &mtimes).await.is_err());
+            for (id, name) in [("f-1", "one.txt"), ("f-2", "two.txt")] {
+                let row = j.get(id, "file").await.unwrap().unwrap();
+                assert_eq!(row.local_path, format!("/r/old/{name}"));
+                assert_eq!(row.local_mtime, Some(1_700_000_000));
+            }
+            assert!(j.get("f-1", "file").await.unwrap().unwrap().delete_pending_since.is_some());
+            assert_eq!(j.get_config("pending_folder_move:folder").await.unwrap().as_deref(), Some("intent"));
+            sqlx::query(drop_trigger).execute(&j.pool).await.unwrap();
+        }
+        j.rebase_folder_paths("folder", &paths, &mtimes)
+            .await
+            .unwrap();
+        for ((id, _, path), (_, mtime)) in paths.iter().zip(&mtimes) {
+            let row = j.get(id, "file").await.unwrap().unwrap();
+            assert_eq!(row.local_path, *path);
+            assert_eq!(row.local_mtime, Some(*mtime));
+            assert!(row.delete_pending_since.is_none());
+        }
+        assert!(j
+            .get_config("pending_folder_move:folder")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
