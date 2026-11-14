@@ -11,7 +11,7 @@ use uncloud_client::Client;
 use uncloud_common::SyncStrategy;
 
 use crate::fs::{LocalFs, NativeFs};
-use crate::journal::{Journal, SyncLogRow};
+use crate::journal::{Journal, SyncLogRow, SyncStatus};
 use crate::sentinel::{ensure_instance_id, verify_or_mint, SentinelError, SentinelStatus};
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -668,12 +668,12 @@ impl SyncEngine {
                         continue;
                     }
                     if row.item_type == "file" {
-                        let exists = self.fs.is_file(&row.local_path).await.unwrap_or(false);
+                        let exists = self.fs.is_file(&row.local_path).await?;
                         if !exists {
                             let _ = self.journal.delete(&row.server_id, "file").await;
                         }
                     } else if row.item_type == "folder" {
-                        let exists = self.fs.is_dir(&row.local_path).await.unwrap_or(false);
+                        let exists = self.fs.is_dir(&row.local_path).await?;
                         if !exists {
                             let _ = self.journal.delete(&row.server_id, "folder").await;
                         }
@@ -700,10 +700,11 @@ impl SyncEngine {
 
             // 3. Load journal
             let journal_rows = self.journal.all().await?;
-            let journal_map: HashMap<(String, String), crate::journal::SyncStateRow> = journal_rows
-                .into_iter()
-                .map(|r| ((r.server_id.clone(), r.item_type.clone()), r))
-                .collect();
+            let mut journal_map: HashMap<(String, String), crate::journal::SyncStateRow> =
+                journal_rows
+                    .into_iter()
+                    .map(|r| ((r.server_id.clone(), r.item_type.clone()), r))
+                    .collect();
 
             let server_files_by_id: std::collections::HashMap<&str, &uncloud_common::FileResponse> =
                 tree.files.iter().map(|f| (f.id.as_str(), f)).collect();
@@ -749,9 +750,18 @@ impl SyncEngine {
             };
             let mut server_changed_subtree_ids = std::collections::HashSet::new();
             for folder in &tree.folders {
+                if folder_info
+                    .get(&folder.id)
+                    .is_some_and(|info| info.strategy == SyncStrategy::DoNotSync)
+                {
+                    continue;
+                }
                 let changed = journal_map
                     .get(&(folder.id.clone(), "folder".to_owned()))
-                    .is_none_or(|row| folder.updated_at > row.server_updated_at);
+                    .is_none_or(|row| {
+                        folder.updated_at > row.server_updated_at
+                            || row.sync_status == SyncStatus::PendingDownload.as_str()
+                    });
                 if changed {
                     server_changed_subtree_ids.insert(folder.id.clone());
                     if let Some(ancestors) = folder_ancestors.get(&folder.id) {
@@ -760,9 +770,20 @@ impl SyncEngine {
                 }
             }
             for file in &tree.files {
+                if file
+                    .parent_id
+                    .as_ref()
+                    .and_then(|id| folder_info.get(id))
+                    .is_some_and(|info| info.strategy == SyncStrategy::DoNotSync)
+                {
+                    continue;
+                }
                 let changed = journal_map
                     .get(&(file.id.clone(), "file".to_owned()))
-                    .is_none_or(|row| file.updated_at > row.server_updated_at);
+                    .is_none_or(|row| {
+                        file.updated_at > row.server_updated_at
+                            || row.sync_status == SyncStatus::PendingDownload.as_str()
+                    });
                 if !changed {
                     continue;
                 }
@@ -782,6 +803,9 @@ impl SyncEngine {
                 let Some(info) = folder_info.get(&folder.id) else {
                     continue;
                 };
+                if info.strategy == SyncStrategy::DoNotSync {
+                    continue;
+                }
                 let Some(base) = info.base_path.as_ref() else {
                     continue;
                 };
@@ -789,7 +813,7 @@ impl SyncEngine {
                 else {
                     continue;
                 };
-                let local_exists = self.fs.is_dir(base).await.unwrap_or(false);
+                let local_exists = self.fs.is_dir(base).await?;
                 if !local_exists
                     && existing.local_path == *base
                     && subtree_changed_on_server(&folder.id)
@@ -802,6 +826,64 @@ impl SyncEngine {
                     .iter()
                     .any(|root_id| folder_in_subtree(folder_id, root_id))
             };
+
+            // Persist the complete restore before materializing any directory:
+            // a crash or a failed child download must not turn the remaining
+            // local absences back into user-requested deletions next run.
+            for folder in &tree.folders {
+                if !restored_from_server(&folder.id) {
+                    continue;
+                }
+                let Some(info) = folder_info.get(&folder.id) else {
+                    continue;
+                };
+                if info.strategy == SyncStrategy::DoNotSync {
+                    continue;
+                }
+                let Some(base) = info.base_path.as_ref() else {
+                    continue;
+                };
+                if !self.fs.is_dir(base).await? {
+                    if let Some(row) =
+                        journal_map.get_mut(&(folder.id.clone(), "folder".to_owned()))
+                    {
+                        self.journal
+                            .set_pending_download(&folder.id, "folder")
+                            .await?;
+                        row.sync_status = SyncStatus::PendingDownload.as_str().to_owned();
+                        row.delete_pending_since = None;
+                    }
+                }
+            }
+            for file in &tree.files {
+                let Some(parent_id) = file.parent_id.as_deref() else {
+                    continue;
+                };
+                if !restored_from_server(parent_id) {
+                    continue;
+                }
+                let Some(info) = folder_info.get(parent_id) else {
+                    continue;
+                };
+                if matches!(
+                    info.strategy,
+                    SyncStrategy::DoNotSync
+                        | SyncStrategy::ClientToServer
+                        | SyncStrategy::UploadOnly
+                ) {
+                    continue;
+                }
+                let Some(base) = info.base_path.as_ref() else {
+                    continue;
+                };
+                if !self.fs.is_file(&self.fs.join(base, &file.name)).await? {
+                    if let Some(row) = journal_map.get_mut(&(file.id.clone(), "file".to_owned())) {
+                        self.journal.set_pending_download(&file.id, "file").await?;
+                        row.sync_status = SyncStatus::PendingDownload.as_str().to_owned();
+                        row.delete_pending_since = None;
+                    }
+                }
+            }
 
             // 4. Process server folders first (create local dirs)
             for folder in &tree.folders {
@@ -823,7 +905,7 @@ impl SyncEngine {
                 // deletion.
                 let key = (folder.id.clone(), "folder".to_owned());
                 let existing = journal_map.get(&key);
-                let local_exists = self.fs.is_dir(base).await.unwrap_or(false);
+                let local_exists = self.fs.is_dir(base).await?;
                 let can_push_delete = matches!(
                     info.strategy,
                     SyncStrategy::TwoWay | SyncStrategy::ClientToServer
@@ -832,6 +914,7 @@ impl SyncEngine {
                     !local_exists
                         && can_push_delete
                         && row.local_path == *base
+                        && row.sync_status != SyncStatus::PendingDownload.as_str()
                         && !subtree_changed_on_server(&folder.id)
                         && !restored_from_server(&folder.id)
                 });
@@ -854,8 +937,7 @@ impl SyncEngine {
                     continue;
                 }
 
-                let _ = self
-                    .journal
+                self.journal
                     .upsert(
                         &folder.id,
                         "folder",
@@ -867,7 +949,7 @@ impl SyncEngine {
                         None,
                         "synced",
                     )
-                    .await;
+                    .await?;
             }
 
             // 5. Process server files
@@ -915,16 +997,22 @@ impl SyncEngine {
                 //
                 // If the journal has no row at all (genuine first-sight) we
                 // still fall through to the `None` arm below and download.
-                let local_exists = self.fs.is_file(local_path).await.unwrap_or(false);
+                let local_exists = self.fs.is_file(local_path).await?;
                 let in_journal = journal_map.contains_key(&key);
-                let restore_from_server = file
-                    .parent_id
-                    .as_deref()
-                    .is_some_and(|parent_id| restored_from_server(parent_id));
+                let pending_download = journal_map
+                    .get(&key)
+                    .is_some_and(|row| row.sync_status == SyncStatus::PendingDownload.as_str());
+                let restore_from_server = pending_download
+                    || file
+                        .parent_id
+                        .as_deref()
+                        .is_some_and(|parent_id| restored_from_server(parent_id));
                 if !local_exists && in_journal && !restore_from_server {
                     continue;
                 }
-                let journal_entry = journal_map.get(&key).filter(|_| local_exists);
+                let journal_entry = journal_map
+                    .get(&key)
+                    .filter(|_| local_exists && !pending_download);
 
                 match journal_entry {
                     None => {
@@ -937,8 +1025,7 @@ impl SyncEngine {
                             match self.download_to(&file.id, local_path).await {
                                 Ok(()) => {
                                     let mtime = self.fs.mtime(local_path).await.ok().flatten();
-                                    let _ = self
-                                        .journal
+                                    self.journal
                                         .upsert(
                                             &file.id,
                                             "file",
@@ -950,7 +1037,7 @@ impl SyncEngine {
                                             mtime,
                                             "synced",
                                         )
-                                        .await;
+                                        .await?;
                                     touched_paths.insert(local_path_str.clone());
                                     report.downloaded.push(server_rel_path.clone());
                                     self.log_download(local_path, false).await;
@@ -1207,7 +1294,7 @@ impl SyncEngine {
             folder_deletion_echoes.sort_by_key(|r| std::cmp::Reverse(r.local_path.len()));
 
             for j in folder_deletion_echoes {
-                let dir_exists = self.fs.is_dir(&j.local_path).await.unwrap_or(false);
+                let dir_exists = self.fs.is_dir(&j.local_path).await?;
                 let path_clear = if dir_exists {
                     match self.fs.remove_dir(&j.local_path).await {
                         Ok(()) => {
@@ -1262,6 +1349,34 @@ impl SyncEngine {
             let allows_delete_push =
                 |s: SyncStrategy| matches!(s, SyncStrategy::TwoWay | SyncStrategy::ClientToServer);
 
+            // A cascading delete must obey every descendant's policy, even
+            // when a DoNotSync subtree has never had any local journal rows.
+            let mut protected_subtree_ids = std::collections::HashSet::new();
+            for folder in &tree.folders {
+                let pending_download = journal_map
+                    .get(&(folder.id.clone(), "folder".to_owned()))
+                    .is_some_and(|row| row.sync_status == SyncStatus::PendingDownload.as_str());
+                if !allows_delete_push(strategy_for_folder(&folder.id)) || pending_download {
+                    protected_subtree_ids.insert(folder.id.clone());
+                    if let Some(ancestors) = folder_ancestors.get(&folder.id) {
+                        protected_subtree_ids.extend(ancestors.iter().cloned());
+                    }
+                }
+            }
+            for file in &tree.files {
+                if journal_map
+                    .get(&(file.id.clone(), "file".to_owned()))
+                    .is_some_and(|row| row.sync_status == SyncStatus::PendingDownload.as_str())
+                {
+                    if let Some(parent_id) = file.parent_id.as_deref() {
+                        protected_subtree_ids.insert(parent_id.to_owned());
+                        if let Some(ancestors) = folder_ancestors.get(parent_id) {
+                            protected_subtree_ids.extend(ancestors.iter().cloned());
+                        }
+                    }
+                }
+            }
+
             // First, identify journal-known folders whose local directory is
             // gone — those are candidates for collapse. Walk file rows
             // grouped by parent so we can count "how many of this folder's
@@ -1278,7 +1393,16 @@ impl SyncEngine {
                 if !server_files_by_id.contains_key(server_id.as_str()) {
                     continue; // Phase 6 covers server-side delete echoes.
                 }
-                let local_exists = self.fs.is_file(&j.local_path).await.unwrap_or(false);
+                if j.sync_status == SyncStatus::PendingDownload.as_str() {
+                    continue;
+                }
+                if !allows_delete_push(strategy_for_file(server_id)) {
+                    if j.delete_pending_since.is_some() {
+                        self.journal.clear_delete_pending(server_id, "file").await?;
+                    }
+                    continue;
+                }
+                let local_exists = self.fs.is_file(&j.local_path).await?;
                 if local_exists {
                     continue;
                 }
@@ -1319,15 +1443,11 @@ impl SyncEngine {
                     .and_then(|info| info.base_path.as_deref())
                     == Some(folder_journal.local_path.as_str());
                 let strategy = strategy_for_folder(&folder.id);
-                let dir_exists = self
-                    .fs
-                    .is_dir(&folder_journal.local_path)
-                    .await
-                    .unwrap_or(false);
-                if dir_exists
-                    || !expected_path_matches
+                if !expected_path_matches
                     || !allows_delete_push(strategy)
+                    || protected_subtree_ids.contains(&folder.id)
                     || subtree_changed_on_server(&folder.id)
+                    || self.fs.is_dir(&folder_journal.local_path).await?
                 {
                     if folder_journal.delete_pending_since.is_some() {
                         let _ = self
@@ -1348,7 +1468,7 @@ impl SyncEngine {
                     if let Some(row) =
                         journal_map.get(&(descendant.id.clone(), "folder".to_owned()))
                     {
-                        if self.fs.is_dir(&row.local_path).await.unwrap_or(false) {
+                        if self.fs.is_dir(&row.local_path).await? {
                             local_descendant_survives = true;
                             break;
                         }
@@ -1361,7 +1481,7 @@ impl SyncEngine {
                         .filter(|file| file_in_subtree(file, &folder.id))
                     {
                         if let Some(row) = journal_map.get(&(file.id.clone(), "file".to_owned())) {
-                            if self.fs.is_file(&row.local_path).await.unwrap_or(false) {
+                            if self.fs.is_file(&row.local_path).await? {
                                 local_descendant_survives = true;
                                 break;
                             }
@@ -1476,19 +1596,6 @@ impl SyncEngine {
             all_missing_files.append(&mut orphan_missing_files);
             for j in all_missing_files {
                 if collapsed_file_ids.contains(&j.server_id) {
-                    continue;
-                }
-                let strategy = strategy_for_file(&j.server_id);
-                if !allows_delete_push(strategy) {
-                    // Strategy doesn't push deletes (UploadOnly / DownloadOnly /
-                    // ServerToClient). Clear any stale pending flag and let
-                    // Phase 5 next scan re-download as it always has.
-                    if j.delete_pending_since.is_some() {
-                        let _ = self
-                            .journal
-                            .clear_delete_pending(&j.server_id, "file")
-                            .await;
-                    }
                     continue;
                 }
                 match j.delete_pending_since.as_deref() {

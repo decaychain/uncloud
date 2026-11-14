@@ -10,7 +10,7 @@
 //!     pushed.
 //!   - `UploadOnly` strategy never pushes a delete.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -25,7 +25,95 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, Mutex};
 use uncloud_client::Client;
+use uncloud_common::SyncStrategy;
+use uncloud_sync::fs::{LocalFs, LocalFsError, NativeFs, WalkEntry};
 use uncloud_sync::SyncEngine;
+
+#[derive(Default)]
+struct FaultyFs {
+    inner: NativeFs,
+    failures: std::sync::RwLock<HashSet<(&'static str, String)>>,
+}
+
+impl FaultyFs {
+    fn fail(&self, operation: &'static str, path: &std::path::Path) {
+        self.failures
+            .write()
+            .unwrap()
+            .insert((operation, path.to_str().unwrap().to_owned()));
+    }
+
+    fn check(&self, operation: &'static str, path: &str) -> Result<(), LocalFsError> {
+        if self
+            .failures
+            .read()
+            .unwrap()
+            .contains(&(operation, path.to_owned()))
+        {
+            Err(LocalFsError::io(
+                path,
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LocalFs for FaultyFs {
+    async fn walk(&self, root: &str) -> Result<Vec<WalkEntry>, LocalFsError> {
+        self.inner.walk(root).await
+    }
+
+    async fn walk_dirs(&self, root: &str) -> Result<Vec<String>, LocalFsError> {
+        self.inner.walk_dirs(root).await
+    }
+
+    async fn create_dir_all(&self, path: &str) -> Result<(), LocalFsError> {
+        self.check("create_dir_all", path)?;
+        self.inner.create_dir_all(path).await
+    }
+
+    async fn read(&self, path: &str) -> Result<Vec<u8>, LocalFsError> {
+        self.inner.read(path).await
+    }
+
+    async fn write(&self, path: &str, data: &[u8]) -> Result<(), LocalFsError> {
+        if self.check("partial_write", path).is_err() {
+            self.inner.write(path, b"incomplete").await?;
+            return Err(LocalFsError::other("interrupted write"));
+        }
+        self.check("write", path)?;
+        self.inner.write(path, data).await
+    }
+
+    async fn remove_file(&self, path: &str) -> Result<(), LocalFsError> {
+        self.inner.remove_file(path).await
+    }
+
+    async fn remove_dir(&self, path: &str) -> Result<(), LocalFsError> {
+        self.inner.remove_dir(path).await
+    }
+
+    async fn mtime(&self, path: &str) -> Result<Option<i64>, LocalFsError> {
+        self.inner.mtime(path).await
+    }
+
+    async fn is_file(&self, path: &str) -> Result<bool, LocalFsError> {
+        self.check("is_file", path)?;
+        self.inner.is_file(path).await
+    }
+
+    async fn is_dir(&self, path: &str) -> Result<bool, LocalFsError> {
+        self.check("is_dir", path)?;
+        self.inner.is_dir(path).await
+    }
+
+    fn join(&self, parent: &str, child: &str) -> String {
+        self.inner.join(parent, child)
+    }
+}
 
 #[derive(Clone)]
 struct ServerFile {
@@ -61,6 +149,8 @@ struct FakeServer {
     folders: Arc<Mutex<HashMap<String, ServerFolder>>>,
     delete_file_hits: Arc<AtomicUsize>,
     delete_folder_hits: Arc<AtomicUsize>,
+    failed_downloads: Arc<Mutex<HashSet<String>>>,
+    download_hits: Arc<AtomicUsize>,
 }
 
 impl FakeServer {
@@ -84,6 +174,8 @@ impl FakeServer {
             folders: Arc::new(Mutex::new(folders)),
             delete_file_hits: Arc::new(AtomicUsize::new(0)),
             delete_folder_hits: Arc::new(AtomicUsize::new(0)),
+            failed_downloads: Arc::new(Mutex::new(HashSet::new())),
+            download_hits: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -129,6 +221,14 @@ async fn sync_tree(State(s): State<FakeServer>) -> impl IntoResponse {
 }
 
 async fn download(AxPath(id): AxPath<String>, State(s): State<FakeServer>) -> impl IntoResponse {
+    s.download_hits.fetch_add(1, Ordering::SeqCst);
+    if s.failed_downloads.lock().await.contains(&id) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporary download failure",
+        )
+            .into_response();
+    }
     match s.files.lock().await.get(&id) {
         Some(f) => (StatusCode::OK, f.bytes.clone()).into_response(),
         None => (StatusCode::NOT_FOUND, "").into_response(),
@@ -149,11 +249,31 @@ async fn delete_folder_handler(
     State(s): State<FakeServer>,
 ) -> impl IntoResponse {
     s.delete_folder_hits.fetch_add(1, Ordering::SeqCst);
-    s.folders.lock().await.remove(&id);
-    s.files
-        .lock()
-        .await
-        .retain(|_, file| file.parent_id.as_deref() != Some(id.as_str()));
+    let mut folders = s.folders.lock().await;
+    let mut deleted = HashSet::from([id]);
+    loop {
+        let before = deleted.len();
+        for folder in folders.values() {
+            if folder
+                .parent_id
+                .as_ref()
+                .is_some_and(|id| deleted.contains(id))
+            {
+                deleted.insert(folder.id.clone());
+            }
+        }
+        if deleted.len() == before {
+            break;
+        }
+    }
+    folders.retain(|id, _| !deleted.contains(id));
+    drop(folders);
+    s.files.lock().await.retain(|_, file| {
+        !file
+            .parent_id
+            .as_ref()
+            .is_some_and(|id| deleted.contains(id))
+    });
     StatusCode::NO_CONTENT
 }
 
@@ -209,6 +329,33 @@ async fn build_engine(rig: &Rig) -> SyncEngine {
     )
     .await
     .unwrap()
+}
+
+async fn build_engine_with_fs(rig: &Rig, fs: Arc<dyn LocalFs>) -> SyncEngine {
+    SyncEngine::with_fs(
+        &rig.db_path,
+        rig.client.clone(),
+        fs,
+        Some(rig.root.to_string_lossy().into_owned()),
+    )
+    .await
+    .unwrap()
+}
+
+async fn journal_status(rig: &Rig, id: &str, item_type: &str) -> (String, Option<String>) {
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", rig.db_path.display()))
+        .await
+        .unwrap();
+    let result = sqlx::query_as(
+        "SELECT sync_status, delete_pending_since FROM sync_state WHERE server_id = ? AND item_type = ?",
+    )
+    .bind(id)
+    .bind(item_type)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    result
 }
 
 #[tokio::test]
@@ -512,4 +659,303 @@ async fn watcher_cancel_hook_clears_pending() {
     let r = engine.incremental_sync().await.unwrap();
     assert!(r.deleted_local.is_empty(), "{:?}", r);
     assert_eq!(delete_hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn filesystem_probe_errors_abort_without_remote_deletions() {
+    for (operation, populated) in [("is_dir", false), ("is_dir", true), ("is_file", true)] {
+        let server = FakeServer::with_folders(
+            if populated {
+                vec![ServerFile {
+                    id: "file".into(),
+                    name: "file.txt".into(),
+                    parent_id: Some("child".into()),
+                    bytes: b"untouched".to_vec(),
+                    updated_at: "2026-01-01T00:00:00Z".into(),
+                }]
+            } else {
+                Vec::new()
+            },
+            vec![
+                ServerFolder::root("parent"),
+                ServerFolder {
+                    id: "child".into(),
+                    name: "child".into(),
+                    parent_id: Some("parent".into()),
+                    updated_at: "2026-01-01T00:00:00Z".into(),
+                },
+            ],
+        );
+        let folder_deletes = server.delete_folder_hits.clone();
+        let file_deletes = server.delete_file_hits.clone();
+        let rig = rig(server).await;
+        let fs = Arc::new(FaultyFs::default());
+        let engine = build_engine_with_fs(&rig, fs.clone()).await;
+        engine.incremental_sync().await.unwrap();
+        let path = if operation == "is_dir" {
+            rig.root.join("parent/child")
+        } else {
+            rig.root.join("parent/child/file.txt")
+        };
+        fs.fail(operation, &path);
+
+        for _ in 0..3 {
+            let error = engine.incremental_sync().await.unwrap_err();
+            assert!(
+                error.to_string().contains(path.to_str().unwrap()),
+                "{error}"
+            );
+        }
+
+        assert_eq!(folder_deletes.load(Ordering::SeqCst), 0);
+        assert_eq!(file_deletes.load(Ordering::SeqCst), 0);
+        assert_eq!(journal_status(&rig, "child", "folder").await.1, None);
+        if populated {
+            assert_eq!(journal_status(&rig, "file", "file").await.1, None);
+        }
+        fs.failures.write().unwrap().clear();
+        assert!(engine.incremental_sync().await.unwrap().errors.is_empty());
+        if populated {
+            assert_eq!(
+                std::fs::read(rig.root.join("parent/child/file.txt")).unwrap(),
+                b"untouched"
+            );
+        } else {
+            assert!(rig.root.join("parent/child").is_dir());
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_restore_retries_after_restart_instead_of_deleting_remote_file() {
+    for failure in ["download", "write", "partial_write", "create_dir_all"] {
+        let server = FakeServer::with_folders(
+            vec![
+                ServerFile {
+                    id: "changed".into(),
+                    name: "changed.txt".into(),
+                    parent_id: Some("parent".into()),
+                    bytes: b"original".to_vec(),
+                    updated_at: "2026-01-01T00:00:00Z".into(),
+                },
+                ServerFile {
+                    id: "sibling-file".into(),
+                    name: "sibling.txt".into(),
+                    parent_id: Some("sibling".into()),
+                    bytes: b"unchanged".to_vec(),
+                    updated_at: "2026-01-01T00:00:00Z".into(),
+                },
+            ],
+            vec![
+                ServerFolder::root("parent"),
+                ServerFolder {
+                    id: "sibling".into(),
+                    name: "sibling".into(),
+                    parent_id: Some("parent".into()),
+                    updated_at: "2026-01-01T00:00:00Z".into(),
+                },
+            ],
+        );
+        let files = server.files.clone();
+        let failed_downloads = server.failed_downloads.clone();
+        let downloads = server.download_hits.clone();
+        let file_deletes = server.delete_file_hits.clone();
+        let folder_deletes = server.delete_folder_hits.clone();
+        let rig = rig(server).await;
+        let fs = Arc::new(FaultyFs::default());
+        let engine = build_engine_with_fs(&rig, fs.clone()).await;
+        engine.incremental_sync().await.unwrap();
+        let parent = rig.root.join("parent");
+        std::fs::remove_dir_all(&parent).unwrap();
+
+        // The restore must also cancel an already-pending local subtree deletion.
+        engine.incremental_sync().await.unwrap();
+        assert!(journal_status(&rig, "parent", "folder").await.1.is_some());
+        {
+            let mut files = files.lock().await;
+            let changed = files.get_mut("changed").unwrap();
+            changed.bytes = b"changed remotely".to_vec();
+            changed.updated_at = "2026-02-01T00:00:00Z".into();
+        }
+        match failure {
+            "download" => {
+                failed_downloads.lock().await.insert("sibling-file".into());
+            }
+            "write" => fs.fail("write", &parent.join("sibling/sibling.txt")),
+            "partial_write" => fs.fail("partial_write", &parent.join("sibling/sibling.txt")),
+            "create_dir_all" => fs.fail("create_dir_all", &parent.join("sibling")),
+            _ => unreachable!(),
+        }
+        let report = engine.incremental_sync().await.unwrap();
+        assert!(!report.errors.is_empty(), "{failure}");
+        assert_eq!(
+            journal_status(&rig, "sibling-file", "file").await,
+            ("pending_download".to_owned(), None)
+        );
+        assert_eq!(journal_status(&rig, "parent", "folder").await.1, None);
+        drop(engine);
+
+        let engine = build_engine_with_fs(&rig, fs.clone()).await;
+        for _ in 0..3 {
+            let report = engine.incremental_sync().await.unwrap();
+            assert!(!report.errors.is_empty(), "{failure}");
+            assert_eq!(file_deletes.load(Ordering::SeqCst), 0, "{failure}");
+            assert_eq!(folder_deletes.load(Ordering::SeqCst), 0, "{failure}");
+        }
+        if failure == "create_dir_all" {
+            assert_eq!(
+                journal_status(&rig, "sibling", "folder").await,
+                ("pending_download".to_owned(), None)
+            );
+        }
+
+        failed_downloads.lock().await.clear();
+        fs.failures.write().unwrap().clear();
+        let recovered = engine.incremental_sync().await.unwrap();
+        assert!(recovered.errors.is_empty(), "{:?}", recovered.errors);
+        assert_eq!(
+            std::fs::read(parent.join("sibling/sibling.txt")).unwrap(),
+            b"unchanged"
+        );
+        assert_eq!(
+            journal_status(&rig, "sibling-file", "file").await,
+            ("synced".to_owned(), None)
+        );
+        assert_eq!(
+            journal_status(&rig, "sibling", "folder").await,
+            ("synced".to_owned(), None)
+        );
+        let download_count = downloads.load(Ordering::SeqCst);
+        engine.incremental_sync().await.unwrap();
+        assert_eq!(
+            downloads.load(Ordering::SeqCst),
+            download_count,
+            "a successful restore must clear the retry state"
+        );
+        assert_eq!(file_deletes.load(Ordering::SeqCst), 0);
+        assert_eq!(folder_deletes.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn parent_delete_preserves_excluded_descendants() {
+    for exclude_before_sync in [false, true] {
+        let server = FakeServer::with_folders(
+            vec![
+                ServerFile {
+                    id: "eligible".into(),
+                    name: "eligible.txt".into(),
+                    parent_id: Some("parent".into()),
+                    bytes: b"delete me".to_vec(),
+                    updated_at: "2026-01-01T00:00:00Z".into(),
+                },
+                ServerFile {
+                    id: "protected".into(),
+                    name: "protected.txt".into(),
+                    parent_id: Some("child".into()),
+                    bytes: b"keep me".to_vec(),
+                    updated_at: "2026-01-01T00:00:00Z".into(),
+                },
+            ],
+            vec![
+                ServerFolder::root("parent"),
+                ServerFolder {
+                    id: "child".into(),
+                    name: "child".into(),
+                    parent_id: Some("parent".into()),
+                    updated_at: "2026-01-01T00:00:00Z".into(),
+                },
+            ],
+        );
+        let file_deletes = server.delete_file_hits.clone();
+        let folder_deletes = server.delete_folder_hits.clone();
+        let files = server.files.clone();
+        let folders = server.folders.clone();
+        let rig = rig(server).await;
+        let fs = Arc::new(FaultyFs::default());
+        let engine = build_engine_with_fs(&rig, fs.clone()).await;
+        if exclude_before_sync {
+            engine
+                .set_folder_local_strategy("child", Some(SyncStrategy::DoNotSync))
+                .await
+                .unwrap();
+        }
+        engine.incremental_sync().await.unwrap();
+        std::fs::remove_dir_all(rig.root.join("parent")).unwrap();
+        if !exclude_before_sync {
+            engine.incremental_sync().await.unwrap();
+            assert!(journal_status(&rig, "parent", "folder").await.1.is_some());
+            engine
+                .set_folder_local_strategy("child", Some(SyncStrategy::DoNotSync))
+                .await
+                .unwrap();
+        }
+
+        fs.fail("is_dir", &rig.root.join("parent/child"));
+        fs.fail("is_file", &rig.root.join("parent/child/protected.txt"));
+
+        for _ in 0..3 {
+            let report = engine.incremental_sync().await.unwrap();
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            assert!(
+                !rig.root.join("parent").exists(),
+                "excluded children must not resurrect the parent"
+            );
+            assert_eq!(folder_deletes.load(Ordering::SeqCst), 0);
+            assert_eq!(journal_status(&rig, "parent", "folder").await.1, None);
+        }
+        assert!(files.lock().await.contains_key("protected"));
+        assert_eq!(
+            file_deletes.load(Ordering::SeqCst),
+            1,
+            "eligible file should still be deleted"
+        );
+        assert_eq!(folders.lock().await.len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn parent_delete_respects_non_deleting_descendant_strategies() {
+    for strategy in [SyncStrategy::UploadOnly, SyncStrategy::ServerToClient] {
+        let server = FakeServer::with_folders(
+            vec![ServerFile {
+                id: "protected".into(),
+                name: "protected.txt".into(),
+                parent_id: Some("child".into()),
+                bytes: b"keep me".to_vec(),
+                updated_at: "2026-01-01T00:00:00Z".into(),
+            }],
+            vec![
+                ServerFolder::root("parent"),
+                ServerFolder {
+                    id: "child".into(),
+                    name: "child".into(),
+                    parent_id: Some("parent".into()),
+                    updated_at: "2026-01-01T00:00:00Z".into(),
+                },
+            ],
+        );
+        let files = server.files.clone();
+        let file_deletes = server.delete_file_hits.clone();
+        let folder_deletes = server.delete_folder_hits.clone();
+        let rig = rig(server).await;
+        let fs = Arc::new(FaultyFs::default());
+        let engine = build_engine_with_fs(&rig, fs.clone()).await;
+        engine.incremental_sync().await.unwrap();
+        engine
+            .set_folder_local_strategy("child", Some(strategy))
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(rig.root.join("parent")).unwrap();
+        // A policy barrier must hold even if materializing its directory fails.
+        fs.fail("create_dir_all", &rig.root.join("parent/child"));
+        for _ in 0..3 {
+            let report = engine.incremental_sync().await.unwrap();
+            assert!(!report.errors.is_empty());
+            assert_eq!(file_deletes.load(Ordering::SeqCst), 0);
+            assert_eq!(folder_deletes.load(Ordering::SeqCst), 0);
+            assert_eq!(journal_status(&rig, "parent", "folder").await.1, None);
+        }
+        assert!(files.lock().await.contains_key("protected"));
+    }
 }

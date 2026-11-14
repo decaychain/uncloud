@@ -434,6 +434,21 @@ impl Journal {
         })
     }
 
+    /// Persist a server-winning restore before creating local directories.
+    /// A failed download must remain a download, even across process restarts.
+    pub async fn set_pending_download(&self, server_id: &str, item_type: &str) -> sqlx::Result<()> {
+        sqlx::query(
+            "UPDATE sync_state SET sync_status = ?, delete_pending_since = NULL \
+             WHERE server_id = ? AND item_type = ?",
+        )
+        .bind(SyncStatus::PendingDownload.as_str())
+        .bind(server_id)
+        .bind(item_type)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     // ── delete_pending_since ──────────────────────────────────────────────
 
     /// Mark a row as "tentatively deleted as of `since`". Phase 6.5 will only
@@ -618,6 +633,22 @@ mod tests {
         j.clear_delete_pending("f-1", "file").await.unwrap();
         let row = j.get("f-1", "file").await.unwrap().unwrap();
         assert!(row.delete_pending_since.is_none());
+    }
+
+    #[tokio::test]
+    async fn pending_download_cancels_pending_deletion() {
+        let (j, _d) = fresh_journal().await;
+        seed_row(&j, "f-1", "/r/foo.txt").await;
+        j.set_delete_pending("f-1", "file", "2026-05-06T00:00:00Z")
+            .await
+            .unwrap();
+
+        j.set_pending_download("f-1", "file").await.unwrap();
+
+        let row = j.get("f-1", "file").await.unwrap().unwrap();
+        assert_eq!(row.sync_status, SyncStatus::PendingDownload.as_str());
+        assert!(row.delete_pending_since.is_none());
+        assert_eq!(row.server_updated_at, "2026-01-01T00:00:00Z");
     }
 
     #[tokio::test]

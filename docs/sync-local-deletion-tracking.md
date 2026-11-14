@@ -122,6 +122,34 @@ cascades the trash (sets `deleted_at` on every descendant inside one
 the audit log. The two-phase commit applies to the folder row the
 same way it does to file rows.
 
+Empty folders and nested subtrees use the same confirmation rule. Parents
+are processed before descendants using server ancestry, not local path
+length (a per-folder path override can put a child elsewhere). A subtree
+cannot be collapsed if a mapped descendant survives locally or any
+descendant's effective strategy forbids pushing deletes. Eligible missing
+files can still be deleted individually; excluded descendants remain on
+the server. Applying an exclusion also cancels a pending ancestor deletion.
+
+Filesystem probe errors are not evidence of absence. Permission and I/O
+errors from directory/file checks abort the sync run instead of marking
+items pending or confirming deletion.
+
+### Server-winning restoration
+
+A server change anywhere in a locally missing, tracked subtree cancels
+its deletion and restores the whole subtree, including unchanged sibling
+folders and files. Changes inside `DoNotSync` subtrees do not trigger
+restoration of an otherwise unchanged parent.
+
+Before creating directories, the engine persists `pending_download` on
+missing journaled items that must be restored and clears their pending
+deletion markers. Failed downloads, partial writes, and failed directory
+creation remain pending across restarts. Files are retried until restored
+successfully; pending items and their ancestors cannot be deleted by
+local-absence reconciliation. Successful restoration returns their status
+to `synced`. This uses the existing journal status field without a schema
+migration.
+
 ## Migration
 
 Existing users on builds before this change have:
