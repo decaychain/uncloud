@@ -195,6 +195,11 @@ impl TestApp {
         Self::with_config(|_| {}).await
     }
 
+    /// Root of the default local storage backend.
+    pub fn storage_path(&self) -> &std::path::Path {
+        self._storage.path()
+    }
+
     /// Drop the test database to free MongoDB memory.
     /// Call this at the end of each test.
     pub async fn cleanup(&self) {
@@ -323,6 +328,7 @@ impl TestApp {
 
 pub struct BoundTestApp {
     pub base_url: String,
+    pub db: mongodb::Database,
     _storage: TempDir,
     /// Dropping this sender triggers graceful shutdown of the background server.
     _shutdown: tokio::sync::oneshot::Sender<()>,
@@ -388,6 +394,8 @@ impl BoundTestApp {
             .expect("search service");
         let processing = ProcessingService::new(1, 3);
 
+        let db_handle = database.clone();
+
         let sync_log = uncloud_server::services::SyncLog::new(
             &database,
             events.clone(),
@@ -426,9 +434,15 @@ impl BoundTestApp {
 
         Self {
             base_url: format!("http://127.0.0.1:{}", bound_port),
+            db: db_handle,
             _storage: storage_dir,
             _shutdown: shutdown_tx,
         }
+    }
+
+    /// Root of the default local storage backend.
+    pub fn storage_path(&self) -> &std::path::Path {
+        self._storage.path()
     }
 
     /// Create a fresh, unauthenticated client for this server.

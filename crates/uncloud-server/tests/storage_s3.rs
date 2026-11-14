@@ -124,6 +124,67 @@ async fn temp_upload_finalizes() {
     assert_eq!(&buf, b"chunk-1;chunk-2;chunk-3");
 }
 
+/// The upload handlers drive the temp API through `UploadStaging`. Run the
+/// same sequence against MinIO: a multi-megabyte body in small frames
+/// replacing an existing object.
+#[tokio::test]
+#[ignore]
+async fn staged_upload_replaces_object() {
+    use mongodb::bson::oid::ObjectId;
+    use sha2::{Digest, Sha256};
+    use std::sync::Arc;
+    use uncloud_server::storage::UploadStaging;
+
+    let (_minio, endpoint) = start_minio().await;
+    make_bucket(&endpoint).await;
+    let storage: Arc<dyn StorageBackend> = Arc::new(make_storage(&endpoint).await);
+    let storage_id = ObjectId::new();
+
+    storage
+        .write("uploads/doc.bin", b"old content")
+        .await
+        .unwrap();
+
+    let data: Vec<u8> = (0..9 * 1024 * 1024 + 321u32)
+        .map(|i| i.wrapping_mul(2_654_435_761).to_le_bytes()[1])
+        .collect();
+    let mut staging = UploadStaging::create(storage_id, storage.clone())
+        .await
+        .unwrap();
+    for frame in data.chunks(64 * 1024) {
+        staging.write(frame).await.unwrap();
+    }
+    let staged = staging.finish().await.unwrap();
+    assert_eq!(staged.size_bytes(), data.len() as i64);
+    assert_eq!(staged.checksum_sha256(), hex::encode(Sha256::digest(&data)));
+    staged
+        .commit(storage_id, &storage, "uploads/doc.bin")
+        .await
+        .unwrap();
+    assert_eq!(storage.read_all("uploads/doc.bin").await.unwrap(), data);
+}
+
+#[tokio::test]
+#[ignore]
+async fn temp_can_be_read_back_before_finalize() {
+    let (_minio, endpoint) = start_minio().await;
+    make_bucket(&endpoint).await;
+    let s = make_storage(&endpoint).await;
+
+    let temp = s.create_temp().await.unwrap();
+    s.append_temp(&temp, b"chunk-1;").await.unwrap();
+    s.append_temp(&temp, b"chunk-2").await.unwrap();
+
+    let mut reader = s.read_temp(&temp).await.unwrap();
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf).await.unwrap();
+    drop(reader);
+    assert_eq!(&buf, b"chunk-1;chunk-2");
+
+    s.abort_temp(&temp).await.unwrap();
+    assert!(s.read_temp(&temp).await.is_err());
+}
+
 #[tokio::test]
 #[ignore]
 async fn rename_and_archive() {

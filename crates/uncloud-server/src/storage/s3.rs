@@ -252,6 +252,13 @@ impl StorageBackend for S3Storage {
         Ok(())
     }
 
+    async fn read_temp(&self, temp_path: &str) -> Result<BoxedAsyncRead> {
+        let file = File::open(self.temp_local(temp_path))
+            .await
+            .map_err(|e| AppError::Storage(format!("Failed to open temp file: {e}")))?;
+        Ok(Box::pin(file))
+    }
+
     async fn finalize_temp(&self, temp_path: &str, final_path: &str) -> Result<()> {
         let local = self.temp_local(temp_path);
         let body = ByteStream::from_path(&local)

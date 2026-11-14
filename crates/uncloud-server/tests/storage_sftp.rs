@@ -177,6 +177,130 @@ async fn temp_upload_finalizes() {
 
 #[tokio::test]
 #[ignore]
+async fn temp_finalize_replaces_existing_file() {
+    let (_sftp, port) = start_sftp_password().await;
+    let db = mongo_db("uncloud_sftp_test_3b").await;
+    let storage = SftpStorage::new(
+        &make_password_config(port),
+        Default::default(),
+        db,
+        ObjectId::new(),
+    )
+    .await
+    .unwrap();
+
+    storage
+        .write("uploads/doc.txt", b"old content")
+        .await
+        .unwrap();
+
+    let temp = storage.create_temp().await.unwrap();
+    storage.append_temp(&temp, b"new").await.unwrap();
+    storage
+        .finalize_temp(&temp, "uploads/doc.txt")
+        .await
+        .unwrap();
+
+    assert_eq!(storage.read_all("uploads/doc.txt").await.unwrap(), b"new");
+    assert!(!storage.exists(&format!(".tmp/{temp}")).await.unwrap());
+}
+
+#[tokio::test]
+#[ignore]
+async fn temp_can_be_read_back_before_finalize() {
+    let (_sftp, port) = start_sftp_password().await;
+    let db = mongo_db("uncloud_sftp_test_3c").await;
+    let storage = SftpStorage::new(
+        &make_password_config(port),
+        Default::default(),
+        db,
+        ObjectId::new(),
+    )
+    .await
+    .unwrap();
+
+    let temp = storage.create_temp().await.unwrap();
+    storage.append_temp(&temp, b"chunk-1;").await.unwrap();
+    storage.append_temp(&temp, b"chunk-2").await.unwrap();
+
+    let mut reader = storage.read_temp(&temp).await.unwrap();
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf).await.unwrap();
+    drop(reader);
+    assert_eq!(&buf, b"chunk-1;chunk-2");
+
+    storage.abort_temp(&temp).await.unwrap();
+    assert!(!storage.exists(&format!(".tmp/{temp}")).await.unwrap());
+}
+
+/// The upload handlers drive the temp API through `UploadStaging`. Run the
+/// same sequence against a real SFTP server: a multi-megabyte body in small
+/// frames replacing an existing file, then an abandoned upload.
+#[tokio::test]
+#[ignore]
+async fn staged_upload_replaces_file_and_abandoned_upload_leaves_no_temp() {
+    use sha2::{Digest, Sha256};
+    use std::sync::Arc;
+    use uncloud_server::storage::UploadStaging;
+
+    let (_sftp, port) = start_sftp_password().await;
+    let db = mongo_db("uncloud_sftp_test_3d").await;
+    let storage: Arc<dyn StorageBackend> = Arc::new(
+        SftpStorage::new(
+            &make_password_config(port),
+            Default::default(),
+            db,
+            ObjectId::new(),
+        )
+        .await
+        .unwrap(),
+    );
+    let storage_id = ObjectId::new();
+
+    storage
+        .write("uploads/doc.bin", b"old content")
+        .await
+        .unwrap();
+
+    let data: Vec<u8> = (0..9 * 1024 * 1024 + 321u32)
+        .map(|i| i.wrapping_mul(2_654_435_761).to_le_bytes()[1])
+        .collect();
+    let mut staging = UploadStaging::create(storage_id, storage.clone())
+        .await
+        .unwrap();
+    for frame in data.chunks(64 * 1024) {
+        staging.write(frame).await.unwrap();
+    }
+    let staged = staging.finish().await.unwrap();
+    assert_eq!(staged.size_bytes(), data.len() as i64);
+    assert_eq!(staged.checksum_sha256(), hex::encode(Sha256::digest(&data)));
+    staged
+        .commit(storage_id, &storage, "uploads/doc.bin")
+        .await
+        .unwrap();
+    assert_eq!(storage.read_all("uploads/doc.bin").await.unwrap(), data);
+
+    let mut abandoned = UploadStaging::create(storage_id, storage.clone())
+        .await
+        .unwrap();
+    abandoned.write(&data[..5 * 1024 * 1024]).await.unwrap();
+    assert_eq!(storage.scan(".tmp").await.unwrap().len(), 1);
+    drop(abandoned);
+
+    for _ in 0..500 {
+        if storage.scan(".tmp").await.unwrap().is_empty() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!(
+        "temp left behind: {:?}",
+        storage.scan(".tmp").await.unwrap()
+    );
+}
+
+#[tokio::test]
+#[ignore]
 async fn rename_and_archive() {
     let (_sftp, port) = start_sftp_password().await;
     let db = mongo_db("uncloud_sftp_test_4").await;
