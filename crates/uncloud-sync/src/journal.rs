@@ -451,25 +451,23 @@ impl Journal {
         Ok(())
     }
 
-    /// Point a row at a new local path after a local rename was mirrored to
-    /// the server. The absence at the old path is explained by the rename, so
-    /// any pending deletion is dropped with it.
-    pub async fn set_local_path(
+    /// Commit a subtree's new paths together so interruption cannot leave
+    /// some descendants pointing at vanished locations.
+    pub async fn rebase_folder_paths(
         &self,
-        server_id: &str,
-        item_type: &str,
-        local_path: &str,
+        folder_id: &str,
+        paths: &[(String, String, String)],
     ) -> sqlx::Result<()> {
-        sqlx::query(
-            "UPDATE sync_state SET local_path = ?, delete_pending_since = NULL \
-             WHERE server_id = ? AND item_type = ?",
-        )
-        .bind(local_path)
-        .bind(server_id)
-        .bind(item_type)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        let mut tx = self.pool.begin().await?;
+        for (id, item_type, path) in paths {
+            sqlx::query("UPDATE sync_state SET local_path = ?, delete_pending_since = NULL WHERE server_id = ? AND item_type = ?")
+                .bind(path).bind(id).bind(item_type).execute(&mut *tx).await?;
+        }
+        sqlx::query("DELETE FROM sync_config WHERE key = ?")
+            .bind(format!("pending_folder_move:{folder_id}"))
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await
     }
 
     // ── folder_effective_strategy ─────────────────────────────────────────
@@ -709,21 +707,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_local_path_moves_the_row_and_drops_pending_deletion() {
+    async fn set_local_paths_moves_rows_and_drops_pending_deletion() {
         let (j, _d) = fresh_journal().await;
         seed_row(&j, "f-1", "/r/old/foo.txt").await;
         j.set_delete_pending("f-1", "file", "2026-05-06T00:00:00Z")
             .await
             .unwrap();
-
-        j.set_local_path("f-1", "file", "/r/new/foo.txt")
+        j.set_config("pending_folder_move:folder", "intent")
             .await
             .unwrap();
+
+        j.rebase_folder_paths(
+            "folder",
+            &[(
+                "f-1".to_owned(),
+                "file".to_owned(),
+                "/r/new/foo.txt".to_owned(),
+            )],
+        )
+        .await
+        .unwrap();
 
         let row = j.get("f-1", "file").await.unwrap().unwrap();
         assert_eq!(row.local_path, "/r/new/foo.txt");
         assert!(row.delete_pending_since.is_none());
+        assert!(j
+            .get_config("pending_folder_move:folder")
+            .await
+            .unwrap()
+            .is_none());
         assert_eq!(row.server_updated_at, "2026-01-01T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn failed_subtree_rebase_rolls_back_paths_and_move_intent() {
+        let (j, _d) = fresh_journal().await;
+        seed_row(&j, "f-1", "/r/old/one.txt").await;
+        seed_row(&j, "f-2", "/r/old/two.txt").await;
+        j.set_config("pending_folder_move:folder", "intent")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER fail_second_rebase BEFORE UPDATE OF local_path ON sync_state WHEN NEW.server_id = 'f-2' BEGIN SELECT RAISE(ABORT, 'injected failure'); END")
+            .execute(&j.pool).await.unwrap();
+        let paths = vec![
+            (
+                "f-1".to_owned(),
+                "file".to_owned(),
+                "/r/new/one.txt".to_owned(),
+            ),
+            (
+                "f-2".to_owned(),
+                "file".to_owned(),
+                "/r/new/two.txt".to_owned(),
+            ),
+        ];
+        assert!(j.rebase_folder_paths("folder", &paths).await.is_err());
+        assert_eq!(
+            j.get("f-1", "file").await.unwrap().unwrap().local_path,
+            "/r/old/one.txt"
+        );
+        assert_eq!(
+            j.get_config("pending_folder_move:folder")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("intent")
+        );
     }
 
     #[tokio::test]

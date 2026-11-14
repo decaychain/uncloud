@@ -66,6 +66,11 @@ impl FaultyFs {
 
 #[async_trait::async_trait]
 impl LocalFs for FaultyFs {
+    async fn rename(&self, from: &str, to: &str) -> Result<(), LocalFsError> {
+        self.check("rename", from)?;
+        self.inner.rename(from, to).await
+    }
+
     async fn walk(&self, root: &str) -> Result<Vec<WalkEntry>, LocalFsError> {
         self.inner.walk(root).await
     }
@@ -421,6 +426,194 @@ async fn journal_status(rig: &Rig, id: &str, item_type: &str) -> (String, Option
     .unwrap();
     pool.close().await;
     result
+}
+
+#[tokio::test]
+async fn incoming_folder_rename_handles_restart_failures_and_collisions() {
+    for scenario in ["restart", "rename_error", "collision", "unreadable_child"] {
+        let server = FakeServer::with_folders(
+            vec![server_file("file", "note.txt", Some("child"), b"original")],
+            vec![
+                ServerFolder::root("parent"),
+                child_folder("child", "parent"),
+            ],
+        );
+        let folders = server.folders.clone();
+        let deletes = server.delete_file_hits.clone();
+        let rig = rig(server).await;
+        let fs = Arc::new(FaultyFs::default());
+        let engine = build_engine_with_fs(&rig, fs.clone()).await;
+        engine.incremental_sync().await.unwrap();
+        let old = rig.root.join("parent");
+        let new = rig.root.join("renamed");
+        {
+            let mut folders = folders.lock().await;
+            let parent = folders.get_mut("parent").unwrap();
+            parent.name = "renamed".into();
+            parent.updated_at = "2026-02-01T00:00:00Z".into();
+        }
+        match scenario {
+            "restart" => {
+                let pool =
+                    sqlx::SqlitePool::connect(&format!("sqlite://{}", rig.db_path.display()))
+                        .await
+                        .unwrap();
+                sqlx::query("INSERT INTO sync_config (key, value) VALUES (?, ?)")
+                    .bind("pending_folder_move:parent")
+                    .bind(
+                        serde_json::to_string(&(old.to_str().unwrap(), new.to_str().unwrap()))
+                            .unwrap(),
+                    )
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                pool.close().await;
+                std::fs::rename(&old, &new).unwrap();
+            }
+            "rename_error" => fs.fail("rename", &old),
+            "collision" => {
+                std::fs::create_dir(&new).unwrap();
+                std::fs::write(new.join("local.txt"), b"keep local data").unwrap();
+            }
+            "unreadable_child" => fs.fail("is_dir", &old.join("child")),
+            _ => unreachable!(),
+        }
+        drop(engine);
+        let engine = build_engine_with_fs(&rig, fs.clone()).await;
+        let report = engine.incremental_sync().await.unwrap();
+        if scenario != "restart" {
+            assert_eq!(report.errors.len(), 1, "{scenario}: {:?}", report.errors);
+            assert!(old.join("child/note.txt").is_file());
+            assert!(!new.join("child/note.txt").exists());
+            if scenario == "collision" {
+                assert_eq!(
+                    std::fs::read(new.join("local.txt")).unwrap(),
+                    b"keep local data"
+                );
+                std::fs::remove_dir_all(&new).unwrap();
+            }
+            fs.failures.write().unwrap().clear();
+            assert!(engine.incremental_sync().await.unwrap().errors.is_empty());
+        } else {
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+        }
+        assert_eq!(
+            std::fs::read(new.join("child/note.txt")).unwrap(),
+            b"original"
+        );
+        assert!(!old.exists());
+        for _ in 0..2 {
+            let report = engine.incremental_sync().await.unwrap();
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            assert!(report.uploaded.is_empty());
+            assert!(report.created_remote_folders.is_empty());
+        }
+        assert_eq!(deletes.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn incoming_rename_does_not_adopt_an_unrelated_destination() {
+    let server = FakeServer::with_tree(
+        vec![server_file(
+            "file",
+            "note.txt",
+            Some("parent"),
+            b"remote content",
+        )],
+        vec!["parent"],
+    );
+    let folders = server.folders.clone();
+    let deletes = server.delete_file_hits.clone();
+    let rig = rig(server).await;
+    let engine = build_engine(&rig).await;
+    engine.incremental_sync().await.unwrap();
+    std::fs::remove_dir_all(rig.root.join("parent")).unwrap();
+    std::fs::create_dir(rig.root.join("renamed")).unwrap();
+    std::fs::write(
+        rig.root.join("renamed/note.txt"),
+        b"unrelated local content",
+    )
+    .unwrap();
+    {
+        let mut folders = folders.lock().await;
+        let parent = folders.get_mut("parent").unwrap();
+        parent.name = "renamed".into();
+        parent.updated_at = "2026-02-01T00:00:00Z".into();
+    }
+    for _ in 0..3 {
+        let report = engine.incremental_sync().await.unwrap();
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+        assert!(report.uploaded.is_empty());
+        assert!(report.downloaded.is_empty());
+    }
+    assert_eq!(
+        std::fs::read(rig.root.join("renamed/note.txt")).unwrap(),
+        b"unrelated local content"
+    );
+    assert_eq!(deletes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn unreadable_folder_protects_its_descendant_deletions() {
+    let server = FakeServer::with_tree(
+        vec![server_file("file", "note.txt", Some("parent"), b"original")],
+        vec!["parent"],
+    );
+    let deletes = server.delete_file_hits.clone();
+    let rig = rig(server).await;
+    let fs = Arc::new(FaultyFs::default());
+    let engine = build_engine_with_fs(&rig, fs.clone()).await;
+    engine.incremental_sync().await.unwrap();
+    std::fs::remove_file(rig.root.join("parent/note.txt")).unwrap();
+    fs.fail("is_dir", &rig.root.join("parent"));
+    for _ in 0..3 {
+        let report = engine.incremental_sync().await.unwrap();
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+        assert_eq!(journal_status(&rig, "file", "file").await.1, None);
+    }
+    assert_eq!(deletes.load(Ordering::SeqCst), 0);
+    fs.failures.write().unwrap().clear();
+    engine.incremental_sync().await.unwrap();
+    assert_eq!(deletes.load(Ordering::SeqCst), 0);
+    engine.incremental_sync().await.unwrap();
+    assert_eq!(deletes.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn unreadable_folder_blocks_descendant_transfers_and_discovery() {
+    let server = FakeServer::with_tree(
+        vec![server_file("file", "note.txt", Some("parent"), b"original")],
+        vec!["parent"],
+    );
+    let files = server.files.clone();
+    let downloads = server.download_hits.clone();
+    let rig = rig(server).await;
+    let fs = Arc::new(FaultyFs::default());
+    let engine = build_engine_with_fs(&rig, fs.clone()).await;
+    engine.incremental_sync().await.unwrap();
+    let initial_downloads = downloads.load(Ordering::SeqCst);
+    std::fs::create_dir(rig.root.join("parent/new-child")).unwrap();
+    std::fs::write(rig.root.join("parent/new.txt"), b"not uploaded").unwrap();
+    fs.fail("is_dir", &rig.root.join("parent"));
+    let mut changed = server_file("file", "note.txt", Some("parent"), b"server change");
+    changed.updated_at = "2026-02-01T00:00:00Z".into();
+    files.lock().await.insert("file".into(), changed);
+    let report = engine.incremental_sync().await.unwrap();
+    assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+    assert_eq!(downloads.load(Ordering::SeqCst), initial_downloads);
+    assert_eq!(
+        std::fs::read(rig.root.join("parent/note.txt")).unwrap(),
+        b"original"
+    );
+    assert!(report.created_remote_folders.is_empty());
+    assert!(report.uploaded.is_empty());
+    fs.failures.write().unwrap().clear();
+    engine.incremental_sync().await.unwrap();
+    assert_eq!(
+        std::fs::read(rig.root.join("parent/note.txt")).unwrap(),
+        b"server change"
+    );
 }
 
 #[tokio::test]

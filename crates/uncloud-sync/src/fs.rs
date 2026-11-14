@@ -81,6 +81,14 @@ pub trait LocalFs: Send + Sync {
     /// `Ok(())` if the directory does not exist.
     async fn remove_dir(&self, path: &str) -> Result<(), LocalFsError>;
 
+    /// Move an entry without replacing an existing destination. Callers
+    /// confirm destination absence before invoking this operation.
+    async fn rename(&self, _from: &str, _to: &str) -> Result<(), LocalFsError> {
+        Err(LocalFsError::other(
+            "local filesystem does not support renames",
+        ))
+    }
+
     /// Return the mtime of `path` in unix seconds, or `None` if unavailable.
     async fn mtime(&self, path: &str) -> Result<Option<i64>, LocalFsError>;
 
@@ -146,6 +154,17 @@ pub const EXCLUDED_NAMES: &[&str] = &[".uncloud-sync.db", ".uncloud-root.json"];
 
 #[async_trait]
 impl LocalFs for NativeFs {
+    async fn rename(&self, from: &str, to: &str) -> Result<(), LocalFsError> {
+        if !self.confirm_absent(to).await? {
+            return Err(LocalFsError::other(format!(
+                "rename destination exists: {to}"
+            )));
+        }
+        tokio::fs::rename(from, to)
+            .await
+            .map_err(|e| LocalFsError::io(from, e))
+    }
+
     async fn walk(&self, root: &str) -> Result<Vec<WalkEntry>, LocalFsError> {
         let root = root.to_owned();
         tokio::task::spawn_blocking(move || {

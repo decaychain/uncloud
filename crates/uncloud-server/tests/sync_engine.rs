@@ -411,6 +411,52 @@ async fn two_clients_share_files() {
 
 // ── Local folder rename / delete ──────────────────────────────────────────────
 
+#[tokio::test]
+async fn local_folder_rename_and_move_reach_second_client() {
+    let app = BoundTestApp::new().await;
+    let client = app.setup_user("rename_peers").await;
+    let (first, first_dir) = app.new_sync_engine(client.clone()).await;
+    let (second, second_dir) = app.new_sync_engine(client.clone()).await;
+    tokio::fs::create_dir_all(first_dir.path().join("Old/inner/empty"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir(first_dir.path().join("Archive"))
+        .await
+        .unwrap();
+    tokio::fs::write(first_dir.path().join("Old/inner/note.txt"), b"content")
+        .await
+        .unwrap();
+    first.incremental_sync().await.unwrap();
+    second.incremental_sync().await.unwrap();
+    let initial = client.sync_tree(None).await.unwrap();
+    for (from, to) in [("Old", "New"), ("New", "Archive/New")] {
+        tokio::fs::rename(first_dir.path().join(from), first_dir.path().join(to))
+            .await
+            .unwrap();
+        let renamed = first.incremental_sync().await.unwrap();
+        assert_eq!(renamed.renamed_remote_folders.len(), 1, "{:?}", renamed);
+        let received = second.incremental_sync().await.unwrap();
+        assert!(received.errors.is_empty(), "{:?}", received.errors);
+        assert_eq!(
+            tokio::fs::read(second_dir.path().join(to).join("inner/note.txt"))
+                .await
+                .unwrap(),
+            b"content"
+        );
+        assert!(second_dir.path().join(to).join("inner/empty").is_dir());
+        assert!(!second_dir.path().join(from).exists());
+        assert!(received.uploaded.is_empty());
+        assert!(received.downloaded.is_empty());
+        assert!(received.created_remote_folders.is_empty());
+        first.incremental_sync().await.unwrap();
+        second.incremental_sync().await.unwrap();
+        let settled = client.sync_tree(None).await.unwrap();
+        assert_eq!(settled.files.len(), initial.files.len());
+        assert_eq!(settled.folders.len(), initial.folders.len());
+        assert_eq!(settled.files[0].id, initial.files[0].id);
+    }
+}
+
 /// Renaming a synced folder locally renames the server folder in place:
 /// the folder and its file keep their ids and nothing is re-uploaded.
 #[tokio::test]

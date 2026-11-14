@@ -286,6 +286,70 @@ async fn build_engine(rig: &TestRig) -> Arc<SyncEngine> {
     Arc::new(engine)
 }
 
+#[tokio::test]
+async fn matching_timestamps_with_different_content_are_not_a_rename() {
+    for contents in [b"different".as_slice(), b"different and longer".as_slice()] {
+        let server = FakeServer::default();
+        let uploads = server.upload_calls.clone();
+        let updates = server.update_folder_calls.clone();
+        let rig = new_rig(server).await;
+        let old = rig.root.join("Old");
+        let new = rig.root.join("New");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::write(old.join("note.txt"), b"original!").unwrap();
+        let engine = build_engine(&rig).await;
+        engine.incremental_sync().await.unwrap();
+        let mtime = std::fs::metadata(old.join("note.txt"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        std::fs::remove_dir_all(&old).unwrap();
+        std::fs::create_dir(&new).unwrap();
+        std::fs::write(new.join("note.txt"), contents).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(new.join("note.txt"))
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(mtime))
+            .unwrap();
+        for _ in 0..2 {
+            let report = engine.incremental_sync().await.unwrap();
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            assert!(report.renamed_remote_folders.is_empty());
+        }
+        assert_eq!(
+            uploads.load(Ordering::SeqCst),
+            2,
+            "new content must be uploaded"
+        );
+        assert_eq!(updates.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn legacy_journal_without_checksums_falls_back_to_upload() {
+    let server = FakeServer::default();
+    let uploads = server.upload_calls.clone();
+    let rig = new_rig(server).await;
+    std::fs::create_dir(rig.root.join("Old")).unwrap();
+    std::fs::write(rig.root.join("Old/note.txt"), b"content").unwrap();
+    let engine = build_engine(&rig).await;
+    engine.incremental_sync().await.unwrap();
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", rig.db_path.display()))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sync_state SET checksum = NULL")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    std::fs::rename(rig.root.join("Old"), rig.root.join("New")).unwrap();
+    let report = engine.incremental_sync().await.unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert!(report.renamed_remote_folders.is_empty());
+    assert_eq!(uploads.load(Ordering::SeqCst), 2);
+}
+
 /// Local-only folder + file → server gets the folder created and the file
 /// uploaded under that folder.
 #[tokio::test]

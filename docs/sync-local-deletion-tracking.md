@@ -166,7 +166,12 @@ directly inside a known folder or sync root, and holds every file the
 journal tracked in the vanished folder at the same relative path with the
 same mtime. If exactly one such pairing exists, the folder was renamed or
 moved: the engine sends `PUT /api/folders/{id}` with the new name and/or
-parent and repoints the journal rows. File and folder ids, and with them
+parent and repoints the journal rows. Matching requires the stored SHA-256
+checksum of every tracked file as well as its relative path and mtime;
+timestamps alone are not proof of identity. Checksums are recorded from the
+actual bytes of successful uploads and downloads, using the existing journal
+column. An older row without a checksum falls back to ordinary creation and
+upload, never a speculative rename. File and folder ids, and with them
 shares and version history, survive; nothing is re-uploaded. Known gaps,
 which fall back to delete-and-create:
 
@@ -175,6 +180,22 @@ which fall back to delete-and-create:
 - a rename combined with edits to the files inside before the next scan,
 - two candidates that match equally well,
 - single-file renames, which were always delete-and-upload.
+
+**Receiving a rename or move.** Before materializing the new server layout,
+the client relocates a tracked folder from its previous local path and rebases
+its descendants' journal paths in one transaction. This preserves local edits,
+unsynced contents and empty folders, without re-uploading or re-downloading
+unchanged files. A move intent is persisted before the filesystem operation;
+after interruption, an already-moved directory is only adopted when that intent
+matches. Completing the journal transaction also clears the intent. An unrelated
+existing destination is never overwritten or adopted.
+
+Unreadable paths, destination collisions, configured sync-base boundaries and
+unsupported moves defer the affected subtree with an error, while unrelated
+sync continues. Desktop moves use the filesystem rename operation (cross-volume
+moves may fail). Android SAF supports renames within one parent directory;
+cross-directory moves are safely deferred because the provider wrapper has no
+directory-move primitive.
 
 **Delete.** Otherwise the folder goes through the same two-phase commit
 as a file and is removed with a single `DELETE /api/folders/{id}`. The
@@ -210,7 +231,9 @@ A failed probe is not evidence of absence, and it is not a reason to stop
 syncing everything else. A path whose state cannot be read (permission
 denied, I/O error) is skipped for the run: nothing under it is
 overwritten, uploaded or deleted, and a folder containing it is never
-removed as a whole. The failure is counted in the run's errors every time
+removed as a whole. Directory probes run before descendant mutations, and a
+failed path blocks all paths beneath it for the rest of the run, including
+new-file discovery, incoming renames and server-deletion echoes. The failure is counted in the run's errors every time
 and written to the activity log once when it starts, not once per poll.
 Runs that do abort (journal or server errors) log their reason the same
 way.

@@ -15,6 +15,7 @@ tracing.workspace = true
 tokio.workspace = true
 futures.workspace = true
 async-trait.workspace = true
+sha2.workspace = true
 
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono", "migrate"] }
 walkdir = "2"

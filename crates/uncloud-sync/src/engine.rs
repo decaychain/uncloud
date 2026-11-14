@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, Utc};
+use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::sync::watch;
 use tracing::{info, warn};
@@ -70,10 +71,10 @@ struct FailureMemo {
 
 /// A tracked folder whose whole subtree is missing locally, described by
 /// the files the journal last saw in it: path relative to the folder (with
-/// `/` separators) and local mtime.
+/// `/` separators), local mtime and checksum of the last transferred bytes.
 struct VanishedFolder {
     folder_id: String,
-    files: BTreeMap<String, i64>,
+    files: BTreeMap<String, (i64, String)>,
 }
 
 /// A local directory with no server counterpart that sits directly inside
@@ -257,6 +258,7 @@ struct RunState {
     /// `Transferring` state until the run ends, instead of flickering back
     /// to `Connected` between sequential file ops.
     any_transfer_seen: bool,
+    blocked_paths: HashSet<String>,
 }
 
 impl SyncEngine {
@@ -649,6 +651,9 @@ impl SyncEngine {
     /// nothing under it is downloaded over, uploaded or deleted, and the
     /// rest of the sync carries on.
     async fn report_unreadable(&self, path: &str, err: &LocalFsError, report: &mut SyncReport) {
+        if let Some(state) = self.run_state.write().unwrap().as_mut() {
+            state.blocked_paths.insert(path.to_owned());
+        }
         let (first_in_run, log_it) = self.note_failure(path);
         if !first_in_run {
             return;
@@ -666,6 +671,9 @@ impl SyncEngine {
     }
 
     async fn probe_file(&self, path: &str, report: &mut SyncReport) -> Presence {
+        if self.path_blocked(path) {
+            return Presence::Unknown;
+        }
         match self.fs.is_file(path).await {
             Ok(true) => Presence::Present,
             Ok(false) => Presence::Absent,
@@ -677,6 +685,9 @@ impl SyncEngine {
     }
 
     async fn probe_dir(&self, path: &str, report: &mut SyncReport) -> Presence {
+        if self.path_blocked(path) {
+            return Presence::Unknown;
+        }
         match self.fs.is_dir(path).await {
             Ok(true) => Presence::Present,
             Ok(false) => Presence::Absent,
@@ -692,6 +703,9 @@ impl SyncEngine {
     /// quick probe and this check disagreeing (a dangling symlink, say) is
     /// reported so the item does not sit in limbo unnoticed.
     async fn confirm_gone(&self, path: &str, report: &mut SyncReport) -> bool {
+        if self.subtree_blocked(path) {
+            return false;
+        }
         match self.fs.confirm_absent(path).await {
             Ok(true) => true,
             Ok(false) => {
@@ -715,6 +729,178 @@ impl SyncEngine {
                 false
             }
         }
+    }
+
+    fn path_blocked(&self, path: &str) -> bool {
+        self.run_state
+            .read()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|state| {
+                state
+                    .blocked_paths
+                    .iter()
+                    .any(|blocked| path == blocked || relative_under(path, blocked).is_some())
+            })
+    }
+
+    fn subtree_blocked(&self, path: &str) -> bool {
+        self.path_blocked(path)
+            || self
+                .run_state
+                .read()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|state| {
+                    state
+                        .blocked_paths
+                        .iter()
+                        .any(|blocked| relative_under(blocked, path).is_some())
+                })
+    }
+
+    async fn reconcile_remote_folder_paths(
+        &self,
+        tree: &uncloud_common::SyncTreeResponse,
+        folder_info: &HashMap<String, ResolvedFolder>,
+        ancestors: &HashMap<String, HashSet<String>>,
+        rows: &mut HashMap<(String, String), SyncStateRow>,
+        bases: &std::collections::BTreeSet<String>,
+        report: &mut SyncReport,
+    ) -> sqlx::Result<()> {
+        let mut folders: Vec<_> = tree.folders.iter().collect();
+        folders.sort_by_key(|folder| ancestors.get(&folder.id).map_or(0, HashSet::len));
+        for row in rows.values().filter(|row| {
+            row.item_type == "folder"
+                && folder_info.get(&row.server_id).is_some_and(|info| {
+                    info.strategy != SyncStrategy::DoNotSync
+                        && info.base_path.as_deref() != Some(row.local_path.as_str())
+                })
+        }) {
+            self.probe_dir(&row.local_path, report).await;
+        }
+        for folder in folders {
+            let Some(info) = folder_info.get(&folder.id) else {
+                continue;
+            };
+            if info.strategy == SyncStrategy::DoNotSync {
+                continue;
+            }
+            let Some(to) = info.base_path.as_deref() else {
+                continue;
+            };
+            let Some(row) = rows.get(&(folder.id.clone(), "folder".to_owned())) else {
+                continue;
+            };
+            let from = row.local_path.clone();
+            if from == to {
+                continue;
+            }
+            if self.subtree_blocked(&from) || self.subtree_blocked(to) {
+                if let Some(state) = self.run_state.write().unwrap().as_mut() {
+                    state.blocked_paths.extend([from.clone(), to.to_owned()]);
+                }
+                continue;
+            }
+            let source = self.probe_dir(&from, report).await;
+            let target = self.probe_dir(to, report).await;
+            if source == Presence::Unknown || target == Presence::Unknown {
+                if let Some(state) = self.run_state.write().unwrap().as_mut() {
+                    state.blocked_paths.extend([from.clone(), to.to_owned()]);
+                }
+                continue;
+            }
+            let move_key = format!("pending_folder_move:{}", folder.id);
+            let pending = self
+                .journal
+                .get_config(&move_key)
+                .await?
+                .and_then(|value| serde_json::from_str::<(String, String)>(&value).ok());
+            let recovering = pending
+                .as_ref()
+                .is_some_and(|(old, new)| old == &from && new == to);
+            let result = async {
+                // A picked sync base has its own sentinel and permissions;
+                // moving it would invalidate the user's mapping.
+                if bases.iter().any(|base| {
+                    base == &from || base == to || relative_under(base, &from).is_some()
+                }) {
+                    return Err(LocalFsError::other(
+                        "cannot relocate a configured sync base",
+                    ));
+                }
+                if source == Presence::Present {
+                    if target == Presence::Present || !self.fs.confirm_absent(to).await? {
+                        return Err(LocalFsError::other(format!(
+                            "rename destination exists: {to}"
+                        )));
+                    }
+                    let parent = folder
+                        .parent_id
+                        .as_ref()
+                        .and_then(|id| folder_info.get(id))
+                        .and_then(|info| info.base_path.as_deref())
+                        .or(self.root_local_path.as_deref())
+                        .ok_or_else(|| {
+                            LocalFsError::other("rename destination has no local parent")
+                        })?;
+                    if self.path_blocked(parent) {
+                        return Err(LocalFsError::other(
+                            "rename destination parent is unreadable",
+                        ));
+                    }
+                    self.fs.create_dir_all(parent).await?;
+                    // The destination must be known absent before recording
+                    // intent; an unrelated pre-existing directory is never
+                    // adopted as the result of an interrupted move.
+                    self.journal
+                        .set_config(&move_key, &serde_json::to_string(&(&from, to)).unwrap())
+                        .await
+                        .map_err(|e| LocalFsError::other(e.to_string()))?;
+                    self.fs.rename(&from, to).await?;
+                } else if target == Presence::Present && !recovering {
+                    return Err(LocalFsError::other(
+                        "rename destination exists without a recorded move",
+                    ));
+                } else if !self.fs.confirm_absent(&from).await? {
+                    return Err(LocalFsError::other(format!(
+                        "rename source is not a directory: {from}"
+                    )));
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(e) = result {
+                self.report_unreadable(&from, &e, report).await;
+                if let Some(state) = self.run_state.write().unwrap().as_mut() {
+                    state.blocked_paths.insert(to.to_owned());
+                }
+                continue;
+            }
+            // Also recovers a crash after the filesystem move but before the
+            // transaction: the old directory is gone and the new one exists.
+            let paths: Vec<_> = rows
+                .values()
+                .filter_map(|row| {
+                    let path = if row.local_path == from {
+                        to.to_owned()
+                    } else {
+                        relative_under(&row.local_path, &from)?
+                            .split('/')
+                            .fold(to.to_owned(), |base, part| self.fs.join(&base, part))
+                    };
+                    Some((row.server_id.clone(), row.item_type.clone(), path))
+                })
+                .collect();
+            self.journal.rebase_folder_paths(&folder.id, &paths).await?;
+            for (id, item_type, path) in paths {
+                if let Some(row) = rows.get_mut(&(id, item_type)) {
+                    row.local_path = path;
+                    row.delete_pending_since = None;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Per-folder override bases that are walked as sync roots of their
@@ -786,6 +972,9 @@ impl SyncEngine {
             };
             for rel in rel_dirs {
                 let path = self.fs.join(&walk_root, &rel);
+                if self.subtree_blocked(&path) {
+                    continue;
+                }
                 if known.contains_key(path.as_str()) {
                     continue;
                 }
@@ -823,13 +1012,14 @@ impl SyncEngine {
     /// Pair each vanished folder with the local-only directory it was
     /// renamed or moved to. A directory matches when it holds every file
     /// the journal tracked in the folder, at the same relative path and
-    /// with the same mtime; extra files are fine and upload as new. Only
+    /// with the same mtime and verified content hash; extra files upload as new. Only
     /// unambiguous pairs are returned, so two identical copies or two
     /// candidate targets fall back to delete-and-create.
     async fn match_folder_renames<'a>(
         &self,
         vanished: &'a [VanishedFolder],
         landing: &'a [LocalOnlyDir],
+        report: &mut SyncReport,
     ) -> Vec<(&'a VanishedFolder, &'a LocalOnlyDir)> {
         let mut listings: Vec<HashMap<String, i64>> = Vec::with_capacity(landing.len());
         for dir in landing {
@@ -845,22 +1035,43 @@ impl SyncEngine {
             };
             listings.push(listing);
         }
-        let targets_of: Vec<Vec<usize>> = vanished
-            .iter()
-            .map(|folder| {
-                listings
+        let mut targets_of = Vec::new();
+        for folder in vanished {
+            let mut targets = Vec::new();
+            for (idx, listing) in listings.iter().enumerate() {
+                if !folder
+                    .files
                     .iter()
-                    .enumerate()
-                    .filter(|(_, listing)| {
-                        folder
-                            .files
-                            .iter()
-                            .all(|(rel, mtime)| listing.get(rel) == Some(mtime))
-                    })
-                    .map(|(idx, _)| idx)
-                    .collect()
-            })
-            .collect();
+                    .all(|(rel, (mtime, _))| listing.get(rel) == Some(mtime))
+                {
+                    continue;
+                }
+                let mut identical = !self.subtree_blocked(&landing[idx].path);
+                for (rel, (_, checksum)) in &folder.files {
+                    if !identical {
+                        break;
+                    }
+                    let path = rel
+                        .split('/')
+                        .fold(landing[idx].path.clone(), |base, part| {
+                            self.fs.join(&base, part)
+                        });
+                    match self.fs.read(&path).await {
+                        Ok(bytes) => {
+                            identical = format!("{:x}", Sha256::digest(&bytes)) == *checksum
+                        }
+                        Err(e) => {
+                            self.report_unreadable(&path, &e, report).await;
+                            identical = false;
+                        }
+                    }
+                }
+                if identical {
+                    targets.push(idx);
+                }
+            }
+            targets_of.push(targets);
+        }
         let mut claims: HashMap<usize, usize> = HashMap::new();
         for targets in &targets_of {
             if let [only] = targets.as_slice() {
@@ -955,6 +1166,7 @@ impl SyncEngine {
             start_reason: start_reason.to_owned(),
             emitted_start: false,
             any_transfer_seen: false,
+            blocked_paths: HashSet::new(),
         });
         // No state transition here — the previous outcome (`Connected` /
         // `NotConnected` / `Error`) holds while we check for updates. The
@@ -1048,6 +1260,18 @@ impl SyncEngine {
                         return Ok(report);
                     }
                 }
+            }
+
+            // Discover unreadable directories before any descendant can be
+            // changed, regardless of the order returned by the server.
+            let mut local_dirs: Vec<&str> = folder_info
+                .values()
+                .filter(|info| info.strategy != SyncStrategy::DoNotSync)
+                .filter_map(|info| info.base_path.as_deref())
+                .collect();
+            local_dirs.sort_by_key(|path| path.len());
+            for path in local_dirs {
+                self.probe_dir(path, &mut report).await;
             }
 
             // 2.55. Reconcile freshly-minted bases. When `verify_or_mint`
@@ -1144,6 +1368,16 @@ impl SyncEngine {
                     .as_deref()
                     .is_some_and(|parent_id| folder_in_subtree(parent_id, root_id))
             };
+            self.reconcile_remote_folder_paths(
+                &tree,
+                &folder_info,
+                &folder_ancestors,
+                &mut journal_map,
+                &bases_to_verify,
+                &mut report,
+            )
+            .await?;
+
             let allows_delete_push =
                 |s: SyncStrategy| matches!(s, SyncStrategy::TwoWay | SyncStrategy::ClientToServer);
             let restore_in_progress =
@@ -1429,7 +1663,7 @@ impl SyncEngine {
                         );
                         if can_download {
                             match self.download_to(&file.id, local_path).await {
-                                Ok(()) => {
+                                Ok(checksum) => {
                                     let mtime = self.fs.mtime(local_path).await.ok().flatten();
                                     self.journal
                                         .upsert(
@@ -1438,7 +1672,7 @@ impl SyncEngine {
                                             server_rel_path,
                                             &local_path_str,
                                             Some(file.size_bytes),
-                                            None,
+                                            Some(&checksum),
                                             &file.updated_at,
                                             mtime,
                                             "synced",
@@ -1483,7 +1717,7 @@ impl SyncEngine {
                                     .upload_update(&file.id, server_rel_path, local_path)
                                     .await
                                 {
-                                    Ok(updated) => {
+                                    Ok((updated, checksum)) => {
                                         let new_mtime =
                                             self.fs.mtime(local_path).await.ok().flatten();
                                         let _ = self
@@ -1494,7 +1728,7 @@ impl SyncEngine {
                                                 server_rel_path,
                                                 &local_path_str,
                                                 Some(updated.size_bytes),
-                                                None,
+                                                Some(&checksum),
                                                 &updated.updated_at,
                                                 new_mtime,
                                                 "synced",
@@ -1527,7 +1761,7 @@ impl SyncEngine {
                                     }
                                 }
                                 match self.download_to(&file.id, local_path).await {
-                                    Ok(()) => {
+                                    Ok(checksum) => {
                                         let new_mtime =
                                             self.fs.mtime(local_path).await.ok().flatten();
                                         let _ = self
@@ -1538,7 +1772,7 @@ impl SyncEngine {
                                                 server_rel_path,
                                                 &local_path_str,
                                                 Some(file.size_bytes),
-                                                None,
+                                                Some(&checksum),
                                                 &file.updated_at,
                                                 new_mtime,
                                                 "synced",
@@ -1566,7 +1800,7 @@ impl SyncEngine {
                             );
                             if can_download {
                                 match self.download_to(&file.id, local_path).await {
-                                    Ok(()) => {
+                                    Ok(checksum) => {
                                         let new_mtime =
                                             self.fs.mtime(local_path).await.ok().flatten();
                                         let _ = self
@@ -1577,7 +1811,7 @@ impl SyncEngine {
                                                 server_rel_path,
                                                 &local_path_str,
                                                 Some(file.size_bytes),
-                                                None,
+                                                Some(&checksum),
                                                 &file.updated_at,
                                                 new_mtime,
                                                 "synced",
@@ -1608,7 +1842,7 @@ impl SyncEngine {
                                     .upload_update(&file.id, server_rel_path, local_path)
                                     .await
                                 {
-                                    Ok(updated) => {
+                                    Ok((updated, checksum)) => {
                                         let new_mtime =
                                             self.fs.mtime(local_path).await.ok().flatten();
                                         let _ = self
@@ -1619,7 +1853,7 @@ impl SyncEngine {
                                                 server_rel_path,
                                                 &local_path_str,
                                                 Some(updated.size_bytes),
-                                                None,
+                                                Some(&checksum),
                                                 &updated.updated_at,
                                                 new_mtime,
                                                 "synced",
@@ -1650,6 +1884,9 @@ impl SyncEngine {
                     continue;
                 }
                 if !server_file_ids.contains(j.server_id.as_str()) {
+                    if self.path_blocked(&j.local_path) {
+                        continue;
+                    }
                     // Server deleted this file
                     let strategy = SyncStrategy::TwoWay; // default; ideally look up parent folder
                     if matches!(
@@ -1907,11 +2144,12 @@ impl SyncEngine {
                         Some((
                             relative_under(&file_row.local_path, &row.local_path)?,
                             file_row.local_mtime?,
+                            file_row.checksum.clone()?,
                         ))
                     });
                     match located {
-                        Some((rel, mtime)) => {
-                            files.insert(rel, mtime);
+                        Some((rel, mtime, checksum)) => {
+                            files.insert(rel, (mtime, checksum));
                         }
                         None => relocatable = false,
                     }
@@ -1934,8 +2172,9 @@ impl SyncEngine {
             }
             if !vanished_folders.is_empty() {
                 let landing = self.local_only_top_dirs(&folder_info).await;
-                for (vanished, target) in
-                    self.match_folder_renames(&vanished_folders, &landing).await
+                for (vanished, target) in self
+                    .match_folder_renames(&vanished_folders, &landing, &mut report)
+                    .await
                 {
                     let folder_id = vanished.folder_id.as_str();
                     let (Some(row), Some(server_folder)) = (
@@ -1956,6 +2195,12 @@ impl SyncEngine {
                         continue;
                     }
                     let updated = {
+                        self.journal
+                            .set_config(
+                                &format!("pending_folder_move:{folder_id}"),
+                                &serde_json::to_string(&(&row.local_path, &target.path)).unwrap(),
+                            )
+                            .await?;
                         let _g = self.transfer_guard();
                         self.client.update_folder(folder_id, &request).await
                     };
@@ -1976,6 +2221,38 @@ impl SyncEngine {
                                 .fold(target.path.clone(), |path, part| self.fs.join(&path, part))
                         })
                     };
+                    let mut paths = vec![(
+                        folder_id.to_owned(),
+                        "folder".to_owned(),
+                        target.path.clone(),
+                    )];
+                    folder_base_updates.push((folder_id.to_owned(), target.path.clone()));
+                    for descendant in tree
+                        .folders
+                        .iter()
+                        .filter(|f| f.id != folder_id && folder_in_subtree(&f.id, folder_id))
+                    {
+                        let Some(new_path) = journal_folder(&descendant.id)
+                            .and_then(|descendant_row| rebase(&descendant_row.local_path))
+                        else {
+                            continue;
+                        };
+                        paths.push((descendant.id.clone(), "folder".to_owned(), new_path.clone()));
+                        folder_base_updates.push((descendant.id.clone(), new_path));
+                    }
+                    for file in tree
+                        .files
+                        .iter()
+                        .filter(|file| file_in_subtree(file, folder_id))
+                    {
+                        let Some(new_path) = journal_file(&file.id)
+                            .and_then(|file_row| rebase(&file_row.local_path))
+                        else {
+                            continue;
+                        };
+                        paths.push((file.id.clone(), "file".to_owned(), new_path));
+                    }
+                    self.journal.rebase_folder_paths(folder_id, &paths).await?;
                     self.journal
                         .upsert(
                             folder_id,
@@ -1989,39 +2266,6 @@ impl SyncEngine {
                             "synced",
                         )
                         .await?;
-                    self.journal
-                        .clear_delete_pending(folder_id, "folder")
-                        .await?;
-                    folder_base_updates.push((folder_id.to_owned(), target.path.clone()));
-                    for descendant in tree
-                        .folders
-                        .iter()
-                        .filter(|f| f.id != folder_id && folder_in_subtree(&f.id, folder_id))
-                    {
-                        let Some(new_path) = journal_folder(&descendant.id)
-                            .and_then(|descendant_row| rebase(&descendant_row.local_path))
-                        else {
-                            continue;
-                        };
-                        self.journal
-                            .set_local_path(&descendant.id, "folder", &new_path)
-                            .await?;
-                        folder_base_updates.push((descendant.id.clone(), new_path));
-                    }
-                    for file in tree
-                        .files
-                        .iter()
-                        .filter(|file| file_in_subtree(file, folder_id))
-                    {
-                        let Some(new_path) = journal_file(&file.id)
-                            .and_then(|file_row| rebase(&file_row.local_path))
-                        else {
-                            continue;
-                        };
-                        self.journal
-                            .set_local_path(&file.id, "file", &new_path)
-                            .await?;
-                    }
                     self.log_rename_remote(&row.local_path, &target.path).await;
                     report
                         .renamed_remote_folders
@@ -2273,6 +2517,9 @@ impl SyncEngine {
 
                 for rel in local_dirs {
                     let full_path = this.fs.join(walk_root, &rel);
+                    if this.path_blocked(&full_path) {
+                        continue;
+                    }
                     // Already a registered base → known server folder, skip.
                     if bases.iter().any(|(p, _, _)| p == &full_path) {
                         continue;
@@ -2431,7 +2678,7 @@ impl SyncEngine {
 
                 for entry in local_entries {
                     let full_path = self.fs.join(root, &entry.rel_path);
-                    if !self.fs.is_file(&full_path).await.unwrap_or(false) {
+                    if self.probe_file(&full_path, &mut report).await != Presence::Present {
                         continue;
                     }
                     // We just touched this path in Phase 5/6 — never push it
@@ -2539,7 +2786,7 @@ impl SyncEngine {
                     }
 
                     let full_path = self.fs.join(base_path, &entry.rel_path);
-                    if !self.fs.is_file(&full_path).await.unwrap_or(false) {
+                    if self.probe_file(&full_path, &mut report).await != Presence::Present {
                         continue;
                     }
                     if touched_paths.contains(&full_path) {
@@ -2658,14 +2905,18 @@ impl SyncEngine {
 
     /// Download file `id` from the server and write it to `path` via the
     /// configured [`LocalFs`] backend.
-    async fn download_to(&self, id: &str, path: &str) -> Result<(), String> {
+    async fn download_to(&self, id: &str, path: &str) -> Result<String, String> {
         let _g = self.transfer_guard();
         let bytes = self
             .client
             .download_file_bytes(id)
             .await
             .map_err(|e| e.to_string())?;
-        self.fs.write(path, &bytes).await.map_err(|e| e.to_string())
+        self.fs
+            .write(path, &bytes)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(format!("{:x}", Sha256::digest(&bytes)))
     }
 
     /// Upload a newly-discovered local file to the server and record it in
@@ -2686,30 +2937,33 @@ impl SyncEngine {
             .to_owned();
 
         match self.fs.read(full_path).await {
-            Ok(bytes) => match self.client.upload_bytes(&file_name, bytes, parent_id).await {
-                Ok(new_file) => {
-                    let _ = self
-                        .journal
-                        .upsert(
-                            &new_file.id,
-                            "file",
-                            &file_name,
-                            full_path,
-                            Some(new_file.size_bytes),
-                            None,
-                            &new_file.updated_at,
-                            Some(mtime),
-                            "synced",
-                        )
-                        .await;
-                    self.log_upload(full_path, false).await;
-                    report.uploaded.push(file_name);
+            Ok(bytes) => {
+                let checksum = format!("{:x}", Sha256::digest(&bytes));
+                match self.client.upload_bytes(&file_name, bytes, parent_id).await {
+                    Ok(new_file) => {
+                        let _ = self
+                            .journal
+                            .upsert(
+                                &new_file.id,
+                                "file",
+                                &file_name,
+                                full_path,
+                                Some(new_file.size_bytes),
+                                Some(&checksum),
+                                &new_file.updated_at,
+                                Some(mtime),
+                                "synced",
+                            )
+                            .await;
+                        self.log_upload(full_path, false).await;
+                        report.uploaded.push(file_name);
+                    }
+                    Err(e) => report.errors.push(SyncError {
+                        path: rel_path.to_owned(),
+                        reason: e.to_string(),
+                    }),
                 }
-                Err(e) => report.errors.push(SyncError {
-                    path: rel_path.to_owned(),
-                    reason: e.to_string(),
-                }),
-            },
+            }
             Err(e) => report.errors.push(SyncError {
                 path: rel_path.to_owned(),
                 reason: e.to_string(),
@@ -2724,9 +2978,10 @@ impl SyncEngine {
         id: &str,
         server_rel_path: &str,
         path: &str,
-    ) -> Result<uncloud_common::FileResponse, String> {
+    ) -> Result<(uncloud_common::FileResponse, String), String> {
         let _g = self.transfer_guard();
         let bytes = self.fs.read(path).await.map_err(|e| e.to_string())?;
+        let checksum = format!("{:x}", Sha256::digest(&bytes));
         let file_name = server_rel_path
             .rsplit(['/', '\\'])
             .next()
@@ -2734,6 +2989,7 @@ impl SyncEngine {
         self.client
             .update_file_content_bytes(id, file_name, bytes)
             .await
+            .map(|file| (file, checksum))
             .map_err(|e| e.to_string())
     }
 

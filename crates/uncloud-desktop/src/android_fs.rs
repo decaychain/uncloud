@@ -70,6 +70,30 @@ impl AndroidSafFs {
 
 #[async_trait]
 impl LocalFs for AndroidSafFs {
+    async fn rename(&self, from: &str, to: &str) -> Result<(), LocalFsError> {
+        let (root, rel) = Self::split(from);
+        let (to_root, to_rel) = Self::split(to);
+        let (parent, _) = rel.rsplit_once('/').unwrap_or(("", rel.as_str()));
+        let (to_parent, name) = to_rel.rsplit_once('/').unwrap_or(("", to_rel.as_str()));
+        if root != to_root || parent != to_parent || rel.is_empty() || to_rel.is_empty() {
+            return Err(LocalFsError::other(
+                "SAF cannot move entries between directories",
+            ));
+        }
+        if !self.confirm_absent(to).await? {
+            return Err(LocalFsError::other("rename destination exists"));
+        }
+        let api = self.app.android_fs_async();
+        let uri = api
+            .resolve_dir_uri(&Self::tree_uri(&root), &rel)
+            .await
+            .map_err(|e| LocalFsError::other(format!("resolve rename source: {e}")))?;
+        api.rename(&uri, name)
+            .await
+            .map(|_| ())
+            .map_err(|e| LocalFsError::other(format!("rename({rel}): {e}")))
+    }
+
     async fn walk(&self, root: &str) -> Result<Vec<WalkEntry>, LocalFsError> {
         let (root_uri, rel_prefix) = Self::split(root);
         let api = self.app.android_fs_async();
@@ -317,15 +341,20 @@ impl LocalFs for AndroidSafFs {
         }
         let api = self.app.android_fs_async();
         let mut dir = Self::tree_uri(&root);
-        let mut parts = rel.split('/').filter(|part| !part.is_empty()).peekable();
-        while let Some(part) = parts.next() {
+        let parts: Vec<String> = rel
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let part_count = parts.len();
+        for (index, part) in parts.into_iter().enumerate() {
             let entries = api.read_dir(&dir).await.map_err(|e| {
                 LocalFsError::other(format!("read_dir while confirming {rel} is gone: {e}"))
             })?;
             let Some(entry) = entries.into_iter().find(|entry| entry.name() == part) else {
                 return Ok(true);
             };
-            if parts.peek().is_none() {
+            if index + 1 == part_count {
                 return Ok(false);
             }
             match entry {
