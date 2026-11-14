@@ -80,7 +80,18 @@ impl LocalFs for FaultyFs {
     async fn copy_file(&self, from: &str, to: &str) -> Result<(), LocalFsError> {
         self.check("copy_file", from)?;
         let data = self.inner.read(from).await?;
-        self.inner.write(to, &data).await
+        self.inner.write(to, &data).await?;
+        if self.check("edit_source_after_copy", from).is_err() {
+            let modified = std::fs::metadata(from).unwrap().modified().unwrap();
+            std::fs::write(from, b"edited during copy").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(from)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+        }
+        Ok(())
     }
 
     async fn walk(&self, root: &str) -> Result<Vec<WalkEntry>, LocalFsError> {
@@ -110,6 +121,7 @@ impl LocalFs for FaultyFs {
     }
 
     async fn remove_file(&self, path: &str) -> Result<(), LocalFsError> {
+        self.check("remove_file", path)?;
         self.inner.remove_file(path).await
     }
 
@@ -664,6 +676,180 @@ async fn pending_move_intents(rig: &Rig) -> i64 {
     count
 }
 
+#[tokio::test]
+async fn resumed_copy_does_not_overwrite_destination_or_source_edits() {
+    for edit_destination in [true, false] {
+        let server = FakeServer::with_tree(
+            vec![server_file("file", "note.txt", Some("parent"), b"original")],
+            vec!["parent"],
+        );
+        let handle = server.clone();
+        let rig = rig(server).await;
+        let fs = Arc::new(FaultyFs::default());
+        let engine = build_engine_with_fs(&rig, fs.clone()).await;
+        assert!(engine.incremental_sync().await.unwrap().errors.is_empty());
+        let old = rig.root.join("parent");
+        let new = rig.root.join("renamed");
+        fs.moves_unsupported.store(true, Ordering::SeqCst);
+        fs.fail("remove_file", &old.join("note.txt"));
+        rename_on_server(&handle, "parent", "renamed", None).await;
+        let failed = engine.incremental_sync().await.unwrap();
+        assert_eq!(failed.errors.len(), 1);
+        assert_eq!(std::fs::read(new.join("note.txt")).unwrap(), b"original");
+        assert_eq!(pending_move_intents(&rig).await, 1);
+        drop(engine);
+
+        let edited = if edit_destination { &new } else { &old };
+        std::fs::write(edited.join("note.txt"), b"valuable local edit").unwrap();
+        fs.failures.write().unwrap().clear();
+        let engine = build_engine_with_fs(&rig, fs).await;
+        for _ in 0..2 {
+            let report = engine.incremental_sync().await.unwrap();
+            assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+            assert!(report.errors[0].reason.contains("destination differs"));
+            assert!(report.uploaded.is_empty());
+            assert!(report.downloaded.is_empty());
+            assert!(report.deleted_local.is_empty());
+            assert!(report.created_remote_folders.is_empty());
+            let untouched = if edit_destination { &old } else { &new };
+            assert_eq!(
+                std::fs::read(edited.join("note.txt")).unwrap(),
+                b"valuable local edit"
+            );
+            assert_eq!(
+                std::fs::read(untouched.join("note.txt")).unwrap(),
+                b"original"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn copying_defers_source_edits_even_when_the_mtime_does_not_change() {
+    let server = FakeServer::with_tree(
+        vec![server_file("file", "note.txt", Some("parent"), b"original")],
+        vec!["parent"],
+    );
+    let handle = server.clone();
+    let rig = rig(server).await;
+    let fs = Arc::new(FaultyFs::default());
+    let engine = build_engine_with_fs(&rig, fs.clone()).await;
+    engine.incremental_sync().await.unwrap();
+    let old = rig.root.join("parent/note.txt");
+    let new = rig.root.join("renamed/note.txt");
+    let mtime = NativeFs.mtime(old.to_str().unwrap()).await.unwrap();
+    fs.moves_unsupported.store(true, Ordering::SeqCst);
+    fs.fail("edit_source_after_copy", &old);
+    rename_on_server(&handle, "parent", "renamed", None).await;
+    let report = engine.incremental_sync().await.unwrap();
+    assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+    assert!(report.errors[0].reason.contains("file changed during move"));
+    assert!(report.uploaded.is_empty());
+    assert!(report.created_remote_folders.is_empty());
+    assert_eq!(NativeFs.mtime(old.to_str().unwrap()).await.unwrap(), mtime);
+    assert_eq!(std::fs::read(old).unwrap(), b"edited during copy");
+    assert_eq!(std::fs::read(new).unwrap(), b"original");
+}
+
+#[tokio::test]
+async fn empty_folder_rename_requires_a_move_intent_to_adopt_a_destination() {
+    for (with_intent, populated) in [(false, false), (false, true), (true, false)] {
+        let server = FakeServer::with_tree(vec![], vec!["parent"]);
+        let handle = server.clone();
+        let rig = rig(server).await;
+        let engine = build_engine(&rig).await;
+        engine.incremental_sync().await.unwrap();
+        let old = rig.root.join("parent");
+        let new = rig.root.join("renamed");
+        std::fs::remove_dir(&old).unwrap();
+        std::fs::create_dir(&new).unwrap();
+        if populated {
+            std::fs::write(new.join("private.txt"), b"unrelated private data").unwrap();
+        }
+        rename_on_server(&handle, "parent", "renamed", None).await;
+        if with_intent {
+            let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", rig.db_path.display()))
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO sync_config (key, value) VALUES (?, ?)")
+                .bind("pending_folder_move:parent")
+                .bind(
+                    serde_json::to_string(&(old.to_str().unwrap(), new.to_str().unwrap(), false))
+                        .unwrap(),
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
+            pool.close().await;
+        }
+        drop(engine);
+        let engine = build_engine(&rig).await;
+        for _ in 0..2 {
+            let report = engine.incremental_sync().await.unwrap();
+            assert!(report.uploaded.is_empty());
+            assert!(report.created_remote_folders.is_empty());
+            if with_intent {
+                assert!(report.errors.is_empty(), "{:?}", report.errors);
+            } else {
+                assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+                assert!(report.errors[0].reason.contains("a different folder"));
+            }
+        }
+        if populated {
+            assert_eq!(
+                std::fs::read(new.join("private.txt")).unwrap(),
+                b"unrelated private data"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn remapping_an_override_keeps_all_retired_copies_out_of_discovery() {
+    let server = FakeServer::with_folders(
+        vec![server_file("file", "note.txt", Some("child"), b"original")],
+        vec![
+            ServerFolder::root("parent"),
+            child_folder("child", "parent"),
+        ],
+    );
+    let deletes = server.delete_file_hits.clone();
+    let folder_deletes = server.delete_folder_hits.clone();
+    let rig = rig(server).await;
+    let engine = build_engine(&rig).await;
+    assert!(engine.incremental_sync().await.unwrap().errors.is_empty());
+    drop(engine);
+    for name in ["mapped-one", "mapped-two", "mapped-one"] {
+        let engine = build_engine(&rig).await;
+        let mapped = rig.root.join(name);
+        std::fs::create_dir_all(&mapped).unwrap();
+        engine
+            .set_folder_local_path("parent", Some(mapped.to_str().unwrap()))
+            .await
+            .unwrap();
+        drop(engine);
+        let engine = build_engine(&rig).await;
+        for _ in 0..3 {
+            let report = engine.incremental_sync().await.unwrap();
+            assert!(report.errors.is_empty(), "{name}: {:?}", report.errors);
+            assert!(report.created_remote_folders.is_empty());
+            assert!(report.uploaded.is_empty());
+        }
+        assert_eq!(
+            std::fs::read(mapped.join("child/note.txt")).unwrap(),
+            b"original"
+        );
+    }
+    for name in ["parent", "mapped-one", "mapped-two"] {
+        assert_eq!(
+            std::fs::read(rig.root.join(name).join("child/note.txt")).unwrap(),
+            b"original"
+        );
+    }
+    assert_eq!(deletes.load(Ordering::SeqCst), 0);
+    assert_eq!(folder_deletes.load(Ordering::SeqCst), 0);
+}
+
 /// Giving an already-synced folder its own local path is a mapping change,
 /// not a server rename: the folder syncs at the new location and the old
 /// copy is neither moved, re-uploaded nor read as a deletion.
@@ -1113,7 +1299,9 @@ async fn failed_incoming_rename_leaves_no_move_intent_behind() {
     let report = engine.incremental_sync().await.unwrap();
     assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
     assert!(
-        report.errors[0].reason.contains("could not follow the server rename"),
+        report.errors[0]
+            .reason
+            .contains("could not follow the server rename"),
         "{:?}",
         report.errors
     );

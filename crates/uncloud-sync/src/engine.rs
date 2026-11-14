@@ -880,7 +880,8 @@ impl SyncEngine {
         files: &BTreeMap<String, (i64, String)>,
         report: &mut SyncReport,
     ) -> bool {
-        if self.subtree_blocked(dir)
+        if files.is_empty()
+            || self.subtree_blocked(dir)
             || !files
                 .iter()
                 .all(|(rel, (mtime, _))| listing.get(rel) == Some(mtime))
@@ -966,8 +967,8 @@ impl SyncEngine {
 
     /// Move a directory tree by copying it and then removing the original,
     /// for moves the backend cannot do as one rename. The original is only
-    /// touched once every file has been copied, and a file edited while the
-    /// copy ran is copied again before it is removed. Returns each file's
+    /// touched once every file has been copied. Existing destinations must
+    /// have identical content, including on recovery. Returns each file's
     /// `/`-separated relative path with its mtime before and after.
     async fn move_by_copy(
         &self,
@@ -981,21 +982,34 @@ impl SyncEngine {
         for dir in &dirs {
             self.fs.create_dir_all(&self.join_rel(to, dir)).await?;
         }
-        for file in &files {
-            self.fs
-                .copy_file(
-                    &self.join_rel(from, &file.rel_path),
-                    &self.join_rel(to, &file.rel_path),
-                )
-                .await?;
-        }
-        let mut moved = Vec::with_capacity(files.len());
+        let mut verified = Vec::with_capacity(files.len());
         for file in &files {
             let source = self.join_rel(from, &file.rel_path);
             let dest = self.join_rel(to, &file.rel_path);
-            let before = self.fs.mtime(&source).await?.unwrap_or(file.mtime);
-            if before != file.mtime {
+            let checksum = self.fs.sha256(&source).await?;
+            if self.fs.confirm_absent(&dest).await? {
                 self.fs.copy_file(&source, &dest).await?;
+            }
+            if !self.fs.is_file(&dest).await? || self.fs.sha256(&dest).await? != checksum {
+                return Err(LocalFsError::other(format!(
+                    "move destination differs from its source: {dest}; both copies were kept"
+                )));
+            }
+            verified.push(checksum);
+        }
+        let mut moved = Vec::with_capacity(files.len());
+        for (file, checksum) in files.iter().zip(verified) {
+            let source = self.join_rel(from, &file.rel_path);
+            let dest = self.join_rel(to, &file.rel_path);
+            let before = self.fs.mtime(&source).await?.unwrap_or(file.mtime);
+            // Do not use the mtime cache here: edits can preserve timestamps
+            // or happen within the same second while a large move is running.
+            if self.fs.sha256(&source).await? != checksum
+                || self.fs.sha256(&dest).await? != checksum
+            {
+                return Err(LocalFsError::other(format!(
+                    "file changed during move: {source}; both copies were kept"
+                )));
             }
             let after = self.fs.mtime(&dest).await?.unwrap_or(before);
             self.fs.remove_file(&source).await?;
@@ -1167,7 +1181,12 @@ impl SyncEngine {
                 || ancestors
                     .get(id)
                     .is_some_and(|above| above.contains(folder_id));
-            if inside && !info.base_path.as_ref().is_some_and(|base| bases.contains(base)) {
+            if inside
+                && !info
+                    .base_path
+                    .as_ref()
+                    .is_some_and(|base| bases.contains(base))
+            {
                 info.base_path = None;
             }
         }
@@ -1268,13 +1287,12 @@ impl SyncEngine {
                 })
                 .filter(|row| {
                     !nested.iter().any(|base| {
-                        row.local_path == **base
-                            || relative_under(&row.local_path, base).is_some()
+                        row.local_path == **base || relative_under(&row.local_path, base).is_some()
                     })
                 })
                 .map(|row| (row.server_id.clone(), row.item_type.clone()))
                 .collect();
-            self.journal.forget_rows(&keys).await?;
+            self.journal.retire_folder_path(&from, &keys).await?;
             for key in &keys {
                 rows.remove(key);
             }
@@ -1968,12 +1986,18 @@ impl SyncEngine {
             // A folder mapped to its own local path leaves its default
             // location under the root behind. That directory is the old copy,
             // not a new folder to create on the server.
+            let actual: HashSet<&str> = folder_info
+                .values()
+                .filter_map(|info| info.base_path.as_deref())
+                .collect();
+            let mut shadowed: HashSet<String> = self
+                .journal
+                .retired_local_paths()
+                .await?
+                .into_iter()
+                .filter(|path| !actual.contains(path.as_str()))
+                .collect();
             if let Some(root) = self.root_local_path.as_deref() {
-                let actual: HashSet<&str> = folder_info
-                    .values()
-                    .filter_map(|info| info.base_path.as_deref())
-                    .collect();
-                let mut shadowed = HashSet::new();
                 for folder in &tree.folders {
                     let mut names = vec![folder.name.as_str()];
                     let mut current = folder.parent_id.as_deref();
@@ -1992,9 +2016,9 @@ impl SyncEngine {
                         shadowed.insert(default);
                     }
                 }
-                if let Some(state) = self.run_state.write().unwrap().as_mut() {
-                    state.shadowed_paths = shadowed;
-                }
+            }
+            if let Some(state) = self.run_state.write().unwrap().as_mut() {
+                state.shadowed_paths = shadowed;
             }
 
             let allows_delete_push =

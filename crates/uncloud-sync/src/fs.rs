@@ -24,10 +24,9 @@ pub type ByteStream<'a> = BoxStream<'a, Result<Bytes, LocalFsError>>;
 
 const STREAM_CHUNK: usize = 256 * 1024;
 
-/// Suffix of the temporary file a download is written to before it replaces
-/// its destination. Walkers skip these: an interrupted download is not a
-/// new local file.
+/// Suffix of uniquely named internal download staging files.
 pub const PARTIAL_SUFFIX: &str = ".uncloud-part";
+const PARTIAL_PREFIX: &str = ".uncloud-download-";
 
 /// Error type returned by [`LocalFs`] operations.
 #[derive(Debug, thiserror::Error)]
@@ -278,7 +277,11 @@ pub const EXCLUDED_NAMES: &[&str] = &[".uncloud-sync.db", ".uncloud-root.json"];
 /// Whether a walker must skip a file with this name: one of
 /// [`EXCLUDED_NAMES`], or the leftover of an interrupted download.
 pub fn is_excluded_name(name: &str) -> bool {
-    EXCLUDED_NAMES.contains(&name) || name.ends_with(PARTIAL_SUFFIX)
+    EXCLUDED_NAMES.contains(&name)
+        || name
+            .strip_prefix(PARTIAL_PREFIX)
+            .and_then(|name| name.strip_suffix(PARTIAL_SUFFIX))
+            .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
 }
 
 #[async_trait]
@@ -446,11 +449,26 @@ impl LocalFs for NativeFs {
     // never leaves a truncated file where a complete one was, to be taken
     // for a local edit on the next scan.
     async fn write_stream(&self, path: &str, chunks: ByteStream<'_>) -> Result<(), LocalFsError> {
-        let partial = format!("{path}{PARTIAL_SUFFIX}");
-        let written = async {
-            let file = tokio::fs::File::create(&partial)
+        let parent = std::path::Path::new(path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let (partial, file) = loop {
+            let partial = parent.join(format!(
+                "{PARTIAL_PREFIX}{}{PARTIAL_SUFFIX}",
+                uuid::Uuid::new_v4()
+            ));
+            match tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&partial)
                 .await
-                .map_err(|e| LocalFsError::io(partial.clone(), e))?;
+            {
+                Ok(file) => break (partial, file),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(LocalFsError::io(partial.to_string_lossy(), e)),
+            }
+        };
+        let written = async {
             write_chunks(file.into_std().await, chunks).await?;
             tokio::fs::rename(&partial, path)
                 .await
@@ -580,7 +598,9 @@ mod tests {
     async fn native_read_stream_yields_the_file_in_bounded_chunks() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("large.bin");
-        let content: Vec<u8> = (0..STREAM_CHUNK * 2 + 123).map(|i| (i % 251) as u8).collect();
+        let content: Vec<u8> = (0..STREAM_CHUNK * 2 + 123)
+            .map(|i| (i % 251) as u8)
+            .collect();
         std::fs::write(&path, &content).unwrap();
 
         let mut stream = NativeFs.read_stream(path.to_str().unwrap()).await.unwrap();
@@ -624,22 +644,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn downloads_preserve_user_files_with_the_old_staging_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("note.txt");
+        let neighbor = dir.path().join("note.txt.uncloud-part");
+        std::fs::write(&neighbor, b"unrelated local data").unwrap();
+        for fail in [true, false] {
+            let chunks = if fail {
+                chunks_of(vec![Ok(b"partial"), Err("connection lost")])
+            } else {
+                chunks_of(vec![Ok(b"download")])
+            };
+            assert_eq!(
+                NativeFs
+                    .write_stream(target.to_str().unwrap(), chunks)
+                    .await
+                    .is_err(),
+                fail
+            );
+            assert_eq!(std::fs::read(&neighbor).unwrap(), b"unrelated local data");
+        }
+        assert_eq!(std::fs::read(&target).unwrap(), b"download");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn download_staging_does_not_follow_a_neighboring_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("note.txt");
+        let other = dir.path().join("other.txt");
+        std::fs::write(&other, b"keep me").unwrap();
+        let link = dir.path().join("note.txt.uncloud-part");
+        std::os::unix::fs::symlink(&other, &link).unwrap();
+        NativeFs
+            .write_stream(target.to_str().unwrap(), chunks_of(vec![Ok(b"download")]))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&other).unwrap(), b"keep me");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+    }
+
+    #[tokio::test]
     async fn walk_skips_the_leftover_of_an_interrupted_download() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("note.txt"), b"content").unwrap();
         std::fs::write(
-            dir.path().join(format!("note.txt{PARTIAL_SUFFIX}")),
+            dir.path().join(format!(
+                "{PARTIAL_PREFIX}{}{PARTIAL_SUFFIX}",
+                uuid::Uuid::new_v4()
+            )),
             b"half",
         )
         .unwrap();
-        let listed: Vec<String> = NativeFs
+        std::fs::write(dir.path().join("user.uncloud-part"), b"user data").unwrap();
+        std::fs::write(
+            dir.path().join(".uncloud-download-not-a-uuid.uncloud-part"),
+            b"also user data",
+        )
+        .unwrap();
+        let mut listed: Vec<String> = NativeFs
             .walk(dir.path().to_str().unwrap())
             .await
             .unwrap()
             .into_iter()
             .map(|entry| entry.rel_path)
             .collect();
-        assert_eq!(listed, ["note.txt"]);
+        listed.sort();
+        assert_eq!(
+            listed,
+            [
+                ".uncloud-download-not-a-uuid.uncloud-part",
+                "note.txt",
+                "user.uncloud-part"
+            ]
+        );
     }
 
     #[tokio::test]

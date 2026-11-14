@@ -212,15 +212,19 @@ What happens depends on what is found at the old and the new path:
 | present | the folder of a server-deleted item | The deletion echo clears it later in the same run and the rename lands on the next one. |
 | present | anything else | Error: "a different folder already exists". Nothing is overwritten or merged. |
 | absent | present, recorded intent matches | An interrupted move; the journal is completed. |
-| absent | present, holds every tracked file with the same mtime and checksum | The same rename was made by hand; the directory is adopted. |
+| absent | present, holds at least one tracked file and every tracked file has the same mtime and checksum | The same rename was made by hand; the directory is adopted. Empty folders provide no identity evidence and need a matching intent. |
 | absent | present, anything else | Error, as above. |
 | absent | absent | The journal follows; the missing folder is then an ordinary local deletion. |
 
 **Moves the backend cannot do in one step.** A move to another volume on
 desktop, or to another directory through Android SAF, fails with
 `LocalFsError::MoveUnsupported` and is done by copying: every file is
-copied (`LocalFs::copy_file`, streamed), a file edited while the copy ran
-is copied again, and only then is the original removed. The intent records
+copied (`LocalFs::copy_file`, streamed), and only then is the original removed.
+An existing destination file is reused only if its SHA-256 matches the source;
+it is never overwritten during recovery. Both files are hashed again before
+the source is removed, without relying on mtimes. An edit to either copy, or a
+partial copy whose bytes differ, defers the move with an error and preserves
+both versions for manual resolution. The intent records
 that a copy is under way, so an interrupted one is resumed instead of
 being mistaken for a collision with its own partial result. Where the
 backend cannot carry mtimes across (SAF), files that were unchanged before
@@ -238,8 +242,18 @@ strategy that takes server changes applies the rename then.
 (or changing it) is not a server rename and moves nothing. What the
 journal tracked at the old location is forgotten and the folder syncs at
 the new one as if seen for the first time. The old directory is left
-alone: it sits where the folder would live by default, so it is neither
-re-created on the server as a new folder nor read as a deletion.
+alone: both default locations and retired custom locations are excluded from
+discovery, so they are neither re-created on the server as new folders nor
+read as deletions. Retired paths persist in the journal's `sync_config`,
+atomically with mapping changes or forgetting detached rows, and survive
+restarts. Explicitly mapping a folder back to a retired location makes that
+location active again.
+
+Native downloads use uniquely named, exclusively created neighboring staging
+files (`.uncloud-download-<uuid>.uncloud-part`) and replace the destination
+only after a complete download. Walkers skip only that internal naming pattern,
+not ordinary user files ending in `.uncloud-part`; pre-existing neighbors and
+symlinks are never opened as staging files.
 
 Unreadable paths, genuine collisions and a directory that contains a
 folder with its own local path defer the affected subtree with an error

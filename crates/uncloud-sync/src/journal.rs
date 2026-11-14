@@ -1,6 +1,8 @@
 use chrono::Utc;
 use sqlx::SqlitePool;
 
+const RETIRED_PATH_PREFIX: &str = "retired_local_path:";
+
 /// Status of a single item in the sync journal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncStatus {
@@ -328,9 +330,19 @@ impl Journal {
         Ok(rows)
     }
 
-    /// Drop a set of rows together, so a subtree is never half forgotten.
-    pub async fn forget_rows(&self, keys: &[(String, String)]) -> sqlx::Result<()> {
+    /// Keep a detached directory out of discovery even after its rows are
+    /// forgotten, including if the client stops midway through remapping.
+    pub async fn retire_folder_path(
+        &self,
+        path: &str,
+        keys: &[(String, String)],
+    ) -> sqlx::Result<()> {
         let mut tx = self.pool.begin().await?;
+        sqlx::query("INSERT OR REPLACE INTO sync_config (key, value) VALUES (?, ?)")
+            .bind(format!("{RETIRED_PATH_PREFIX}{path}"))
+            .bind(path)
+            .execute(&mut *tx)
+            .await?;
         for (server_id, item_type) in keys {
             sqlx::query("DELETE FROM sync_state WHERE server_id = ? AND item_type = ?")
                 .bind(server_id)
@@ -339,6 +351,15 @@ impl Journal {
                 .await?;
         }
         tx.commit().await
+    }
+
+    pub async fn retired_local_paths(&self) -> sqlx::Result<Vec<String>> {
+        Ok(self
+            .configs_with_prefix(RETIRED_PATH_PREFIX)
+            .await?
+            .into_iter()
+            .map(|(_, path)| path)
+            .collect())
     }
 
     /// Record content checksums for file rows that have none yet.
@@ -429,6 +450,21 @@ impl Journal {
         local_path: Option<&str>,
     ) -> sqlx::Result<()> {
         let now = Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await?;
+        let previous: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT local_path FROM folder_sync_config WHERE folder_id = ?")
+                .bind(folder_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if let Some((Some(path),)) = previous {
+            if Some(path.as_str()) != local_path {
+                sqlx::query("INSERT OR REPLACE INTO sync_config (key, value) VALUES (?, ?)")
+                    .bind(format!("{RETIRED_PATH_PREFIX}{path}"))
+                    .bind(path)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
         sqlx::query(
             r#"
             INSERT INTO folder_sync_config (folder_id, strategy, local_path, updated_at)
@@ -441,9 +477,9 @@ impl Journal {
         .bind(folder_id)
         .bind(local_path)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        Ok(())
+        tx.commit().await
     }
 
     // ── sync_bases ────────────────────────────────────────────────────────
@@ -725,6 +761,75 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn changed_path_overrides_retire_old_locations_without_changing_strategy() {
+        let (j, _d) = fresh_journal().await;
+        j.set_folder_local_strategy("folder", Some("upload_only"))
+            .await
+            .unwrap();
+        j.set_folder_local_path("folder", Some("/old"))
+            .await
+            .unwrap();
+        j.set_folder_local_path("folder", Some("/old"))
+            .await
+            .unwrap();
+        assert!(j.retired_local_paths().await.unwrap().is_empty());
+        j.set_folder_local_path("folder", Some("/new"))
+            .await
+            .unwrap();
+        assert_eq!(j.retired_local_paths().await.unwrap(), ["/old"]);
+        assert_eq!(
+            j.get_folder_sync_config("folder").await.unwrap(),
+            Some((Some("upload_only".to_owned()), Some("/new".to_owned())))
+        );
+        j.set_folder_local_path("folder", None).await.unwrap();
+        let mut retired = j.retired_local_paths().await.unwrap();
+        retired.sort();
+        assert_eq!(retired, ["/new", "/old"]);
+    }
+
+    #[tokio::test]
+    async fn failed_mapping_change_does_not_retire_the_current_path() {
+        let (j, _d) = fresh_journal().await;
+        j.set_folder_local_path("folder", Some("/old"))
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER fail_mapping BEFORE UPDATE OF local_path ON folder_sync_config BEGIN SELECT RAISE(ABORT, 'injected failure'); END")
+            .execute(&j.pool).await.unwrap();
+        assert!(j
+            .set_folder_local_path("folder", Some("/new"))
+            .await
+            .is_err());
+        assert!(j.retired_local_paths().await.unwrap().is_empty());
+        assert_eq!(
+            j.get_folder_sync_config("folder").await.unwrap(),
+            Some((None, Some("/old".to_owned())))
+        );
+    }
+
+    #[tokio::test]
+    async fn retiring_a_folder_and_forgetting_its_rows_is_atomic() {
+        let (j, _d) = fresh_journal().await;
+        seed_row(&j, "one", "/old/one").await;
+        seed_row(&j, "two", "/old/two").await;
+        let keys = [
+            ("one".to_owned(), "file".to_owned()),
+            ("two".to_owned(), "file".to_owned()),
+        ];
+        sqlx::query("CREATE TRIGGER fail_forget BEFORE DELETE ON sync_state WHEN OLD.server_id = 'two' BEGIN SELECT RAISE(ABORT, 'injected failure'); END")
+            .execute(&j.pool).await.unwrap();
+        assert!(j.retire_folder_path("/old", &keys).await.is_err());
+        assert!(j.retired_local_paths().await.unwrap().is_empty());
+        assert_eq!(j.all().await.unwrap().len(), 2);
+        sqlx::query("DROP TRIGGER fail_forget")
+            .execute(&j.pool)
+            .await
+            .unwrap();
+        j.retire_folder_path("/old", &keys).await.unwrap();
+        assert_eq!(j.retired_local_paths().await.unwrap(), ["/old"]);
+        assert!(j.all().await.unwrap().is_empty());
     }
 
     #[tokio::test]
