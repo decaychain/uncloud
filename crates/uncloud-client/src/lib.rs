@@ -285,20 +285,40 @@ impl Client {
             .map(|chunk| chunk.map_err(ClientError::from)))
     }
 
-    /// Upload a stream of chunks as a new file. The length is not known up
-    /// front, so the request goes out with chunked transfer encoding.
+    /// A multipart file part fed from a stream. With `length` the request
+    /// carries a `Content-Length` and the stream must yield exactly that
+    /// many bytes; without it the request goes out with chunked transfer
+    /// encoding.
+    fn stream_part<S, E>(
+        file_name: &str,
+        chunks: S,
+        length: Option<u64>,
+    ) -> reqwest::multipart::Part
+    where
+        S: futures::Stream<Item = std::result::Result<bytes::Bytes, E>> + Send + 'static,
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let body = reqwest::Body::wrap_stream(chunks);
+        match length {
+            Some(length) => reqwest::multipart::Part::stream_with_length(body, length),
+            None => reqwest::multipart::Part::stream(body),
+        }
+        .file_name(file_name.to_owned())
+    }
+
+    /// Upload a stream of chunks as a new file.
     pub async fn upload_stream<S, E>(
         &self,
         file_name: &str,
         chunks: S,
+        length: Option<u64>,
         parent_id: Option<&str>,
     ) -> Result<FileResponse>
     where
         S: futures::Stream<Item = std::result::Result<bytes::Bytes, E>> + Send + 'static,
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        let part = reqwest::multipart::Part::stream(reqwest::Body::wrap_stream(chunks))
-            .file_name(file_name.to_owned());
+        let part = Self::stream_part(file_name, chunks, length);
         let mut form = reqwest::multipart::Form::new().part("file", part);
         if let Some(pid) = parent_id {
             form = form.text("parent_id", pid.to_owned());
@@ -318,13 +338,13 @@ impl Client {
         file_id: &str,
         file_name: &str,
         chunks: S,
+        length: Option<u64>,
     ) -> Result<FileResponse>
     where
         S: futures::Stream<Item = std::result::Result<bytes::Bytes, E>> + Send + 'static,
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
-        let part = reqwest::multipart::Part::stream(reqwest::Body::wrap_stream(chunks))
-            .file_name(file_name.to_owned());
+        let part = Self::stream_part(file_name, chunks, length);
         let form = reqwest::multipart::Form::new().part("file", part);
         let resp = self
             .http

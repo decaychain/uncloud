@@ -353,6 +353,11 @@ impl Journal {
         tx.commit().await
     }
 
+    pub async fn forget_retired_path(&self, path: &str) -> sqlx::Result<()> {
+        self.delete_config(&format!("{RETIRED_PATH_PREFIX}{path}"))
+            .await
+    }
+
     pub async fn retired_local_paths(&self) -> sqlx::Result<Vec<String>> {
         Ok(self
             .configs_with_prefix(RETIRED_PATH_PREFIX)

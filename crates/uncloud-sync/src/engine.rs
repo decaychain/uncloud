@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -14,7 +14,7 @@ use uncloud_common::SyncStrategy;
 
 use futures::StreamExt;
 
-use crate::fs::{ByteStream, LocalFs, LocalFsError, NativeFs};
+use crate::fs::{ByteStream, LocalFs, LocalFsError, NativeFs, WalkEntry};
 use crate::journal::{Journal, SyncLogRow, SyncStateRow, SyncStatus};
 use crate::sentinel::{ensure_instance_id, verify_or_mint, SentinelError, SentinelStatus};
 
@@ -93,13 +93,36 @@ enum Relocation {
     Progress,
     /// Nothing to do, or the folder is skipped for this run.
     Settled,
-    /// The destination is still the location of another tracked folder,
-    /// named here, that has to move first.
+    /// The destination is still the location of the tracked folder named
+    /// here, which has to move first. A folder names itself when the backend
+    /// cannot change only the case of its name in one step, so that it goes
+    /// through a temporary name like one side of a swap.
     Deferred(String),
 }
 
+/// A file carried across by [`SyncEngine::move_by_copy`].
+struct MovedFile {
+    /// `/`-separated path relative to the moved folder.
+    rel: String,
+    /// Its mtime at the new location.
+    mtime: i64,
+    content: MovedContent,
+}
+
+/// How a moved file's content relates to what the journal last synced.
+enum MovedContent {
+    Unchanged,
+    Edited,
+    /// The journal holds no checksum to compare with; the file had this
+    /// mtime before the move.
+    Unverified {
+        before: i64,
+    },
+}
+
 /// Journal key prefix of a folder move recorded before the filesystem is
-/// touched, as `(from, to, copying)`.
+/// touched, as `(from, to, copying, in_flight)`. `in_flight` is the file a
+/// copying move was writing when the record was made.
 const MOVE_INTENT_PREFIX: &str = "pending_folder_move:";
 
 /// Appended to a folder's path while it is parked so that two folders can
@@ -110,14 +133,24 @@ fn staging_path(path: &str) -> String {
     format!("{path}{STAGING_SUFFIX}")
 }
 
-fn parse_move_intent(value: &str) -> Option<(String, String, bool)> {
-    serde_json::from_str::<(String, String, bool)>(value)
+fn parse_move_intent(value: &str) -> Option<(String, String, bool, Option<String>)> {
+    serde_json::from_str::<(String, String, bool, Option<String>)>(value)
         .ok()
+        .or_else(|| {
+            serde_json::from_str::<(String, String, bool)>(value)
+                .ok()
+                .map(|(from, to, copying)| (from, to, copying, None))
+        })
         .or_else(|| {
             serde_json::from_str::<(String, String)>(value)
                 .ok()
-                .map(|(from, to)| (from, to, false))
+                .map(|(from, to)| (from, to, false, None))
         })
+}
+
+/// Whether two paths differ in nothing but letter case.
+fn differs_only_in_case(a: &str, b: &str) -> bool {
+    a != b && a.to_lowercase() == b.to_lowercase()
 }
 
 /// Strategies under which this client applies what the server holds to the
@@ -287,6 +320,10 @@ pub struct SyncEngine {
     delete_confirm_delay: Duration,
     failure_memo: Mutex<FailureMemo>,
     hash_cache: Mutex<HashCache>,
+    /// Whether a download may have left a staging file behind: true until
+    /// the first sweep, since a previous process may have died mid-download,
+    /// and again from the moment any download starts.
+    staging_dirty: AtomicBool,
 }
 
 struct TransferGuard<'a> {
@@ -361,6 +398,7 @@ impl SyncEngine {
             delete_confirm_delay: DEFAULT_DELETE_CONFIRM_DELAY,
             failure_memo: Mutex::new(FailureMemo::default()),
             hash_cache: Mutex::new(HashCache::default()),
+            staging_dirty: AtomicBool::new(true),
         })
     }
 
@@ -870,6 +908,15 @@ impl SyncEngine {
         Ok(checksum)
     }
 
+    /// Drop remembered checksums that an overwrite, or an edit that kept the
+    /// mtime, may have made wrong.
+    fn forget_checksums<'p>(&self, paths: impl IntoIterator<Item = &'p str>) {
+        let mut cache = self.hash_cache.lock().unwrap();
+        for path in paths {
+            cache.entries.remove(path);
+        }
+    }
+
     /// Whether `dir` holds every file in `files` at the same relative path,
     /// with the same mtime and the same content. `listing` is the walk of
     /// `dir`, keyed by `/`-separated relative path.
@@ -965,59 +1012,207 @@ impl SyncEngine {
         Ok(())
     }
 
+    /// The files a copy of `from` has to carry, or an error when the copy
+    /// would leave something behind: an entry that is not a regular file or
+    /// directory, or a tracked file the walk did not list. Changes nothing.
+    async fn copyable_files(
+        &self,
+        from: &str,
+        tracked: &HashMap<String, Option<String>>,
+    ) -> Result<Vec<WalkEntry>, LocalFsError> {
+        if let Some(entry) = self.fs.uncopyable(from).await?.first() {
+            return Err(LocalFsError::other(format!(
+                "{} cannot be copied to the new location (links, special files and sync \
+                 state are not carried)",
+                self.relative_display_path(&self.join_rel(from, entry))
+            )));
+        }
+        let files = self.fs.walk(from).await?;
+        let listed: HashSet<String> = files
+            .iter()
+            .map(|file| file.rel_path.replace('\\', "/"))
+            .collect();
+        // A walker that passes over what it cannot read must not make a
+        // tracked file look moved: its row would follow the folder and the
+        // file would then read as deleted.
+        for rel in tracked.keys().filter(|rel| !listed.contains(*rel)) {
+            let source = self.join_rel(from, rel);
+            if self.fs.is_file(&source).await? {
+                return Err(LocalFsError::other(format!(
+                    "{} exists but could not be listed",
+                    self.relative_display_path(&source)
+                )));
+            }
+        }
+        Ok(files)
+    }
+
     /// Move a directory tree by copying it and then removing the original,
-    /// for moves the backend cannot do as one rename. The original is only
-    /// touched once every file has been copied. Existing destinations must
-    /// have identical content, including on recovery. Returns each file's
-    /// `/`-separated relative path with its mtime before and after.
+    /// for moves the backend cannot do as one rename. `files` is what
+    /// [`copyable_files`](Self::copyable_files) listed. The original is
+    /// only touched once every file has been copied.
+    ///
+    /// `tracked` maps each file the journal tracks in the folder to the
+    /// checksum it last synced. A destination file that differs from its
+    /// source is settled by that checksum: whichever side still matches it
+    /// is the stale one. `in_flight` names the file an interrupted run was
+    /// writing, whose destination may be incomplete. Anything else that
+    /// differs is an error and both copies stay.
     async fn move_by_copy(
         &self,
         from: &str,
         to: &str,
-    ) -> Result<Vec<(String, i64, i64)>, LocalFsError> {
-        let files = self.fs.walk(from).await?;
+        files: Vec<WalkEntry>,
+        move_key: &str,
+        tracked: &HashMap<String, Option<String>>,
+        in_flight: Option<String>,
+    ) -> Result<Vec<MovedFile>, LocalFsError> {
+        let display = |path: &str| self.relative_display_path(path);
+        let listed: HashSet<String> = files
+            .iter()
+            .map(|file| file.rel_path.replace('\\', "/"))
+            .collect();
         let mut dirs = self.fs.walk_dirs(from).await?;
         dirs.sort_by_key(String::len);
         self.fs.create_dir_all(to).await?;
         for dir in &dirs {
             self.fs.create_dir_all(&self.join_rel(to, dir)).await?;
         }
-        let mut verified = Vec::with_capacity(files.len());
+        // One listing of the destination instead of a probe per file, which
+        // on SAF would list every directory from the tree root each time.
+        let existing: HashMap<String, i64> = self
+            .fs
+            .walk(to)
+            .await?
+            .into_iter()
+            .map(|entry| (entry.rel_path.replace('\\', "/"), entry.mtime))
+            .collect();
+        let strangers: HashSet<String> = self
+            .fs
+            .uncopyable(to)
+            .await?
+            .into_iter()
+            .map(|rel| rel.replace('\\', "/"))
+            .collect();
+        let record = |in_flight: Option<&str>| {
+            let value = serde_json::to_string(&(from, to, true, in_flight)).unwrap();
+            async move {
+                self.journal
+                    .set_config(move_key, &value)
+                    .await
+                    .map_err(|e| LocalFsError::other(e.to_string()))
+            }
+        };
+
+        let mut dest_is_newer: HashSet<&str> = HashSet::new();
+        let mut marked = in_flight.is_some();
         for file in &files {
+            let rel = file.rel_path.replace('\\', "/");
             let source = self.join_rel(from, &file.rel_path);
             let dest = self.join_rel(to, &file.rel_path);
-            let checksum = self.fs.sha256(&source).await?;
-            if self.fs.confirm_absent(&dest).await? {
+            if strangers.contains(&rel) {
+                return Err(LocalFsError::other(format!(
+                    "something that is not a file is in the way at {}",
+                    display(&dest)
+                )));
+            }
+            let copy = match existing.get(&rel) {
+                None => true,
+                Some(_) if in_flight.as_deref() == Some(rel.as_str()) => true,
+                Some(dest_mtime) => {
+                    let found = self.local_checksum(&dest, *dest_mtime).await?;
+                    let wanted = self.local_checksum(&source, file.mtime).await?;
+                    match tracked.get(&rel).and_then(Option::as_deref) {
+                        _ if found == wanted => false,
+                        Some(synced) if synced == found => true,
+                        Some(synced) if synced == wanted => {
+                            dest_is_newer.insert(file.rel_path.as_str());
+                            false
+                        }
+                        _ => {
+                            return Err(LocalFsError::other(format!(
+                                "move destination differs from its source: {}; both copies \
+                                 were kept",
+                                display(&dest)
+                            )))
+                        }
+                    }
+                }
+            };
+            if copy {
+                // SAF cannot replace a file in one step, so a copy that dies
+                // half-way leaves a truncated destination. Naming the file
+                // first lets the next run tell that from a local edit.
+                record(Some(&rel)).await?;
+                marked = true;
+                self.forget_checksums([dest.as_str()]);
                 self.fs.copy_file(&source, &dest).await?;
             }
-            if !self.fs.is_file(&dest).await? || self.fs.sha256(&dest).await? != checksum {
-                return Err(LocalFsError::other(format!(
-                    "move destination differs from its source: {dest}; both copies were kept"
-                )));
-            }
-            verified.push(checksum);
         }
-        let mut moved = Vec::with_capacity(files.len());
-        for (file, checksum) in files.iter().zip(verified) {
+        if marked {
+            record(None).await?;
+        }
+
+        let mut moved = Vec::with_capacity(tracked.len().max(files.len()));
+        for file in &files {
+            let rel = file.rel_path.replace('\\', "/");
             let source = self.join_rel(from, &file.rel_path);
             let dest = self.join_rel(to, &file.rel_path);
+            let synced = tracked.get(&rel).and_then(Option::as_deref);
             let before = self.fs.mtime(&source).await?.unwrap_or(file.mtime);
-            // Do not use the mtime cache here: edits can preserve timestamps
-            // or happen within the same second while a large move is running.
-            if self.fs.sha256(&source).await? != checksum
-                || self.fs.sha256(&dest).await? != checksum
-            {
+            // Read both sides again instead of trusting an mtime: an edit
+            // can keep the timestamp or land within the same second while a
+            // large move is running.
+            let content = self.fs.sha256(&source).await?;
+            let kept_edit = dest_is_newer.contains(file.rel_path.as_str());
+            let intact = if kept_edit {
+                synced == Some(content.as_str())
+            } else {
+                self.fs.sha256(&dest).await? == content
+            };
+            if !intact {
+                self.forget_checksums([source.as_str(), dest.as_str()]);
                 return Err(LocalFsError::other(format!(
-                    "file changed during move: {source}; both copies were kept"
+                    "file changed during move: {}; both copies were kept",
+                    display(&source)
                 )));
             }
-            let after = self.fs.mtime(&dest).await?.unwrap_or(before);
+            let mtime = self.fs.mtime(&dest).await?.unwrap_or(before);
             self.fs.remove_file(&source).await?;
-            moved.push((file.rel_path.replace('\\', "/"), before, after));
+            let content = match synced {
+                _ if kept_edit => MovedContent::Edited,
+                Some(synced) if synced == content => MovedContent::Unchanged,
+                Some(_) => MovedContent::Edited,
+                None => MovedContent::Unverified { before },
+            };
+            moved.push(MovedFile {
+                rel,
+                mtime,
+                content,
+            });
         }
-        // Anything the walk does not list (a symlink, say) keeps its
-        // directory alive. The move itself is complete, so that is left
-        // behind instead of failing the whole relocation on every run.
+        // Files an earlier, interrupted run already carried across.
+        for (rel, synced) in tracked {
+            let (Some(synced), Some(mtime)) = (synced, existing.get(rel)) else {
+                continue;
+            };
+            if listed.contains(rel) {
+                continue;
+            }
+            let found = self.local_checksum(&self.join_rel(to, rel), *mtime).await?;
+            moved.push(MovedFile {
+                rel: rel.clone(),
+                mtime: *mtime,
+                content: if found == *synced {
+                    MovedContent::Unchanged
+                } else {
+                    MovedContent::Edited
+                },
+            });
+        }
+        // A file that appeared in the original while it was being moved
+        // keeps its directory alive. The move itself is complete, so that
+        // is left behind instead of failing the relocation on every run.
         for dir in dirs.iter().rev() {
             if let Err(e) = self.fs.remove_dir(&self.join_rel(from, dir)).await {
                 warn!("left behind after move: {e}");
@@ -1051,7 +1246,7 @@ impl SyncEngine {
         for (key, value) in self.journal.configs_with_prefix(MOVE_INTENT_PREFIX).await? {
             let folder_id = &key[MOVE_INTENT_PREFIX.len()..];
             let folder_key = (folder_id.to_owned(), "folder".to_owned());
-            let intent = parse_move_intent(&value).filter(|(from, to, _)| {
+            let intent = parse_move_intent(&value).filter(|(from, to, ..)| {
                 from != to
                     && rows
                         .get(&folder_key)
@@ -1062,7 +1257,7 @@ impl SyncEngine {
                             .and_then(|info| info.base_path.as_deref())
                             == Some(to.as_str()))
             });
-            let Some((from, to, _)) = intent else {
+            let Some((from, to, ..)) = intent else {
                 self.journal.delete_config(&key).await?;
                 continue;
             };
@@ -1141,7 +1336,14 @@ impl SyncEngine {
                     }
                 }
                 if !freed {
-                    for (folder, _) in deferred {
+                    for (folder, holder) in deferred {
+                        // Covered by the report on the ancestor it waits for.
+                        if ancestors
+                            .get(&folder.id)
+                            .is_some_and(|above| above.contains(&holder))
+                        {
+                            continue;
+                        }
                         let Some(from) = rows
                             .get(&(folder.id.clone(), "folder".to_owned()))
                             .map(|row| row.local_path.clone())
@@ -1319,6 +1521,24 @@ impl SyncEngine {
             self.block_paths([from.as_str(), to.as_str()]);
             return Ok(Relocation::Settled);
         }
+        // Both of this folder's paths are derived from its ancestors'. While
+        // one of them is still waiting to move, the folder travels with it
+        // and has nothing of its own to do yet.
+        let waiting_above = ancestors.get(&folder.id).and_then(|above| {
+            above.iter().find(|id| {
+                let Some(info) = folder_info.get(*id) else {
+                    return false;
+                };
+                info.strategy != SyncStrategy::DoNotSync
+                    && info.base_path.as_ref().is_some_and(|base| {
+                        rows.get(&((*id).clone(), "folder".to_owned()))
+                            .is_some_and(|row| row.local_path != *base)
+                    })
+            })
+        });
+        if let Some(ancestor) = waiting_above {
+            return Ok(Relocation::Deferred(ancestor.clone()));
+        }
         if let Some(holder) = rows.values().find(|row| {
             row.item_type == "folder" && row.server_id != folder.id && row.local_path == to
         }) {
@@ -1363,9 +1583,21 @@ impl SyncEngine {
             .get_config(&move_key)
             .await?
             .and_then(|value| parse_move_intent(&value))
-            .filter(|(old, new, _)| *old == from && *new == to);
+            .filter(|(old, new, ..)| *old == from && *new == to);
         let recovering = intent.is_some();
-        let copying = intent.is_some_and(|(_, _, copying)| copying);
+        let (copying, in_flight) = intent.map_or((false, None), |(_, _, copying, in_flight)| {
+            (copying, in_flight)
+        });
+        let tracked: HashMap<String, Option<String>> = rows
+            .values()
+            .filter(|row| row.item_type == "file")
+            .filter_map(|row| {
+                Some((
+                    relative_under(&row.local_path, &from)?,
+                    row.checksum.clone(),
+                ))
+            })
+            .collect();
         let record = |copying: bool| {
             let value = serde_json::to_string(&(&from, &to, copying)).unwrap();
             let move_key = &move_key;
@@ -1377,7 +1609,8 @@ impl SyncEngine {
             }
         };
 
-        let mut copied: Vec<(String, i64, i64)> = Vec::new();
+        let mut copied: Vec<MovedFile> = Vec::new();
+        let mut in_two_steps = false;
         let result: Result<(), LocalFsError> = async {
             match (source, target) {
                 (Presence::Present, _) => {
@@ -1418,21 +1651,49 @@ impl SyncEngine {
                         // up there later is never taken for the result of an
                         // interrupted move.
                         record(false).await?;
-                        match self.fs.rename(&from, &to).await {
+                        let renamed = self.fs.rename(&from, &to).await;
+                        // Copying a folder onto another spelling of its own
+                        // name would have it overwrite itself, so a backend
+                        // that cannot change only the case in one step gets
+                        // a rename through a temporary name instead.
+                        let case_only = same_entry || differs_only_in_case(&from, &to);
+                        match renamed {
                             Ok(()) => return Ok(()),
-                            Err(LocalFsError::MoveUnsupported(_)) if !same_entry => {}
+                            Err(LocalFsError::MoveUnsupported(_)) if !case_only => {}
                             Err(e) => {
                                 // A failed rename moved nothing.
                                 self.journal
                                     .delete_config(&move_key)
                                     .await
                                     .map_err(|e| LocalFsError::other(e.to_string()))?;
+                                if matches!(e, LocalFsError::MoveUnsupported(_)) {
+                                    in_two_steps = true;
+                                    return Ok(());
+                                }
                                 return Err(e);
                             }
                         }
+                    }
+                    let files = match self.copyable_files(&from, &tracked).await {
+                        Ok(files) => files,
+                        Err(e) => {
+                            // Refused before anything was copied; a move
+                            // already under way keeps its record.
+                            if !copying {
+                                self.journal
+                                    .delete_config(&move_key)
+                                    .await
+                                    .map_err(|e| LocalFsError::other(e.to_string()))?;
+                            }
+                            return Err(e);
+                        }
+                    };
+                    if !copying {
                         record(true).await?;
                     }
-                    copied = self.move_by_copy(&from, &to).await?;
+                    copied = self
+                        .move_by_copy(&from, &to, files, &move_key, &tracked, in_flight)
+                        .await?;
                     Ok(())
                 }
                 (_, Presence::Present) => {
@@ -1467,33 +1728,45 @@ impl SyncEngine {
             self.block_paths([to.as_str()]);
             return Ok(Relocation::Settled);
         }
+        if in_two_steps {
+            return Ok(Relocation::Deferred(folder.id.clone()));
+        }
 
         // Also completes a move interrupted between the filesystem and the
         // journal: the old directory is gone and the new one exists.
         self.rebase_rows(&folder.id, &from, &to, rows).await?;
 
-        // A backend that cannot carry mtimes across a copy would make every
-        // moved file look edited. Files that were unchanged before the move
-        // are recorded with the mtime they have now.
-        if copied.iter().any(|(_, before, after)| before != after) {
+        // The engine spots local edits by comparing mtimes with the journal,
+        // and a copy does not always carry them across. A file known to
+        // hold what was last synced is recorded with the mtime it has now;
+        // one known to differ is made to read as edited even if the edit
+        // kept the mtime.
+        if !copied.is_empty() {
             let by_path: HashMap<String, (String, String)> = rows
                 .iter()
                 .filter(|(_, row)| row.item_type == "file")
                 .map(|(key, row)| (row.local_path.clone(), key.clone()))
                 .collect();
-            for (rel, before, after) in copied {
-                if before == after {
-                    continue;
-                }
+            for file in copied {
                 let Some(row) = by_path
-                    .get(&self.join_rel(&to, &rel))
+                    .get(&self.join_rel(&to, &file.rel))
                     .and_then(|key| rows.get_mut(key))
                 else {
                     continue;
                 };
-                if row.local_mtime == Some(before) {
-                    self.journal.set_local_mtime(&row.server_id, after).await?;
-                    row.local_mtime = Some(after);
+                let recorded = match file.content {
+                    MovedContent::Unchanged => Some(file.mtime),
+                    MovedContent::Edited => row
+                        .local_mtime
+                        .is_some_and(|seen| seen >= file.mtime)
+                        .then_some(file.mtime - 1),
+                    MovedContent::Unverified { before } => {
+                        (row.local_mtime == Some(before)).then_some(file.mtime)
+                    }
+                };
+                if let Some(mtime) = recorded.filter(|mtime| row.local_mtime != Some(*mtime)) {
+                    self.journal.set_local_mtime(&row.server_id, mtime).await?;
+                    row.local_mtime = Some(mtime);
                 }
             }
         }
@@ -1843,6 +2116,24 @@ impl SyncEngine {
                 }
             }
 
+            // What an interrupted download left behind is invisible to the
+            // walkers, so it would keep a folder deleted on the server from
+            // being removed here and have it created there again.
+            if self.staging_dirty.swap(false, Ordering::SeqCst) {
+                for base in &bases_to_verify {
+                    match self.fs.sweep_staging(base).await {
+                        Ok(0) => {}
+                        Ok(removed) => {
+                            info!("Removed {removed} leftover download file(s) in {base}")
+                        }
+                        Err(e) => {
+                            warn!("Could not clear leftover download files in {base}: {e}");
+                            self.staging_dirty.store(true, Ordering::SeqCst);
+                        }
+                    }
+                }
+            }
+
             // Discover unreadable directories before any descendant can be
             // changed, regardless of the order returned by the server.
             let mut local_dirs: Vec<&str> = folder_info
@@ -1990,13 +2281,19 @@ impl SyncEngine {
                 .values()
                 .filter_map(|info| info.base_path.as_deref())
                 .collect();
-            let mut shadowed: HashSet<String> = self
-                .journal
-                .retired_local_paths()
-                .await?
-                .into_iter()
-                .filter(|path| !actual.contains(path.as_str()))
-                .collect();
+            // A retired path stops being one when a folder syncs there
+            // again or the old copy is gone; a directory created at it
+            // later is new and syncs like any other.
+            let mut shadowed: HashSet<String> = HashSet::new();
+            for path in self.journal.retired_local_paths().await? {
+                if actual.contains(path.as_str())
+                    || matches!(self.fs.confirm_absent(&path).await, Ok(true))
+                {
+                    self.journal.forget_retired_path(&path).await?;
+                } else {
+                    shadowed.insert(path);
+                }
+            }
             if let Some(root) = self.root_local_path.as_deref() {
                 for folder in &tree.folders {
                     let mut names = vec![folder.name.as_str()];
@@ -2360,9 +2657,7 @@ impl SyncEngine {
                                     .upload_update(&file.id, server_rel_path, local_path)
                                     .await
                                 {
-                                    Ok((updated, checksum)) => {
-                                        let new_mtime =
-                                            self.fs.mtime(local_path).await.ok().flatten();
+                                    Ok((updated, checksum, new_mtime)) => {
                                         let _ = self
                                             .journal
                                             .upsert(
@@ -2389,15 +2684,21 @@ impl SyncEngine {
                             } else {
                                 let conflict_rel = conflict_name(server_rel_path, today);
                                 let conflict_path = self.fs.join(&parent_base, &conflict_rel);
-                                match self.fs.copy_file(local_path, &conflict_path).await {
-                                    // Don't let Phase 7 immediately push the
-                                    // conflict copy back up.
-                                    Ok(()) => {
-                                        touched_paths.insert(conflict_path.clone());
-                                    }
-                                    Err(e) => warn!("Could not create conflict copy: {}", e),
-                                }
-                                match self.download_to(&file.id, local_path).await {
+                                // Don't let Phase 7 push the conflict copy
+                                // back up in this run, complete or not.
+                                touched_paths.insert(conflict_path.clone());
+                                // The copy is the only place the local
+                                // version survives the download, so without
+                                // it the local file is left as it is.
+                                let downloaded =
+                                    match self.fs.copy_file(local_path, &conflict_path).await {
+                                        Ok(()) => self.download_to(&file.id, local_path).await,
+                                        Err(e) => Err(format!(
+                                            "kept the local version: its conflict copy could \
+                                             not be written: {e}"
+                                        )),
+                                    };
+                                match downloaded {
                                     Ok(checksum) => {
                                         let new_mtime =
                                             self.fs.mtime(local_path).await.ok().flatten();
@@ -2479,9 +2780,7 @@ impl SyncEngine {
                                     .upload_update(&file.id, server_rel_path, local_path)
                                     .await
                                 {
-                                    Ok((updated, checksum)) => {
-                                        let new_mtime =
-                                            self.fs.mtime(local_path).await.ok().flatten();
+                                    Ok((updated, checksum, new_mtime)) => {
                                         let _ = self
                                             .journal
                                             .upsert(
@@ -3550,6 +3849,9 @@ impl SyncEngine {
             .download_file_stream(id)
             .await
             .map_err(|e| e.to_string())?;
+        // Set before the first byte is written and never cleared here: a
+        // download that is cancelled gets no chance to clean up after itself.
+        self.staging_dirty.store(true, Ordering::SeqCst);
         let mut hasher = Sha256::new();
         let chunks = download
             .map(|chunk| {
@@ -3565,25 +3867,43 @@ impl SyncEngine {
         Ok(format!("{:x}", hasher.finalize()))
     }
 
-    /// The content of a local file as an upload body, hashed as it is read.
-    /// The checksum is complete once the stream has been consumed.
+    /// The content of a local file as an upload body, hashed as it is read,
+    /// with its length where the backend can state it. The checksum is
+    /// complete once the stream has been consumed.
+    ///
+    /// A stated length is binding: the stream stops there even if the file
+    /// has grown since, so that the bytes hashed are the bytes sent. A file
+    /// that shrank falls short of it and fails the request.
     async fn hashed_read_stream(
         &self,
         path: &str,
-    ) -> Result<(ByteStream<'static>, Arc<Mutex<Sha256>>), LocalFsError> {
+    ) -> Result<(ByteStream<'static>, Arc<Mutex<Sha256>>, Option<u64>), LocalFsError> {
+        let length = self.fs.size(path).await?;
         let hasher = Arc::new(Mutex::new(Sha256::new()));
         let tee = Arc::clone(&hasher);
         let chunks = self
             .fs
             .read_stream(path)
             .await?
+            .scan(length.unwrap_or(u64::MAX), |left, chunk| {
+                if *left == 0 {
+                    return futures::future::ready(None);
+                }
+                futures::future::ready(Some(chunk.map(|mut chunk| {
+                    if chunk.len() as u64 > *left {
+                        chunk.truncate(*left as usize);
+                    }
+                    *left -= chunk.len() as u64;
+                    chunk
+                })))
+            })
             .inspect(move |chunk| {
                 if let Ok(chunk) = chunk {
                     tee.lock().unwrap().update(chunk);
                 }
             })
             .boxed();
-        Ok((chunks, hasher))
+        Ok((chunks, hasher, length))
     }
 
     /// Upload a newly-discovered local file to the server and record it in
@@ -3604,10 +3924,10 @@ impl SyncEngine {
             .to_owned();
 
         match self.hashed_read_stream(full_path).await {
-            Ok((chunks, hasher)) => {
+            Ok((chunks, hasher, length)) => {
                 match self
                     .client
-                    .upload_stream(&file_name, chunks, parent_id)
+                    .upload_stream(&file_name, chunks, length, parent_id)
                     .await
                 {
                     Ok(new_file) => {
@@ -3649,9 +3969,12 @@ impl SyncEngine {
         id: &str,
         server_rel_path: &str,
         path: &str,
-    ) -> Result<(uncloud_common::FileResponse, String), String> {
+    ) -> Result<(uncloud_common::FileResponse, String, Option<i64>), String> {
         let _g = self.transfer_guard();
-        let (chunks, hasher) = self
+        // Taken before the first byte is read: a file that changes while it
+        // is being sent then still reads as edited on the next scan.
+        let mtime = self.fs.mtime(path).await.ok().flatten();
+        let (chunks, hasher, length) = self
             .hashed_read_stream(path)
             .await
             .map_err(|e| e.to_string())?;
@@ -3660,11 +3983,11 @@ impl SyncEngine {
             .next()
             .unwrap_or(server_rel_path);
         self.client
-            .update_file_content_stream(id, file_name, chunks)
+            .update_file_content_stream(id, file_name, chunks, length)
             .await
             .map(|file| {
                 let checksum = format!("{:x}", hasher.lock().unwrap().clone().finalize());
-                (file, checksum)
+                (file, checksum, mtime)
             })
             .map_err(|e| e.to_string())
     }
@@ -3963,14 +4286,27 @@ mod tests {
     }
 
     #[test]
-    fn move_intent_reads_both_recorded_forms() {
+    fn move_intent_reads_every_recorded_form() {
         assert_eq!(
             parse_move_intent(r#"["/a","/b"]"#),
-            Some(("/a".to_owned(), "/b".to_owned(), false))
+            Some(("/a".to_owned(), "/b".to_owned(), false, None))
         );
         assert_eq!(
             parse_move_intent(r#"["/a","/b",true]"#),
-            Some(("/a".to_owned(), "/b".to_owned(), true))
+            Some(("/a".to_owned(), "/b".to_owned(), true, None))
+        );
+        assert_eq!(
+            parse_move_intent(r#"["/a","/b",true,"sub/note.txt"]"#),
+            Some((
+                "/a".to_owned(),
+                "/b".to_owned(),
+                true,
+                Some("sub/note.txt".to_owned())
+            ))
+        );
+        assert_eq!(
+            parse_move_intent(r#"["/a","/b",true,null]"#),
+            Some(("/a".to_owned(), "/b".to_owned(), true, None))
         );
         assert_eq!(parse_move_intent("intent"), None);
     }

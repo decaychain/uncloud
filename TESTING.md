@@ -131,7 +131,7 @@ End-to-end coverage of the two-way sync algorithm in `uncloud-sync` against a re
 
 The engine's deletion, restore and rename rules are covered in more depth by `crates/uncloud-sync/tests/` (`local_deletion_tracking.rs`, `client_creates_local.rs`), which run against an in-process fake server and need no containers: `cargo test -p uncloud-sync`.
 
-Regression coverage includes interrupted copy moves with edits at either location, source edits that preserve mtimes, rejection of unrelated destinations for empty folders, and repeated custom-path remapping across restarts. Filesystem tests check staging-file isolation and journal tests check atomic retirement of old mapping paths.
+Regression coverage includes interrupted copy moves with edits at either location or both, a copy cut off mid-file, folders a copy cannot carry in full (symlinks, files the walk did not list), source edits that preserve mtimes, case-only renames on a backend that needs a temporary name, swapped folders with subfolders, rejection of unrelated destinations for empty folders, repeated custom-path remapping across restarts and the release of retired paths, leftover download files in a folder the server deleted, a conflict copy that cannot be written, and uploads that declare their length. Filesystem tests check staging-file isolation and sweeping, permission bits surviving a download, and what a copy would leave behind; journal tests check atomic retirement of old mapping paths.
 
 ### Storage migration (`tests/storage_migration.rs`)
 

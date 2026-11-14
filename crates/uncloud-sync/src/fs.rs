@@ -178,6 +178,30 @@ pub trait LocalFs: Send + Sync {
     /// observations for the length of a run drop them here.
     fn begin_run(&self) {}
 
+    /// Remove what interrupted downloads left behind under the sync base
+    /// `root`, returning how many files went. Called at the start of a run,
+    /// when no download of this engine is in flight. A leftover is invisible
+    /// to the walkers, so it would otherwise keep its directory from ever
+    /// being emptied.
+    async fn sweep_staging(&self, _root: &str) -> Result<usize, LocalFsError> {
+        Ok(0)
+    }
+
+    /// Entries under `root` that a copy made from [`walk`](Self::walk) and
+    /// [`walk_dirs`](Self::walk_dirs) would not carry: anything that is
+    /// neither a regular file nor a directory, and files the walkers skip.
+    /// Relative paths; a directory that cannot be read is an error. The
+    /// default suits backends whose walkers report everything or fail.
+    async fn uncopyable(&self, _root: &str) -> Result<Vec<String>, LocalFsError> {
+        Ok(Vec::new())
+    }
+
+    /// Size in bytes of the file at `path`, when the backend can state it
+    /// reliably. `None` makes an upload go out without a declared length.
+    async fn size(&self, _path: &str) -> Result<Option<u64>, LocalFsError> {
+        Ok(None)
+    }
+
     /// Move an entry without replacing an existing destination. The entry
     /// must end up at exactly `to`: a backend that would store it under a
     /// different name has to undo the move and fail. A move the backend
@@ -277,11 +301,15 @@ pub const EXCLUDED_NAMES: &[&str] = &[".uncloud-sync.db", ".uncloud-root.json"];
 /// Whether a walker must skip a file with this name: one of
 /// [`EXCLUDED_NAMES`], or the leftover of an interrupted download.
 pub fn is_excluded_name(name: &str) -> bool {
-    EXCLUDED_NAMES.contains(&name)
-        || name
-            .strip_prefix(PARTIAL_PREFIX)
-            .and_then(|name| name.strip_suffix(PARTIAL_SUFFIX))
-            .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+    EXCLUDED_NAMES.contains(&name) || is_staging_name(name)
+}
+
+/// Whether `name` is one this crate gives its download staging files. The
+/// random part must be a UUID, so a user's file is not taken for one.
+fn is_staging_name(name: &str) -> bool {
+    name.strip_prefix(PARTIAL_PREFIX)
+        .and_then(|name| name.strip_suffix(PARTIAL_SUFFIX))
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
 }
 
 #[async_trait]
@@ -352,6 +380,68 @@ impl LocalFs for NativeFs {
         })
         .await
         .map_err(|e| LocalFsError::other(format!("sha256 task panicked: {e}")))?
+    }
+
+    // Directories that cannot be read are passed over: whatever is in them
+    // cannot be removed either, and the probes report them on their own.
+    async fn sweep_staging(&self, root: &str) -> Result<usize, LocalFsError> {
+        let root = root.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let mut removed = 0;
+            for entry in walkdir::WalkDir::new(&root)
+                .min_depth(1)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                if entry.file_type().is_file()
+                    && is_staging_name(&entry.file_name().to_string_lossy())
+                    && std::fs::remove_file(entry.path()).is_ok()
+                {
+                    removed += 1;
+                }
+            }
+            Ok(removed)
+        })
+        .await
+        .map_err(|e| LocalFsError::other(format!("sweep_staging task panicked: {e}")))?
+    }
+
+    async fn uncopyable(&self, root: &str) -> Result<Vec<String>, LocalFsError> {
+        let root = root.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            for entry in walkdir::WalkDir::new(&root).min_depth(1) {
+                let entry = entry.map_err(|e| {
+                    let path = e
+                        .path()
+                        .map_or_else(|| root.clone(), |p| p.to_string_lossy().into_owned());
+                    LocalFsError::other(format!("cannot read {path}: {e}"))
+                })?;
+                let kind = entry.file_type();
+                let carried = kind.is_dir()
+                    || (kind.is_file() && !is_excluded_name(&entry.file_name().to_string_lossy()));
+                if !carried {
+                    out.push(
+                        entry
+                            .path()
+                            .strip_prefix(&root)
+                            .unwrap_or(entry.path())
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| LocalFsError::other(format!("uncopyable task panicked: {e}")))?
+    }
+
+    async fn size(&self, path: &str) -> Result<Option<u64>, LocalFsError> {
+        let meta = tokio::fs::metadata(path)
+            .await
+            .map_err(|e| LocalFsError::io(path, e))?;
+        Ok(meta.is_file().then(|| meta.len()))
     }
 
     async fn walk(&self, root: &str) -> Result<Vec<WalkEntry>, LocalFsError> {
@@ -470,6 +560,13 @@ impl LocalFs for NativeFs {
         };
         let written = async {
             write_chunks(file.into_std().await, chunks).await?;
+            // The staging file replaces the destination, so without this a
+            // download would reset the mode the user gave the file.
+            if let Ok(meta) = tokio::fs::metadata(path).await {
+                tokio::fs::set_permissions(&partial, meta.permissions())
+                    .await
+                    .map_err(|e| LocalFsError::io(path, e))?;
+            }
             tokio::fs::rename(&partial, path)
                 .await
                 .map_err(|e| LocalFsError::io(path, e))
@@ -719,6 +816,104 @@ mod tests {
                 "user.uncloud-part"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn sweep_removes_download_leftovers_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let leftover = |parent: &std::path::Path| {
+            parent.join(format!(
+                "{PARTIAL_PREFIX}{}{PARTIAL_SUFFIX}",
+                uuid::Uuid::new_v4()
+            ))
+        };
+        std::fs::write(leftover(dir.path()), b"half").unwrap();
+        std::fs::write(leftover(&sub), b"half").unwrap();
+        std::fs::create_dir(leftover(&sub)).unwrap();
+        std::fs::write(sub.join("note.txt"), b"content").unwrap();
+        std::fs::write(sub.join("user.uncloud-part"), b"user data").unwrap();
+        std::fs::write(
+            sub.join(".uncloud-download-not-a-uuid.uncloud-part"),
+            b"also user data",
+        )
+        .unwrap();
+
+        let root = dir.path().to_str().unwrap();
+        assert_eq!(NativeFs.sweep_staging(root).await.unwrap(), 2);
+        assert_eq!(NativeFs.sweep_staging(root).await.unwrap(), 0);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(&sub).unwrap().count(), 4);
+    }
+
+    #[tokio::test]
+    async fn native_size_is_the_length_of_a_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.txt");
+        std::fs::write(&path, b"12345").unwrap();
+        let fs = NativeFs;
+        assert_eq!(fs.size(path.to_str().unwrap()).await.unwrap(), Some(5));
+        assert_eq!(fs.size(dir.path().to_str().unwrap()).await.unwrap(), None);
+        assert!(fs
+            .size(dir.path().join("gone").to_str().unwrap())
+            .await
+            .is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn uncopyable_lists_what_the_walkers_leave_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("note.txt"), b"content").unwrap();
+        let root = dir.path().to_str().unwrap();
+        assert!(NativeFs.uncopyable(root).await.unwrap().is_empty());
+
+        std::os::unix::fs::symlink(sub.join("note.txt"), sub.join("link")).unwrap();
+        std::fs::write(dir.path().join(EXCLUDED_NAMES[1]), b"{}").unwrap();
+        let mut found = NativeFs.uncopyable(root).await.unwrap();
+        found.sort();
+        assert_eq!(found, [EXCLUDED_NAMES[1], "sub/link"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn uncopyable_fails_on_a_directory_it_cannot_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("note.txt"), b"content").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads any directory, so there is nothing to observe then.
+        let readable = std::fs::read_dir(&locked).is_ok();
+        let root = dir.path().to_str().unwrap();
+        let listed = NativeFs.walk(root).await.unwrap();
+        let result = NativeFs.uncopyable(root).await;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !readable {
+            assert!(listed.is_empty());
+            assert!(result.is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn download_keeps_the_mode_of_the_file_it_replaces() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("script.sh");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o750)).unwrap();
+        NativeFs
+            .write_stream(path.to_str().unwrap(), chunks_of(vec![Ok(b"new")]))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o750);
     }
 
     #[tokio::test]

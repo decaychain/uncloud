@@ -36,6 +36,9 @@ use uncloud_sync::{
 /// Makes the name of each spooled download unique within the process.
 static SPOOL_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Name prefix of downloads spooled in the app's cache directory.
+const SPOOL_PREFIX: &str = "uncloud-download-";
+
 /// One directory's entries by name: whether each is a directory, and its URI.
 type Listing = Arc<HashMap<String, (bool, FileUri)>>;
 
@@ -177,6 +180,30 @@ impl LocalFs for AndroidSafFs {
         self.listings.lock().unwrap().clear();
     }
 
+    // Downloads are spooled in the app's cache directory, never inside the
+    // picked tree, so that is the only place an interrupted one can leave
+    // anything. No download is in flight when a run starts.
+    async fn sweep_staging(&self, _root: &str) -> Result<usize, LocalFsError> {
+        let dir = self
+            .app
+            .path()
+            .app_cache_dir()
+            .map_err(|e| LocalFsError::other(format!("no cache directory: {e}")))?;
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Ok(0);
+        };
+        Ok(entries
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(SPOOL_PREFIX)
+            })
+            .filter(|entry| std::fs::remove_file(entry.path()).is_ok())
+            .count())
+    }
+
     async fn rename(&self, from: &str, to: &str) -> Result<(), LocalFsError> {
         let (root, rel) = Self::split(from);
         let (to_root, to_rel) = Self::split(to);
@@ -192,6 +219,15 @@ impl LocalFs for AndroidSafFs {
         }
         if !self.confirm_absent(to).await? {
             return Err(LocalFsError::other("rename destination exists"));
+        }
+        // Shared storage folds case, and a provider asked for `Docs` while
+        // `docs` exists picks a free name such as `Docs (1)` instead. The
+        // engine takes this refusal as the cue to go through a temporary
+        // name, which works whether or not the provider folds case.
+        if old_name != name && old_name.to_lowercase() == name.to_lowercase() {
+            return Err(LocalFsError::MoveUnsupported(
+                "SAF cannot change only the case of a name in one step".to_owned(),
+            ));
         }
         let api = self.app.android_fs_async();
         let uri = api
@@ -437,7 +473,7 @@ impl LocalFs for AndroidSafFs {
             .app_cache_dir()
             .map_err(|e| LocalFsError::other(format!("no cache directory: {e}")))?
             .join(format!(
-                "uncloud-download-{}-{}",
+                "{SPOOL_PREFIX}{}-{}",
                 std::process::id(),
                 SPOOL_SEQ.fetch_add(1, Ordering::Relaxed)
             ));

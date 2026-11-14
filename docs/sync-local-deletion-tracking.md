@@ -207,8 +207,9 @@ What happens depends on what is found at the old and the new path:
 | Old path | New path | Outcome |
 |---|---|---|
 | present | absent | The directory is renamed. |
-| present | the same directory (case-only rename on a case-insensitive filesystem) | Renamed in place; `LocalFs::same_entry` tells this apart from a collision. |
+| present | the same directory (case-only rename on a case-insensitive filesystem) | Renamed in place; `LocalFs::same_entry` tells this apart from a collision. A backend that cannot change only the case in one step (Android SAF, which would store `Docs` as `Docs (1)` while `docs` exists) refuses with `MoveUnsupported`, and the folder is parked as `<name>.uncloud-moving` and renamed from there. It is never copied onto its own other spelling. |
 | present | another tracked folder that is itself about to move | The folder waits for it. Chains resolve in one run in dependency order; a ring (two folders swapping names) is broken by parking one folder as `<name>.uncloud-moving`, with the journal following it. |
+| present | anywhere, while an ancestor folder is still waiting to move | The folder waits for the ancestor and travels with it. Its own paths are derived from the ancestor's, so moving it first would put it inside whatever still occupies the ancestor's new name. |
 | present | the folder of a server-deleted item | The deletion echo clears it later in the same run and the rename lands on the next one. |
 | present | anything else | Error: "a different folder already exists". Nothing is overwritten or merged. |
 | absent | present, recorded intent matches | An interrupted move; the journal is completed. |
@@ -220,16 +221,38 @@ What happens depends on what is found at the old and the new path:
 desktop, or to another directory through Android SAF, fails with
 `LocalFsError::MoveUnsupported` and is done by copying: every file is
 copied (`LocalFs::copy_file`, streamed), and only then is the original removed.
-An existing destination file is reused only if its SHA-256 matches the source;
-it is never overwritten during recovery. Both files are hashed again before
-the source is removed, without relying on mtimes. An edit to either copy, or a
-partial copy whose bytes differ, defers the move with an error and preserves
-both versions for manual resolution. The intent records
-that a copy is under way, so an interrupted one is resumed instead of
-being mistaken for a collision with its own partial result. Where the
-backend cannot carry mtimes across (SAF), files that were unchanged before
-the move are recorded with their new mtime so they are not read as local
-edits.
+Each file is read three times: once to copy it, and once on each side for the
+SHA-256 comparison made right before the original is removed. That comparison
+never relies on mtimes. The destination is listed once up front instead of
+being probed per file, which on SAF would list every directory from the tree
+root each time.
+
+Nothing is copied unless everything can be. `LocalFs::uncopyable` lists what
+the walkers would leave out (symlinks, special files, sync state files) and
+fails on a directory it cannot read, and a tracked file that exists but was
+not listed stops the move as well. The folder then stays where it is with an
+error naming the entry, and no move intent is kept. Without this, a file in an
+unreadable directory would be left behind while its journal row followed the
+folder, and would then be deleted on the server as missing.
+
+The intent records that a copy is under way and which file is being written,
+so an interrupted move is resumed. On recovery, a destination file that
+differs from its source is settled as follows:
+
+| Destination file | Outcome |
+|---|---|
+| the file that was being written when the copy stopped | Copied again. SAF cannot replace a file in one step, so this one may be truncated. |
+| matches the journal's checksum, source does not | The source was edited after the copy. It is copied again over the stale destination. |
+| differs, source matches the journal's checksum | The destination was edited after the copy. It is kept and the source removed. |
+| anything else (both edited, or no checksum on record) | Error: "move destination differs from its source". Both are kept for manual resolution. |
+
+A source that changes between its copy and the final comparison fails that
+run with "file changed during move"; the next run settles it by the table
+above. Once the move is done, a file known to hold what was last synced is
+recorded with the mtime it has at the new location, so a backend that cannot
+carry mtimes across (SAF) does not make it read as a local edit. A file known
+to differ is recorded so that it does read as one, even if the edit kept the
+mtime, and is uploaded.
 
 **Strategies.** Only strategies that apply server changes locally
 (`TwoWay`, `ServerToClient`) follow an incoming rename. Under
@@ -246,14 +269,41 @@ alone: both default locations and retired custom locations are excluded from
 discovery, so they are neither re-created on the server as new folders nor
 read as deletions. Retired paths persist in the journal's `sync_config`,
 atomically with mapping changes or forgetting detached rows, and survive
-restarts. Explicitly mapping a folder back to a retired location makes that
-location active again.
+restarts. A retired path is released when a folder is mapped to it again
+or when nothing exists there any more, so a directory created at it later
+is a new folder like any other.
 
 Native downloads use uniquely named, exclusively created neighboring staging
 files (`.uncloud-download-<uuid>.uncloud-part`) and replace the destination
-only after a complete download. Walkers skip only that internal naming pattern,
-not ordinary user files ending in `.uncloud-part`; pre-existing neighbors and
-symlinks are never opened as staging files.
+only after a complete download, keeping the permission bits of the file they
+replace. Walkers skip only that internal naming pattern, not ordinary user
+files ending in `.uncloud-part`; pre-existing neighbors and symlinks are never
+opened as staging files.
+
+A download that is killed or cancelled leaves its staging file behind. Being
+invisible to the walkers, it would keep its directory from ever being emptied:
+a folder deleted on the server could not be removed locally and would be
+created on the server again. `LocalFs::sweep_staging` therefore removes
+leftovers under every verified sync base at the start of the first run after
+the client starts, and of any run that follows one in which a download
+started. On Android downloads are spooled in the app's cache directory, and
+that is what is swept there.
+
+**Conflict copies.** When both sides changed a file, the local version is
+copied to `<name> (conflict <date>)` and the server version is downloaded
+over the original. If the copy cannot be written the download does not
+happen: the local file stays as it is and the failure is reported, to be
+retried on the next run.
+
+**Uploads.** Where the backend can state a file's size (`LocalFs::size`,
+desktop only), the upload declares it and the request carries a
+`Content-Length` instead of chunked transfer encoding. The declared length
+is binding: the stream stops there even if the file has grown since, so the
+checksum on record is that of the bytes the server received, and a file that
+shrank fails the request. The mtime written to the journal is the one read
+before the upload began, so a file that changed while it was being sent
+still reads as edited on the next scan. Android reports no size, because a
+storage provider that misreports one would truncate the upload.
 
 Unreadable paths, genuine collisions and a directory that contains a
 folder with its own local path defer the affected subtree with an error
