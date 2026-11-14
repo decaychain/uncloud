@@ -408,3 +408,82 @@ async fn two_clients_share_files() {
         assert_eq!(content, format!("content {}", i).as_bytes());
     }
 }
+
+// ── Local folder rename / delete ──────────────────────────────────────────────
+
+/// Renaming a synced folder locally renames the server folder in place:
+/// the folder and its file keep their ids and nothing is re-uploaded.
+#[tokio::test]
+async fn local_folder_rename_renames_server_folder() {
+    let app = BoundTestApp::new().await;
+    let client = app.setup_user("rena").await;
+    let (engine, sync_dir) = app.new_sync_engine(Arc::clone(&client)).await;
+
+    let old_path = sync_dir.path().join("Old name");
+    tokio::fs::create_dir(&old_path).await.unwrap();
+    tokio::fs::write(old_path.join("note.txt"), b"hello")
+        .await
+        .unwrap();
+    engine.incremental_sync().await.unwrap();
+
+    let folders = client.list_folders(None).await.unwrap();
+    assert_eq!(folders.len(), 1);
+    let folder_id = folders[0].id.clone();
+    let files = client.list_files(Some(&folder_id)).await.unwrap();
+    assert_eq!(files.len(), 1);
+    let file_id = files[0].id.clone();
+
+    tokio::fs::rename(&old_path, sync_dir.path().join("New name"))
+        .await
+        .unwrap();
+    let report = engine.incremental_sync().await.unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.renamed_remote_folders.len(), 1);
+    assert!(report.uploaded.is_empty(), "{:?}", report.uploaded);
+
+    let settled = engine.incremental_sync().await.unwrap();
+    assert!(settled.errors.is_empty(), "{:?}", settled.errors);
+    assert!(settled.uploaded.is_empty());
+    assert!(settled.downloaded.is_empty());
+    assert!(!old_path.exists());
+
+    let folders = client.list_folders(None).await.unwrap();
+    assert_eq!(folders.len(), 1);
+    assert_eq!(folders[0].id, folder_id);
+    assert_eq!(folders[0].name, "New name");
+    let files = client.list_files(Some(&folder_id)).await.unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].id, file_id);
+}
+
+/// Deleting a synced folder locally removes it from the server with one
+/// cascading delete once the absence is confirmed, and not before.
+#[tokio::test]
+async fn local_folder_delete_removes_server_folder_once_confirmed() {
+    let app = BoundTestApp::new().await;
+    let client = app.setup_user("delia").await;
+    let (engine, sync_dir) = app.new_sync_engine(Arc::clone(&client)).await;
+    let engine = engine.with_delete_confirm_delay(Duration::ZERO);
+
+    let folder = sync_dir.path().join("documents");
+    tokio::fs::create_dir(&folder).await.unwrap();
+    tokio::fs::write(folder.join("inside.txt"), b"contents")
+        .await
+        .unwrap();
+    engine.incremental_sync().await.unwrap();
+    assert_eq!(client.list_folders(None).await.unwrap().len(), 1);
+
+    tokio::fs::remove_dir_all(&folder).await.unwrap();
+
+    let first = engine.incremental_sync().await.unwrap();
+    assert!(first.errors.is_empty(), "{:?}", first.errors);
+    assert!(first.deleted_local.is_empty());
+    assert_eq!(client.list_folders(None).await.unwrap().len(), 1);
+    assert!(!folder.exists(), "the folder must not be re-downloaded");
+
+    let second = engine.incremental_sync().await.unwrap();
+    assert!(second.errors.is_empty(), "{:?}", second.errors);
+    assert_eq!(second.deleted_local, vec!["documents"]);
+    assert!(client.list_folders(None).await.unwrap().is_empty());
+    assert!(!folder.exists());
+}

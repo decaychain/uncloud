@@ -50,7 +50,14 @@ struct FakeServer {
     files: Arc<Mutex<HashMap<String, UploadedFile>>>,
     create_folder_calls: Arc<AtomicUsize>,
     delete_folder_calls: Arc<AtomicUsize>,
+    update_folder_calls: Arc<AtomicUsize>,
     upload_calls: Arc<AtomicUsize>,
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateFolderBody {
+    name: Option<String>,
+    parent_id: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -142,6 +149,39 @@ async fn delete_folder(
     StatusCode::NO_CONTENT
 }
 
+async fn update_folder(
+    AxPath(id): AxPath<String>,
+    State(s): State<FakeServer>,
+    AxJson(body): AxJson<UpdateFolderBody>,
+) -> impl IntoResponse {
+    s.update_folder_calls.fetch_add(1, Ordering::SeqCst);
+    let mut folders = s.folders.lock().await;
+    let Some(folder) = folders.get_mut(&id) else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({}))).into_response();
+    };
+    if let Some(name) = body.name {
+        folder.name = name;
+    }
+    if let Some(parent_id) = body.parent_id {
+        folder.parent_id = (!parent_id.is_empty()).then_some(parent_id);
+    }
+    Json(serde_json::json!({
+        "id": folder.id,
+        "name": folder.name,
+        "parent_id": folder.parent_id,
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+        "sync_strategy": "inherit",
+        "effective_strategy": "two_way",
+        "gallery_include": "inherit",
+        "effective_gallery_include": "exclude",
+        "music_include": "inherit",
+        "effective_music_include": "exclude",
+        "shared_with_count": 0,
+    }))
+    .into_response()
+}
+
 async fn upload_simple(
     State(s): State<FakeServer>,
     mut multipart: axum::extract::Multipart,
@@ -188,7 +228,10 @@ async fn spawn_server(state: FakeServer) -> (String, oneshot::Sender<()>) {
     let app = Router::new()
         .route("/api/sync/tree", get(sync_tree))
         .route("/api/folders", post(create_folder))
-        .route("/api/folders/{id}", delete(delete_folder))
+        .route(
+            "/api/folders/{id}",
+            delete(delete_folder).put(update_folder),
+        )
         .route("/api/uploads/simple", post(upload_simple))
         .with_state(state);
 
@@ -238,7 +281,8 @@ async fn build_engine(rig: &TestRig) -> Arc<SyncEngine> {
         Some(rig.root.to_string_lossy().into_owned()),
     )
     .await
-    .unwrap();
+    .unwrap()
+    .with_delete_confirm_delay(std::time::Duration::ZERO);
     Arc::new(engine)
 }
 
@@ -369,37 +413,129 @@ async fn second_sync_is_a_noop() {
 }
 
 #[tokio::test]
-async fn local_folder_rename_does_not_resurrect_the_old_name() {
+async fn local_folder_rename_is_mirrored_as_a_server_rename() {
     let server = FakeServer::default();
     let folders = server.folders.clone();
+    let files = server.files.clone();
     let create_calls = server.create_folder_calls.clone();
     let delete_calls = server.delete_folder_calls.clone();
+    let update_calls = server.update_folder_calls.clone();
+    let upload_calls = server.upload_calls.clone();
 
     let rig = new_rig(server).await;
     let old_path = rig.root.join("Old name");
     let new_path = rig.root.join("New name");
-    std::fs::create_dir(&old_path).unwrap();
+    std::fs::create_dir_all(old_path.join("inner")).unwrap();
     std::fs::write(old_path.join("note.txt"), b"hello").unwrap();
+    std::fs::write(old_path.join("inner/deep.txt"), b"deep").unwrap();
 
     let engine = build_engine(&rig).await;
     engine.incremental_sync().await.unwrap();
-    assert_eq!(create_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(create_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(upload_calls.load(Ordering::SeqCst), 2);
+    let folder_ids_before: std::collections::BTreeSet<String> =
+        folders.lock().await.keys().cloned().collect();
+    let file_ids_before: std::collections::BTreeSet<String> =
+        files.lock().await.keys().cloned().collect();
 
     std::fs::rename(&old_path, &new_path).unwrap();
 
-    // First scan preserves the old path's absence, marks its server folder
-    // pending, and creates the renamed local folder as a new remote subtree.
-    engine.incremental_sync().await.unwrap();
+    let report = engine.incremental_sync().await.unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.renamed_remote_folders.len(), 1);
+    assert_eq!(update_calls.load(Ordering::SeqCst), 1);
     assert!(!old_path.exists(), "the old folder name must stay absent");
-    assert!(new_path.join("note.txt").is_file());
+    assert!(new_path.join("inner/deep.txt").is_file());
+
+    // The rename is settled: nothing is deleted, recreated or re-uploaded
+    // now or on later scans, so ids (and with them shares and version
+    // history) survive.
+    for _ in 0..2 {
+        let report = engine.incremental_sync().await.unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report.uploaded.is_empty(), "{:?}", report.uploaded);
+    }
+    assert_eq!(create_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(upload_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(delete_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(update_calls.load(Ordering::SeqCst), 1);
+
+    let folders = folders.lock().await;
+    assert_eq!(
+        folders
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        folder_ids_before
+    );
+    assert!(folders.values().any(|f| f.name == "New name"));
+    assert!(!folders.values().any(|f| f.name == "Old name"));
+    assert_eq!(
+        files
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        file_ids_before
+    );
+}
+
+#[tokio::test]
+async fn local_folder_move_changes_the_server_parent() {
+    let server = FakeServer::default();
+    let folders = server.folders.clone();
+    let create_calls = server.create_folder_calls.clone();
+    let delete_calls = server.delete_folder_calls.clone();
+    let update_calls = server.update_folder_calls.clone();
+
+    let rig = new_rig(server).await;
+    std::fs::create_dir_all(rig.root.join("Album")).unwrap();
+    std::fs::create_dir_all(rig.root.join("Archive")).unwrap();
+    std::fs::write(rig.root.join("Album/track.txt"), b"audio").unwrap();
+
+    let engine = build_engine(&rig).await;
+    engine.incremental_sync().await.unwrap();
+    assert_eq!(create_calls.load(Ordering::SeqCst), 2);
+
+    std::fs::rename(rig.root.join("Album"), rig.root.join("Archive/Album")).unwrap();
+    let report = engine.incremental_sync().await.unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    engine.incremental_sync().await.unwrap();
+
+    assert_eq!(update_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(create_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(delete_calls.load(Ordering::SeqCst), 0);
+    let folders = folders.lock().await;
+    let archive = folders.values().find(|f| f.name == "Archive").unwrap();
+    let album = folders.values().find(|f| f.name == "Album").unwrap();
+    assert_eq!(album.parent_id.as_deref(), Some(archive.id.as_str()));
+}
+
+// An empty folder carries nothing to recognise it by, so its rename is
+// still a delete of the old name plus a create of the new one.
+#[tokio::test]
+async fn empty_folder_rename_falls_back_to_delete_and_create() {
+    let server = FakeServer::default();
+    let folders = server.folders.clone();
+    let create_calls = server.create_folder_calls.clone();
+    let delete_calls = server.delete_folder_calls.clone();
+    let update_calls = server.update_folder_calls.clone();
+
+    let rig = new_rig(server).await;
+    std::fs::create_dir(rig.root.join("Old name")).unwrap();
+    let engine = build_engine(&rig).await;
+    engine.incremental_sync().await.unwrap();
+
+    std::fs::rename(rig.root.join("Old name"), rig.root.join("New name")).unwrap();
+    engine.incremental_sync().await.unwrap();
+    assert!(!rig.root.join("Old name").exists());
     assert_eq!(create_calls.load(Ordering::SeqCst), 2);
     assert_eq!(delete_calls.load(Ordering::SeqCst), 0);
 
-    // The confirmation scan removes the old remote subtree in one operation.
     engine.incremental_sync().await.unwrap();
     assert_eq!(delete_calls.load(Ordering::SeqCst), 1);
-    assert!(!old_path.exists());
-
+    assert_eq!(update_calls.load(Ordering::SeqCst), 0);
     let folders = folders.lock().await;
     assert_eq!(folders.len(), 1);
     assert_eq!(folders.values().next().unwrap().name, "New name");

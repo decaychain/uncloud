@@ -434,8 +434,10 @@ impl Journal {
         })
     }
 
-    /// Persist a server-winning restore before creating local directories.
-    /// A failed download must remain a download, even across process restarts.
+    /// Record that a tracked file is being brought back from the server.
+    /// Persisted before the download starts so a failed or half-written
+    /// download is retried as a download, even across restarts, instead of
+    /// the leftover being compared against the journal as a local edit.
     pub async fn set_pending_download(&self, server_id: &str, item_type: &str) -> sqlx::Result<()> {
         sqlx::query(
             "UPDATE sync_state SET sync_status = ?, delete_pending_since = NULL \
@@ -447,6 +449,61 @@ impl Journal {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Point a row at a new local path after a local rename was mirrored to
+    /// the server. The absence at the old path is explained by the rename, so
+    /// any pending deletion is dropped with it.
+    pub async fn set_local_path(
+        &self,
+        server_id: &str,
+        item_type: &str,
+        local_path: &str,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            "UPDATE sync_state SET local_path = ?, delete_pending_since = NULL \
+             WHERE server_id = ? AND item_type = ?",
+        )
+        .bind(local_path)
+        .bind(server_id)
+        .bind(item_type)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // ── folder_effective_strategy ─────────────────────────────────────────
+
+    /// Effective strategy every folder had when the previous run finished
+    /// resolving them, keyed by folder id.
+    pub async fn effective_strategies_seen(
+        &self,
+    ) -> sqlx::Result<std::collections::HashMap<String, String>> {
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT folder_id, strategy FROM folder_effective_strategy")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().collect())
+    }
+
+    pub async fn replace_effective_strategies_seen(
+        &self,
+        strategies: &std::collections::HashMap<String, String>,
+    ) -> sqlx::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM folder_effective_strategy")
+            .execute(&mut *tx)
+            .await?;
+        for (folder_id, strategy) in strategies {
+            sqlx::query(
+                "INSERT INTO folder_effective_strategy (folder_id, strategy) VALUES (?, ?)",
+            )
+            .bind(folder_id)
+            .bind(strategy)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await
     }
 
     // ── delete_pending_since ──────────────────────────────────────────────
@@ -649,6 +706,46 @@ mod tests {
         assert_eq!(row.sync_status, SyncStatus::PendingDownload.as_str());
         assert!(row.delete_pending_since.is_none());
         assert_eq!(row.server_updated_at, "2026-01-01T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn set_local_path_moves_the_row_and_drops_pending_deletion() {
+        let (j, _d) = fresh_journal().await;
+        seed_row(&j, "f-1", "/r/old/foo.txt").await;
+        j.set_delete_pending("f-1", "file", "2026-05-06T00:00:00Z")
+            .await
+            .unwrap();
+
+        j.set_local_path("f-1", "file", "/r/new/foo.txt")
+            .await
+            .unwrap();
+
+        let row = j.get("f-1", "file").await.unwrap().unwrap();
+        assert_eq!(row.local_path, "/r/new/foo.txt");
+        assert!(row.delete_pending_since.is_none());
+        assert_eq!(row.server_updated_at, "2026-01-01T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn effective_strategies_seen_round_trip_replaces_previous_set() {
+        let (j, _d) = fresh_journal().await;
+        assert!(j.effective_strategies_seen().await.unwrap().is_empty());
+
+        let first: std::collections::HashMap<String, String> = [
+            ("a".to_owned(), "do_not_sync".to_owned()),
+            ("b".to_owned(), "two_way".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        j.replace_effective_strategies_seen(&first).await.unwrap();
+        assert_eq!(j.effective_strategies_seen().await.unwrap(), first);
+
+        let second: std::collections::HashMap<String, String> =
+            [("a".to_owned(), "two_way".to_owned())]
+                .into_iter()
+                .collect();
+        j.replace_effective_strategies_seen(&second).await.unwrap();
+        assert_eq!(j.effective_strategies_seen().await.unwrap(), second);
     }
 
     #[tokio::test]

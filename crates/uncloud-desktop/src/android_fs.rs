@@ -304,6 +304,38 @@ impl LocalFs for AndroidSafFs {
         }
     }
 
+    // SAF errors carry no kind, so `is_file` / `is_dir` cannot tell "not
+    // there" from "the provider failed" and report both as absent. Before a
+    // deletion is pushed, absence is established by listing every directory
+    // on the way down from the tree root instead: a name missing from a
+    // listing that succeeded is a positive observation, a listing that
+    // fails is an error.
+    async fn confirm_absent(&self, path: &str) -> Result<bool, LocalFsError> {
+        let (root, rel) = Self::split(path);
+        if rel.is_empty() {
+            return Ok(false);
+        }
+        let api = self.app.android_fs_async();
+        let mut dir = Self::tree_uri(&root);
+        let mut parts = rel.split('/').filter(|part| !part.is_empty()).peekable();
+        while let Some(part) = parts.next() {
+            let entries = api.read_dir(&dir).await.map_err(|e| {
+                LocalFsError::other(format!("read_dir while confirming {rel} is gone: {e}"))
+            })?;
+            let Some(entry) = entries.into_iter().find(|entry| entry.name() == part) else {
+                return Ok(true);
+            };
+            if parts.peek().is_none() {
+                return Ok(false);
+            }
+            match entry {
+                Entry::Dir { uri, .. } => dir = uri,
+                Entry::File { .. } => return Ok(true),
+            }
+        }
+        Ok(false)
+    }
+
     fn join(&self, parent: &str, child: &str) -> String {
         if parent.contains(SEP) {
             format!("{parent}/{child}")

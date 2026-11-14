@@ -93,8 +93,28 @@ pub trait LocalFs: Send + Sync {
     /// folder-delete instead of N file-deletes.
     async fn is_dir(&self, path: &str) -> Result<bool, LocalFsError>;
 
+    /// Authoritative absence check, called right before a local absence is
+    /// pushed to the server as a deletion. Must return `Ok(true)` only when
+    /// the backend positively observed that nothing exists at `path`; a
+    /// backend that cannot tell must return an error instead. The default
+    /// is only correct for backends whose `is_file` / `is_dir` already
+    /// separate "not found" from every other failure.
+    async fn confirm_absent(&self, path: &str) -> Result<bool, LocalFsError> {
+        Ok(!self.is_file(path).await? && !self.is_dir(path).await?)
+    }
+
     /// Join `parent` and `child` using the backend's path separator.
     fn join(&self, parent: &str, child: &str) -> String;
+}
+
+/// A path is missing when it does not exist or when one of its parents is
+/// not a directory; both are positive observations, unlike permission or
+/// I/O failures.
+fn is_missing(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
 }
 
 // ── NativeFs: desktop backing ────────────────────────────────────────────────
@@ -247,7 +267,7 @@ impl LocalFs for NativeFs {
         let path_owned = path.to_owned();
         tokio::task::spawn_blocking(move || match std::fs::metadata(&path_owned) {
             Ok(m) => Ok(m.is_file()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) if is_missing(&e) => Ok(false),
             Err(e) => Err(LocalFsError::io(path_owned, e)),
         })
         .await
@@ -258,11 +278,25 @@ impl LocalFs for NativeFs {
         let path_owned = path.to_owned();
         tokio::task::spawn_blocking(move || match std::fs::metadata(&path_owned) {
             Ok(m) => Ok(m.is_dir()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) if is_missing(&e) => Ok(false),
             Err(e) => Err(LocalFsError::io(path_owned, e)),
         })
         .await
         .map_err(|e| LocalFsError::other(format!("is_dir task panicked: {e}")))?
+    }
+
+    // `symlink_metadata` does not follow links, so a dangling symlink (its
+    // target on an unmounted volume, say) still counts as something being
+    // there instead of reading as a deletion.
+    async fn confirm_absent(&self, path: &str) -> Result<bool, LocalFsError> {
+        let path_owned = path.to_owned();
+        tokio::task::spawn_blocking(move || match std::fs::symlink_metadata(&path_owned) {
+            Ok(_) => Ok(false),
+            Err(e) if is_missing(&e) => Ok(true),
+            Err(e) => Err(LocalFsError::io(path_owned, e)),
+        })
+        .await
+        .map_err(|e| LocalFsError::other(format!("confirm_absent task panicked: {e}")))?
     }
 
     fn join(&self, parent: &str, child: &str) -> String {
