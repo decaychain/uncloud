@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{Multipart, Path, Query, State},
+    extract::{multipart::Field, Multipart, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::Response,
     Json,
@@ -25,6 +25,7 @@ use crate::routes::apps::{
     deliver_webhooks, EVENT_FILE_CREATED, EVENT_FILE_DELETED, EVENT_FILE_UPDATED,
 };
 use crate::services::sharing::{check_file_access, check_folder_access};
+use crate::storage::{StagedUpload, StorageBackend, UploadStaging};
 use crate::AppState;
 use std::collections::{HashMap, HashSet};
 use uncloud_common::{FileResponse, InheritableSetting};
@@ -718,27 +719,24 @@ pub async fn update_file_content(
         });
     }
 
-    // Read new content from multipart
-    let mut new_data = Vec::new();
-    while let Some(field) = multipart
+    let backend = state.storage.get_backend(file.storage_id).await?;
+
+    // The current blob stays untouched until the whole body has arrived: the
+    // new content streams into a temp that only replaces it at step 4.
+    let mut staged = None;
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|e| AppError::BadRequest(format!("Multipart error: {}", e)))?
     {
         if field.name().unwrap_or("") == "file" {
-            new_data = field
-                .bytes()
-                .await
-                .map_err(|e| AppError::BadRequest(format!("Failed to read file: {}", e)))?
-                .to_vec();
+            staged = Some(stage_field(file.storage_id, backend.clone(), &mut field).await?);
             break;
         }
     }
-    if new_data.is_empty() {
-        return Err(AppError::BadRequest("No file data provided".to_string()));
-    }
-
-    let backend = state.storage.get_backend(file.storage_id).await?;
+    let staged = staged
+        .filter(|s| s.size_bytes() > 0)
+        .ok_or_else(|| AppError::BadRequest("No file data provided".to_string()))?;
 
     // 1. Count existing versions to determine the next version number.
     let versions_coll = state.db.collection::<FileVersion>("file_versions");
@@ -763,16 +761,16 @@ pub async fn update_file_content(
     );
     versions_coll.insert_one(&file_version).await?;
 
-    // 4. Write new bytes over the existing storage path.
-    let new_size = new_data.len() as i64;
-    let mut hasher = sha2::Sha256::new();
-    sha2::Digest::update(&mut hasher, &new_data);
-    let new_checksum = hex::encode(hasher.finalize());
+    // 4. Move the new bytes over the existing storage path.
+    let new_size = staged.size_bytes();
+    let new_checksum = staged.checksum_sha256().to_string();
     let new_mime = mime_guess::from_path(&file.name)
         .first_or_octet_stream()
         .to_string();
 
-    backend.write(&file.storage_path, &new_data).await?;
+    staged
+        .commit(file.storage_id, &backend, &file.storage_path)
+        .await?;
 
     // 5. Update the files record.
     let size_delta = new_size - file.size_bytes;
@@ -858,6 +856,24 @@ pub async fn update_file_content(
     Ok(Json(file_to_response(&updated)))
 }
 
+/// Stream one multipart part into a temp file on `backend`, hashing as it
+/// goes, so the request body is never held in memory whole.
+async fn stage_field(
+    storage_id: ObjectId,
+    backend: Arc<dyn StorageBackend>,
+    field: &mut Field<'_>,
+) -> Result<StagedUpload> {
+    let mut staging = UploadStaging::create(storage_id, backend).await?;
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Failed to read file: {}", e)))?
+    {
+        staging.write(&chunk).await?;
+    }
+    staging.finish().await
+}
+
 pub async fn simple_upload(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -866,9 +882,9 @@ pub async fn simple_upload(
 ) -> Result<Json<FileResponse>> {
     let mut filename = None;
     let mut parent_id: Option<ObjectId> = None;
-    let mut file_data = Vec::new();
+    let mut staged: Option<StagedUpload> = None;
 
-    while let Some(field) = multipart
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|e| AppError::BadRequest(format!("Multipart error: {}", e)))?
@@ -878,11 +894,14 @@ pub async fn simple_upload(
         match name.as_str() {
             "file" => {
                 filename = field.file_name().map(|s| s.to_string());
-                file_data = field
-                    .bytes()
-                    .await
-                    .map_err(|e| AppError::BadRequest(format!("Failed to read file: {}", e)))?
-                    .to_vec();
+                // Clients send `file` before `parent_id`, so the folder (and
+                // any storage pinned on it) is usually unknown here. Stage on
+                // the storage implied by what has been seen so far; `commit`
+                // moves the bytes if the final answer turns out different.
+                let staging_storage_id =
+                    state.storage.resolve_storage_for_parent(parent_id).await?;
+                let staging_backend = state.storage.get_backend(staging_storage_id).await?;
+                staged = Some(stage_field(staging_storage_id, staging_backend, &mut field).await?);
             }
             "parent_id" => {
                 let text = field
@@ -900,8 +919,10 @@ pub async fn simple_upload(
         }
     }
 
-    let filename = filename.ok_or_else(|| AppError::BadRequest("No file provided".to_string()))?;
-    let size = file_data.len() as i64;
+    let (filename, staged) = filename
+        .zip(staged)
+        .ok_or_else(|| AppError::BadRequest("No file provided".to_string()))?;
+    let size = staged.size_bytes();
 
     // Determine effective owner: if uploading to a shared folder, the file
     // belongs to the folder owner, and quota is charged to them.
@@ -936,7 +957,9 @@ pub async fn simple_upload(
         (user.id, user.username.clone())
     };
 
-    // Check quota against the effective owner
+    // Check quota against the effective owner. The size is only known once
+    // the body has streamed, so a rejected upload has already been staged;
+    // dropping `staged` on the way out removes the temp.
     {
         let users_coll = state.db.collection::<User>("users");
         if let Some(owner) = users_coll
@@ -949,11 +972,11 @@ pub async fn simple_upload(
         }
     }
 
-    // Reject duplicate names up-front. The partial unique index on `files`
-    // (owner_id, parent_id, name) where `deleted_at: null` is the
-    // authoritative guard, but checking here lets us return a clean 409
-    // and skip the storage write — no torn files on disk for a request
-    // that was never going to land in the DB anyway.
+    // Reject duplicate names before the staged bytes are moved into place.
+    // The partial unique index on `files` (owner_id, parent_id, name) where
+    // `deleted_at: null` is the authoritative guard, but checking here lets
+    // us return a clean 409 and leave the existing file's blob alone for a
+    // request that was never going to land in the DB anyway.
     if check_name_conflict(
         &state.db,
         effective_owner_id,
@@ -983,13 +1006,8 @@ pub async fn simple_upload(
     )
     .await?;
 
-    // Calculate checksum
-    let mut hasher = Sha256::new();
-    hasher.update(&file_data);
-    let checksum = hex::encode(hasher.finalize());
-
-    // Write to storage
-    backend.write(&storage_path, &file_data).await?;
+    let checksum = staged.checksum_sha256().to_string();
+    staged.commit(storage.id, &backend, &storage_path).await?;
 
     // Determine MIME type
     let mime_type = mime_guess::from_path(&filename)

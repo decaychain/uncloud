@@ -35,6 +35,7 @@ crates/uncloud-server/
     auth.rs               ← Authentication tests (login/logout/sessions)
     auth_e2e.rs           ← Extended auth: registration modes, password change, admin user lifecycle
     files.rs              ← File upload/download/CRUD + duplicate-name constraints
+    upload_streaming.rs   ← Streamed single-request uploads: integrity, temp cleanup on failure, client disconnect
     folders.rs            ← Folder management tests
     sync.rs               ← Sync strategy tests (effective_strategy, sync/tree)
     sync_engine.rs        ← End-to-end two-way sync algorithm tests (uncloud-sync against a real server)
@@ -83,6 +84,36 @@ crates/uncloud-server/
 | `user_isolation` | `GET /api/files/{id}` | user B gets 404 for user A's file |
 | `auth_required` | all file routes | 401 without session cookie |
 
+### Streaming uploads (`tests/upload_streaming.rs`)
+
+`POST /api/uploads/simple` and `POST /api/files/{id}/content` stream the body into a storage temp file. Every test except the ignored memory one ends by asserting the backend's `.tmp/` directory is empty.
+
+| Test | Behaviour |
+|---|---|
+| `simple_upload_stores_multi_megabyte_body_intact` | 9 MiB upload: size, SHA-256, blob on disk, download, `used_bytes`, audit event |
+| `simple_upload_resolves_folder_named_after_the_file_part` | `parent_id` sent after `file` still lands under the folder |
+| `simple_upload_accepts_empty_file` | zero-byte upload still creates a file |
+| `content_update_stores_multi_megabyte_body_and_archives_previous` | 9 MiB replacement: new size/checksum, previous content downloadable as version 1 |
+| `quota_exceeded_upload_leaves_no_temp_and_no_file` | 403; no temp, no blob, no record, `used_bytes` unchanged |
+| `duplicate_name_upload_leaves_no_temp_and_keeps_existing_content` | 409; existing blob untouched |
+| `upload_to_missing_folder_leaves_no_temp` | 404 |
+| `upload_without_file_part_is_rejected` | 400 |
+| `empty_content_update_is_rejected_and_keeps_existing_content` | 400; no version created |
+| `upload_into_folder_pinned_to_another_storage_lands_there` | two local storages; body staged on the default, committed to the pinned one (and directly when `parent_id` comes first) |
+| `chunked_simple_upload_without_content_length_arrives_intact` | real HTTP, chunked transfer encoding, 11 MiB in ~48 KiB frames |
+| `chunked_content_update_without_content_length_arrives_intact` | same for content replacement |
+| `disconnect_during_simple_upload_leaves_no_temp_and_no_file` | client abandons the request after 6 MiB; temp removed |
+| `disconnect_during_content_update_keeps_existing_content` | same for content replacement; current content and version list unchanged |
+| `large_upload_does_not_grow_resident_memory` (`#[ignore]`, Linux) | 256 MiB upload must grow peak RSS by less than 48 MiB |
+
+The ignored memory test writes 256 MiB to the temp dir; run it with:
+
+```bash
+cargo test -p uncloud-server --test upload_streaming -- --ignored large_upload --nocapture
+```
+
+`storage::staging` also has unit tests (`cargo test -p uncloud-server --lib staging`) for the hash/size bookkeeping across append-buffer flushes, replace-on-commit, cross-storage commit, and temp removal on drop.
+
 ### Folders (`tests/folders.rs`)
 
 | Test | Route | Expected |
@@ -130,11 +161,11 @@ Covers the offline `uncloud-server migrate` subcommand. Asserts idempotency, has
 
 ### S3 backend (`tests/storage_s3.rs`)
 
-Runs `S3Storage` against a `MinIO` testcontainer. Covers write/read/delete round-trip, range reads, the temp-upload finalize sequence, rename+archive_version, key scanning, and fast-fail behaviour against a missing bucket.
+Runs `S3Storage` against a `MinIO` testcontainer. Covers write/read/delete round-trip, range reads, the temp-upload finalize sequence, reading a temp back before finalize, rename+archive_version, key scanning, and fast-fail behaviour against a missing bucket.
 
 ### SFTP backend (`tests/storage_sftp.rs`)
 
-Runs `SftpStorage` against a `linuxserver/openssh-server` testcontainer. Covers password auth and private-key auth, range reads, temp-upload finalize, rename+archive, key scanning, and the TOFU host-key pin: first connect records the key in `sftp_host_keys`; subsequent connects validate against the pinned key.
+Runs `SftpStorage` against an `atmoz/sftp` testcontainer. Covers password auth and private-key auth, range reads, temp-upload finalize (including finalizing over an existing file), reading a temp back before finalize, rename+archive, key scanning, and the TOFU host-key pin: first connect records the key in `sftp_host_keys`; subsequent connects validate against the pinned key.
 
 ### Backup (`tests/backup.rs`, `#[ignore]`)
 

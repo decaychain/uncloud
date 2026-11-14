@@ -181,11 +181,32 @@ impl StorageBackend for LocalStorage {
         Ok(())
     }
 
+    async fn read_temp(&self, temp_path: &str) -> Result<BoxedAsyncRead> {
+        let full_path = self.resolve_temp_path(temp_path);
+        let file = File::open(&full_path)
+            .await
+            .map_err(|e| AppError::Storage(format!("Failed to open temp file: {}", e)))?;
+        Ok(Box::pin(BufReader::new(file)))
+    }
+
     async fn finalize_temp(&self, temp_path: &str, final_path: &str) -> Result<()> {
         let temp_full = self.resolve_temp_path(temp_path);
         let final_full = self.resolve_path(final_path);
 
         self.ensure_parent_dir(&final_full).await?;
+
+        // `write` syncs before it returns, and single-request uploads now
+        // arrive through a temp instead of `write`. Sync here so a finalized
+        // upload is as durable as a written one. Opened for writing because
+        // Windows cannot flush a read-only handle.
+        OpenOptions::new()
+            .write(true)
+            .open(&temp_full)
+            .await
+            .map_err(|e| AppError::Storage(format!("Failed to open temp file: {}", e)))?
+            .sync_all()
+            .await
+            .map_err(|e| AppError::Storage(format!("Failed to sync temp file: {}", e)))?;
 
         fs::rename(&temp_full, &final_full)
             .await

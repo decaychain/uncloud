@@ -332,6 +332,9 @@ async fn migration_fails_on_corrupt_dest_when_hash_verify_enabled() {
         async fn append_temp(&self, p: &str, d: &[u8]) -> StorageResult<()> {
             self.inner.append_temp(p, d).await
         }
+        async fn read_temp(&self, t: &str) -> StorageResult<BoxedAsyncRead> {
+            self.inner.read_temp(t).await
+        }
         async fn finalize_temp(&self, t: &str, f: &str) -> StorageResult<()> {
             self.inner.finalize_temp(t, f).await
         }

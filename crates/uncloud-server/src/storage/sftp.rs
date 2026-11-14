@@ -844,12 +844,36 @@ impl StorageBackend for SftpStorage {
         result
     }
 
+    async fn read_temp(&self, temp_path: &str) -> Result<BoxedAsyncRead> {
+        self.read(&format!(".tmp/{}", temp_path.trim_start_matches('/')))
+            .await
+    }
+
     async fn finalize_temp(&self, temp_path: &str, final_path: &str) -> Result<()> {
         let pooled = self.pool.checkout().await?;
         let from = self.resolve(&format!(".tmp/{}", temp_path.trim_start_matches('/')));
         let to = self.resolve(final_path);
         let result = async {
             self.ensure_parent_dir(&pooled.sftp, &to).await?;
+            let Err(first) = pooled.sftp.rename(from.clone(), to.clone()).await else {
+                return Ok(());
+            };
+            // SFTP rename refuses to replace an existing file, which is what
+            // finalizing new content for an existing path asks for. Remove the
+            // destination and rename again, but only once both ends are known
+            // to exist, so an unrelated failure never costs the destination.
+            // Not atomic: a crash between the two calls leaves the path empty
+            // with the bytes still in the temp.
+            let replacing = pooled.sftp.metadata(from.clone()).await.is_ok()
+                && pooled.sftp.metadata(to.clone()).await.is_ok();
+            if !replacing {
+                return Err(AppError::Storage(format!("SFTP rename failed: {first}")));
+            }
+            pooled
+                .sftp
+                .remove_file(to.clone())
+                .await
+                .map_err(|e| AppError::Storage(format!("SFTP replace failed: {e}")))?;
             pooled
                 .sftp
                 .rename(from, to)

@@ -323,6 +323,7 @@ pub trait StorageBackend: Send + Sync {
     async fn available_space(&self) -> Result<Option<u64>>;
     async fn create_temp(&self) -> Result<String>;
     async fn append_temp(&self, temp_path: &str, data: &[u8]) -> Result<()>;
+    async fn read_temp(&self, temp_path: &str) -> Result<BoxedAsyncRead>;
     async fn finalize_temp(&self, temp_path: &str, final_path: &str) -> Result<()>;
     async fn abort_temp(&self, temp_path: &str) -> Result<()>;
     async fn rename(&self, from: &str, to: &str) -> Result<()>;
@@ -339,6 +340,17 @@ Three backends ship today:
 - `SftpStorage` (any SSH-accessible host: VPS, NAS, dedicated SFTP service) — files live under a configured `base_path` on the remote host. Built on `russh` + `russh-sftp` with a single long-lived SSH session that is recreated on demand. Supports both password and PEM-encoded private-key authentication (passphrase optional). Host-key verification defaults to **TOFU**: the server's public key is recorded in MongoDB `sftp_host_keys` (keyed by `storage_id`) on first connect and verified on every subsequent connect. Pin explicitly with `host_key:` for strict mode, or set `host_key_check: skip` to disable on trusted networks.
 
 Multiple `Storage` records can coexist (each file's `storage_id` decides where its blob lives). The lineup is configured in `config.yaml`; admin REST endpoints under `/api/admin/storages` are read-only.
+
+### Streaming uploads
+
+`POST /api/uploads/simple` and `POST /api/files/{id}/content` never hold the request body in memory. `storage::staging` (`UploadStaging` → `StagedUpload`) streams the multipart `file` part into a backend temp file, hashing as it goes, and coalesces body frames into 4 MiB appends, so one in-flight upload costs about that much memory whatever the file size. The handlers then run their checks and `commit` the temp to its final path.
+
+- **Size-dependent checks run after the body.** The size is not known up front (clients may send chunked transfer encoding with no `Content-Length`), so the quota check in `simple_upload` runs once the body has been staged, before `commit`. The response is the same 403; the difference is that the rejected bytes sat in a temp file rather than in RAM.
+- **Destination resolved late.** Clients send `file` before `parent_id`, so neither the final path nor the folder's pinned storage is known while the body streams. `simple_upload` stages on the storage implied by the fields seen so far (the default storage when `file` comes first). If the folder turns out to be pinned elsewhere, `commit` copies the temp across with `read_temp` + `write_stream` and removes it; otherwise it is a `finalize_temp` rename. A client that sends `parent_id` first skips the copy.
+- **No orphaned temps.** The temp is owned by a guard that calls `abort_temp` when dropped unfinalized. That covers every early return (quota, name conflict, missing folder, DB error before `commit`) and the handler future being cancelled when the client disconnects mid-body. Cleanup runs on a spawned task, so it can complete just after the error response is sent.
+- **Content replacement.** `update_file_content` stages the new bytes first, then archives the current blob as a version, then finalizes over the existing path. A failed or abandoned upload leaves the current content and version history untouched. `LocalStorage::finalize_temp` syncs the temp before the rename (matching the durability `write` gave these endpoints before) and replaces the destination atomically; `SftpStorage::finalize_temp` falls back to remove-then-rename because SFTP rename refuses to overwrite.
+
+Other write paths do not go through staging yet. `copy_file`, recursive folder copy, the MCP `write_file` tool and saving a mail attachment to Files each hold one whole file in memory. `upload_chunk` and an S3 multipart part hold one chunk. `complete_upload` hashes by reading the finalized file back (bounded memory, but a second full pass, and a full download on S3/SFTP). The S3-compatible `PutObject` already streams to a temp file.
 
 ### Constraint
 

@@ -4,7 +4,7 @@ Detailed feature inventory. For the route table see [Architecture.md](Architectu
 
 ## File Management
 
-- **Upload**: drag-and-drop zone (shown only when folder is empty) + toolbar Upload button; hidden `<input>` always present for the button; supports simple upload and chunked upload for large files; `POST /api/uploads/init`, `POST /api/uploads/{id}/chunk`, `POST /api/uploads/{id}/complete`; also `POST /api/uploads/simple` for small files
+- **Upload**: drag-and-drop zone (shown only when folder is empty) + toolbar Upload button; hidden `<input>` always present for the button; supports simple upload and chunked upload for large files; `POST /api/uploads/init`, `POST /api/uploads/{id}/chunk`, `POST /api/uploads/{id}/complete`; also `POST /api/uploads/simple` for single-request uploads, which the server streams to storage rather than buffering (see [Architecture → Streaming uploads](Architecture.md#streaming-uploads))
 - **Download**: `GET /api/files/{id}/download` with range request support; desktop-native downloads show a toast while saving, then a shortened Downloads location with Open and Copy path actions
 - **Update content**: `POST /api/files/{id}/content` replaces file content (creates a new version)
 - **Rename**: file and folder, via context menu -> modal

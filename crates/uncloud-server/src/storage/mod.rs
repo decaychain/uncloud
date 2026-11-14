@@ -2,6 +2,7 @@ pub mod local;
 pub mod retry;
 pub mod s3;
 pub mod sftp;
+pub mod staging;
 
 use async_trait::async_trait;
 use std::pin::Pin;
@@ -67,6 +68,11 @@ pub trait StorageBackend: Send + Sync {
     /// Append to temporary file
     async fn append_temp(&self, temp_path: &str, data: &[u8]) -> Result<()>;
 
+    /// Open a temporary file for reading. Lets an upload staged on one
+    /// backend be copied to another when its destination storage was not
+    /// known while it streamed.
+    async fn read_temp(&self, temp_path: &str) -> Result<BoxedAsyncRead>;
+
     /// Finalize temp file to permanent location
     async fn finalize_temp(&self, temp_path: &str, final_path: &str) -> Result<()>;
 
@@ -95,3 +101,4 @@ pub trait StorageBackend: Send + Sync {
 pub use local::LocalStorage;
 pub use s3::S3Storage;
 pub use sftp::SftpStorage;
+pub use staging::{StagedUpload, UploadStaging};
