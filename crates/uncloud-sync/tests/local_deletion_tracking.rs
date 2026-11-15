@@ -873,61 +873,85 @@ async fn resumed_copy_carries_an_edit_made_to_either_copy() {
     }
 }
 
-/// A backend that cannot replace a file in one step leaves a truncated
-/// destination when a copy dies half-way. That partial destination is
-/// indistinguishable from a subsequent user edit, so recovery preserves
-/// both copies until the user resolves it.
+/// A copy that fails part-way leaves a truncated destination on a backend
+/// that cannot replace a file in one step. What happens to it depends on
+/// what can still be known about it:
+///   - the copy returned an error: the engine wrote those bytes a moment
+///     ago, so it removes them and the next run copies the file again;
+///   - the client was killed: after a restart the truncated file is still
+///     the beginning of its source and nothing more, and is copied again;
+///   - it was edited after the interruption: it could be the only copy of
+///     that edit, so both files wait for the user.
 #[tokio::test]
-async fn copy_cut_off_mid_file_waits_for_manual_resolution_after_a_restart() {
-    let server = FakeServer::with_tree(
-        vec![
-            server_file("first", "a.txt", Some("parent"), b"first file"),
-            server_file("second", "b.txt", Some("parent"), b"second file"),
-        ],
-        vec!["parent"],
-    );
-    let handle = server.clone();
-    let rig = rig(server).await;
-    let fs = Arc::new(FaultyFs::default());
-    let engine = build_engine_with_fs(&rig, fs.clone()).await;
-    engine.incremental_sync().await.unwrap();
-    let downloads = handle.download_hits.load(Ordering::SeqCst);
-    let old = rig.root.join("parent");
-    let new = rig.root.join("renamed");
-    fs.moves_unsupported.store(true, Ordering::SeqCst);
-    fs.fail("partial_copy", &old.join("b.txt"));
-    rename_on_server(&handle, "parent", "renamed", None).await;
+async fn copy_cut_off_mid_file_is_redone_unless_it_was_edited_since() {
+    for scenario in ["error", "killed", "edited"] {
+        let server = FakeServer::with_tree(
+            vec![
+                server_file("first", "a.txt", Some("parent"), b"first file"),
+                server_file("second", "b.txt", Some("parent"), b"second file"),
+            ],
+            vec!["parent"],
+        );
+        let handle = server.clone();
+        let rig = rig(server).await;
+        let fs = Arc::new(FaultyFs::default());
+        let engine = build_engine_with_fs(&rig, fs.clone()).await;
+        engine.incremental_sync().await.unwrap();
+        let downloads = handle.download_hits.load(Ordering::SeqCst);
+        let old = rig.root.join("parent");
+        let new = rig.root.join("renamed");
+        fs.moves_unsupported.store(true, Ordering::SeqCst);
+        fs.fail("partial_copy", &old.join("b.txt"));
+        if scenario != "error" {
+            // A killed client gets no chance to clear what it was writing.
+            fs.fail("remove_file", &new.join("b.txt"));
+        }
+        rename_on_server(&handle, "parent", "renamed", None).await;
 
-    let report = engine.incremental_sync().await.unwrap();
-    assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
-    assert_eq!(std::fs::read(new.join("b.txt")).unwrap(), b"secon");
-    assert_eq!(std::fs::read(old.join("b.txt")).unwrap(), b"second file");
-    drop(engine);
-
-    fs.failures.write().unwrap().clear();
-    let engine = build_engine_with_fs(&rig, fs).await;
-    for _ in 0..2 {
         let report = engine.incremental_sync().await.unwrap();
-        assert_eq!(report.errors.len(), 1, "{report:?}");
-        assert!(report.errors[0].reason.contains("manual resolution"));
-        assert!(report.uploaded.is_empty());
-        assert_eq!(std::fs::read(new.join("b.txt")).unwrap(), b"secon");
+        assert_eq!(report.errors.len(), 1, "{scenario}: {:?}", report.errors);
         assert_eq!(std::fs::read(old.join("b.txt")).unwrap(), b"second file");
+        if scenario == "error" {
+            assert!(!new.join("b.txt").exists());
+        } else {
+            assert_eq!(std::fs::read(new.join("b.txt")).unwrap(), b"secon");
+        }
         assert_eq!(pending_move_intents(&rig).await, 1);
+        drop(engine);
+
+        if scenario == "edited" {
+            std::fs::write(new.join("b.txt"), b"second thoughts").unwrap();
+        }
+        fs.failures.write().unwrap().clear();
+        let engine = build_engine_with_fs(&rig, fs).await;
+        if scenario == "edited" {
+            for _ in 0..2 {
+                let report = engine.incremental_sync().await.unwrap();
+                assert_eq!(report.errors.len(), 1, "{report:?}");
+                assert!(report.errors[0].reason.contains("manual resolution"));
+                assert!(report.uploaded.is_empty());
+                assert_eq!(
+                    std::fs::read(new.join("b.txt")).unwrap(),
+                    b"second thoughts"
+                );
+                assert_eq!(std::fs::read(old.join("b.txt")).unwrap(), b"second file");
+                assert_eq!(pending_move_intents(&rig).await, 1);
+            }
+            std::fs::remove_file(new.join("b.txt")).unwrap();
+        }
+        for _ in 0..3 {
+            let report = engine.incremental_sync().await.unwrap();
+            assert!(report.errors.is_empty(), "{scenario}: {:?}", report.errors);
+            assert!(report.uploaded.is_empty());
+        }
+        assert_eq!(std::fs::read(new.join("a.txt")).unwrap(), b"first file");
+        assert_eq!(std::fs::read(new.join("b.txt")).unwrap(), b"second file");
+        assert!(!old.exists());
+        assert_eq!(handle.download_hits.load(Ordering::SeqCst), downloads);
+        assert_eq!(handle.delete_file_hits.load(Ordering::SeqCst), 0);
+        assert!(handle.content_updates.lock().await.is_empty());
+        assert_eq!(pending_move_intents(&rig).await, 0);
     }
-    std::fs::remove_file(new.join("b.txt")).unwrap();
-    for _ in 0..3 {
-        let report = engine.incremental_sync().await.unwrap();
-        assert!(report.errors.is_empty(), "{:?}", report.errors);
-        assert!(report.uploaded.is_empty());
-    }
-    assert_eq!(std::fs::read(new.join("a.txt")).unwrap(), b"first file");
-    assert_eq!(std::fs::read(new.join("b.txt")).unwrap(), b"second file");
-    assert!(!old.exists());
-    assert_eq!(handle.download_hits.load(Ordering::SeqCst), downloads);
-    assert_eq!(handle.delete_file_hits.load(Ordering::SeqCst), 0);
-    assert!(handle.content_updates.lock().await.is_empty());
-    assert_eq!(pending_move_intents(&rig).await, 0);
 }
 
 #[tokio::test]
@@ -1000,7 +1024,9 @@ async fn unresolved_inflight_copy_is_checked_before_starting_another_copy() {
     assert_eq!(engine.incremental_sync().await.unwrap().errors.len(), 1);
     drop(engine);
     let copies = fs.copy_calls.load(Ordering::SeqCst);
-    let before = std::fs::read(new.join(unfinished)).unwrap();
+    // Not the beginning of its source, so it cannot be a cut-off copy.
+    let before = b"edited after the interruption".to_vec();
+    std::fs::write(new.join(unfinished), &before).unwrap();
     std::fs::write(old.join(earlier), b"source edit").unwrap();
     fs.failures.write().unwrap().clear();
     fs.fail("partial_copy", &old.join(earlier));
@@ -1157,6 +1183,232 @@ async fn interrupted_move_commit_preserves_paths_mtimes_and_intent() {
         assert!(report.uploaded.is_empty());
         assert!(report.downloaded.is_empty());
     }
+}
+
+/// An interrupted copy leaves the old directory complete and the new one
+/// partial. Clearing away the old one as a leftover must not turn the files
+/// that never made it across into deletions on the server: they are
+/// downloaded again instead.
+#[tokio::test]
+async fn files_an_interrupted_copy_never_carried_are_restored_not_deleted() {
+    for removed in ["old directory", "old contents", "both directories"] {
+        let contents = |i: usize| format!("content {i}").into_bytes();
+        let files = (0..4)
+            .map(|i| {
+                server_file(
+                    &format!("f{i}"),
+                    &format!("f{i}.txt"),
+                    Some("parent"),
+                    &contents(i),
+                )
+            })
+            .collect();
+        let server = FakeServer::with_folders(
+            files,
+            vec![ServerFolder::root("parent"), child_folder("sub", "parent")],
+        );
+        let handle = server.clone();
+        let rig = rig(server).await;
+        let fs = Arc::new(FaultyFs::default());
+        let engine = build_engine_with_fs(&rig, fs.clone()).await;
+        engine.incremental_sync().await.unwrap();
+        let old = rig.root.join("parent");
+        let new = rig.root.join("renamed");
+        let listed = NativeFs.walk(old.to_str().unwrap()).await.unwrap();
+        let cut_off = &listed[1].rel_path;
+        fs.moves_unsupported.store(true, Ordering::SeqCst);
+        fs.fail("partial_copy", &old.join(cut_off));
+        fs.fail("remove_file", &new.join(cut_off));
+        rename_on_server(&handle, "parent", "renamed", None).await;
+        assert_eq!(engine.incremental_sync().await.unwrap().errors.len(), 1);
+        assert_eq!(
+            dir_names(&new).len(),
+            3,
+            "one copy, one cut off, one folder"
+        );
+        drop(engine);
+
+        fs.failures.write().unwrap().clear();
+        match removed {
+            "old directory" => std::fs::remove_dir_all(&old).unwrap(),
+            "old contents" => {
+                for file in &listed {
+                    std::fs::remove_file(old.join(&file.rel_path)).unwrap();
+                }
+            }
+            _ => {
+                std::fs::remove_dir_all(&old).unwrap();
+                std::fs::remove_dir_all(&new).unwrap();
+            }
+        }
+        let engine = build_engine_with_fs(&rig, fs).await;
+        if removed != "both directories" {
+            // The cut-off copy has no original left to be checked against.
+            for _ in 0..2 {
+                let report = engine.incremental_sync().await.unwrap();
+                assert_eq!(report.errors.len(), 1, "{removed}: {report:?}");
+                assert!(report.errors[0].reason.contains("manual resolution"));
+            }
+            std::fs::remove_file(new.join(cut_off)).unwrap();
+        }
+        for _ in 0..3 {
+            let report = engine.incremental_sync().await.unwrap();
+            assert!(report.errors.is_empty(), "{removed}: {report:?}");
+            assert!(report.uploaded.is_empty());
+        }
+        for i in 0..4 {
+            assert_eq!(
+                std::fs::read(new.join(format!("f{i}.txt"))).unwrap(),
+                contents(i),
+                "{removed}"
+            );
+        }
+        assert!(new.join("sub").is_dir(), "{removed}");
+        assert!(!old.exists(), "{removed}");
+        assert_eq!(handle.files.lock().await.len(), 4, "{removed}");
+        assert_eq!(handle.folders.lock().await.len(), 2, "{removed}");
+        assert_eq!(handle.delete_file_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(handle.delete_folder_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(handle.create_folder_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(pending_move_intents(&rig).await, 0);
+    }
+}
+
+/// A move waiting for the user is not read again on every run: the verdict
+/// stands until one of the two files changes.
+#[tokio::test]
+async fn stuck_copy_move_is_not_reread_until_something_changes() {
+    for stuck_on in ["both edited", "edited cut-off copy"] {
+        let files = (0..6)
+            .map(|i| {
+                server_file(
+                    &format!("f{i}"),
+                    &format!("f{i}.txt"),
+                    Some("parent"),
+                    format!("content {i}").as_bytes(),
+                )
+            })
+            .collect();
+        let server = FakeServer::with_tree(files, vec!["parent"]);
+        let handle = server.clone();
+        let rig = rig(server).await;
+        let fs = Arc::new(FaultyFs::default());
+        let engine = build_engine_with_fs(&rig, fs.clone()).await;
+        engine.incremental_sync().await.unwrap();
+        let old = rig.root.join("parent");
+        let new = rig.root.join("renamed");
+        let listed = NativeFs.walk(old.to_str().unwrap()).await.unwrap();
+        let last = &listed.last().unwrap().rel_path;
+        fs.moves_unsupported.store(true, Ordering::SeqCst);
+        if stuck_on == "both edited" {
+            fs.fail("remove_file", &old.join(&listed[0].rel_path));
+        } else {
+            fs.fail("partial_copy", &old.join(last));
+        }
+        rename_on_server(&handle, "parent", "renamed", None).await;
+        assert_eq!(engine.incremental_sync().await.unwrap().errors.len(), 1);
+        fs.failures.write().unwrap().clear();
+        std::fs::write(new.join(last), b"edited at the new location").unwrap();
+        if stuck_on == "both edited" {
+            std::fs::write(old.join(last), b"edited at the old location").unwrap();
+        }
+
+        let stuck_run = || async {
+            fs.sha256_calls.store(0, Ordering::SeqCst);
+            let report = engine.incremental_sync().await.unwrap();
+            assert_eq!(report.errors.len(), 1, "{stuck_on}: {report:?}");
+            assert!(report.errors[0].reason.contains("manual resolution"));
+            (
+                report.errors[0].reason.clone(),
+                fs.sha256_calls.load(Ordering::SeqCst),
+            )
+        };
+        let (first_reason, first_reads) = stuck_run().await;
+        assert!(first_reads > 0);
+        for _ in 0..3 {
+            assert_eq!(stuck_run().await, (first_reason.clone(), 0));
+        }
+
+        // Any change to either file has the verdict worked out afresh.
+        std::fs::File::options()
+            .write(true)
+            .open(new.join(last))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + Duration::from_secs(90))
+            .unwrap();
+        assert!(stuck_run().await.1 > 0);
+        assert_eq!(stuck_run().await.1, 0);
+
+        std::fs::remove_file(new.join(last)).unwrap();
+        let report = engine.incremental_sync().await.unwrap();
+        assert!(report.errors.is_empty(), "{stuck_on}: {report:?}");
+        assert!(!old.exists());
+        assert_eq!(handle.delete_file_hits.load(Ordering::SeqCst), 0);
+    }
+}
+
+/// A copy-move whose files all arrived but whose journal update was lost
+/// is completed from what is at the destination. A file with no checksum on
+/// record cannot be compared, which is no reason to upload it again.
+#[tokio::test]
+async fn recovered_move_does_not_reupload_files_without_a_recorded_checksum() {
+    let server = FakeServer::with_tree(
+        vec![server_file("file", "note.txt", Some("parent"), b"original")],
+        vec!["parent"],
+    );
+    let handle = server.clone();
+    let rig = rig(server).await;
+    let fs = Arc::new(FaultyFs::default());
+    let engine = build_engine_with_fs(&rig, fs.clone()).await;
+    engine.incremental_sync().await.unwrap();
+    drop(engine);
+    let source = rig.root.join("parent/note.txt");
+    let dest = rig.root.join("renamed/note.txt");
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", rig.db_path.display()))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sync_state SET checksum = NULL")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TRIGGER fail_paths BEFORE UPDATE OF local_path ON sync_state BEGIN SELECT RAISE(ABORT, 'injected interruption'); END")
+        .execute(&pool)
+        .await
+        .unwrap();
+    fs.moves_unsupported.store(true, Ordering::SeqCst);
+    rename_on_server(&handle, "parent", "renamed", None).await;
+    let engine = build_engine_with_fs(&rig, fs.clone()).await;
+    assert!(engine.incremental_sync().await.is_err());
+    assert!(!source.exists());
+    drop(engine);
+    // As on a backend that carries the mtime across a copy.
+    let recorded: i64 =
+        sqlx::query_scalar("SELECT local_mtime FROM sync_state WHERE server_id = 'file'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&dest)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(recorded as u64))
+        .unwrap();
+    sqlx::query("DROP TRIGGER fail_paths")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    let engine = build_engine_with_fs(&rig, fs).await;
+    for _ in 0..2 {
+        let report = engine.incremental_sync().await.unwrap();
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(report.uploaded.is_empty());
+        assert!(report.downloaded.is_empty());
+    }
+    assert_eq!(std::fs::read(&dest).unwrap(), b"original");
+    assert!(handle.content_updates.lock().await.is_empty());
+    assert_eq!(pending_move_intents(&rig).await, 0);
 }
 
 /// Moving by copy reads each file once to copy it and once more on each

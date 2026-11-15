@@ -24,7 +24,8 @@ pub type ByteStream<'a> = BoxStream<'a, Result<Bytes, LocalFsError>>;
 
 const STREAM_CHUNK: usize = 256 * 1024;
 
-/// Suffix of uniquely named internal download staging files.
+/// Suffix of uniquely named internal staging files, which hold a download
+/// or a copy until it is complete.
 pub const PARTIAL_SUFFIX: &str = ".uncloud-part";
 const PARTIAL_PREFIX: &str = ".uncloud-download-";
 
@@ -178,9 +179,9 @@ pub trait LocalFs: Send + Sync {
     /// observations for the length of a run drop them here.
     fn begin_run(&self) {}
 
-    /// Remove what interrupted downloads left behind under the sync base
-    /// `root`, returning how many files went. Called at the start of a run,
-    /// when no download of this engine is in flight. A leftover is invisible
+    /// Remove what interrupted downloads and copies left behind under the
+    /// sync base `root`, returning how many files went. Called at the start
+    /// of a run, when none of this engine's is in flight. A leftover is invisible
     /// to the walkers, so it would otherwise keep its directory from ever
     /// being emptied.
     async fn sweep_staging(&self, _root: &str) -> Result<usize, LocalFsError> {
@@ -299,12 +300,35 @@ impl Default for NativeFs {
 pub const EXCLUDED_NAMES: &[&str] = &[".uncloud-sync.db", ".uncloud-root.json"];
 
 /// Whether a walker must skip a file with this name: one of
-/// [`EXCLUDED_NAMES`], or the leftover of an interrupted download.
+/// [`EXCLUDED_NAMES`], or the leftover of an interrupted download or copy.
 pub fn is_excluded_name(name: &str) -> bool {
     EXCLUDED_NAMES.contains(&name) || is_staging_name(name)
 }
 
-/// Whether `name` is one this crate gives its download staging files. The
+/// Create a uniquely named, empty staging file beside `target`. Exclusive
+/// creation means an existing file or symlink is never opened as one.
+fn create_staging_file(
+    target: &std::path::Path,
+) -> Result<(std::path::PathBuf, std::fs::File), LocalFsError> {
+    let parent = target.parent().unwrap_or_else(|| std::path::Path::new("."));
+    loop {
+        let partial = parent.join(format!(
+            "{PARTIAL_PREFIX}{}{PARTIAL_SUFFIX}",
+            uuid::Uuid::new_v4()
+        ));
+        match std::fs::File::options()
+            .write(true)
+            .create_new(true)
+            .open(&partial)
+        {
+            Ok(file) => return Ok((partial, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(LocalFsError::io(partial.to_string_lossy(), e)),
+        }
+    }
+}
+
+/// Whether `name` is one this crate gives its staging files. The
 /// random part must be a UUID, so a user's file is not taken for one.
 fn is_staging_name(name: &str) -> bool {
     name.strip_prefix(PARTIAL_PREFIX)
@@ -352,20 +376,29 @@ impl LocalFs for NativeFs {
         .map_err(|e| LocalFsError::other(format!("same_entry task panicked: {e}")))?
     }
 
-    // The engine compares local mtimes with the journal to spot local
-    // edits, so a copy that reset them would make every file look changed.
+    // The copy is made beside the destination and renamed into place, so a
+    // copy that dies half-way never leaves a truncated file under the final
+    // name. The engine compares local mtimes with the journal to spot local
+    // edits, so the mtime is carried over as well.
     async fn copy_file(&self, from: &str, to: &str) -> Result<(), LocalFsError> {
         let (from, to) = (from.to_owned(), to.to_owned());
         tokio::task::spawn_blocking(move || {
-            let modified = std::fs::metadata(&from)
-                .and_then(|meta| meta.modified())
-                .map_err(|e| LocalFsError::io(from.clone(), e))?;
-            std::fs::copy(&from, &to).map_err(|e| LocalFsError::io(from.clone(), e))?;
-            std::fs::File::options()
-                .write(true)
-                .open(&to)
-                .and_then(|file| file.set_modified(modified))
-                .map_err(|e| LocalFsError::io(to.clone(), e))
+            let mut source = std::fs::File::open(&from).map_err(|e| LocalFsError::io(&from, e))?;
+            let meta = source.metadata().map_err(|e| LocalFsError::io(&from, e))?;
+            let modified = meta.modified().map_err(|e| LocalFsError::io(&from, e))?;
+            let (partial, mut staged) = create_staging_file(std::path::Path::new(&to))?;
+            let copied = std::io::copy(&mut source, &mut staged)
+                .and_then(|_| staged.set_permissions(meta.permissions()))
+                .and_then(|()| staged.set_modified(modified))
+                .and_then(|()| {
+                    drop(staged);
+                    std::fs::rename(&partial, &to)
+                })
+                .map_err(|e| LocalFsError::io(&to, e));
+            if copied.is_err() {
+                let _ = std::fs::remove_file(&partial);
+            }
+            copied
         })
         .await
         .map_err(|e| LocalFsError::other(format!("copy_file task panicked: {e}")))?
@@ -539,27 +572,12 @@ impl LocalFs for NativeFs {
     // never leaves a truncated file where a complete one was, to be taken
     // for a local edit on the next scan.
     async fn write_stream(&self, path: &str, chunks: ByteStream<'_>) -> Result<(), LocalFsError> {
-        let parent = std::path::Path::new(path)
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        let (partial, file) = loop {
-            let partial = parent.join(format!(
-                "{PARTIAL_PREFIX}{}{PARTIAL_SUFFIX}",
-                uuid::Uuid::new_v4()
-            ));
-            match tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&partial)
-                .await
-            {
-                Ok(file) => break (partial, file),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => return Err(LocalFsError::io(partial.to_string_lossy(), e)),
-            }
-        };
+        let target = std::path::PathBuf::from(path);
+        let (partial, file) = tokio::task::spawn_blocking(move || create_staging_file(&target))
+            .await
+            .map_err(|e| LocalFsError::other(format!("write_stream task panicked: {e}")))??;
         let written = async {
-            write_chunks(file.into_std().await, chunks).await?;
+            write_chunks(file, chunks).await?;
             // The staging file replaces the destination, so without this a
             // download would reset the mode the user gave the file.
             if let Ok(meta) = tokio::fs::metadata(path).await {
@@ -938,6 +956,50 @@ mod tests {
             fs.mtime(to.to_str().unwrap()).await.unwrap(),
             fs.mtime(from.to_str().unwrap()).await.unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn native_copy_file_replaces_the_destination_in_one_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("from.txt");
+        let to = dir.path().join("to.txt");
+        std::fs::write(&to, b"what was there").unwrap();
+        let fs = NativeFs;
+        let (source, dest) = (from.to_str().unwrap(), to.to_str().unwrap());
+
+        // A copy that fails leaves the destination and its directory alone.
+        assert!(fs.copy_file(source, dest).await.is_err());
+        assert_eq!(std::fs::read(&to).unwrap(), b"what was there");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+
+        std::fs::write(&from, b"new content").unwrap();
+        fs.copy_file(source, dest).await.unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"new content");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_copy_file_carries_the_mode_and_does_not_write_through_a_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("from.sh");
+        let elsewhere = dir.path().join("elsewhere.txt");
+        let to = dir.path().join("to.sh");
+        std::fs::write(&from, b"script").unwrap();
+        std::fs::set_permissions(&from, std::fs::Permissions::from_mode(0o750)).unwrap();
+        std::fs::write(&elsewhere, b"keep me").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &to).unwrap();
+
+        NativeFs
+            .copy_file(from.to_str().unwrap(), to.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&elsewhere).unwrap(), b"keep me");
+        let copied = std::fs::symlink_metadata(&to).unwrap();
+        assert!(copied.file_type().is_file());
+        assert_eq!(copied.permissions().mode() & 0o777, 0o750);
+        assert_eq!(std::fs::read(&to).unwrap(), b"script");
     }
 
     #[tokio::test]

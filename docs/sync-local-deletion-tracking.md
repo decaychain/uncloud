@@ -236,16 +236,34 @@ error naming the entry, and no move intent is kept. Without this, a file in an
 unreadable directory would be left behind while its journal row followed the
 folder, and would then be deleted on the server as missing.
 
+A copy that fails must not leave something behind that later looks like a
+file. Three things keep that from needing the user:
+
+- On desktop `NativeFs::copy_file` writes to a staging file beside the
+  destination and renames it into place, so a copy that dies half-way never
+  leaves a truncated file under the final name. The staging file is removed
+  by the sweep described below.
+- When `copy_file` returns an error, the engine removes the destination in
+  the same breath. What is there at that moment is what the call just wrote
+  over a file that was absent or already vouched stale, so nothing can be
+  lost. The next run copies the file again.
+- When the client was killed in the middle of a copy on a backend that cannot
+  replace a file in one step (SAF), the truncated file is still there after
+  the restart. Copies are written front to back, so it is the beginning of
+  its source and nothing more. A marked destination that is such a strict
+  prefix is copied again.
+
 The intent records that a copy is under way and which file is being written.
-That marker is not permission to overwrite its destination: a truncated copy
-and a user edit made after interruption are indistinguishable. Any ambiguous
-in-flight destination is checked before another copy can replace its marker.
-On recovery, a destination file that differs from its source is settled as
-follows, using fresh SHA-256 hashes:
+That marker alone is not permission to overwrite its destination, because the
+user may have edited it after the interruption. The marked destination is
+checked before another copy can replace the marker. On recovery, a
+destination file that differs from its source is settled as follows, using
+fresh SHA-256 hashes:
 
 | Destination file | Outcome |
 |---|---|
-| the file that was being written when the copy stopped | Error; both copies are kept for manual resolution, because it may be truncated or edited. An identical copy can be reused, and a missing destination can be copied again. |
+| the file that was being written when the copy stopped, and a strict prefix of its source | A cut-off copy. Copied again. The one thing this can undo is a user truncating exactly that file after the interruption; no content is lost, since the source holds all of it. |
+| the file that was being written when the copy stopped, anything else | Error; both copies are kept for manual resolution, because it was edited. An identical copy is reused, and a missing destination is copied again. |
 | matches the journal's checksum, source does not | The source was edited after the copy. It is copied again over the stale destination. |
 | differs, source matches the journal's checksum | The destination was edited after the copy. It is kept and the source removed. |
 | anything else (both edited, or no checksum on record) | Error: "move destination differs from its source". Both are kept for manual resolution. |
@@ -263,10 +281,34 @@ remain. Recovery rehashes the destination even when the old directory is
 already gone, preserving edited-file detection without re-uploading
 unchanged files.
 
-To resolve an ambiguous interrupted copy, preserve any edited version outside
-the moving directories, remove the incomplete destination, and retry sync.
-Alternatively, make the destination identical to the source. Recovery never
-discards a differing in-flight copy on its own.
+To resolve an interrupted copy that was edited, preserve the edited version
+outside the moving directories, remove the destination file, and retry sync.
+Alternatively, make the destination identical to the source. The error names
+both files and says so. Apart from a strict prefix of its source, recovery
+never discards a differing in-flight copy on its own.
+
+While a move waits for the user, the verdict is remembered in memory with the
+mtimes of the two files it stopped on. Later runs repeat the error without
+reading the folder again, until either mtime changes, ten minutes pass, or
+the client restarts. The memo only ever repeats an error; a decision to copy
+or remove something is always made from fresh hashes.
+
+**Files that never arrived.** An interrupted copy leaves the old directory
+complete and the new one partial, and clearing the old one away as a
+leftover is the obvious thing to do. The rows of files and subfolders that
+never made it across must then not follow the folder, or they would read as
+local deletions and take the server copies with them. Whenever a copy-move is
+completed from a recorded intent, rows with nothing at the matching place
+under the new path are forgotten instead, and the items are downloaded again
+like any first sight. This holds when the old directory is gone, when only
+its contents are, and when both directories are; in the last case the
+folder's own row is forgotten too. The cost is that a file deleted on purpose
+while its folder was half-moved comes back once.
+
+When the old directory is gone and the journal update of a finished copy was
+lost, the files at the destination are compared with the journal's
+checksums. A file with no checksum on record is left to the ordinary mtime
+comparison instead of being taken for edited.
 
 **Strategies.** Only strategies that apply server changes locally
 (`TwoWay`, `ServerToClient`) follow an incoming rename. Under
@@ -287,20 +329,20 @@ restarts. A retired path is released when a folder is mapped to it again
 or when nothing exists there any more, so a directory created at it later
 is a new folder like any other.
 
-Native downloads use uniquely named, exclusively created neighboring staging
-files (`.uncloud-download-<uuid>.uncloud-part`) and replace the destination
-only after a complete download, keeping the permission bits of the file they
-replace. Walkers skip only that internal naming pattern, not ordinary user
+Native downloads and copies use uniquely named, exclusively created
+neighboring staging files (`.uncloud-download-<uuid>.uncloud-part`) and
+replace the destination only when complete. A download keeps the permission
+bits of the file it replaces; a copy carries those of its source. Walkers skip only that internal naming pattern, not ordinary user
 files ending in `.uncloud-part`; pre-existing neighbors and symlinks are never
 opened as staging files.
 
-A download that is killed or cancelled leaves its staging file behind. Being
+A download or copy that is killed or cancelled leaves its staging file behind. Being
 invisible to the walkers, it would keep its directory from ever being emptied:
 a folder deleted on the server could not be removed locally and would be
 created on the server again. `LocalFs::sweep_staging` therefore removes
 leftovers under every verified sync base at the start of the first run after
-the client starts, and of any run that follows one in which a download
-started. On Android downloads are spooled in the app's cache directory, and
+the client starts, and of any run that follows one in which a download or
+a copy started. On Android downloads are spooled in the app's cache directory, and
 that is what is swept there.
 
 **Conflict copies.** When both sides changed a file, the local version is

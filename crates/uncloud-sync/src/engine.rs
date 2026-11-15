@@ -162,6 +162,23 @@ fn takes_server_changes(strategy: SyncStrategy) -> bool {
     )
 }
 
+/// A copy-move that stopped on a file only the user can settle, remembered
+/// so that the next runs do not read the folder again to reach the same
+/// verdict. It holds for as long as the file's mtimes on both sides stay
+/// what they were, and for [`STUCK_MOVE_RECHECK`] at most. It only ever
+/// repeats an error; it never lets anything be copied or removed.
+struct StuckMove {
+    rel: String,
+    source_mtime: Option<i64>,
+    dest_mtime: Option<i64>,
+    reason: String,
+    checked: std::time::Instant,
+}
+
+/// How long a [`StuckMove`] stands in for reading the files again. An edit
+/// can keep an mtime, so the verdict is rechecked now and then regardless.
+const STUCK_MOVE_RECHECK: Duration = Duration::from_secs(600);
+
 /// Local SHA-256 results remembered across runs, keyed by path and valid
 /// for one mtime. Entries a run did not ask for are dropped at the start of
 /// the next one.
@@ -320,9 +337,11 @@ pub struct SyncEngine {
     delete_confirm_delay: Duration,
     failure_memo: Mutex<FailureMemo>,
     hash_cache: Mutex<HashCache>,
-    /// Whether a download may have left a staging file behind: true until
-    /// the first sweep, since a previous process may have died mid-download,
-    /// and again from the moment any download starts.
+    /// Stuck copy-moves by move intent key.
+    stuck_moves: Mutex<HashMap<String, StuckMove>>,
+    /// Whether a download or copy may have left a staging file behind: true
+    /// until the first sweep, since a previous process may have died in the
+    /// middle of one, and again from the moment any of them starts.
     staging_dirty: AtomicBool,
 }
 
@@ -398,6 +417,7 @@ impl SyncEngine {
             delete_confirm_delay: DEFAULT_DELETE_CONFIRM_DELAY,
             failure_memo: Mutex::new(FailureMemo::default()),
             hash_cache: Mutex::new(HashCache::default()),
+            stuck_moves: Mutex::new(HashMap::new()),
             staging_dirty: AtomicBool::new(true),
         })
     }
@@ -917,6 +937,121 @@ impl SyncEngine {
         }
     }
 
+    /// The remembered verdict on a stuck copy-move, if the file it stopped
+    /// on still has the mtimes it had then. `mtimes` gives a file's current
+    /// mtime at the source and at the destination.
+    fn stuck_reason(
+        &self,
+        move_key: &str,
+        mtimes: impl Fn(&str) -> (Option<i64>, Option<i64>),
+    ) -> Option<String> {
+        let mut stuck = self.stuck_moves.lock().unwrap();
+        let memo = stuck.get(move_key)?;
+        if memo.checked.elapsed() < STUCK_MOVE_RECHECK
+            && mtimes(&memo.rel) == (memo.source_mtime, memo.dest_mtime)
+        {
+            return Some(memo.reason.clone());
+        }
+        stuck.remove(move_key);
+        None
+    }
+
+    /// Remember that a copy-move cannot go on until the user settles `rel`,
+    /// and return the error to report.
+    fn stuck_on(
+        &self,
+        move_key: &str,
+        rel: &str,
+        (source_mtime, dest_mtime): (Option<i64>, Option<i64>),
+        reason: String,
+    ) -> LocalFsError {
+        self.stuck_moves.lock().unwrap().insert(
+            move_key.to_owned(),
+            StuckMove {
+                rel: rel.to_owned(),
+                source_mtime,
+                dest_mtime,
+                reason: reason.clone(),
+                checked: std::time::Instant::now(),
+            },
+        );
+        LocalFsError::other(reason)
+    }
+
+    /// Whether `short` holds the beginning of `long` and nothing else, and
+    /// is the shorter of the two. That is what a copy cut off part-way
+    /// leaves behind, since copies are written front to back.
+    async fn is_strict_prefix(&self, short: &str, long: &str) -> Result<bool, LocalFsError> {
+        let mut short = self.fs.read_stream(short).await?;
+        let mut long = self.fs.read_stream(long).await?;
+        let mut ahead = bytes::Bytes::new();
+        while let Some(chunk) = short.next().await {
+            let mut chunk = chunk?;
+            while !chunk.is_empty() {
+                if ahead.is_empty() {
+                    match long.next().await {
+                        Some(next) => ahead = next?,
+                        None => return Ok(false),
+                    }
+                    continue;
+                }
+                let shared = chunk.len().min(ahead.len());
+                if chunk.split_to(shared) != ahead.split_to(shared) {
+                    return Ok(false);
+                }
+            }
+        }
+        while ahead.is_empty() {
+            match long.next().await {
+                Some(next) => ahead = next?,
+                None => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
+    /// Journal rows of the folder at `from` that have nothing at the
+    /// matching place under `to`: files and subfolders, and the folder's own
+    /// row when `to` itself is gone.
+    async fn rows_missing_at(
+        &self,
+        from: &str,
+        to: &str,
+        rows: &HashMap<(String, String), SyncStateRow>,
+    ) -> Result<Vec<(String, String)>, LocalFsError> {
+        let listing = |entries: Vec<String>| -> HashSet<String> {
+            entries
+                .into_iter()
+                .map(|rel| rel.replace('\\', "/"))
+                .collect()
+        };
+        let exists = self.fs.is_dir(to).await?;
+        let (files, dirs) = if exists {
+            let files = self.fs.walk(to).await?;
+            (
+                listing(files.into_iter().map(|file| file.rel_path).collect()),
+                listing(self.fs.walk_dirs(to).await?),
+            )
+        } else {
+            (HashSet::new(), HashSet::new())
+        };
+        Ok(rows
+            .values()
+            .filter_map(|row| {
+                let present = if row.local_path == from {
+                    exists
+                } else {
+                    let rel = relative_under(&row.local_path, from)?;
+                    match row.item_type.as_str() {
+                        "file" => files.contains(&rel),
+                        _ => dirs.contains(&rel),
+                    }
+                };
+                (!present).then(|| (row.server_id.clone(), row.item_type.clone()))
+            })
+            .collect())
+    }
+
     /// Whether `dir` holds every file in `files` at the same relative path,
     /// with the same mtime and the same content. `listing` is the walk of
     /// `dir`, keyed by `/`-separated relative path.
@@ -1086,8 +1221,10 @@ impl SyncEngine {
     /// `tracked` maps each file the journal tracks in the folder to the
     /// checksum it last synced. A destination file that differs from its
     /// source is settled by that checksum: whichever side still matches it
-    /// is the stale one. `in_flight` names a possibly incomplete destination:
-    /// a differing copy is ambiguous and must be kept for manual resolution.
+    /// is the stale one. `in_flight` names the destination an interrupted run
+    /// was writing. If it differs from its source it is copied again only
+    /// when it is a cut-off copy, the beginning of the source and nothing
+    /// more; anything else may be an edit and is kept for manual resolution.
     async fn move_by_copy(
         &self,
         from: &str,
@@ -1134,23 +1271,59 @@ impl SyncEngine {
             }
         };
 
+        let source_mtimes: HashMap<String, i64> = files
+            .iter()
+            .map(|file| (file.rel_path.replace('\\', "/"), file.mtime))
+            .collect();
+        let mtimes = |rel: &str| (source_mtimes.get(rel).copied(), existing.get(rel).copied());
+        if let Some(reason) = self.stuck_reason(move_key, mtimes) {
+            return Err(LocalFsError::other(reason));
+        }
+
         // Resolve the old marker before another copy can replace it: a
         // later failure must not make this ambiguous destination look edited.
+        let mut redo_in_flight = false;
         if let Some(rel) = in_flight
             .as_deref()
             .filter(|rel| existing.contains_key(*rel))
         {
             let source = self.join_rel(from, rel);
             let dest = self.join_rel(to, rel);
-            if !listed.contains(rel)
-                || self.fs.sha256(&dest).await? != self.fs.sha256(&source).await?
-            {
-                return Err(LocalFsError::other(format!(
-                    "move destination differs from its source: {}; the interrupted \
-                     copy may be incomplete or edited; both copies were kept for \
-                     manual resolution",
-                    display(&dest)
-                )));
+            let found = self.fs.sha256(&dest).await?;
+            if !listed.contains(rel) {
+                // With its original gone, the copy can only be vouched for
+                // by what was last synced.
+                if tracked.get(rel).and_then(Option::as_deref) != Some(found.as_str()) {
+                    return Err(self.stuck_on(
+                        move_key,
+                        rel,
+                        mtimes(rel),
+                        format!(
+                            "interrupted copy at {} needs manual resolution: its original \
+                             is gone, so it cannot be told whether the copy is complete. \
+                             Remove it to have the file downloaded again, after saving \
+                             any changes it holds somewhere else",
+                            display(&dest)
+                        ),
+                    ));
+                }
+            } else if found != self.fs.sha256(&source).await? {
+                if !self.is_strict_prefix(&dest, &source).await? {
+                    return Err(self.stuck_on(
+                        move_key,
+                        rel,
+                        mtimes(rel),
+                        format!(
+                            "move destination differs from its source: {dest}; the \
+                             interrupted copy was edited since, so it needs manual \
+                             resolution. Remove it to have {source} copied again, or \
+                             make the two identical; nothing was overwritten",
+                            dest = display(&dest),
+                            source = display(&source)
+                        ),
+                    ));
+                }
+                redo_in_flight = true;
             }
         }
 
@@ -1168,18 +1341,32 @@ impl SyncEngine {
             }
             let copy = match existing.get(&rel) {
                 None => true,
+                // Found above to be a cut-off copy of this very file.
+                Some(_) if redo_in_flight && in_flight.as_deref() == Some(rel.as_str()) => true,
                 Some(_) => {
                     // These hashes authorize overwrites, so a cached mtime
                     // is not sufficient evidence that either copy is stale.
                     let found = self.fs.sha256(&dest).await?;
                     let wanted = self.fs.sha256(&source).await?;
+                    let unsettled = |why: &str| {
+                        self.stuck_on(
+                            move_key,
+                            &rel,
+                            mtimes(&rel),
+                            format!(
+                                "move destination differs from its source: {dest}; {why}, \
+                                 so it needs manual resolution. Remove the one to discard \
+                                 ({dest} or {source}), or make the two identical; both \
+                                 copies were kept",
+                                dest = display(&dest),
+                                source = display(&source)
+                            ),
+                        )
+                    };
                     if found != wanted && in_flight.as_deref() == Some(rel.as_str()) {
-                        return Err(LocalFsError::other(format!(
-                            "move destination differs from its source: {}; the interrupted \
-                             copy may be incomplete or edited; both copies were kept for \
-                             manual resolution",
-                            display(&dest)
-                        )));
+                        return Err(unsettled(
+                            "the interrupted copy changed while being checked",
+                        ));
                     }
                     match tracked.get(&rel).and_then(Option::as_deref) {
                         _ if found == wanted => false,
@@ -1188,23 +1375,32 @@ impl SyncEngine {
                             dest_is_newer.insert(file.rel_path.as_str());
                             false
                         }
-                        _ => {
-                            return Err(LocalFsError::other(format!(
-                                "move destination differs from its source: {}; both copies \
-                                 were kept",
-                                display(&dest)
-                            )))
+                        Some(_) => return Err(unsettled("both were edited")),
+                        None => {
+                            return Err(unsettled(
+                                "there is no synced version on record to compare them with",
+                            ))
                         }
                     }
                 }
             };
             if copy {
-                // A marked destination may be truncated or edited. Recovery
-                // must not treat this marker as permission to overwrite it.
+                // The marker names a destination that may be incomplete. It
+                // is not by itself permission to overwrite that file later.
                 record(Some(&rel)).await?;
                 marked = true;
                 self.forget_checksums([dest.as_str()]);
-                self.fs.copy_file(&source, &dest).await?;
+                self.staging_dirty.store(true, Ordering::SeqCst);
+                if let Err(e) = self.fs.copy_file(&source, &dest).await {
+                    // Whatever is at the destination now is what this call
+                    // wrote over a file that was absent or already vouched
+                    // stale. Only here, before anyone could have edited it,
+                    // is it certain that removing it loses nothing.
+                    if let Err(left) = self.fs.remove_file(&dest).await {
+                        warn!("could not clear an incomplete copy: {left}");
+                    }
+                    return Err(e);
+                }
             }
         }
         if marked {
@@ -1763,24 +1959,54 @@ impl SyncEngine {
                         // The filesystem move may have completed before its
                         // journal transaction. Rebuild content evidence rather
                         // than completing it with stale pre-copy mtimes.
-                        for file in self.fs.walk(&to).await? {
-                            let rel = file.rel_path.replace('\\', "/");
-                            let Some(synced) = tracked.get(&rel) else {
-                                continue;
+                        let mut arrived = self.fs.walk(&to).await?;
+                        for file in &mut arrived {
+                            file.rel_path = file.rel_path.replace('\\', "/");
+                        }
+                        // The file an interrupted run was writing comes
+                        // first: if it cannot be vouched for, nothing else
+                        // needs to be read.
+                        arrived.sort_by_key(|file| in_flight.as_deref() != Some(&file.rel_path));
+                        let mtimes = |rel: &str| {
+                            let at_dest = arrived.iter().find(|file| file.rel_path == rel);
+                            (None, at_dest.map(|file| file.mtime))
+                        };
+                        if let Some(reason) = self.stuck_reason(&move_key, mtimes) {
+                            return Err(LocalFsError::other(reason));
+                        }
+                        for file in &arrived {
+                            let rel = &file.rel_path;
+                            let interrupted = in_flight.as_deref() == Some(rel.as_str());
+                            let synced = match tracked.get(rel) {
+                                Some(Some(synced)) => synced,
+                                // Without a synced checksum the content says
+                                // nothing; the mtime comparison decides, as
+                                // it does for any other file.
+                                Some(None) if !interrupted => continue,
+                                Some(None) => "",
+                                None => continue,
                             };
-                            let found = self.fs.sha256(&self.join_rel(&to, &rel)).await?;
-                            if in_flight.as_deref() == Some(rel.as_str())
-                                && synced.as_deref() != Some(found.as_str())
-                            {
-                                return Err(LocalFsError::other(format!(
-                                    "interrupted copy at {} needs manual resolution",
-                                    self.relative_display_path(&self.join_rel(&to, &rel))
-                                )));
+                            let dest = self.join_rel(&to, rel);
+                            let found = self.fs.sha256(&dest).await?;
+                            if interrupted && found != synced {
+                                return Err(self.stuck_on(
+                                    &move_key,
+                                    rel,
+                                    mtimes(rel),
+                                    format!(
+                                        "interrupted copy at {} needs manual resolution: its \
+                                         original is gone, so it cannot be told whether the \
+                                         copy is complete. Remove it to have the file \
+                                         downloaded again, after saving any changes it holds \
+                                         somewhere else",
+                                        self.relative_display_path(&dest)
+                                    ),
+                                ));
                             }
                             copied.push(MovedFile {
-                                rel,
+                                rel: rel.clone(),
                                 mtime: file.mtime,
-                                content: if synced.as_deref() == Some(found.as_str()) {
+                                content: if found == synced {
                                     MovedContent::Unchanged
                                 } else {
                                     MovedContent::Edited
@@ -1810,6 +2036,19 @@ impl SyncEngine {
             }
         }
         .await;
+        // A copy that was interrupted may never have carried some files
+        // across, and the user may since have cleared the old directory as
+        // a leftover. Their rows must not follow the folder: they would read
+        // as local deletions and take the server copies with them. Forgotten
+        // instead, the items are downloaded again like any first sight.
+        let mut never_arrived: Vec<(String, String)> = Vec::new();
+        let result = match result {
+            Ok(()) if copying => self
+                .rows_missing_at(&from, &to, rows)
+                .await
+                .map(|keys| never_arrived = keys),
+            other => other,
+        };
         if let Err(e) = result {
             self.report_skipped(&from, failed(e.to_string()), report)
                 .await;
@@ -1819,11 +2058,16 @@ impl SyncEngine {
         if in_two_steps {
             return Ok(Relocation::Deferred(folder.id.clone()));
         }
+        for key in never_arrived {
+            self.journal.delete(&key.0, &key.1).await?;
+            rows.remove(&key);
+        }
 
         // Also completes a move interrupted between the filesystem and the
         // journal: the old directory is gone and the new one exists.
         self.rebase_rows(&folder.id, &from, &to, rows, &copied)
             .await?;
+        self.stuck_moves.lock().unwrap().remove(&move_key);
         Ok(Relocation::Progress)
     }
 
@@ -2744,6 +2988,7 @@ impl SyncEngine {
                                 // The copy is the only place the local
                                 // version survives the download, so without
                                 // it the local file is left as it is.
+                                self.staging_dirty.store(true, Ordering::SeqCst);
                                 let downloaded =
                                     match self.fs.copy_file(local_path, &conflict_path).await {
                                         Ok(()) => self.download_to(&file.id, local_path).await,
@@ -4339,6 +4584,46 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         assert_eq!(engine.local_checksum(path, 10).await.unwrap(), first);
         assert!(engine.local_checksum(path, 11).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn only_the_beginning_of_a_file_counts_as_a_cut_off_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SyncEngine::new(
+            &dir.path().join("sync.db"),
+            Arc::new(Client::new("http://127.0.0.1:9")),
+            None,
+        )
+        .await
+        .unwrap();
+        // Longer than two read chunks, so the comparison crosses them.
+        let whole: Vec<u8> = (0..700_000u32).map(|i| (i % 251) as u8).collect();
+        let source = dir.path().join("source.bin");
+        std::fs::write(&source, &whole).unwrap();
+        let mut edited = whole[..300_000].to_vec();
+        edited[299_999] ^= 1;
+        let mut longer = whole.clone();
+        longer.push(0);
+        for (case, content, expected) in [
+            ("nothing written yet", &[][..], true),
+            ("stopped inside a chunk", &whole[..300_000], true),
+            ("stopped one byte short", &whole[..699_999], true),
+            ("complete", &whole[..], false),
+            ("changed in its last byte", &edited[..], false),
+            ("longer than the source", &longer[..], false),
+        ] {
+            let dest = dir.path().join("dest.bin");
+            std::fs::write(&dest, content).unwrap();
+            let found = engine
+                .is_strict_prefix(dest.to_str().unwrap(), source.to_str().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(found, expected, "{case}");
+        }
+        let empty = dir.path().join("empty.bin");
+        std::fs::write(&empty, b"").unwrap();
+        let path = empty.to_str().unwrap();
+        assert!(!engine.is_strict_prefix(path, path).await.unwrap());
     }
 
     #[test]
