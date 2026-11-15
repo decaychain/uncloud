@@ -136,7 +136,12 @@ impl LocalFs for FaultyFs {
     }
 
     async fn walk_dirs(&self, root: &str) -> Result<Vec<String>, LocalFsError> {
-        self.inner.walk_dirs(root).await
+        let mut entries = self.inner.walk_dirs(root).await?;
+        entries.retain(|rel| {
+            self.check("hide_from_walk", &self.inner.join(root, rel))
+                .is_ok()
+        });
+        Ok(entries)
     }
 
     async fn create_dir_all(&self, path: &str) -> Result<(), LocalFsError> {
@@ -879,12 +884,19 @@ async fn resumed_copy_carries_an_edit_made_to_either_copy() {
 ///   - the copy returned an error: the engine wrote those bytes a moment
 ///     ago, so it removes them and the next run copies the file again;
 ///   - the client was killed: after a restart the truncated file is still
-///     the beginning of its source and nothing more, and is copied again;
-///   - it was edited after the interruption: it could be the only copy of
-///     that edit, so both files wait for the user.
+///     possibly edited, even if it is a strict prefix of its source;
+///   - a differing destination waits for the user, including a deliberately
+///     shortened or emptied copy; an identical one can be reused.
 #[tokio::test]
-async fn copy_cut_off_mid_file_is_redone_unless_it_was_edited_since() {
-    for scenario in ["error", "killed", "edited"] {
+async fn interrupted_copy_preserves_ambiguous_destinations_until_resolved() {
+    for scenario in [
+        "error",
+        "killed",
+        "edited",
+        "truncated",
+        "emptied",
+        "identical",
+    ] {
         let server = FakeServer::with_tree(
             vec![
                 server_file("first", "a.txt", Some("parent"), b"first file"),
@@ -919,21 +931,25 @@ async fn copy_cut_off_mid_file_is_redone_unless_it_was_edited_since() {
         assert_eq!(pending_move_intents(&rig).await, 1);
         drop(engine);
 
-        if scenario == "edited" {
-            std::fs::write(new.join("b.txt"), b"second thoughts").unwrap();
+        let expected: &[u8] = match scenario {
+            "edited" => b"second thoughts",
+            "truncated" => b"sec",
+            "emptied" => b"",
+            "identical" => b"second file",
+            _ => b"secon",
+        };
+        if !matches!(scenario, "error" | "killed") {
+            std::fs::write(new.join("b.txt"), expected).unwrap();
         }
         fs.failures.write().unwrap().clear();
         let engine = build_engine_with_fs(&rig, fs).await;
-        if scenario == "edited" {
+        if !matches!(scenario, "error" | "identical") {
             for _ in 0..2 {
                 let report = engine.incremental_sync().await.unwrap();
                 assert_eq!(report.errors.len(), 1, "{report:?}");
                 assert!(report.errors[0].reason.contains("manual resolution"));
                 assert!(report.uploaded.is_empty());
-                assert_eq!(
-                    std::fs::read(new.join("b.txt")).unwrap(),
-                    b"second thoughts"
-                );
+                assert_eq!(std::fs::read(new.join("b.txt")).unwrap(), expected);
                 assert_eq!(std::fs::read(old.join("b.txt")).unwrap(), b"second file");
                 assert_eq!(pending_move_intents(&rig).await, 1);
             }
@@ -1272,6 +1288,200 @@ async fn files_an_interrupted_copy_never_carried_are_restored_not_deleted() {
         assert_eq!(handle.create_folder_hits.load(Ordering::SeqCst), 0);
         assert_eq!(pending_move_intents(&rig).await, 0);
     }
+}
+
+#[tokio::test]
+async fn missing_copy_rows_remain_recoverable_after_failed_completion() {
+    for destination_exists in [false, true] {
+        let server = FakeServer::with_folders(
+            vec![server_file("file", "note.txt", Some("child"), b"original")],
+            vec![
+                ServerFolder::root("parent"),
+                child_folder("child", "parent"),
+            ],
+        );
+        let handle = server.clone();
+        let rig = rig(server).await;
+        let engine = build_engine(&rig).await;
+        engine.incremental_sync().await.unwrap();
+        drop(engine);
+        let old = rig.root.join("parent");
+        let new = rig.root.join("renamed");
+        std::fs::remove_dir_all(&old).unwrap();
+        if destination_exists {
+            std::fs::create_dir(&new).unwrap();
+        }
+        rename_on_server(&handle, "parent", "renamed", None).await;
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", rig.db_path.display()))
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sync_config (key, value) VALUES (?, ?)")
+            .bind("pending_folder_move:parent")
+            .bind(
+                serde_json::to_string(&(old.to_str().unwrap(), new.to_str().unwrap(), true))
+                    .unwrap(),
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER fail_completion BEFORE DELETE ON sync_config WHEN OLD.key = 'pending_folder_move:parent' BEGIN SELECT RAISE(ABORT, 'interrupted completion'); END")
+            .execute(&pool).await.unwrap();
+        let engine = build_engine(&rig).await;
+        assert!(engine.incremental_sync().await.is_err());
+        drop(engine);
+        let recorded: Vec<(String, String)> =
+            sqlx::query_as("SELECT server_id, local_path FROM sync_state")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(recorded.len(), 3);
+        for (id, path) in recorded {
+            let expected = match id.as_str() {
+                "parent" => old.clone(),
+                "child" => old.join("child"),
+                "file" => old.join("child/note.txt"),
+                _ => panic!("unexpected row {id}"),
+            };
+            assert_eq!(path, expected.to_str().unwrap());
+        }
+        assert_eq!(pending_move_intents(&rig).await, 1);
+        sqlx::query("DROP TRIGGER fail_completion")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        let engine = build_engine(&rig).await;
+        for _ in 0..3 {
+            let report = engine.incremental_sync().await.unwrap();
+            assert!(report.errors.is_empty(), "{report:?}");
+            assert!(report.uploaded.is_empty());
+        }
+        assert_eq!(
+            std::fs::read(new.join("child/note.txt")).unwrap(),
+            b"original"
+        );
+        assert_eq!(handle.delete_file_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(handle.delete_folder_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(handle.files.lock().await.len(), 1);
+        assert_eq!(handle.folders.lock().await.len(), 2);
+        assert_eq!(pending_move_intents(&rig).await, 0);
+    }
+}
+
+#[tokio::test]
+async fn copy_recovery_requires_confirmed_absence_for_unlisted_entries() {
+    for hidden in ["file", "folder", "unconfirmed absence"] {
+        let server = FakeServer::with_folders(
+            vec![server_file("file", "note.txt", Some("child"), b"original")],
+            vec![
+                ServerFolder::root("parent"),
+                child_folder("child", "parent"),
+            ],
+        );
+        let handle = server.clone();
+        let rig = rig(server).await;
+        let fs = Arc::new(FaultyFs::default());
+        let engine = build_engine_with_fs(&rig, fs.clone()).await;
+        engine.incremental_sync().await.unwrap();
+        let old = rig.root.join("parent");
+        let new = rig.root.join("renamed");
+        let dest = new.join("child/note.txt");
+        fs.moves_unsupported.store(true, Ordering::SeqCst);
+        fs.fail("remove_file", &old.join("child/note.txt"));
+        rename_on_server(&handle, "parent", "renamed", None).await;
+        assert_eq!(engine.incremental_sync().await.unwrap().errors.len(), 1);
+        drop(engine);
+        std::fs::remove_dir_all(&old).unwrap();
+        std::fs::write(&dest, b"unique destination edit").unwrap();
+        fs.failures.write().unwrap().clear();
+        match hidden {
+            "file" => fs.fail("hide_from_walk", &dest),
+            "folder" => fs.fail("hide_from_walk", &new.join("child")),
+            _ => {
+                std::fs::remove_file(&dest).unwrap();
+                fs.fail("confirm_absent", &dest);
+            }
+        }
+        let engine = build_engine_with_fs(&rig, fs.clone()).await;
+        for _ in 0..2 {
+            let report = engine.incremental_sync().await.unwrap();
+            assert_eq!(report.errors.len(), 1, "{hidden}: {report:?}");
+            assert!(report.uploaded.is_empty());
+            assert!(report.downloaded.is_empty());
+            assert_eq!(pending_move_intents(&rig).await, 1);
+            if hidden != "unconfirmed absence" {
+                assert_eq!(std::fs::read(&dest).unwrap(), b"unique destination edit");
+            }
+        }
+        fs.failures.write().unwrap().clear();
+        for _ in 0..3 {
+            let report = engine.incremental_sync().await.unwrap();
+            assert!(report.errors.is_empty(), "{hidden}: {report:?}");
+        }
+        let expected: &[u8] = if hidden == "unconfirmed absence" {
+            b"original"
+        } else {
+            b"unique destination edit"
+        };
+        assert_eq!(std::fs::read(&dest).unwrap(), expected);
+        assert_eq!(handle.files.lock().await["file"].bytes, expected);
+        assert_eq!(handle.delete_file_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(handle.delete_folder_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(pending_move_intents(&rig).await, 0);
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn copy_recovery_preserves_edits_in_a_directory_that_cannot_be_listed() {
+    use std::os::unix::fs::PermissionsExt;
+    let server = FakeServer::with_tree(
+        vec![server_file("file", "note.txt", Some("parent"), b"original")],
+        vec!["parent"],
+    );
+    let handle = server.clone();
+    let rig = rig(server).await;
+    let fs = Arc::new(FaultyFs::default());
+    let engine = build_engine_with_fs(&rig, fs.clone()).await;
+    engine.incremental_sync().await.unwrap();
+    let old = rig.root.join("parent");
+    let new = rig.root.join("renamed");
+    let dest = new.join("note.txt");
+    fs.moves_unsupported.store(true, Ordering::SeqCst);
+    fs.fail("remove_file", &old.join("note.txt"));
+    rename_on_server(&handle, "parent", "renamed", None).await;
+    assert_eq!(engine.incremental_sync().await.unwrap().errors.len(), 1);
+    drop(engine);
+    std::fs::remove_dir_all(&old).unwrap();
+    std::fs::write(&dest, b"unique destination edit").unwrap();
+    let permissions = std::fs::metadata(&new).unwrap().permissions();
+    std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o333)).unwrap();
+    if std::fs::read_dir(&new).is_ok() {
+        // Root can enumerate despite the mode bits.
+        std::fs::set_permissions(&new, permissions).unwrap();
+        return;
+    }
+    let engine = build_engine(&rig).await;
+    let report = engine.incremental_sync().await;
+    std::fs::set_permissions(&new, permissions).unwrap();
+    let report = report.unwrap();
+    assert_eq!(report.errors.len(), 1, "{report:?}");
+    assert!(report.errors[0]
+        .reason
+        .contains("exists but could not be listed"));
+    assert!(report.uploaded.is_empty());
+    assert!(report.downloaded.is_empty());
+    assert_eq!(std::fs::read(&dest).unwrap(), b"unique destination edit");
+    assert_eq!(pending_move_intents(&rig).await, 1);
+    let report = engine.incremental_sync().await.unwrap();
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert_eq!(report.uploaded.len(), 1);
+    assert_eq!(
+        handle.files.lock().await["file"].bytes,
+        b"unique destination edit"
+    );
+    assert_eq!(handle.delete_file_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(pending_move_intents(&rig).await, 0);
 }
 
 /// A move waiting for the user is not read again on every run: the verdict

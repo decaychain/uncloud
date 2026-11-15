@@ -237,7 +237,7 @@ unreadable directory would be left behind while its journal row followed the
 folder, and would then be deleted on the server as missing.
 
 A copy that fails must not leave something behind that later looks like a
-file. Three things keep that from needing the user:
+file. Two paths can recover without involving the user:
 
 - On desktop `NativeFs::copy_file` writes to a staging file beside the
   destination and renames it into place, so a copy that dies half-way never
@@ -247,11 +247,12 @@ file. Three things keep that from needing the user:
   the same breath. What is there at that moment is what the call just wrote
   over a file that was absent or already vouched stale, so nothing can be
   lost. The next run copies the file again.
-- When the client was killed in the middle of a copy on a backend that cannot
-  replace a file in one step (SAF), the truncated file is still there after
-  the restart. Copies are written front to back, so it is the beginning of
-  its source and nothing more. A marked destination that is such a strict
-  prefix is copied again.
+
+When the client was killed in the middle of a copy on a backend that cannot
+replace a file in one step (SAF), a truncated destination may remain after
+restart. Even a strict prefix of the source, including an empty file, can
+be a deliberate user edit. Recovery does not overwrite such a destination
+automatically; it preserves both copies for manual resolution.
 
 The intent records that a copy is under way and which file is being written.
 That marker alone is not permission to overwrite its destination, because the
@@ -262,8 +263,7 @@ fresh SHA-256 hashes:
 
 | Destination file | Outcome |
 |---|---|
-| the file that was being written when the copy stopped, and a strict prefix of its source | A cut-off copy. Copied again. The one thing this can undo is a user truncating exactly that file after the interruption; no content is lost, since the source holds all of it. |
-| the file that was being written when the copy stopped, anything else | Error; both copies are kept for manual resolution, because it was edited. An identical copy is reused, and a missing destination is copied again. |
+| the file that was being written when the copy stopped, differing from its source | Error; both copies are kept for manual resolution, because the destination may be incomplete or edited. This includes prefixes and empty files. An identical copy is reused, and a missing destination is copied again. |
 | matches the journal's checksum, source does not | The source was edited after the copy. It is copied again over the stale destination. |
 | differs, source matches the journal's checksum | The destination was edited after the copy. It is kept and the source removed. |
 | anything else (both edited, or no checksum on record) | Error: "move destination differs from its source". Both are kept for manual resolution. |
@@ -274,18 +274,20 @@ above. Once the move is done, a file known to hold what was last synced is
 recorded with the mtime it has at the new location, so a backend that cannot
 carry mtimes across (SAF) does not make it read as a local edit. A file known
 to differ is recorded so that it does read as one, even if the edit kept the
-mtime, and is uploaded. The new paths, content-derived mtimes, and removal
-of the move intent commit in one journal transaction. If that transaction
-fails or the process stops before it commits, the old paths and intent
-remain. Recovery rehashes the destination even when the old directory is
+mtime, and is uploaded. Cleanup of rows for files that never arrived, the new
+paths, content-derived mtimes, and removal of the move intent commit in one
+journal transaction. If that transaction fails or the process stops before
+it commits, the old rows, paths, mtimes, and intent remain. In particular,
+the parent row cannot disappear while child rows still await cleanup.
+Recovery rehashes the destination even when the old directory is
 already gone, preserving edited-file detection without re-uploading
 unchanged files.
 
-To resolve an interrupted copy that was edited, preserve the edited version
+To resolve an ambiguous interrupted copy, preserve any edited version
 outside the moving directories, remove the destination file, and retry sync.
 Alternatively, make the destination identical to the source. The error names
-both files and says so. Apart from a strict prefix of its source, recovery
-never discards a differing in-flight copy on its own.
+both files and says so. Recovery never discards a differing in-flight copy
+on its own.
 
 While a move waits for the user, the verdict is remembered in memory with the
 mtimes of the two files it stopped on. Later runs repeat the error without
@@ -302,8 +304,12 @@ completed from a recorded intent, rows with nothing at the matching place
 under the new path are forgotten instead, and the items are downloaded again
 like any first sight. This holds when the old directory is gone, when only
 its contents are, and when both directories are; in the last case the
-folder's own row is forgotten too. The cost is that a file deleted on purpose
-while its folder was half-moved comes back once.
+folder's own row is forgotten too. Before forgetting a row omitted from the
+destination listing, recovery confirms that nothing exists at its destination
+path. A listing error or an existing entry omitted by a walker keeps the move
+pending, without forgetting rows or downloading over local edits. Cleanup is
+part of the same transaction that completes the move. The cost is that a file
+deleted on purpose while its folder was half-moved comes back once.
 
 When the old directory is gone and the journal update of a finished copy was
 lost, the files at the destination are compared with the journal's

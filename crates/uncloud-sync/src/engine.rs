@@ -978,38 +978,6 @@ impl SyncEngine {
         LocalFsError::other(reason)
     }
 
-    /// Whether `short` holds the beginning of `long` and nothing else, and
-    /// is the shorter of the two. That is what a copy cut off part-way
-    /// leaves behind, since copies are written front to back.
-    async fn is_strict_prefix(&self, short: &str, long: &str) -> Result<bool, LocalFsError> {
-        let mut short = self.fs.read_stream(short).await?;
-        let mut long = self.fs.read_stream(long).await?;
-        let mut ahead = bytes::Bytes::new();
-        while let Some(chunk) = short.next().await {
-            let mut chunk = chunk?;
-            while !chunk.is_empty() {
-                if ahead.is_empty() {
-                    match long.next().await {
-                        Some(next) => ahead = next?,
-                        None => return Ok(false),
-                    }
-                    continue;
-                }
-                let shared = chunk.len().min(ahead.len());
-                if chunk.split_to(shared) != ahead.split_to(shared) {
-                    return Ok(false);
-                }
-            }
-        }
-        while ahead.is_empty() {
-            match long.next().await {
-                Some(next) => ahead = next?,
-                None => return Ok(false),
-            }
-        }
-        Ok(true)
-    }
-
     /// Journal rows of the folder at `from` that have nothing at the
     /// matching place under `to`: files and subfolders, and the folder's own
     /// row when `to` itself is gone.
@@ -1035,21 +1003,33 @@ impl SyncEngine {
         } else {
             (HashSet::new(), HashSet::new())
         };
-        Ok(rows
-            .values()
-            .filter_map(|row| {
-                let present = if row.local_path == from {
-                    exists
-                } else {
-                    let rel = relative_under(&row.local_path, from)?;
-                    match row.item_type.as_str() {
-                        "file" => files.contains(&rel),
-                        _ => dirs.contains(&rel),
-                    }
+        let mut missing = Vec::new();
+        for row in rows.values() {
+            let (path, present) = if row.local_path == from {
+                (to.to_owned(), exists)
+            } else if let Some(rel) = relative_under(&row.local_path, from) {
+                let present = match row.item_type.as_str() {
+                    "file" => files.contains(&rel),
+                    _ => dirs.contains(&rel),
                 };
-                (!present).then(|| (row.server_id.clone(), row.item_type.clone()))
-            })
-            .collect())
+                (self.join_rel(to, &rel), present)
+            } else {
+                continue;
+            };
+            if !present {
+                // Walkers can omit unreadable entries. Forgetting an existing
+                // file would make the next download overwrite its local edits.
+                if !self.fs.confirm_absent(&path).await? {
+                    return Err(LocalFsError::other(format!(
+                        "{} exists but could not be listed at the new location; \
+                         the move remains pending",
+                        self.relative_display_path(&path)
+                    )));
+                }
+                missing.push((row.server_id.clone(), row.item_type.clone()));
+            }
+        }
+        Ok(missing)
     }
 
     /// Whether `dir` holds every file in `files` at the same relative path,
@@ -1117,8 +1097,8 @@ impl SyncEngine {
         self.holds_tracked_files(to, &listing, &files, report).await
     }
 
-    /// Point every row at or under `from` to the same place under `to`, in
-    /// one transaction that also clears the folder's recorded move.
+    /// Rebase surviving rows under `from` to `to`, forgetting verified
+    /// absences in the same transaction that clears the recorded move.
     async fn rebase_rows(
         &self,
         folder_id: &str,
@@ -1126,6 +1106,7 @@ impl SyncEngine {
         to: &str,
         rows: &mut HashMap<(String, String), SyncStateRow>,
         copied: &[MovedFile],
+        missing: &[(String, String)],
     ) -> sqlx::Result<()> {
         // Copies can reset mtimes. Save a baseline below verified edits in
         // the path transaction, or interruption could hide those edits.
@@ -1162,8 +1143,11 @@ impl SyncEngine {
             })
             .collect();
         self.journal
-            .rebase_folder_paths(folder_id, &paths, &local_mtimes)
+            .rebase_folder_paths(folder_id, &paths, &local_mtimes, missing)
             .await?;
+        for key in missing {
+            rows.remove(key);
+        }
         for (id, item_type, path) in paths {
             if let Some(row) = rows.get_mut(&(id, item_type)) {
                 row.local_path = path;
@@ -1222,9 +1206,8 @@ impl SyncEngine {
     /// checksum it last synced. A destination file that differs from its
     /// source is settled by that checksum: whichever side still matches it
     /// is the stale one. `in_flight` names the destination an interrupted run
-    /// was writing. If it differs from its source it is copied again only
-    /// when it is a cut-off copy, the beginning of the source and nothing
-    /// more; anything else may be an edit and is kept for manual resolution.
+    /// was writing. A differing destination may be incomplete or edited,
+    /// even when it is a prefix of its source, and needs manual resolution.
     async fn move_by_copy(
         &self,
         from: &str,
@@ -1282,7 +1265,6 @@ impl SyncEngine {
 
         // Resolve the old marker before another copy can replace it: a
         // later failure must not make this ambiguous destination look edited.
-        let mut redo_in_flight = false;
         if let Some(rel) = in_flight
             .as_deref()
             .filter(|rel| existing.contains_key(*rel))
@@ -1308,22 +1290,19 @@ impl SyncEngine {
                     ));
                 }
             } else if found != self.fs.sha256(&source).await? {
-                if !self.is_strict_prefix(&dest, &source).await? {
-                    return Err(self.stuck_on(
-                        move_key,
-                        rel,
-                        mtimes(rel),
-                        format!(
-                            "move destination differs from its source: {dest}; the \
-                             interrupted copy was edited since, so it needs manual \
-                             resolution. Remove it to have {source} copied again, or \
-                             make the two identical; nothing was overwritten",
-                            dest = display(&dest),
-                            source = display(&source)
-                        ),
-                    ));
-                }
-                redo_in_flight = true;
+                return Err(self.stuck_on(
+                    move_key,
+                    rel,
+                    mtimes(rel),
+                    format!(
+                        "move destination differs from its source: {dest}; the \
+                         interrupted copy may be incomplete or edited and needs manual \
+                         resolution. Remove it to have {source} copied again, or \
+                         make the two identical; nothing was overwritten",
+                        dest = display(&dest),
+                        source = display(&source)
+                    ),
+                ));
             }
         }
 
@@ -1341,8 +1320,6 @@ impl SyncEngine {
             }
             let copy = match existing.get(&rel) {
                 None => true,
-                // Found above to be a cut-off copy of this very file.
-                Some(_) if redo_in_flight && in_flight.as_deref() == Some(rel.as_str()) => true,
                 Some(_) => {
                     // These hashes authorize overwrites, so a cached mtime
                     // is not sufficient evidence that either copy is stale.
@@ -1522,7 +1499,8 @@ impl SyncEngine {
                 if self.probe_dir(&from, report).await == Presence::Absent
                     && self.probe_dir(&to, report).await == Presence::Present
                 {
-                    self.rebase_rows(folder_id, &from, &to, rows, &[]).await?;
+                    self.rebase_rows(folder_id, &from, &to, rows, &[], &[])
+                        .await?;
                 } else {
                     self.journal.delete_config(&key).await?;
                 }
@@ -1693,7 +1671,7 @@ impl SyncEngine {
             .await;
             return Ok(false);
         }
-        self.rebase_rows(&folder.id, &from, &parked, rows, &[])
+        self.rebase_rows(&folder.id, &from, &parked, rows, &[], &[])
             .await?;
         Ok(true)
     }
@@ -2058,14 +2036,9 @@ impl SyncEngine {
         if in_two_steps {
             return Ok(Relocation::Deferred(folder.id.clone()));
         }
-        for key in never_arrived {
-            self.journal.delete(&key.0, &key.1).await?;
-            rows.remove(&key);
-        }
-
         // Also completes a move interrupted between the filesystem and the
         // journal: the old directory is gone and the new one exists.
-        self.rebase_rows(&folder.id, &from, &to, rows, &copied)
+        self.rebase_rows(&folder.id, &from, &to, rows, &copied, &never_arrived)
             .await?;
         self.stuck_moves.lock().unwrap().remove(&move_key);
         Ok(Relocation::Progress)
@@ -3489,7 +3462,7 @@ impl SyncEngine {
                         paths.push((file.id.clone(), "file".to_owned(), new_path));
                     }
                     self.journal
-                        .rebase_folder_paths(folder_id, &paths, &[])
+                        .rebase_folder_paths(folder_id, &paths, &[], &[])
                         .await?;
                     self.journal
                         .upsert(
@@ -4584,46 +4557,6 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         assert_eq!(engine.local_checksum(path, 10).await.unwrap(), first);
         assert!(engine.local_checksum(path, 11).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn only_the_beginning_of_a_file_counts_as_a_cut_off_copy() {
-        let dir = tempfile::tempdir().unwrap();
-        let engine = SyncEngine::new(
-            &dir.path().join("sync.db"),
-            Arc::new(Client::new("http://127.0.0.1:9")),
-            None,
-        )
-        .await
-        .unwrap();
-        // Longer than two read chunks, so the comparison crosses them.
-        let whole: Vec<u8> = (0..700_000u32).map(|i| (i % 251) as u8).collect();
-        let source = dir.path().join("source.bin");
-        std::fs::write(&source, &whole).unwrap();
-        let mut edited = whole[..300_000].to_vec();
-        edited[299_999] ^= 1;
-        let mut longer = whole.clone();
-        longer.push(0);
-        for (case, content, expected) in [
-            ("nothing written yet", &[][..], true),
-            ("stopped inside a chunk", &whole[..300_000], true),
-            ("stopped one byte short", &whole[..699_999], true),
-            ("complete", &whole[..], false),
-            ("changed in its last byte", &edited[..], false),
-            ("longer than the source", &longer[..], false),
-        ] {
-            let dest = dir.path().join("dest.bin");
-            std::fs::write(&dest, content).unwrap();
-            let found = engine
-                .is_strict_prefix(dest.to_str().unwrap(), source.to_str().unwrap())
-                .await
-                .unwrap();
-            assert_eq!(found, expected, "{case}");
-        }
-        let empty = dir.path().join("empty.bin");
-        std::fs::write(&empty, b"").unwrap();
-        let path = empty.to_str().unwrap();
-        assert!(!engine.is_strict_prefix(path, path).await.unwrap());
     }
 
     #[test]
