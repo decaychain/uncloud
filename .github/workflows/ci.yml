@@ -158,6 +158,10 @@ jobs:
       - name: Build desktop bundles
         env:
           UNCLOUD_DESKTOP_FALLBACK_KEY: ${{ secrets.UNCLOUD_DESKTOP_FALLBACK_KEY }}
+          # `createUpdaterArtifacts: true` makes the bundler sign, and it
+          # fails after building the packages when no key is set.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           cd crates/uncloud-desktop
           cargo tauri build --bundles deb,rpm
