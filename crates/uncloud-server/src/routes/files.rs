@@ -120,6 +120,7 @@ pub(crate) fn file_to_response(f: &File) -> FileResponse {
         parent_id: f.parent_id.map(|id| id.to_hex()),
         created_at: f.created_at.to_rfc3339(),
         updated_at: f.updated_at.to_rfc3339(),
+        checksum_sha256: None,
         captured_at: f.captured_at.map(|dt| dt.to_rfc3339()),
         metadata: f
             .metadata

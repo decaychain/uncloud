@@ -10,6 +10,10 @@ pub struct FileResponse {
     pub parent_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Lowercase hex SHA-256 of the current content. Only the sync tree
+    /// reports it, and only on servers that know the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checksum_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captured_at: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

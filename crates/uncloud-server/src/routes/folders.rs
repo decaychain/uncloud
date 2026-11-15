@@ -824,6 +824,10 @@ pub struct SyncFileEntry {
     pub parent_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Lets a client fill in journal rows that predate checksums without
+    /// reading the local file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checksum_sha256: Option<String>,
 }
 
 pub async fn sync_tree(
@@ -877,6 +881,8 @@ async fn collect_tree(
             parent_id: file.parent_id.map(|id| id.to_hex()),
             created_at: file.created_at.to_rfc3339(),
             updated_at: file.updated_at.to_rfc3339(),
+            checksum_sha256: (!file.checksum_sha256.is_empty())
+                .then(|| file.checksum_sha256.clone()),
         });
     }
 

@@ -264,6 +264,97 @@ impl Client {
         self.parse(resp).await
     }
 
+    /// Download a file by ID as a stream of chunks, so the caller decides
+    /// where the bytes go without the whole file being held in memory.
+    pub async fn download_file_stream(
+        &self,
+        id: &str,
+    ) -> Result<impl futures::Stream<Item = Result<bytes::Bytes>> + Send + 'static> {
+        use futures::StreamExt;
+
+        let resp = self
+            .http
+            .get(self.url(&format!("/api/files/{}/download", id)))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(ClientError::api(resp).await);
+        }
+        Ok(resp
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(ClientError::from)))
+    }
+
+    /// A multipart file part fed from a stream. With `length` the request
+    /// carries a `Content-Length` and the stream must yield exactly that
+    /// many bytes; without it the request goes out with chunked transfer
+    /// encoding.
+    fn stream_part<S, E>(
+        file_name: &str,
+        chunks: S,
+        length: Option<u64>,
+    ) -> reqwest::multipart::Part
+    where
+        S: futures::Stream<Item = std::result::Result<bytes::Bytes, E>> + Send + 'static,
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let body = reqwest::Body::wrap_stream(chunks);
+        match length {
+            Some(length) => reqwest::multipart::Part::stream_with_length(body, length),
+            None => reqwest::multipart::Part::stream(body),
+        }
+        .file_name(file_name.to_owned())
+    }
+
+    /// Upload a stream of chunks as a new file.
+    pub async fn upload_stream<S, E>(
+        &self,
+        file_name: &str,
+        chunks: S,
+        length: Option<u64>,
+        parent_id: Option<&str>,
+    ) -> Result<FileResponse>
+    where
+        S: futures::Stream<Item = std::result::Result<bytes::Bytes, E>> + Send + 'static,
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let part = Self::stream_part(file_name, chunks, length);
+        let mut form = reqwest::multipart::Form::new().part("file", part);
+        if let Some(pid) = parent_id {
+            form = form.text("parent_id", pid.to_owned());
+        }
+        let resp = self
+            .http
+            .post(self.url("/api/uploads/simple"))
+            .multipart(form)
+            .send()
+            .await?;
+        self.parse(resp).await
+    }
+
+    /// Replace existing file content with a stream of chunks.
+    pub async fn update_file_content_stream<S, E>(
+        &self,
+        file_id: &str,
+        file_name: &str,
+        chunks: S,
+        length: Option<u64>,
+    ) -> Result<FileResponse>
+    where
+        S: futures::Stream<Item = std::result::Result<bytes::Bytes, E>> + Send + 'static,
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let part = Self::stream_part(file_name, chunks, length);
+        let form = reqwest::multipart::Form::new().part("file", part);
+        let resp = self
+            .http
+            .post(self.url(&format!("/api/files/{}/content", file_id)))
+            .multipart(form)
+            .send()
+            .await?;
+        self.parse(resp).await
+    }
+
     pub async fn delete_file(&self, id: &str) -> Result<()> {
         let resp = self
             .http

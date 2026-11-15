@@ -408,3 +408,193 @@ async fn two_clients_share_files() {
         assert_eq!(content, format!("content {}", i).as_bytes());
     }
 }
+
+// ── Local folder rename / delete ──────────────────────────────────────────────
+
+/// The sync tree carries each file's content checksum, which clients use
+/// to fill in journal rows written before they recorded one.
+#[tokio::test]
+async fn sync_tree_reports_content_checksums() {
+    let app = BoundTestApp::new().await;
+    let client = app.setup_user("checksums").await;
+    let (engine, dir) = app.new_sync_engine(client.clone()).await;
+    tokio::fs::write(dir.path().join("note.txt"), b"content")
+        .await
+        .unwrap();
+    engine.incremental_sync().await.unwrap();
+    let tree = client.sync_tree(None).await.unwrap();
+    assert_eq!(
+        tree.files[0].checksum_sha256.as_deref(),
+        Some(
+            uncloud_sync::sha256_hex_reader(&b"content"[..])
+                .unwrap()
+                .as_str()
+        )
+    );
+}
+
+/// A file several chunks long is uploaded and downloaded as a stream and
+/// arrives intact, with the checksum each side recorded for it agreeing.
+#[tokio::test]
+async fn large_file_round_trips_between_clients() {
+    let app = BoundTestApp::new().await;
+    let client = app.setup_user("large_file").await;
+    let (first, first_dir) = app.new_sync_engine(client.clone()).await;
+    let (second, second_dir) = app.new_sync_engine(client.clone()).await;
+    let content: Vec<u8> = (0..3 * 1024 * 1024 + 17u32)
+        .map(|i| (i.wrapping_mul(31) % 251) as u8)
+        .collect();
+    tokio::fs::write(first_dir.path().join("large.bin"), &content)
+        .await
+        .unwrap();
+
+    let uploaded = first.incremental_sync().await.unwrap();
+    assert!(uploaded.errors.is_empty(), "{:?}", uploaded.errors);
+    let downloaded = second.incremental_sync().await.unwrap();
+    assert!(downloaded.errors.is_empty(), "{:?}", downloaded.errors);
+
+    assert_eq!(
+        tokio::fs::read(second_dir.path().join("large.bin"))
+            .await
+            .unwrap(),
+        content
+    );
+    let tree = client.sync_tree(None).await.unwrap();
+    assert_eq!(tree.files[0].size_bytes as usize, content.len());
+    assert_eq!(
+        tree.files[0].checksum_sha256.as_deref(),
+        Some(
+            uncloud_sync::sha256_hex_reader(&content[..])
+                .unwrap()
+                .as_str()
+        )
+    );
+    // Neither side sees the other's transfer as a change to send back.
+    for engine in [&first, &second] {
+        let settled = engine.incremental_sync().await.unwrap();
+        assert!(settled.uploaded.is_empty() && settled.downloaded.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn local_folder_rename_and_move_reach_second_client() {
+    let app = BoundTestApp::new().await;
+    let client = app.setup_user("rename_peers").await;
+    let (first, first_dir) = app.new_sync_engine(client.clone()).await;
+    let (second, second_dir) = app.new_sync_engine(client.clone()).await;
+    tokio::fs::create_dir_all(first_dir.path().join("Old/inner/empty"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir(first_dir.path().join("Archive"))
+        .await
+        .unwrap();
+    tokio::fs::write(first_dir.path().join("Old/inner/note.txt"), b"content")
+        .await
+        .unwrap();
+    first.incremental_sync().await.unwrap();
+    second.incremental_sync().await.unwrap();
+    let initial = client.sync_tree(None).await.unwrap();
+    for (from, to) in [("Old", "New"), ("New", "Archive/New")] {
+        tokio::fs::rename(first_dir.path().join(from), first_dir.path().join(to))
+            .await
+            .unwrap();
+        let renamed = first.incremental_sync().await.unwrap();
+        assert_eq!(renamed.renamed_remote_folders.len(), 1, "{:?}", renamed);
+        let received = second.incremental_sync().await.unwrap();
+        assert!(received.errors.is_empty(), "{:?}", received.errors);
+        assert_eq!(
+            tokio::fs::read(second_dir.path().join(to).join("inner/note.txt"))
+                .await
+                .unwrap(),
+            b"content"
+        );
+        assert!(second_dir.path().join(to).join("inner/empty").is_dir());
+        assert!(!second_dir.path().join(from).exists());
+        assert!(received.uploaded.is_empty());
+        assert!(received.downloaded.is_empty());
+        assert!(received.created_remote_folders.is_empty());
+        first.incremental_sync().await.unwrap();
+        second.incremental_sync().await.unwrap();
+        let settled = client.sync_tree(None).await.unwrap();
+        assert_eq!(settled.files.len(), initial.files.len());
+        assert_eq!(settled.folders.len(), initial.folders.len());
+        assert_eq!(settled.files[0].id, initial.files[0].id);
+    }
+}
+
+/// Renaming a synced folder locally renames the server folder in place:
+/// the folder and its file keep their ids and nothing is re-uploaded.
+#[tokio::test]
+async fn local_folder_rename_renames_server_folder() {
+    let app = BoundTestApp::new().await;
+    let client = app.setup_user("rena").await;
+    let (engine, sync_dir) = app.new_sync_engine(Arc::clone(&client)).await;
+
+    let old_path = sync_dir.path().join("Old name");
+    tokio::fs::create_dir(&old_path).await.unwrap();
+    tokio::fs::write(old_path.join("note.txt"), b"hello")
+        .await
+        .unwrap();
+    engine.incremental_sync().await.unwrap();
+
+    let folders = client.list_folders(None).await.unwrap();
+    assert_eq!(folders.len(), 1);
+    let folder_id = folders[0].id.clone();
+    let files = client.list_files(Some(&folder_id)).await.unwrap();
+    assert_eq!(files.len(), 1);
+    let file_id = files[0].id.clone();
+
+    tokio::fs::rename(&old_path, sync_dir.path().join("New name"))
+        .await
+        .unwrap();
+    let report = engine.incremental_sync().await.unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.renamed_remote_folders.len(), 1);
+    assert!(report.uploaded.is_empty(), "{:?}", report.uploaded);
+
+    let settled = engine.incremental_sync().await.unwrap();
+    assert!(settled.errors.is_empty(), "{:?}", settled.errors);
+    assert!(settled.uploaded.is_empty());
+    assert!(settled.downloaded.is_empty());
+    assert!(!old_path.exists());
+
+    let folders = client.list_folders(None).await.unwrap();
+    assert_eq!(folders.len(), 1);
+    assert_eq!(folders[0].id, folder_id);
+    assert_eq!(folders[0].name, "New name");
+    let files = client.list_files(Some(&folder_id)).await.unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].id, file_id);
+}
+
+/// Deleting a synced folder locally removes it from the server with one
+/// cascading delete once the absence is confirmed, and not before.
+#[tokio::test]
+async fn local_folder_delete_removes_server_folder_once_confirmed() {
+    let app = BoundTestApp::new().await;
+    let client = app.setup_user("delia").await;
+    let (engine, sync_dir) = app.new_sync_engine(Arc::clone(&client)).await;
+    let engine = engine.with_delete_confirm_delay(Duration::ZERO);
+
+    let folder = sync_dir.path().join("documents");
+    tokio::fs::create_dir(&folder).await.unwrap();
+    tokio::fs::write(folder.join("inside.txt"), b"contents")
+        .await
+        .unwrap();
+    engine.incremental_sync().await.unwrap();
+    assert_eq!(client.list_folders(None).await.unwrap().len(), 1);
+
+    tokio::fs::remove_dir_all(&folder).await.unwrap();
+
+    let first = engine.incremental_sync().await.unwrap();
+    assert!(first.errors.is_empty(), "{:?}", first.errors);
+    assert!(first.deleted_local.is_empty());
+    assert_eq!(client.list_folders(None).await.unwrap().len(), 1);
+    assert!(!folder.exists(), "the folder must not be re-downloaded");
+
+    let second = engine.incremental_sync().await.unwrap();
+    assert!(second.errors.is_empty(), "{:?}", second.errors);
+    assert_eq!(second.deleted_local, vec!["documents"]);
+    assert!(client.list_folders(None).await.unwrap().is_empty());
+    assert!(!folder.exists());
+}

@@ -123,6 +123,15 @@ End-to-end coverage of the two-way sync algorithm in `uncloud-sync` against a re
 | `server_to_client_folder_blocks_local_upload` | one-way strategy enforced |
 | `idempotent_sync` | second run is a no-op |
 | `two_clients_share_files` | bidirectional propagation between two engines |
+| `local_folder_rename_renames_server_folder` | local rename → server rename in place, ids kept, nothing re-uploaded |
+| `large_file_round_trips_between_clients` | a multi-megabyte file is uploaded and downloaded as a stream and arrives intact |
+| `sync_tree_reports_content_checksums` | the tree carries each file's SHA-256, used to fill in journal rows that predate checksums |
+| `local_folder_rename_and_move_reach_second_client` | incoming rename/move relocates nested contents and empty folders without recreating the old remote name |
+| `local_folder_delete_removes_server_folder_once_confirmed` | local folder delete → one cascading server delete after confirmation |
+
+The engine's deletion, restore and rename rules are covered in more depth by `crates/uncloud-sync/tests/` (`local_deletion_tracking.rs`, `client_creates_local.rs`), which run against an in-process fake server and need no containers: `cargo test -p uncloud-sync`.
+
+Regression coverage includes interrupted copy moves with edits at either location or both, error cleanup and manual resolution of ambiguous copies after a kill (including shortened and empty destination edits), a killed re-copy over a destination that still holds the synced content being redone, files an interrupted copy never carried being downloaded again instead of deleted on the server, unlisted destination files and folders requiring confirmed absence before their rows are forgotten, a native directory that permits direct file access but not enumeration, a stuck move not being re-read on every run, a recovered move leaving files without a recorded checksum alone, same-mtime edits after a failed recovery, restart after a failed move-completion transaction including missing-row cleanup, folders a copy cannot carry in full (symlinks, files the walk did not list), source edits that preserve mtimes, case-only renames on a backend that needs a temporary name, swapped folders with subfolders, rejection of unrelated destinations for empty folders, repeated custom-path remapping across restarts and the release of retired paths, leftover download files in a folder the server deleted, a conflict copy that cannot be written, and uploads that declare their length. Filesystem tests check staging-file isolation and sweeping, a copy replacing its destination in one step, permission bits surviving a download, and what a copy would leave behind; journal tests check atomic retirement of old mapping paths and atomic completion of missing-row cleanup, paths, mtimes, and move intents, with failures injected at every stage.
 
 ### Storage migration (`tests/storage_migration.rs`)
 

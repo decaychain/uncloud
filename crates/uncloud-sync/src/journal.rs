@@ -1,6 +1,8 @@
 use chrono::Utc;
 use sqlx::SqlitePool;
 
+const RETIRED_PATH_PREFIX: &str = "retired_local_path:";
+
 /// Status of a single item in the sync journal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncStatus {
@@ -309,6 +311,78 @@ impl Journal {
         Ok(())
     }
 
+    pub async fn delete_config(&self, key: &str) -> sqlx::Result<()> {
+        sqlx::query("DELETE FROM sync_config WHERE key = ?")
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Every `(key, value)` whose key starts with `prefix`.
+    pub async fn configs_with_prefix(&self, prefix: &str) -> sqlx::Result<Vec<(String, String)>> {
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT key, value FROM sync_config WHERE substr(key, 1, ?) = ?")
+                .bind(prefix.len() as i64)
+                .bind(prefix)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows)
+    }
+
+    /// Keep a detached directory out of discovery even after its rows are
+    /// forgotten, including if the client stops midway through remapping.
+    pub async fn retire_folder_path(
+        &self,
+        path: &str,
+        keys: &[(String, String)],
+    ) -> sqlx::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("INSERT OR REPLACE INTO sync_config (key, value) VALUES (?, ?)")
+            .bind(format!("{RETIRED_PATH_PREFIX}{path}"))
+            .bind(path)
+            .execute(&mut *tx)
+            .await?;
+        for (server_id, item_type) in keys {
+            sqlx::query("DELETE FROM sync_state WHERE server_id = ? AND item_type = ?")
+                .bind(server_id)
+                .bind(item_type)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await
+    }
+
+    pub async fn forget_retired_path(&self, path: &str) -> sqlx::Result<()> {
+        self.delete_config(&format!("{RETIRED_PATH_PREFIX}{path}"))
+            .await
+    }
+
+    pub async fn retired_local_paths(&self) -> sqlx::Result<Vec<String>> {
+        Ok(self
+            .configs_with_prefix(RETIRED_PATH_PREFIX)
+            .await?
+            .into_iter()
+            .map(|(_, path)| path)
+            .collect())
+    }
+
+    /// Record content checksums for file rows that have none yet.
+    pub async fn fill_missing_checksums(&self, checksums: &[(String, String)]) -> sqlx::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for (server_id, checksum) in checksums {
+            sqlx::query(
+                "UPDATE sync_state SET checksum = ? \
+                 WHERE server_id = ? AND item_type = 'file' AND checksum IS NULL",
+            )
+            .bind(checksum)
+            .bind(server_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await
+    }
+
     /// All distinct non-NULL `local_path` overrides across every folder.
     /// Used by sentinel verification to enumerate Android's per-folder SAF
     /// picks (each is its own physical sync base).
@@ -370,6 +444,21 @@ impl Journal {
         local_path: Option<&str>,
     ) -> sqlx::Result<()> {
         let now = Utc::now().to_rfc3339();
+        let mut tx = self.pool.begin().await?;
+        let previous: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT local_path FROM folder_sync_config WHERE folder_id = ?")
+                .bind(folder_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if let Some((Some(path),)) = previous {
+            if Some(path.as_str()) != local_path {
+                sqlx::query("INSERT OR REPLACE INTO sync_config (key, value) VALUES (?, ?)")
+                    .bind(format!("{RETIRED_PATH_PREFIX}{path}"))
+                    .bind(path)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
         sqlx::query(
             r#"
             INSERT INTO folder_sync_config (folder_id, strategy, local_path, updated_at)
@@ -382,9 +471,9 @@ impl Journal {
         .bind(folder_id)
         .bind(local_path)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        Ok(())
+        tx.commit().await
     }
 
     // ── sync_bases ────────────────────────────────────────────────────────
@@ -432,6 +521,94 @@ impl Journal {
             instance_id: instance_id.to_owned(),
             created_at: now,
         })
+    }
+
+    /// Record that a tracked file is being brought back from the server.
+    /// Persisted before the download starts so a failed or half-written
+    /// download is retried as a download, even across restarts, instead of
+    /// the leftover being compared against the journal as a local edit.
+    pub async fn set_pending_download(&self, server_id: &str, item_type: &str) -> sqlx::Result<()> {
+        sqlx::query(
+            "UPDATE sync_state SET sync_status = ?, delete_pending_since = NULL \
+             WHERE server_id = ? AND item_type = ?",
+        )
+        .bind(SyncStatus::PendingDownload.as_str())
+        .bind(server_id)
+        .bind(item_type)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Commit missing-row cleanup, paths and content-derived mtimes before
+    /// clearing the intent, so interruption cannot lose recovery state.
+    pub async fn rebase_folder_paths(
+        &self,
+        folder_id: &str,
+        paths: &[(String, String, String)],
+        local_mtimes: &[(String, i64)],
+        missing: &[(String, String)],
+    ) -> sqlx::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        for (id, item_type) in missing {
+            sqlx::query("DELETE FROM sync_state WHERE server_id = ? AND item_type = ?")
+                .bind(id)
+                .bind(item_type)
+                .execute(&mut *tx)
+                .await?;
+        }
+        for (id, item_type, path) in paths {
+            sqlx::query("UPDATE sync_state SET local_path = ?, delete_pending_since = NULL WHERE server_id = ? AND item_type = ?")
+                .bind(path).bind(id).bind(item_type).execute(&mut *tx).await?;
+        }
+        for (id, mtime) in local_mtimes {
+            sqlx::query(
+                "UPDATE sync_state SET local_mtime = ? WHERE server_id = ? AND item_type = 'file'",
+            )
+            .bind(mtime)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query("DELETE FROM sync_config WHERE key = ?")
+            .bind(format!("pending_folder_move:{folder_id}"))
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await
+    }
+
+    // ── folder_effective_strategy ─────────────────────────────────────────
+
+    /// Effective strategy every folder had when the previous run finished
+    /// resolving them, keyed by folder id.
+    pub async fn effective_strategies_seen(
+        &self,
+    ) -> sqlx::Result<std::collections::HashMap<String, String>> {
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT folder_id, strategy FROM folder_effective_strategy")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().collect())
+    }
+
+    pub async fn replace_effective_strategies_seen(
+        &self,
+        strategies: &std::collections::HashMap<String, String>,
+    ) -> sqlx::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM folder_effective_strategy")
+            .execute(&mut *tx)
+            .await?;
+        for (folder_id, strategy) in strategies {
+            sqlx::query(
+                "INSERT INTO folder_effective_strategy (folder_id, strategy) VALUES (?, ?)",
+            )
+            .bind(folder_id)
+            .bind(strategy)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await
     }
 
     // ── delete_pending_since ──────────────────────────────────────────────
@@ -599,6 +776,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn changed_path_overrides_retire_old_locations_without_changing_strategy() {
+        let (j, _d) = fresh_journal().await;
+        j.set_folder_local_strategy("folder", Some("upload_only"))
+            .await
+            .unwrap();
+        j.set_folder_local_path("folder", Some("/old"))
+            .await
+            .unwrap();
+        j.set_folder_local_path("folder", Some("/old"))
+            .await
+            .unwrap();
+        assert!(j.retired_local_paths().await.unwrap().is_empty());
+        j.set_folder_local_path("folder", Some("/new"))
+            .await
+            .unwrap();
+        assert_eq!(j.retired_local_paths().await.unwrap(), ["/old"]);
+        assert_eq!(
+            j.get_folder_sync_config("folder").await.unwrap(),
+            Some((Some("upload_only".to_owned()), Some("/new".to_owned())))
+        );
+        j.set_folder_local_path("folder", None).await.unwrap();
+        let mut retired = j.retired_local_paths().await.unwrap();
+        retired.sort();
+        assert_eq!(retired, ["/new", "/old"]);
+    }
+
+    #[tokio::test]
+    async fn failed_mapping_change_does_not_retire_the_current_path() {
+        let (j, _d) = fresh_journal().await;
+        j.set_folder_local_path("folder", Some("/old"))
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER fail_mapping BEFORE UPDATE OF local_path ON folder_sync_config BEGIN SELECT RAISE(ABORT, 'injected failure'); END")
+            .execute(&j.pool).await.unwrap();
+        assert!(j
+            .set_folder_local_path("folder", Some("/new"))
+            .await
+            .is_err());
+        assert!(j.retired_local_paths().await.unwrap().is_empty());
+        assert_eq!(
+            j.get_folder_sync_config("folder").await.unwrap(),
+            Some((None, Some("/old".to_owned())))
+        );
+    }
+
+    #[tokio::test]
+    async fn retiring_a_folder_and_forgetting_its_rows_is_atomic() {
+        let (j, _d) = fresh_journal().await;
+        seed_row(&j, "one", "/old/one").await;
+        seed_row(&j, "two", "/old/two").await;
+        let keys = [
+            ("one".to_owned(), "file".to_owned()),
+            ("two".to_owned(), "file".to_owned()),
+        ];
+        sqlx::query("CREATE TRIGGER fail_forget BEFORE DELETE ON sync_state WHEN OLD.server_id = 'two' BEGIN SELECT RAISE(ABORT, 'injected failure'); END")
+            .execute(&j.pool).await.unwrap();
+        assert!(j.retire_folder_path("/old", &keys).await.is_err());
+        assert!(j.retired_local_paths().await.unwrap().is_empty());
+        assert_eq!(j.all().await.unwrap().len(), 2);
+        sqlx::query("DROP TRIGGER fail_forget")
+            .execute(&j.pool)
+            .await
+            .unwrap();
+        j.retire_folder_path("/old", &keys).await.unwrap();
+        assert_eq!(j.retired_local_paths().await.unwrap(), ["/old"]);
+        assert!(j.all().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn delete_pending_lifecycle() {
         let (j, _d) = fresh_journal().await;
         seed_row(&j, "f-1", "/r/foo.txt").await;
@@ -618,6 +864,231 @@ mod tests {
         j.clear_delete_pending("f-1", "file").await.unwrap();
         let row = j.get("f-1", "file").await.unwrap().unwrap();
         assert!(row.delete_pending_since.is_none());
+    }
+
+    #[tokio::test]
+    async fn pending_download_cancels_pending_deletion() {
+        let (j, _d) = fresh_journal().await;
+        seed_row(&j, "f-1", "/r/foo.txt").await;
+        j.set_delete_pending("f-1", "file", "2026-05-06T00:00:00Z")
+            .await
+            .unwrap();
+
+        j.set_pending_download("f-1", "file").await.unwrap();
+
+        let row = j.get("f-1", "file").await.unwrap().unwrap();
+        assert_eq!(row.sync_status, SyncStatus::PendingDownload.as_str());
+        assert!(row.delete_pending_since.is_none());
+        assert_eq!(row.server_updated_at, "2026-01-01T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn set_local_paths_moves_rows_and_drops_pending_deletion() {
+        let (j, _d) = fresh_journal().await;
+        seed_row(&j, "f-1", "/r/old/foo.txt").await;
+        j.set_delete_pending("f-1", "file", "2026-05-06T00:00:00Z")
+            .await
+            .unwrap();
+        j.set_config("pending_folder_move:folder", "intent")
+            .await
+            .unwrap();
+
+        j.rebase_folder_paths(
+            "folder",
+            &[(
+                "f-1".to_owned(),
+                "file".to_owned(),
+                "/r/new/foo.txt".to_owned(),
+            )],
+            &[],
+            &[],
+        )
+        .await
+        .unwrap();
+
+        let row = j.get("f-1", "file").await.unwrap().unwrap();
+        assert_eq!(row.local_path, "/r/new/foo.txt");
+        assert!(row.delete_pending_since.is_none());
+        assert!(j
+            .get_config("pending_folder_move:folder")
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(row.server_updated_at, "2026-01-01T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn failed_subtree_rebase_rolls_back_paths_and_move_intent() {
+        let (j, _d) = fresh_journal().await;
+        seed_row(&j, "f-1", "/r/old/one.txt").await;
+        seed_row(&j, "f-2", "/r/old/two.txt").await;
+        j.set_config("pending_folder_move:folder", "intent")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER fail_second_rebase BEFORE UPDATE OF local_path ON sync_state WHEN NEW.server_id = 'f-2' BEGIN SELECT RAISE(ABORT, 'injected failure'); END")
+            .execute(&j.pool).await.unwrap();
+        let paths = vec![
+            (
+                "f-1".to_owned(),
+                "file".to_owned(),
+                "/r/new/one.txt".to_owned(),
+            ),
+            (
+                "f-2".to_owned(),
+                "file".to_owned(),
+                "/r/new/two.txt".to_owned(),
+            ),
+        ];
+        assert!(j
+            .rebase_folder_paths("folder", &paths, &[], &[])
+            .await
+            .is_err());
+        assert_eq!(
+            j.get("f-1", "file").await.unwrap().unwrap().local_path,
+            "/r/old/one.txt"
+        );
+        assert_eq!(
+            j.get_config("pending_folder_move:folder")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("intent")
+        );
+    }
+
+    #[tokio::test]
+    async fn subtree_rebase_commits_mtimes_paths_and_intent_together() {
+        let (j, _d) = fresh_journal().await;
+        seed_row(&j, "f-1", "/r/old/one.txt").await;
+        seed_row(&j, "f-2", "/r/old/two.txt").await;
+        j.set_delete_pending("f-1", "file", "2026-05-06T00:00:00Z")
+            .await
+            .unwrap();
+        j.set_config("pending_folder_move:folder", "intent")
+            .await
+            .unwrap();
+        let paths = vec![
+            (
+                "f-1".to_owned(),
+                "file".to_owned(),
+                "/r/new/one.txt".to_owned(),
+            ),
+            (
+                "f-2".to_owned(),
+                "file".to_owned(),
+                "/r/new/two.txt".to_owned(),
+            ),
+        ];
+        let mtimes = vec![
+            ("f-1".to_owned(), 1_800_000_000),
+            ("f-2".to_owned(), 1_600_000_000),
+        ];
+        for (trigger, drop_trigger) in [
+            ("CREATE TRIGGER fail_move BEFORE UPDATE OF local_mtime ON sync_state WHEN NEW.server_id = 'f-2' BEGIN SELECT RAISE(ABORT, 'injected failure'); END", "DROP TRIGGER fail_move"),
+            ("CREATE TRIGGER fail_move BEFORE DELETE ON sync_config WHEN OLD.key = 'pending_folder_move:folder' BEGIN SELECT RAISE(ABORT, 'injected failure'); END", "DROP TRIGGER fail_move"),
+        ] {
+            sqlx::query(trigger).execute(&j.pool).await.unwrap();
+            assert!(j.rebase_folder_paths("folder", &paths, &mtimes, &[]).await.is_err());
+            for (id, name) in [("f-1", "one.txt"), ("f-2", "two.txt")] {
+                let row = j.get(id, "file").await.unwrap().unwrap();
+                assert_eq!(row.local_path, format!("/r/old/{name}"));
+                assert_eq!(row.local_mtime, Some(1_700_000_000));
+            }
+            assert!(j.get("f-1", "file").await.unwrap().unwrap().delete_pending_since.is_some());
+            assert_eq!(j.get_config("pending_folder_move:folder").await.unwrap().as_deref(), Some("intent"));
+            sqlx::query(drop_trigger).execute(&j.pool).await.unwrap();
+        }
+        j.rebase_folder_paths("folder", &paths, &mtimes, &[])
+            .await
+            .unwrap();
+        for ((id, _, path), (_, mtime)) in paths.iter().zip(&mtimes) {
+            let row = j.get(id, "file").await.unwrap().unwrap();
+            assert_eq!(row.local_path, *path);
+            assert_eq!(row.local_mtime, Some(*mtime));
+            assert!(row.delete_pending_since.is_none());
+        }
+        assert!(j
+            .get_config("pending_folder_move:folder")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn subtree_rebase_rolls_back_missing_row_cleanup_on_failure() {
+        let (j, _d) = fresh_journal().await;
+        for id in ["gone-1", "gone-2", "kept"] {
+            seed_row(&j, id, &format!("/r/old/{id}")).await;
+        }
+        j.set_delete_pending("gone-1", "file", "2026-05-06T00:00:00Z")
+            .await
+            .unwrap();
+        j.set_config("pending_folder_move:folder", "intent")
+            .await
+            .unwrap();
+        let missing = vec![
+            ("gone-1".to_owned(), "file".to_owned()),
+            ("gone-2".to_owned(), "file".to_owned()),
+        ];
+        let paths = vec![(
+            "kept".to_owned(),
+            "file".to_owned(),
+            "/r/new/kept".to_owned(),
+        )];
+        let mtimes = vec![("kept".to_owned(), 1_800_000_000)];
+        for trigger in [
+            "CREATE TRIGGER fail_completion BEFORE DELETE ON sync_state WHEN OLD.server_id = 'gone-2' BEGIN SELECT RAISE(ABORT, 'prune interrupted'); END",
+            "CREATE TRIGGER fail_completion BEFORE UPDATE OF local_path ON sync_state BEGIN SELECT RAISE(ABORT, 'path rebase interrupted'); END",
+            "CREATE TRIGGER fail_completion BEFORE UPDATE OF local_mtime ON sync_state BEGIN SELECT RAISE(ABORT, 'mtime interrupted'); END",
+            "CREATE TRIGGER fail_completion BEFORE DELETE ON sync_config BEGIN SELECT RAISE(ABORT, 'intent removal interrupted'); END",
+        ] {
+            sqlx::query(trigger).execute(&j.pool).await.unwrap();
+            assert!(j.rebase_folder_paths("folder", &paths, &mtimes, &missing).await.is_err());
+            for id in ["gone-1", "gone-2", "kept"] {
+                let row = j.get(id, "file").await.unwrap().unwrap();
+                assert_eq!(row.local_path, format!("/r/old/{id}"));
+                assert_eq!(row.local_mtime, Some(1_700_000_000));
+            }
+            assert!(j.get("gone-1", "file").await.unwrap().unwrap().delete_pending_since.is_some());
+            assert_eq!(j.get_config("pending_folder_move:folder").await.unwrap().as_deref(), Some("intent"));
+            sqlx::query("DROP TRIGGER fail_completion").execute(&j.pool).await.unwrap();
+        }
+        j.rebase_folder_paths("folder", &paths, &mtimes, &missing)
+            .await
+            .unwrap();
+        for (id, item_type) in missing {
+            assert!(j.get(&id, &item_type).await.unwrap().is_none());
+        }
+        let kept = j.get("kept", "file").await.unwrap().unwrap();
+        assert_eq!(kept.local_path, "/r/new/kept");
+        assert_eq!(kept.local_mtime, Some(1_800_000_000));
+        assert!(j
+            .get_config("pending_folder_move:folder")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn effective_strategies_seen_round_trip_replaces_previous_set() {
+        let (j, _d) = fresh_journal().await;
+        assert!(j.effective_strategies_seen().await.unwrap().is_empty());
+
+        let first: std::collections::HashMap<String, String> = [
+            ("a".to_owned(), "do_not_sync".to_owned()),
+            ("b".to_owned(), "two_way".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        j.replace_effective_strategies_seen(&first).await.unwrap();
+        assert_eq!(j.effective_strategies_seen().await.unwrap(), first);
+
+        let second: std::collections::HashMap<String, String> =
+            [("a".to_owned(), "two_way".to_owned())]
+                .into_iter()
+                .collect();
+        j.replace_effective_strategies_seen(&second).await.unwrap();
+        assert_eq!(j.effective_strategies_seen().await.unwrap(), second);
     }
 
     #[tokio::test]

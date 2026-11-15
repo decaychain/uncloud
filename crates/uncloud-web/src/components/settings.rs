@@ -2683,6 +2683,8 @@ fn local_log_badge_class(op: &str) -> &'static str {
         "Updated on server" => "badge badge-info badge-sm",
         "Updated from server" => "badge badge-info badge-sm",
         "Deleted" => "badge badge-error badge-sm",
+        "Restored" => "badge badge-info badge-sm",
+        "Renamed on server" => "badge badge-info badge-sm",
         "SyncStart" => "badge badge-primary badge-outline badge-sm font-semibold",
         "SyncEnd" => "badge badge-primary badge-sm font-semibold",
         _ => "badge badge-neutral badge-sm",
