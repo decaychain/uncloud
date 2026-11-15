@@ -1207,7 +1207,8 @@ impl SyncEngine {
     /// source is settled by that checksum: whichever side still matches it
     /// is the stale one. `in_flight` names the destination an interrupted run
     /// was writing. A differing destination may be incomplete or edited,
-    /// even when it is a prefix of its source, and needs manual resolution.
+    /// even when it is a prefix of its source, and needs manual resolution,
+    /// unless it still holds exactly what was last synced.
     async fn move_by_copy(
         &self,
         from: &str,
@@ -1289,7 +1290,12 @@ impl SyncEngine {
                         ),
                     ));
                 }
-            } else if found != self.fs.sha256(&source).await? {
+            } else if tracked.get(rel).and_then(Option::as_deref) != Some(found.as_str())
+                && found != self.fs.sha256(&source).await?
+            {
+                // A destination still holding what was last synced is left
+                // to the table below: a copy staged beside it was cut off
+                // before replacing it, and it holds nothing of its own.
                 return Err(self.stuck_on(
                     move_key,
                     rel,
@@ -1340,12 +1346,16 @@ impl SyncEngine {
                             ),
                         )
                     };
-                    if found != wanted && in_flight.as_deref() == Some(rel.as_str()) {
+                    let synced = tracked.get(&rel).and_then(Option::as_deref);
+                    if found != wanted
+                        && synced != Some(found.as_str())
+                        && in_flight.as_deref() == Some(rel.as_str())
+                    {
                         return Err(unsettled(
                             "the interrupted copy changed while being checked",
                         ));
                     }
-                    match tracked.get(&rel).and_then(Option::as_deref) {
+                    match synced {
                         _ if found == wanted => false,
                         Some(synced) if synced == found => true,
                         Some(synced) if synced == wanted => {

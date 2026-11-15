@@ -263,7 +263,7 @@ fresh SHA-256 hashes:
 
 | Destination file | Outcome |
 |---|---|
-| the file that was being written when the copy stopped, differing from its source | Error; both copies are kept for manual resolution, because the destination may be incomplete or edited. This includes prefixes and empty files. An identical copy is reused, and a missing destination is copied again. |
+| the file that was being written when the copy stopped, differing from its source and from the journal's checksum | Error; both copies are kept for manual resolution, because the destination may be incomplete or edited. This includes prefixes and empty files. An identical copy is reused, and a missing destination is copied again. One that still holds exactly what was last synced holds nothing of its own and falls under the next row: a staged copy killed before its rename leaves that behind. |
 | matches the journal's checksum, source does not | The source was edited after the copy. It is copied again over the stale destination. |
 | differs, source matches the journal's checksum | The destination was edited after the copy. It is kept and the source removed. |
 | anything else (both edited, or no checksum on record) | Error: "move destination differs from its source". Both are kept for manual resolution. |
@@ -287,7 +287,7 @@ To resolve an ambiguous interrupted copy, preserve any edited version
 outside the moving directories, remove the destination file, and retry sync.
 Alternatively, make the destination identical to the source. The error names
 both files and says so. Recovery never discards a differing in-flight copy
-on its own.
+on its own, unless it is byte for byte what was last synced.
 
 While a move waits for the user, the verdict is remembered in memory with the
 mtimes of the two files it stopped on. Later runs repeat the error without

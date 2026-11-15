@@ -1040,7 +1040,6 @@ async fn unresolved_inflight_copy_is_checked_before_starting_another_copy() {
     assert_eq!(engine.incremental_sync().await.unwrap().errors.len(), 1);
     drop(engine);
     let copies = fs.copy_calls.load(Ordering::SeqCst);
-    // Not the beginning of its source, so it cannot be a cut-off copy.
     let before = b"edited after the interruption".to_vec();
     std::fs::write(new.join(unfinished), &before).unwrap();
     std::fs::write(old.join(earlier), b"source edit").unwrap();
@@ -1484,11 +1483,81 @@ async fn copy_recovery_preserves_edits_in_a_directory_that_cannot_be_listed() {
     assert_eq!(pending_move_intents(&rig).await, 0);
 }
 
+/// The file an interrupted run was writing is not held back when its
+/// destination still holds exactly what was last synced: nothing there can
+/// be an edit. A staged copy killed before its rename leaves that, and so
+/// does a copy of an appended source cut off at the old length.
+#[tokio::test]
+async fn interrupted_recopy_over_a_stale_destination_is_redone() {
+    for scenario in ["staged", "cut off at the old length"] {
+        let server = FakeServer::with_tree(
+            vec![server_file("file", "note.txt", Some("parent"), b"original")],
+            vec!["parent"],
+        );
+        let handle = server.clone();
+        let rig = rig(server).await;
+        let fs = Arc::new(FaultyFs::default());
+        let engine = build_engine_with_fs(&rig, fs.clone()).await;
+        engine.incremental_sync().await.unwrap();
+        let source = rig.root.join("parent/note.txt");
+        let dest = rig.root.join("renamed/note.txt");
+        fs.moves_unsupported.store(true, Ordering::SeqCst);
+        fs.fail("remove_file", &source);
+        rename_on_server(&handle, "parent", "renamed", None).await;
+        assert_eq!(engine.incremental_sync().await.unwrap().errors.len(), 1);
+        drop(engine);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"original");
+
+        // Twice the synced length, so half a copy is the synced content.
+        std::fs::write(&source, b"original, longer").unwrap();
+        fs.failures.write().unwrap().clear();
+        let interruption = if scenario == "staged" {
+            "copy_file"
+        } else {
+            "partial_copy"
+        };
+        fs.fail(interruption, &source);
+        // A killed client gets no chance to clear what it was writing.
+        fs.fail("remove_file", &dest);
+        let engine = build_engine_with_fs(&rig, fs.clone()).await;
+        assert_eq!(engine.incremental_sync().await.unwrap().errors.len(), 1);
+        drop(engine);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"original", "{scenario}");
+        let intent: String = {
+            let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", rig.db_path.display()))
+                .await
+                .unwrap();
+            let value = sqlx::query_scalar(
+                "SELECT value FROM sync_config WHERE key = 'pending_folder_move:parent'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+            value
+        };
+        assert!(intent.contains("note.txt"), "{scenario}: {intent}");
+
+        fs.failures.write().unwrap().clear();
+        let engine = build_engine_with_fs(&rig, fs).await;
+        for _ in 0..3 {
+            let report = engine.incremental_sync().await.unwrap();
+            assert!(report.errors.is_empty(), "{scenario}: {report:?}");
+        }
+        assert_eq!(std::fs::read(&dest).unwrap(), b"original, longer");
+        assert!(!rig.root.join("parent").exists());
+        assert_eq!(handle.files.lock().await["file"].bytes, b"original, longer");
+        assert_eq!(handle.content_updates.lock().await.len(), 1);
+        assert_eq!(handle.delete_file_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(pending_move_intents(&rig).await, 0);
+    }
+}
+
 /// A move waiting for the user is not read again on every run: the verdict
 /// stands until one of the two files changes.
 #[tokio::test]
 async fn stuck_copy_move_is_not_reread_until_something_changes() {
-    for stuck_on in ["both edited", "edited cut-off copy"] {
+    for stuck_on in ["both edited", "edited interrupted copy"] {
         let files = (0..6)
             .map(|i| {
                 server_file(
