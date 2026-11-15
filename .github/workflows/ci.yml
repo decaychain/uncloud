@@ -71,6 +71,10 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The action's default also asks for the obsolete "tools" package,
+          # which sdkmanager can no longer find.
+          packages: platform-tools
 
       - name: Install Android NDK
         run: sdkmanager "ndk;${ANDROID_NDK_VERSION}"
