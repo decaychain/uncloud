@@ -52,11 +52,12 @@ local folder against an Uncloud server).
 %build
 # dioxus-cli is not packaged for Fedora, so we cargo-install it into a
 # build-local prefix. Network access is required (and enabled on the
-# COPR project). Pinned to 0.7.5: newer dx releases refuse to build a
-# project pinned to dioxus 0.7.5. Use --locked so cargo install does
-# not resolve newer transitive dependencies than dioxus-cli 0.7.5 was
-# published/tested with.
-cargo install dioxus-cli --version 0.7.5 --locked --root %{_builddir}/%{name}-%{version}/cargo-tools
+# COPR project). Pinned to 0.7.10, which builds this project's dioxus
+# 0.7.x; a dx from another minor series refuses to. Releases up to
+# 0.7.6 lock an openssl-sys that rejects OpenSSL 4 (Fedora 45). Use
+# --locked so cargo install does not resolve newer transitive
+# dependencies than that dioxus-cli release was published/tested with.
+cargo install dioxus-cli --version 0.7.10 --locked --root %{_builddir}/%{name}-%{version}/cargo-tools
 export PATH="%{_builddir}/%{name}-%{version}/cargo-tools/bin:$PATH"
 
 # Build the web frontend bundle that the desktop binary serves locally.
