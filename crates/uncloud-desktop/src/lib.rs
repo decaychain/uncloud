@@ -63,6 +63,11 @@ pub struct DesktopState {
     /// `last_sync_at` at the end. Without this lock, two overlapping
     /// `run_sync_once` calls would clobber each other's bookkeeping.
     pub run_lock: Arc<Mutex<()>>,
+    /// Held while an engine is built and installed. Startup auto-login keeps
+    /// retrying in the background, so it can finish at the same moment as a
+    /// manual login or a lazy init; whoever comes second must see the first
+    /// one's engine instead of opening the journal a second time.
+    pub init_lock: Arc<Mutex<()>>,
     /// Tray icon handle. Stored so the activity listener can swap the
     /// per-state icons on [`EngineState`] transitions. Desktop-only.
     /// `std::sync::Mutex` keeps the call sites lock-free of `.await`.
@@ -164,7 +169,7 @@ impl From<SyncReport> for SyncReportDto {
 /// Non-secret state persisted to disk as JSON. The password lives separately
 /// in the OS keyring (or an AES-GCM-encrypted file fallback) — see
 /// `secret_store.rs`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistedConfig {
     server_url: String,
     username: String,
@@ -571,6 +576,14 @@ fn set_autostart(_app: AppHandle, _enabled: bool) -> Result<(), String> {
 
 // ── Tauri commands ────────────────────────────────────────────────────────────
 
+/// The password saved for `cfg`, or why it cannot be had right now.
+fn stored_password(app: &AppHandle, cfg: &PersistedConfig) -> Result<String, String> {
+    let secrets = secrets_dir(app).ok_or("Cannot determine data directory")?;
+    secret_store::load_password(&secrets, &cfg.server_url, &cfg.username)
+        .map_err(|e| format!("Credential store unavailable: {e}"))?
+        .ok_or_else(|| "No saved credentials".to_string())
+}
+
 /// Ensure the sync engine is initialized. If not, try to load persisted config
 /// and spin it up synchronously. This self-heals from a failed auto-login at
 /// startup so commands like `sync_now` can still work once the server is up.
@@ -582,15 +595,17 @@ async fn ensure_engine(
         return Ok(eng);
     }
     let cfg = load_config_from(app).ok_or("Not configured (no saved config)")?;
-    let secrets = secrets_dir(app).ok_or("Cannot determine data directory")?;
-    let password = secret_store::load_password(&secrets, &cfg.server_url, &cfg.username)
-        .ok_or("No saved credentials")?;
+    let password = stored_password(app, &cfg)?;
     let client = Arc::new(make_client(&cfg.server_url));
     client.login(&cfg.username, &password).await.map_err(|e| {
         let msg = format!("Login failed during lazy init: {e}");
         eprintln!("[uncloud-desktop] {msg}");
         msg
     })?;
+    let _init = state.init_lock.lock().await;
+    if let Some(eng) = state.engine.read().await.as_ref().map(Arc::clone) {
+        return Ok(eng);
+    }
     let db_path = sync_db_path(app).ok_or("Cannot determine data directory")?;
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -760,9 +775,7 @@ async fn try_reauth_with_stored_password(
     engine: &SyncEngine,
 ) -> std::result::Result<(), String> {
     let cfg = load_config_from(app).ok_or_else(|| "no saved config".to_string())?;
-    let secrets = secrets_dir(app).ok_or_else(|| "no data directory".to_string())?;
-    let password = secret_store::load_password(&secrets, &cfg.server_url, &cfg.username)
-        .ok_or_else(|| "no saved credentials".to_string())?;
+    let password = stored_password(app, &cfg)?;
     engine
         .client()
         .login(&cfg.username, &password)
@@ -862,6 +875,7 @@ async fn login(
         Some(root_path.clone())
     };
 
+    let init = state.init_lock.lock().await;
     let engine = build_engine(&app, &db_path, client.clone(), effective_root)
         .await
         .map_err(|e| e.to_string())?;
@@ -877,6 +891,7 @@ async fn login(
     spawn_activity_listener(engine.clone(), state.tray.clone());
     *state.client.write().await = Some(client);
     *state.engine.write().await = Some(engine);
+    drop(init);
     *state.phase.lock().await = SyncPhase::Idle;
     let stats_snapshot = {
         let mut s = state.stats.lock().await;
@@ -1385,6 +1400,176 @@ fn spawn_sync(
     });
 }
 
+// ── Startup auto-login ────────────────────────────────────────────────────────
+
+/// How one startup auto-login attempt ended.
+enum AutoLogin {
+    /// Nothing left to do: the engine is up, through this attempt or
+    /// another path, or the config this attempt worked from is gone.
+    Done,
+    /// Not possible yet but may be shortly: the credential store or the
+    /// server cannot be reached.
+    Retry(String),
+    /// Will not succeed without the user.
+    Failed(String),
+}
+
+/// Attempts on which "nothing stored" is still treated as "not there yet".
+/// A credential store that has only just started may answer before it has
+/// opened its storage.
+const MISSING_CREDENTIAL_GRACE_ATTEMPTS: u32 = 4;
+
+/// Pause before the attempt after `attempt` (zero-based): 1 s doubling to a
+/// one-minute ceiling.
+fn auto_login_retry_delay(attempt: u32) -> Duration {
+    Duration::from_secs((1u64 << attempt.min(6)).min(60))
+}
+
+/// Whether the server turned the stored credentials down, as opposed to
+/// being unreachable or temporarily unable to answer.
+fn login_rejected(err: &uncloud_client::ClientError) -> bool {
+    use uncloud_client::ClientError;
+    match err {
+        ClientError::Unauthenticated => true,
+        ClientError::Api { status, .. } => {
+            (400..500).contains(status) && !matches!(status, 408 | 425 | 429)
+        }
+        ClientError::Network(_) | ClientError::Io(_) => false,
+    }
+}
+
+/// True once auto-login has nothing left to do for `cfg`: an engine is
+/// installed, or the user disconnected or signed in as someone else.
+async fn auto_login_obsolete(app: &AppHandle, cfg: &PersistedConfig) -> bool {
+    let state = app.state::<DesktopState>();
+    let engine_up = state.engine.read().await.is_some();
+    engine_up || load_config_from(app).as_ref() != Some(cfg)
+}
+
+async fn auto_login_attempt(app: &AppHandle, cfg: &PersistedConfig, attempt: u32) -> AutoLogin {
+    if auto_login_obsolete(app, cfg).await {
+        return AutoLogin::Done;
+    }
+    let Some(secrets) = secrets_dir(app) else {
+        return AutoLogin::Failed("cannot determine data directory".to_string());
+    };
+    let password = match secret_store::load_password(&secrets, &cfg.server_url, &cfg.username) {
+        Ok(Some(password)) => password,
+        Ok(None) if attempt < MISSING_CREDENTIAL_GRACE_ATTEMPTS => {
+            return AutoLogin::Retry("no stored credentials yet".to_string());
+        }
+        Ok(None) => return AutoLogin::Failed("no stored credentials".to_string()),
+        Err(e) => return AutoLogin::Retry(format!("credential store unavailable: {e}")),
+    };
+
+    let client = Arc::new(make_client(&cfg.server_url));
+    let user_resp = match client.login(&cfg.username, &password).await {
+        Ok(resp) => resp,
+        Err(e) if login_rejected(&e) => return AutoLogin::Failed(format!("login failed: {e}")),
+        Err(e) => return AutoLogin::Retry(format!("login failed: {e}")),
+    };
+
+    let Some(db) = sync_db_path(app) else {
+        return AutoLogin::Failed("cannot determine data directory".to_string());
+    };
+    let _ = db.parent().map(std::fs::create_dir_all);
+    let effective_root: Option<String> = if cfg.root_path.is_empty() {
+        None
+    } else {
+        Some(cfg.root_path.clone())
+    };
+
+    let state = app.state::<DesktopState>();
+    let _init = state.init_lock.lock().await;
+    // The login above can take as long as the network likes; a manual
+    // login, a lazy init or a disconnect may have happened meanwhile.
+    if auto_login_obsolete(app, cfg).await {
+        return AutoLogin::Done;
+    }
+    let engine = match build_engine(app, &db, client.clone(), effective_root)
+        .await
+        .map_err(|e| e.to_string())
+    {
+        Ok(engine) => Arc::new(engine),
+        Err(e) => return AutoLogin::Failed(format!("engine init failed: {e}")),
+    };
+    wire_engine_hooks(
+        &engine,
+        app.clone(),
+        state.phase.clone(),
+        state.stats.clone(),
+    );
+    #[cfg(desktop)]
+    spawn_activity_listener(engine.clone(), state.tray.clone());
+    if let Ok(mut t) = state.auth_token.lock() {
+        *t = user_resp.session_token.clone();
+    }
+    *state.client.write().await = Some(client);
+    *state.engine.write().await = Some(engine);
+    *state.phase.lock().await = SyncPhase::Idle;
+    let stats_snapshot = state.stats.lock().await.clone();
+    emit_stats(app, SyncPhase::Idle, stats_snapshot);
+    eprintln!("[uncloud-desktop] Auto-login successful");
+    info!("Auto-login successful");
+
+    #[cfg(desktop)]
+    if !cfg.root_path.is_empty() {
+        restart_file_watcher(app, &state, &cfg.root_path);
+    }
+    AutoLogin::Done
+}
+
+/// Sign in with the stored credentials and bring the engine up, retrying
+/// for as long as the obstacle looks temporary. At session start the app
+/// can run before the keyring service or the network is there, and a
+/// single attempt would leave it disconnected until the user stepped in.
+///
+/// `auth_pending` stays set across the retries, so the webview keeps its
+/// own stored token instead of bouncing to the login screen.
+fn spawn_auto_login(app: AppHandle, cfg: PersistedConfig) {
+    async_runtime::spawn(async move {
+        let mut attempt: u32 = 0;
+        let mut last_reason = String::new();
+        let failure = loop {
+            match auto_login_attempt(&app, &cfg, attempt).await {
+                AutoLogin::Done => break None,
+                AutoLogin::Failed(reason) => break Some(reason),
+                AutoLogin::Retry(reason) => {
+                    let delay = auto_login_retry_delay(attempt);
+                    // An outage repeats the same reason every minute.
+                    if reason != last_reason {
+                        eprintln!("[uncloud-desktop] Auto-login postponed: {reason}; retrying");
+                        warn!("Auto-login postponed: {}; retrying", reason);
+                        last_reason = reason;
+                    }
+                    tokio::time::sleep(delay).await;
+                    attempt = attempt.saturating_add(1);
+                }
+            }
+        };
+
+        let state = app.state::<DesktopState>();
+        if let Ok(mut p) = state.auth_pending.lock() {
+            *p = false;
+        }
+        match failure {
+            None => spawn_sync(
+                app.clone(),
+                state.engine.clone(),
+                state.phase.clone(),
+                state.stats.clone(),
+                state.run_lock.clone(),
+            ),
+            Some(reason) => {
+                eprintln!("[uncloud-desktop] Auto-login gave up: {reason}");
+                error!("Auto-login gave up: {}", reason);
+                #[cfg(desktop)]
+                apply_tray_state(&state.tray, EngineState::NotConnected);
+            }
+        }
+    });
+}
+
 // ── Desktop-only: window management ──────────────────────────────────────────
 
 #[cfg(desktop)]
@@ -1413,6 +1598,7 @@ pub fn run() {
         auth_token: Arc::new(std::sync::Mutex::new(None)),
         auth_pending: Arc::new(std::sync::Mutex::new(false)),
         run_lock: Arc::new(Mutex::new(())),
+        init_lock: Arc::new(Mutex::new(())),
         #[cfg(desktop)]
         tray: Arc::new(std::sync::Mutex::new(None)),
         #[cfg(desktop)]
@@ -1480,144 +1666,13 @@ pub fn run() {
 
             // Auto-login from persisted config + stored credentials if both exist.
             if let Some(cfg) = load_config_from(app.handle()) {
-                let ds = app.state::<DesktopState>();
-                let engine_arc = ds.engine.clone();
-                let phase_arc = ds.phase.clone();
-                let stats_arc = ds.stats.clone();
-                let client_arc = ds.client.clone();
-                let token_arc = ds.auth_token.clone();
-                let pending_arc = ds.auth_pending.clone();
-                let run_lock_arc_auto = ds.run_lock.clone();
-                #[cfg(desktop)]
-                let tray_arc = ds.tray.clone();
-                let app_handle = app.handle().clone();
                 // Flip pending BEFORE spawning so the webview can't race
                 // and observe `pending=false` while the future is still
                 // queued for execution.
-                if let Ok(mut p) = pending_arc.lock() {
+                if let Ok(mut p) = app.state::<DesktopState>().auth_pending.lock() {
                     *p = true;
                 }
-                async_runtime::spawn(async move {
-                    // Single point that always runs at exit — drops the
-                    // `pending` flag so the webview stops falling back to
-                    // localStorage and, on failure, swaps the tray icon to
-                    // the disconnected state. `succeeded=false` also leaves
-                    // the in-memory `auth_token` cleared so `get_auth_token`
-                    // returns None and the webview wipes its stored token.
-                    let finish = |succeeded: bool| {
-                        if let Ok(mut p) = pending_arc.lock() {
-                            *p = false;
-                        }
-                        #[cfg(desktop)]
-                        if !succeeded {
-                            apply_tray_state(&tray_arc, EngineState::NotConnected);
-                        }
-                    };
-
-                    let Some(secrets) = secrets_dir(&app_handle) else {
-                        error!("Auto-login: cannot determine data directory");
-                        finish(false);
-                        return;
-                    };
-                    let Some(password) =
-                        secret_store::load_password(&secrets, &cfg.server_url, &cfg.username)
-                    else {
-                        eprintln!("[uncloud-desktop] Auto-login skipped: no stored credentials");
-                        finish(false);
-                        return;
-                    };
-                    let client = Arc::new(make_client(&cfg.server_url));
-                    let login_result = client
-                        .login(&cfg.username, &password)
-                        .await
-                        .map_err(|e| e.to_string());
-                    match login_result {
-                        Ok(user_resp) => {
-                            if let Ok(mut t) = token_arc.lock() {
-                                *t = user_resp.session_token.clone();
-                            }
-                            let db = match sync_db_path(&app_handle) {
-                                Some(p) => {
-                                    let _ = p.parent().map(std::fs::create_dir_all);
-                                    p
-                                }
-                                None => {
-                                    error!("Auto-login: cannot determine data directory");
-                                    if let Ok(mut t) = token_arc.lock() {
-                                        *t = None;
-                                    }
-                                    finish(false);
-                                    return;
-                                }
-                            };
-                            let effective_root: Option<String> = if cfg.root_path.is_empty() {
-                                None
-                            } else {
-                                Some(cfg.root_path.clone())
-                            };
-                            let engine_result =
-                                build_engine(&app_handle, &db, client.clone(), effective_root)
-                                    .await
-                                    .map_err(|e| e.to_string());
-                            match engine_result {
-                                Ok(engine) => {
-                                    let engine = Arc::new(engine);
-                                    wire_engine_hooks(
-                                        &engine,
-                                        app_handle.clone(),
-                                        phase_arc.clone(),
-                                        stats_arc.clone(),
-                                    );
-                                    #[cfg(desktop)]
-                                    spawn_activity_listener(engine.clone(), tray_arc.clone());
-                                    *client_arc.write().await = Some(client);
-                                    *engine_arc.write().await = Some(engine);
-                                    *phase_arc.lock().await = SyncPhase::Idle;
-                                    let stats_snapshot = {
-                                        let ds = app_handle.state::<DesktopState>();
-                                        let guard = ds.stats.lock().await;
-                                        guard.clone()
-                                    };
-                                    emit_stats(&app_handle, SyncPhase::Idle, stats_snapshot);
-                                    eprintln!("[uncloud-desktop] Auto-login successful");
-                                    info!("Auto-login successful");
-
-                                    #[cfg(desktop)]
-                                    if !cfg.root_path.is_empty() {
-                                        let st = app_handle.state::<DesktopState>();
-                                        restart_file_watcher(&app_handle, &st, &cfg.root_path);
-                                    }
-
-                                    finish(true);
-
-                                    // Sync-on-start (auto-login path).
-                                    spawn_sync(
-                                        app_handle.clone(),
-                                        engine_arc.clone(),
-                                        phase_arc.clone(),
-                                        stats_arc.clone(),
-                                        run_lock_arc_auto.clone(),
-                                    );
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "[uncloud-desktop] Auto-login engine init failed: {e}"
-                                    );
-                                    error!("Auto-login: engine init failed: {}", e);
-                                    if let Ok(mut t) = token_arc.lock() {
-                                        *t = None;
-                                    }
-                                    finish(false);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("[uncloud-desktop] Auto-login login failed: {e}");
-                            error!("Auto-login: login failed: {}", e);
-                            finish(false);
-                        }
-                    }
-                });
+                spawn_auto_login(app.handle().clone(), cfg);
             }
 
             // Desktop: system tray + menu
@@ -1738,4 +1793,35 @@ pub fn run() {
                 );
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uncloud_client::ClientError;
+
+    #[test]
+    fn auto_login_retry_delay_doubles_to_a_minute() {
+        let secs: Vec<u64> = (0..9)
+            .map(|attempt| auto_login_retry_delay(attempt).as_secs())
+            .collect();
+        assert_eq!(secs, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
+        assert_eq!(auto_login_retry_delay(u32::MAX).as_secs(), 60);
+    }
+
+    #[test]
+    fn only_a_refusal_of_the_credentials_ends_auto_login() {
+        let api = |status| ClientError::Api {
+            status,
+            message: String::new(),
+        };
+        for status in [400, 401, 403, 404] {
+            assert!(login_rejected(&api(status)), "{status}");
+        }
+        for status in [408, 425, 429, 500, 502, 503, 504] {
+            assert!(!login_rejected(&api(status)), "{status}");
+        }
+        assert!(login_rejected(&ClientError::Unauthenticated));
+        assert!(!login_rejected(&ClientError::Io("reset".to_string())));
+    }
 }

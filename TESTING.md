@@ -154,3 +154,13 @@ cargo test -p uncloud-server --test backup -- --ignored
 ```
 
 End-to-end CLI smoke (`init` / `create` / `list` / `check` / `restore --dry-run`) is verified manually on an empty database.
+
+### Desktop app (`crates/uncloud-desktop/src/lib.rs`)
+
+Unit tests for the startup auto-login policy: the retry schedule (`auto_login_retry_delay_doubles_to_a_minute`) and which login errors end the retries (`only_a_refusal_of_the_credentials_ends_auto_login`).
+
+```bash
+cargo test -p uncloud-desktop --lib
+```
+
+The retry loop itself is checked by hand: run the debug binary on a private session bus (`dbus-run-session`) with no Secret Service provider and no server, then start both late.

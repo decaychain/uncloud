@@ -50,11 +50,24 @@ pub fn store_password(
 
 /// Load the password for `(server_url, username)`. Tries keyring first,
 /// then the encrypted file fallback.
-pub fn load_password(fallback_dir: &Path, server_url: &str, username: &str) -> Option<String> {
+///
+/// `Err` means the keyring could not be asked and there is no fallback
+/// file, so a password may well be stored: at session start the keyring
+/// service can come up after the app does. `Ok(None)` means the keyring
+/// answered and neither place holds one.
+pub fn load_password(
+    fallback_dir: &Path,
+    server_url: &str,
+    username: &str,
+) -> Result<Option<String>, String> {
     let account = account_key(server_url, username);
     match keyring_get(&account) {
-        Ok(Some(pw)) => Some(pw),
-        Ok(None) | Err(_) => read_fallback_file(fallback_dir, &account).ok(),
+        Ok(Some(pw)) => Ok(Some(pw)),
+        Ok(None) => Ok(read_fallback_file(fallback_dir, &account).ok()),
+        Err(e) => match read_fallback_file(fallback_dir, &account) {
+            Ok(pw) => Ok(Some(pw)),
+            Err(_) => Err(e),
+        },
     }
 }
 
