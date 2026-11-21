@@ -5,35 +5,35 @@ Origin: Uncloud
 Label: Uncloud
 Suite: stable
 Codename: stable
-Date: Sun, 15 Nov 2026 12:59:24 UTC
+Date: Sat, 21 Nov 2026 16:50:43 UTC
 Architectures: amd64 arm64
 Components: main
 Description: Uncloud desktop client APT repository
 MD5Sum:
- 5d216241d2461f8b23f299613ce0a150 675 main/binary-amd64/Packages
- c93e1faa73714dc5dec229d9d34a81ff 432 main/binary-amd64/Packages.gz
+ 2e329f940cd2c9d9f69977458134ef98 675 main/binary-amd64/Packages
+ e84c0018f6744108c72b3beea80e96a7 431 main/binary-amd64/Packages.gz
  f2360ea87957a62989aa21d32d941a79 134 main/binary-amd64/Release
- 454034b75451de351ba2421315f4b515 675 main/binary-arm64/Packages
- 03e033c7c329ec9019f3f0fdc1dd6095 435 main/binary-arm64/Packages.gz
+ ad7c0f24f531a9b5360f5f0a3e40b7fc 675 main/binary-arm64/Packages
+ 509fda109640bcc42e6661c9acbaaba0 433 main/binary-arm64/Packages.gz
  031577c59dd1ce9fdb3fb30699f9dcf0 134 main/binary-arm64/Release
 SHA1:
- b87701cc29fcc3c945d6c576a29516890d5e63e9 675 main/binary-amd64/Packages
- 0dd5bec82c30f43704ea608e96e12f73276de0b5 432 main/binary-amd64/Packages.gz
+ b2312eb2bd846ac4754317922289e3cffdc7a0ef 675 main/binary-amd64/Packages
+ e65d2130ca82dc632b63feaeb970705945915a60 431 main/binary-amd64/Packages.gz
  d115ddd68527aada0edec3bd07a3ce61767d8982 134 main/binary-amd64/Release
- 869c7cd2e0f5fba5bffd5681c32496904b54d9b0 675 main/binary-arm64/Packages
- a041275b1e830794a4fa974a648c53faf6995a1f 435 main/binary-arm64/Packages.gz
+ c612c8870246d9e2c08aee682e94ac9f5f32af74 675 main/binary-arm64/Packages
+ e0b1e6de1bb269f8f7c600cb9f087abf0e0b0938 433 main/binary-arm64/Packages.gz
  52330d77a6318f126e1ffcd3e34edc6921738ef5 134 main/binary-arm64/Release
 SHA256:
- 0120fbb499846fdf04929630c722f474545410a2014da33fa2827a181170679c 675 main/binary-amd64/Packages
- 6f26b87c5e5bba7c69c948dd5a5d8e41bc705782b3ae4abc5466ef09499f64dd 432 main/binary-amd64/Packages.gz
+ d6b1a2c80f4a9120b458a6e82e2c0a2131621de20a362ac73684f1637ead780e 675 main/binary-amd64/Packages
+ fb55df20bfab84b0f724f0d6024d0862efb9b2f58fc47ac42cfc96b099868675 431 main/binary-amd64/Packages.gz
  5c01f71bf5aa58b9d4016aad2f351d6a6927621e6b143b9b1824e074851de002 134 main/binary-amd64/Release
- fce91b6efb7433d9345fc673f2de50385a1e17281cb5deddbced6a105ccc08b6 675 main/binary-arm64/Packages
- 5c87783c2fce0a86d49d44adbcf3370c1d826c6d0fac1d9366f29ca71b2a8a33 435 main/binary-arm64/Packages.gz
+ cd728a4e7a5014a592859904a688f83c45167f15d46e56e0f6f883d6a223f983 675 main/binary-arm64/Packages
+ 2412897dd5997a785f049f7ab828219776601349697f0dbd4ad0c2aea6e0f420 433 main/binary-arm64/Packages.gz
  84242f45a5b9e3aea4fe721cd337d903d39f45a2579ff32fb3f203dc9b7df628 134 main/binary-arm64/Release
 -----BEGIN PGP SIGNATURE-----
 
-iHUEARYKAB0WIQSplwom4iCHh01u0FZtw96lJ24TmAUCavmsrAAKCRBtw96lJ24T
-mIKaAPwIPyq2O7zE/x7HpFVL1NzYQ4z+YbCwr+oYuY1RlDjpzQD/V0N9rUYUkQAB
-6DNw70roVPMc4xJMBpFxuSUifPRo7gU=
-=BUHF
+iHUEARYKAB0WIQSplwom4iCHh01u0FZtw96lJ24TmAUCawHL4wAKCRBtw96lJ24T
+mBU7AQCV2PXKVmADJMli0UtArYlNYPKm7JhO9NNmFMxq08Et0gEAhKqyBy0RtKaG
+0/FfvDCYh2DFoUL7lbCd0Tw6YTv8twE=
+=cVy1
 -----END PGP SIGNATURE-----
